@@ -24,6 +24,22 @@ settings instead of edited, so syncing never conflicts with them. Run the
 test suite locally, or through a pull request to upstream, before relying on
 a change.
 
+## Running the test suite from a Windows checkout
+
+The suite takes about 22 minutes. Run it as CI does: Python 3.12 with a
+`pgvector/pgvector:pg16` server, `PGVECTOR_TEST_ADMIN_URL` and
+`TEST_DATABASE_URL` pointing at it, in a privileged Linux container (for
+`unshare -Urm`). Three differences from CI's Ubuntu runner make tests fail
+that have nothing to do with the code:
+
+- **CRLF line endings.** Git on Windows checks the `docker/*.sh` scripts out
+  with CRLF, and bash refuses to run them. Convert copies to LF inside the
+  container (`sed -i 's/\r$//'`) before running.
+- **No `O_TMPFILE` on overlayfs.** The container's `/tmp` must be a tmpfs
+  (`--tmpfs /tmp`), or every no-clobber write refuses.
+- **No `psql`.** `record-backup.sh` calls it; install `postgresql-client` in
+  the container.
+
 ## Pending pull requests
 
 - [#339](https://github.com/maxkuminov/obsidian-mcp/pull/339), ours, open.
