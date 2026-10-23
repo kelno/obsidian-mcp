@@ -7105,3 +7105,121 @@ async def delete_file_impl(
         f"Moved {rel} to {dest}. It is out of the vault's visible tree but still "
         "on disk; pass permanent=True to unlink instead."
     )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# move_file
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@_tracked("move_file", ["from_path", "to_path", "expected_hash"], write_class=True)
+async def move_file_impl(
+    from_path: str, to_path: str, expected_hash: str | None = None
+) -> str:
+    """Move (rename or relocate) a non-markdown vault file.
+
+    The raw-file peer of `move_note`, and its commit is the same one: both
+    endpoints anchored by `open_mutable`, the source inode pinned, one
+    `move_file_no_clobber` and `_verify_the_moved_inode` (with its rollback),
+    all inside one confirmed step (#88). What it leaves out is everything
+    `move_note` does because the file is a note: non-markdown files are not
+    indexed, so there are no metadata rows to update, no title to re-derive and
+    no `note_links` rows keyed on the path. Links in notes that embed the file
+    are **not** rewritten, and the docstring of the tool says so.
+
+    Markdown is refused at either endpoint, on the canonical name
+    `open_mutable` resolved rather than the caller's string (the reasoning in
+    `delete_file_impl`): moving a note here would leave its index rows and
+    backlinks behind, and moving a file *to* a `.md` name would turn an
+    attachment into a note behind the indexer's back.
+
+    `expected_hash` binds `from_path`'s bytes, compared before the rename. The
+    rename moves the inode without rewriting it, so the caller's hash still
+    describes the file at `to_path` and success reports none.
+    """
+    if err := _precondition_syntax_error("move_file", expected_hash, path=from_path):
+        return err
+    if err := _require_write():
+        return err
+    uid = current_user_id.get()
+
+    targets: list = []
+    try:
+        try:
+            src_target = open_mutable(from_path, user_id=uid)
+            targets.append(src_target)
+            dst_target = open_mutable(to_path, user_id=uid)
+            targets.append(dst_target)
+        except ValueError as e:
+            return _body_refusal(str(e), "validation_failed")
+        except OSError as e:
+            return _body_refusal(f"Could not open {from_path} or {to_path}: {e}", "io_failure")
+
+        from_rel = src_target.rel
+        to_rel = dst_target.rel
+        for rel in (from_rel, to_rel):
+            if PurePosixPath(rel).name.lower().endswith(".md"):
+                return _body_refusal(
+                    f"{rel} is a markdown note. Use `move_note` for notes — it is "
+                    "the tool that knows about the index and about backlinks. "
+                    "`move_file` handles everything else, at both ends.",
+                    "invalid_argument",
+                )
+
+        if err := _leaf_state_error(
+            src_target, from_path, missing=f"File not found: {from_path}"
+        ):
+            return err
+
+        if expected_hash is not None or settings.write_precondition_required:
+            cap_name, cap_bytes = _file_precondition_cap()
+            try:
+                incumbent, over_cap = _read_incumbent(src_target, from_rel, cap_bytes)
+            except OSError as e:
+                return _body_refusal(f"Failed to read {from_rel}: {e}", "io_failure")
+            if incumbent is None and not over_cap:
+                return _body_refusal(f"File not found: {from_path}", "not_found")
+            if err := _precondition_error(
+                "move_file", from_rel, incumbent, expected_hash,
+                over_cap=over_cap, cap_name=cap_name, cap_bytes=cap_bytes,
+            ):
+                return err
+
+        # The same commit as `move_note`'s `_commit_the_move`: confirmation,
+        # rename and verification (with any rollback) in one synchronous step.
+        def _commit_the_move(confirmation):
+            with _pin_source_inode(src_target) as moved_inode:
+                permit = move_file_no_clobber(
+                    src_target, dst_target, confirmation=confirmation
+                )
+                return _verify_the_moved_inode(
+                    src_target, dst_target, moved_inode, from_path, to_rel,
+                    permit=permit,
+                )
+
+        try:
+            err, verify_error = await _confirmed_publication(uid, _commit_the_move)
+        except FileExistsError:
+            return _leaf_state_error(dst_target, to_path) or _body_refusal(
+                f"Destination already exists: {to_path}", "already_exists"
+            )
+        except FileNotFoundError:
+            return _body_refusal(f"File not found: {from_path}", "not_found")
+        except vault_fs.UnsupportedFilesystem as e:
+            return _body_refusal(f"Move failed: {e}", "unsupported_filesystem")
+        except (ValueError, vault_fs.VaultFSError) as e:
+            return _body_refusal(f"Move failed: {e}", "validation_failed")
+        except OSError as e:
+            return _body_refusal(f"Move failed: {e}", "io_failure")
+        if err:
+            return err
+        if verify_error:
+            return verify_error
+        return (
+            f"Moved {from_rel} to {to_rel}. Links to it in notes were not "
+            "rewritten; the file's bytes are unchanged, so a content_hash read "
+            "before the move still binds it."
+        )
+    finally:
+        for opened in targets:
+            opened.close()

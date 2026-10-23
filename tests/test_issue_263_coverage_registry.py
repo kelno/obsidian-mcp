@@ -34,6 +34,7 @@ COVERAGE = {
     'request_download': [('success', 'test_transfer_tools.py::test_request_download_mints_a_fingerprinted_link')],
     'import_from_url': [('partial', 'test_transfer_tools.py::test_import_reports_a_post_publish_failure_as_written')],
     'delete_file': [('refused', 'test_transfer_tools.py::test_delete_file_reports_a_missing_file')],
+    'move_file': [('success', 'test_move_file.py::test_moves_a_file_and_creates_parents'), ('refused', 'test_move_file.py::test_an_existing_destination_is_never_replaced')],
 }
 
 
@@ -41,7 +42,7 @@ def test_every_registered_tool_has_inventory_and_live_behavioral_references():
     from src.mcp_server.server import mcp
     registered = {tool.name for tool in mcp._tool_manager.list_tools()}
     assert set(COVERAGE) == registered
-    assert len(registered) == 25
+    assert len(registered) == 26
     root = Path(__file__).resolve().parents[1]
     inventory = (root / 'openspec/changes/archive/2026-09-06-typed-tool-outcomes/inventory.md').read_text()
     for tool, references in COVERAGE.items():

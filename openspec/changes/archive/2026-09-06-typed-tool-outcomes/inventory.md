@@ -281,6 +281,12 @@ Each entry identifies every direct return branch. PROPAGATE means classify at th
 - Line 6732: **SUCCESS — unchanged; no outcome marker**. Current return: `f'Permanently deleted {rel}'`
 - Line 6733: **SUCCESS — unchanged; no outcome marker**. Current return: `f"Moved {rel} to {dest}. It is out of the vault's visible tree but still on disk; pass permanent=True to unlink instead."`
 
+### move_file_impl — src/mcp_server/tools.py (added after #263, typed from the start)
+- **PROPAGATE** precondition syntax, write permission, leaf state and precondition helper outcomes.
+- **REFUSE validation_failed** for `open_mutable`'s `ValueError` and for `ValueError`/`VaultFSError` from the move; **io_failure** for `OSError`; **invalid_argument** for a markdown endpoint; **not_found**, **already_exists**, **unsupported_filesystem** as named.
+- **PROPAGATE** `_confirmed_publication` and `_verify_the_moved_inode` outcomes (partial/uncertain, as for `move_note`).
+- **SUCCESS — no outcome marker**: `Moved <from> to <to>. …`
+
 ## Shared/nested helper inventory
 
 ### _confirmed_publication — tools.py:706

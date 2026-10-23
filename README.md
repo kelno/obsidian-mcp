@@ -305,8 +305,13 @@ no embedding or indexing of non-markdown files.
   file to `.trash/<YYYYMMDD-HHMMSS>-<basename>-<8 hex>` with a single
   atomic rename. Refuses markdown (that is `delete_note`), directories,
   and symlinks.
+- `move_file(from_path, to_path)`, moves or renames a non-markdown
+  file with a single non-replacing rename, creating missing parent
+  folders. Refuses markdown at either path (that is `move_note`),
+  directories, symlinks and an existing destination. Links to the file
+  in notes are not rewritten.
 
-All four reuse the path-traversal guard and exclude any path with a
+All of them reuse the path-traversal guard and exclude any path with a
 component starting with `.` (dot-directories and dot-files)
 (`.obsidian`, `.git`, `.trash`, …), matching the indexer's visibility
 rule.

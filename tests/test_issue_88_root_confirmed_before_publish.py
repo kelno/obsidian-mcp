@@ -314,6 +314,8 @@ async def _call(ctx, name: str):
         return await tools.delete_note_impl("note.md", permanent=True)
     if name == "delete_file":
         return await tools.delete_file_impl("picture.png")
+    if name == "move_file":
+        return await tools.move_file_impl("picture.png", "moved.png")
     raise AssertionError(name)  # pragma: no cover
 
 
@@ -326,6 +328,7 @@ MUTATING_TOOLS = [
     "delete_note",
     "delete_note_permanent",
     "delete_file",
+    "move_file",
 ]
 
 
@@ -1563,6 +1566,7 @@ def test_the_write_tool_detector_finds_the_tools_we_know_about():
         "set_frontmatter",
         "write_file",
         "delete_file",
+        "move_file",
         "import_from_url",
         "request_upload",
     } <= found, found

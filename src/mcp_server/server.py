@@ -23,6 +23,7 @@ from src.mcp_server.tools import (
     import_from_url_impl,
     list_files_impl,
     list_notes_impl,
+    move_file_impl,
     move_note_impl,
     read_file_impl,
     read_note_impl,
@@ -1281,6 +1282,42 @@ async def delete_file(
         expected_hash: Optional whole-file raw-byte digest of the incumbent.
     """
     return await delete_file_impl(path, permanent=permanent, expected_hash=expected_hash)
+
+
+@mcp.tool()
+async def move_file(
+    from_path: str, to_path: str, expected_hash: str | None = None
+) -> str:
+    """Move or rename a non-markdown file inside the vault (an image, a PDF, an
+    attachment). Requires write permission — a `readwrite` API key, or an OAuth
+    token carrying the `readwrite` scope.
+    Peer to `move_note`, which handles notes.
+
+    The move is one atomic, non-replacing rename: it never overwrites an
+    existing file at `to_path`, and missing parent folders are created. Refuses
+    markdown at either path (use `move_note`, which updates the index and can
+    rewrite backlinks), directories, symlinked final components, hidden paths
+    (any component starting with `.`) and path traversal; symlinked folders
+    inside the vault work normally. Both paths must be on the same filesystem.
+
+    **Links are not rewritten.** Notes that embed or link the file
+    (`![[old.png]]`, `[text](old.pdf)`) keep pointing at the old path; fix them
+    with `edit_note`. Non-markdown files are not indexed, so search is
+    unaffected.
+
+    Optional `expected_hash` binds `from_path`'s whole raw file: pass the
+    canonical `sha256:<64 lowercase hex>` from `read_file`'s base64 header,
+    `read_file(hash_only=True)` or a write success, and the move is refused,
+    with nothing changed, if the file changed since. Refusals end with one
+    `MCP-REFUSAL {"code":…}` line. The bytes are not rewritten, so the same hash
+    still binds the file at `to_path` and success reports none.
+
+    Args:
+        from_path: Vault-relative path of the existing file.
+        to_path: Vault-relative destination path. Must not exist.
+        expected_hash: Optional whole-file raw-byte digest of `from_path`.
+    """
+    return await move_file_impl(from_path, to_path, expected_hash=expected_hash)
 
 
 def _forbid_unknown_arguments(server: FastMCP) -> None:

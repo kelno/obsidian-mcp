@@ -326,6 +326,7 @@ incumbent, and leaves the final compare-to-rename race unchanged.
 | `move_note` | optional | the **source note's** bytes | ✅ the destination's — see the matrix |
 | `delete_note` (both `permanent` values) | optional | whole file | ❌ nothing exists to hash |
 | `delete_file` (both `permanent` values) | optional | whole file | ❌ nothing exists to hash |
+| `move_file` | optional | whole file (source) | ❌ bytes unchanged; the caller's hash still binds `to_path` |
 | `import_from_url(overwrite=True)`, `request_upload(overwrite=True)` | ⛔ out of scope | — | — |
 
 "⛔" is load-bearing: **the argument is accepted by the signature on every one of those tools** and answered with a typed refusal. A signature that rejected it would produce a protocol-level argument error instead of the contract — which is exactly why `create_note` takes the argument it can never honour, and why `create_note` evaluates it *before any filesystem work*.
@@ -386,6 +387,7 @@ Raw read/write/browse of arbitrary vault files, distinct peers to the note tools
 - `list_files(folder=".", pattern="*", recursive=False, limit=200)` — `ls`-style: immediate children (subdirs + files) by default, each file with size + mtime; glob-filterable; capped at `limit` with a truncation note. `pattern` is refused over `MAX_LIST_PATTERN_CHARS` (1,024) — see "The `list_files` pattern cap" below.
 
 - `delete_file(path, permanent=False, expected_hash=None)` — soft-deletes to `.trash/<YYYYMMDD-HHMMSS>-<basename>-<8 hex>` through the anchored helper; `permanent=True` unlinks. Refuses `.md` (pointing at `delete_note`), directories and symlinks. The `.md` refusal runs on the **canonical** final component, so `note.md/.`, `a//note.md` and `NOTE.MD` are refused too — the caller's string is not the path.
+- `move_file(from_path, to_path, expected_hash=None)` — the raw-file peer of `move_note`, with the same commit: both endpoints through `open_mutable` (symlinked leaf refused, symlinked folders followed), the source inode pinned, one `move_file_no_clobber` (`renameat2(RENAME_NOREPLACE)`, both parents flushed) and `_verify_the_moved_inode` with its rollback, inside one confirmed step (#88). Refuses `.md` at **either** endpoint on the canonical name: a note moved here would leave its index rows and backlinks behind, and a file moved to a `.md` name would become a note behind the indexer's back. Nothing is indexed, so no database work follows, and links to the file in notes are not rewritten. `expected_hash` binds the source's whole raw file; the bytes are not rewritten, so success reports no hash and the caller's still binds `to_path`.
 
 The base64 header and `hash_only=True` result carry the complete raw-byte
 `content_hash`, with `path` encoded as a quoted JSON string so newlines and

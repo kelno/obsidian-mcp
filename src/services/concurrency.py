@@ -41,7 +41,7 @@ TOOL_CLASSES = {
     "semantic_search": "embedding",
     "find_related": "vector",
     **dict.fromkeys(("create_note", "edit_note", "move_note", "delete_note",
-                     "set_frontmatter", "write_file", "delete_file",
+                     "set_frontmatter", "write_file", "delete_file", "move_file",
                      "import_from_url"), "write"),
     **dict.fromkeys(("keyword_search", "list_notes", "get_tags",
                      "get_neighborhood", "find_orphans", "list_files"), "scan"),
