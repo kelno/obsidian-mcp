@@ -1,5 +1,4 @@
-# Build -> Trivy gate -> push a PRIVATE image to GHCR (ghcr.io/<owner>/obsidian-mcp:
-# the repository this runs in, so a fork publishes to its own package).
+# Build -> Trivy gate -> push a PRIVATE image to GHCR (ghcr.io/maxkuminov/obsidian-mcp).
 #
 # A k3s deployment runs this image pinned BY DIGEST in a separate GitOps repo; a
 # push here changes nothing anywhere until that digest is bumped there. The
@@ -50,7 +49,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  IMAGE: ghcr.io/${{ github.repository }}
+  IMAGE: ghcr.io/maxkuminov/obsidian-mcp
   # Trivy runs from its container image pinned by digest (not trivy-action):
   # 0.69.3, the same pin as the other GHCR image workflows.
   TRIVY_IMAGE: aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
