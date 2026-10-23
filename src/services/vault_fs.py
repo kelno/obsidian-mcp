@@ -83,7 +83,7 @@ import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from src.config import settings
@@ -2429,7 +2429,7 @@ def soft_delete_at(
         if cross_mount_definitely(src_dir_fd, trash_fd):
             raise _trash_mount_boundary(rel_path, trash_dir)
         if stamp is None:
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         try:
             created = _rename_into_trash(
                 src_dir_fd, name, trash_fd, f"{stamp}-{name}"
