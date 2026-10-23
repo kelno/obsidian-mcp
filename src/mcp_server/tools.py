@@ -2627,6 +2627,10 @@ def _precondition_syntax_error(
     )
 
 
+# The outcome sentence of a refused move's precondition prose.
+_NOTHING_MOVED = "Nothing was moved."
+
+
 def _precondition_error(
     tool: str,
     path: str,
@@ -2638,6 +2642,8 @@ def _precondition_error(
     no_incumbent: bool = False,
     over_cap: bool = False,
     enforceable: bool = True,
+    action: str = "write",
+    outcome: str = "Nothing was written.",
 ) -> str | None:
     """The rest of the ladder. `None` means "the write may proceed".
 
@@ -2660,6 +2666,8 @@ def _precondition_error(
             comparison is possible.
         enforceable: whether `WRITE_PRECONDITION_REQUIRED` applies to this
             call at all.
+        action / outcome: what the refused call is, and the sentence saying
+            it did not happen, for the prose (a move is not a write).
     """
     syntax = _precondition_syntax_error(tool, expected_hash, path=path)
     if syntax is not None:
@@ -2695,7 +2703,7 @@ def _precondition_error(
         return _precondition_refusal(
             f"{tool}: {path} is larger than {cap_name} ({cap_bytes:,} bytes), "
             "the most this tool may read, so its current bytes cannot be "
-            "hashed and no precondition can be checked. Nothing was written. "
+            f"hashed and no precondition can be checked. {outcome} "
             f"Raising {cap_name} is an operator action; to fetch this file's "
             "bytes, use the transfer download route (`request_download`).",
             refusals.PRECONDITION_UNAVAILABLE,
@@ -2723,7 +2731,7 @@ def _precondition_error(
         return _precondition_refusal(
             f"{tool}: this deployment requires every write to name the bytes "
             "it is replacing (WRITE_PRECONDITION_REQUIRED). Resend with "
-            f"expected_hash. Nothing was written. {path} currently hashes to "
+            f"expected_hash. {outcome} {path} currently hashes to "
             f"{current_hash}, which you may send as expected_hash if nothing "
             "changes in between.",
             refusals.PRECONDITION_REQUIRED,
@@ -2736,9 +2744,9 @@ def _precondition_error(
 
     return _precondition_refusal(
         f"{tool}: {path} has changed since the hash you supplied was taken, so "
-        "this write was refused rather than applied to bytes you have not "
-        f"seen. Nothing was written. Its current content_hash is {current_hash}"
-        " — re-read the file, recompute the write from its current bytes, and "
+        f"this {action} was refused rather than applied to bytes you have not "
+        f"seen. {outcome} Its current content_hash is {current_hash}"
+        f" — re-read the file, recompute the {action} from its current bytes, and "
         "resend; the hash named here may be sent as expected_hash if nothing "
         f"else changes in between. {_PRECONDITION_READ_HINT}",
         refusals.STALE_PRECONDITION,
@@ -3215,6 +3223,8 @@ def _move_precondition_error(
         cap_name=cap_name,
         cap_bytes=cap_bytes,
         over_cap=over_cap,
+        action="move",
+        outcome=_NOTHING_MOVED,
     )
     if err is None:
         return None
@@ -7182,6 +7192,7 @@ async def move_file_impl(
             if err := _precondition_error(
                 "move_file", from_rel, incumbent, expected_hash,
                 over_cap=over_cap, cap_name=cap_name, cap_bytes=cap_bytes,
+                action="move", outcome=_NOTHING_MOVED,
             ):
                 return err
 
