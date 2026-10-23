@@ -453,10 +453,12 @@ _RESOLVE_STRICT = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS
 _O_LOOKUP = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
 
 # `syscall(2)` numbers for `openat2`. Unlike `_SYS_RENAMEAT2` this table is not
-# a fallback for an old glibc — it is the implementation. **glibc exports no
-# `openat2` wrapper at any version** (D24): measured on glibc 2.36 and 2.39,
-# where `renameat2`, `statx`, `close_range` and `getrandom` all resolve through
-# `ctypes.CDLL(None)` and `openat2` raises `AttributeError`.
+# a fallback for an old glibc — it is the implementation. **glibc exported no
+# `openat2` wrapper** when this was written (D24): measured on glibc 2.36 and
+# 2.39, where `renameat2`, `statx`, `close_range` and `getrandom` all resolve
+# through `ctypes.CDLL(None)` and `openat2` raises `AttributeError`. A newer
+# glibc does export one (GitHub's ubuntu runner image, 2026-10-23); the raw
+# syscall stays correct either way, so the wrapper is deliberately not used.
 #
 # The number is 437 everywhere, because the syscall postdates the unified
 # numbering convention. That uniformity is a convenience, not a licence to
