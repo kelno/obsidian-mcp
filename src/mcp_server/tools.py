@@ -6350,6 +6350,8 @@ async def list_files_impl(
         entries, truncated = list_dir(
             folder, pattern=pattern, recursive=recursive, limit=limit, user_id=uid
         )
+    except FileNotFoundError as e:
+        return _body_refusal(str(e), "not_found")
     except NotADirectoryError as e:
         return _body_refusal(str(e), "invalid_path")
     except ValueError as e:

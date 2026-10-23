@@ -224,6 +224,19 @@ async def test_list_limit_truncates(vault):
     assert sum(1 for ln in result.splitlines() if ln.startswith("- ")) == 3
 
 
+async def test_list_missing_folder_is_not_found(vault):
+    result = await tools.list_files_impl("no/such/folder")
+    assert "Folder not found: no/such/folder" in result
+    assert 'MCP-REFUSAL {"code":"not_found"}' in result
+
+
+async def test_list_a_file_is_refused_as_not_a_folder(vault):
+    (vault / "b.txt").write_text("b", encoding="utf-8")
+    result = await tools.list_files_impl("b.txt")
+    assert "b.txt is a file, not a folder." in result
+    assert 'MCP-REFUSAL {"code":"invalid_path"}' in result
+
+
 # ── 5.4 safety ───────────────────────────────────────────────────────────────
 
 

@@ -3135,8 +3135,10 @@ def list_dir(
         )
 
     base = validate_visible_path(folder or ".", user_id=user_id)
+    if not base.exists():
+        raise FileNotFoundError(f"Folder not found: {folder}")
     if not base.is_dir():
-        raise NotADirectoryError(f"Not a directory: {folder}")
+        raise NotADirectoryError(f"{folder} is a file, not a folder.")
     vault = _vault_root(user_id).resolve()
 
     def _entry(p: Path, is_dir: bool) -> dict:

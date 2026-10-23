@@ -87,7 +87,7 @@ async def test_an_over_long_pattern_is_refused_by_its_own_cause(vault):
     )
 
     assert "MAX_LIST_PATTERN_CHARS" in result
-    assert "Not a directory" not in result
+    assert "Folder not found" not in result
 
 
 async def test_the_refusal_precedes_path_validation_and_the_compile(
