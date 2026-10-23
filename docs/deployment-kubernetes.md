@@ -290,8 +290,8 @@ them.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `MCP_RATE_LIMIT_PER_MINUTE` / `MCP_RATE_LIMIT_BURST` | `120` / `30` | General per-principal bucket. |
-| `MCP_WRITE_RATE_LIMIT_PER_MINUTE` / `MCP_WRITE_RATE_LIMIT_BURST` | `60` / `15` | Write bucket (the vault-mutating tools and uploads). |
+| `MCP_RATE_LIMIT_PER_MINUTE` / `MCP_RATE_LIMIT_BURST` | `600` / `120` | General per-principal bucket. |
+| `MCP_WRITE_RATE_LIMIT_PER_MINUTE` / `MCP_WRITE_RATE_LIMIT_BURST` | `120` / `30` | Write bucket (the vault-mutating tools and uploads). |
 | `MCP_AUTH_FAILURE_LIMIT` / `MCP_AUTH_FAILURE_WINDOW_SECONDS` | `60` / `300` | Failed `/mcp` authentications per client address per window. |
 | `MCP_AUTH_FAILURE_TABLE_SIZE` | `4096` | Slots in that address table. |
 | `MCP_LIMITER_MAX_TRACKED_PRINCIPALS` | `10000` | Principals with their own bucket before overflow sharing. |

@@ -694,19 +694,22 @@ class Settings(BaseSettings):
         900, ge=1, le=LIMITER_WINDOW_SECONDS_MAX
     )
 
-    # L2 — the general velocity bucket, on every tool call. Far above observed
-    # usage (~1,600 calls per 30 days across all credentials), and it stops a
-    # hot loop within a second; the burst covers a post-search fan-out.
-    mcp_rate_limit_per_minute: NullableLimit = 120
-    mcp_rate_limit_burst: NullableLimit = 30
+    # L2 — the general velocity bucket, on every tool call. Sized for a real
+    # agent workload, not the average: on 2026-10-23 an agent's morning-briefing
+    # scan made ~400 `read_note` calls in ~100 s (8–11/s sustained, 13/s peaks)
+    # and the old 120/min, burst 30 refused it mid-task. 600/min (10/s) with a
+    # 120 burst admits that scan and still stops a hot loop within seconds;
+    # total work stays bounded by the daily quota, not by this bucket.
+    mcp_rate_limit_per_minute: NullableLimit = 600
+    mcp_rate_limit_burst: NullableLimit = 120
 
     # L3 — the write bucket, which the eight vault-mutating tools must pass in
     # addition (and `PUT /transfer/upload`, which writes vault bytes without
     # being a tool call at all). A **velocity** bound, not a blast-radius one:
     # neither bucket bounds the total work a credential can do in a day, which
     # only the daily quota does and only for the credentials it reaches.
-    mcp_write_rate_limit_per_minute: NullableLimit = 60
-    mcp_write_rate_limit_burst: NullableLimit = 15
+    mcp_write_rate_limit_per_minute: NullableLimit = 120
+    mcp_write_rate_limit_burst: NullableLimit = 30
 
     # Principal-keyed limiter entries held before further principals fold onto
     # one shared overflow entry. Reaching it needs more than ten thousand live

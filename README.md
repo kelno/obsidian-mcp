@@ -1075,10 +1075,10 @@ to multi-user later resumes where you left off without re-bootstrapping
 | `MCP_AUTH_FAILURE_LIMIT` | `60` | Failed `/mcp` authentications one client address may make per window before a 429. Checked before the credential lookup, so a refused probe costs no query. Null disables. See [Rate limits](#rate-limits). |
 | `MCP_AUTH_FAILURE_WINDOW_SECONDS` | `300` | The window that budget is counted over. |
 | `MCP_AUTH_FAILURE_TABLE_SIZE` | `4096` | Counter slots in the fixed-size, per-process-salted address table. Memory is O(size); collisions only make the control stricter. |
-| `MCP_RATE_LIMIT_PER_MINUTE` | `120` | Sustained tool calls per minute per principal (an API key, or an OAuth *grant*). Null — with the burst — disables the general bucket. |
-| `MCP_RATE_LIMIT_BURST` | `30` | Capacity of the general bucket. Must be set together with its rate or nulled together with it. |
-| `MCP_WRITE_RATE_LIMIT_PER_MINUTE` | `60` | Sustained vault-mutating calls per minute per principal — the eight write tools, plus `PUT /transfer/upload` charged to the principal that minted the capability. |
-| `MCP_WRITE_RATE_LIMIT_BURST` | `15` | Capacity of the write bucket. |
+| `MCP_RATE_LIMIT_PER_MINUTE` | `600` | Sustained tool calls per minute per principal (an API key, or an OAuth *grant*). Null — with the burst — disables the general bucket. |
+| `MCP_RATE_LIMIT_BURST` | `120` | Capacity of the general bucket. Must be set together with its rate or nulled together with it. |
+| `MCP_WRITE_RATE_LIMIT_PER_MINUTE` | `120` | Sustained vault-mutating calls per minute per principal — the eight write tools, plus `PUT /transfer/upload` charged to the principal that minted the capability. |
+| `MCP_WRITE_RATE_LIMIT_BURST` | `30` | Capacity of the write bucket. |
 | `MCP_LIMITER_MAX_TRACKED_PRINCIPALS` | `10000` | Principals holding their own limiter entry before further ones share one overflow entry. |
 | `MCP_REFUSAL_LOG_INTERVAL_SECONDS` | `10` | How long one rate/slot-refusal coalescing window stays open. Inside it a refusal writes nothing; the row that lands stands for `1 + suppressed` refusals. |
 | `MCP_CONCURRENCY_MODE` | `shadow` | `off`, `shadow`, or `enforce`. Shadow observes pressure without rejecting or waiting. See [Concurrency admission](#concurrency-admission). |
@@ -1383,9 +1383,9 @@ The consumer of this server is an agent, and a retry-storming or
 prompt-injected agent is an ordinary input. Three controls bound how
 fast one credential can create work.
 
-- **A general bucket** — `MCP_RATE_LIMIT_PER_MINUTE` (120) sustained,
-  `MCP_RATE_LIMIT_BURST` (30) capacity — on every tool call.
-- **A write bucket** — 60/min, burst 15 — that the eight vault-mutating
+- **A general bucket** — `MCP_RATE_LIMIT_PER_MINUTE` (600) sustained,
+  `MCP_RATE_LIMIT_BURST` (120) capacity — on every tool call.
+- **A write bucket** — 120/min, burst 30 — that the eight vault-mutating
   tools must pass in addition, and that `PUT /transfer/upload` consumes
   too, charged to the principal that **minted** the capability so the
   write rate cannot be escaped by minting links and redeeming them.
@@ -1403,8 +1403,8 @@ never a protocol error, never a silent empty result set — and it ends
 with one machine-readable line:
 
 ```
-Error: this credential exceeded its general rate limit of 120 calls per minute, so the call was refused before it ran. Nothing was read, written, or counted against the daily quota. Retry in 3 seconds, or slow the calling loop down.
-MCP-REFUSAL {"code":"rate_limited","scope":"principal","limit":120,"limit_unit":"calls_per_minute","retry_after_seconds":3}
+Error: this credential exceeded its general rate limit of 600 calls per minute, so the call was refused before it ran. Nothing was read, written, or counted against the daily quota. Retry in 1 seconds, or slow the calling loop down.
+MCP-REFUSAL {"code":"rate_limited","scope":"principal","limit":600,"limit_unit":"calls_per_minute","retry_after_seconds":1}
 ```
 
 The `MCP-REFUSAL` sentinel is line-initial and the JSON is one line, so

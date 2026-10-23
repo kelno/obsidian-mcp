@@ -154,8 +154,8 @@ update it in the same change.** What stays here is the short list:
   and the consequence is cross-tenant read/overwrite/delete — see
   [vault roots and tenancy](docs/architecture/vault-roots-and-tenancy.md).
 - **`/mcp` rate control is in-process, and `--workers 1` is part of the
-  contract.** Two per-principal token buckets in `_tracked` (general 120/min
-  burst 30; write 60/min burst 15 on the eight vault-mutating tools *and*
+  contract.** Two per-principal token buckets in `_tracked` (general 600/min
+  burst 120; write 120/min burst 30 on the eight vault-mutating tools *and*
   `PUT /transfer/upload`, charged to the principal that **minted** the
   capability) plus a per-address budget on failed `/mcp` authentication. The
   principal is `("api_key", id)` or `("oauth", grant_id)` — the **grant**, so a

@@ -34,8 +34,8 @@ nothing to slow it and nothing to tell it to stop.
 | 1a | Request occupancy (#261, #188) | `APIKeyMiddleware`, before auth session through ASGI completion | global / presented-bearer fingerprint | 64 / 20, waiters 64 / 16, sharing one 2 s transport deadline with 1b; mode default **shadow** | enforce: transport 429 after the deadline or on waiter overflow; queue: admitted with an overrun; shadow: observation only. A disconnected waiter is released at once | `mcp_concurrency_pressure` event; request-level `concurrency_counters`; authenticated observations can accompany tool rows |
 | 1b | Auth-session occupancy (#261, #188) | around the middleware's own DB session only | global | 2, waiters 32, same deadline as 1a | enforce: transport 429 before opening a session; queue/shadow as 1a | same transport event and counters |
 | 1c | Body-memory budget (#322) | `APIKeyMiddleware`, after authentication and the auth permit, before the app reads a byte; **POST only** | process (two lanes: ≤ 1 MiB small, the rest large) | cgroup limit × 0.5 ÷ 8 (128 MiB on 2 GiB), 15 s wait, 8 waiters; **always on, every mode** | transport **429** `code: body_memory` + `Retry-After: 2`; **413** for a declared length above the per-request limit | `mcp_concurrency_pressure`, `reason: body:memory`; **not** in `concurrency_counters` |
-| 2 | General velocity bucket | `_tracked`, first gate | principal | 120/min, burst 30 (`MCP_RATE_LIMIT_PER_MINUTE`, `MCP_RATE_LIMIT_BURST`) | in-band, sentinel line | `rate_limited`, scope `principal` — **coalesced** |
-| 3 | Write velocity bucket | `_tracked` (write tools) **and** `PUT /transfer/upload` | principal | 60/min, burst 15 (`MCP_WRITE_RATE_LIMIT_PER_MINUTE`, `MCP_WRITE_RATE_LIMIT_BURST`) | in-band on a tool; **429** on the transfer route | `rate_limited`, scope `principal_write` — **coalesced** |
+| 2 | General velocity bucket | `_tracked`, first gate | principal | 600/min, burst 120 (`MCP_RATE_LIMIT_PER_MINUTE`, `MCP_RATE_LIMIT_BURST`) | in-band, sentinel line | `rate_limited`, scope `principal` — **coalesced** |
+| 3 | Write velocity bucket | `_tracked` (write tools) **and** `PUT /transfer/upload` | principal | 120/min, burst 30 (`MCP_WRITE_RATE_LIMIT_PER_MINUTE`, `MCP_WRITE_RATE_LIMIT_BURST`) | in-band on a tool; **429** on the transfer route | `rate_limited`, scope `principal_write` — **coalesced** |
 | 4 | Vault admission (#66) | `_tracked` | user | — | in-band | `no_vault_assigned` (and the three vault-root quarantine markers, #199) |
 | 5a | Unencodable-argument screen (#149) | `_tracked` | argument | — | in-band | `argument_not_encodable` |
 | 5b | Query and import-URL length caps | `_tracked`, beside 5a | argument | 8,192 (`MAX_SEARCH_QUERY_CHARS`; `MAX_IMPORT_URL_CHARS` for `import_from_url`'s `url`, #322) | in-band | `argument_too_long` — **own row** |
@@ -130,10 +130,11 @@ request rate.
 ## Two buckets, because velocity and destruction are different questions
 
 The general bucket is a **velocity** bound: it stops a hot loop and bounds the
-rate at which any work is created. It is *not* a blast-radius bound — 120
-deletes a minute empties a 2,577-note vault in about twenty minutes. The write
-bucket halves that. **Neither bucket bounds totality**; only the daily quota
-does, and only for the credentials it reaches.
+rate at which any work is created. It is *not* a blast-radius bound — the
+write bucket's 120 deletes a minute (the general bucket alone would allow 600)
+still empties a 2,577-note vault in about twenty minutes. **Neither bucket
+bounds totality**; only the daily quota does, and only for the credentials it
+reaches.
 
 > **Accepted limitation, owner-approved.** OAuth principals and pre-existing
 > NULL-limit API keys have **velocity bounds only** — no durable ceiling on
@@ -211,8 +212,8 @@ renderer appending a single final line to the existing prose.
 What an agent actually receives when the general bucket refuses it:
 
 ```
-Error: this credential exceeded its general rate limit of 120 calls per minute, so the call was refused before it ran. Nothing was read, written, or counted against the daily quota. Retry in 3 seconds, or slow the calling loop down.
-MCP-REFUSAL {"code":"rate_limited","scope":"principal","limit":120,"limit_unit":"calls_per_minute","retry_after_seconds":3}
+Error: this credential exceeded its general rate limit of 600 calls per minute, so the call was refused before it ran. Nothing was read, written, or counted against the daily quota. Retry in 1 seconds, or slow the calling loop down.
+MCP-REFUSAL {"code":"rate_limited","scope":"principal","limit":600,"limit_unit":"calls_per_minute","retry_after_seconds":1}
 ```
 
 - The sentinel `MCP-REFUSAL` is **line-initial** and the JSON is **one line**,
@@ -507,13 +508,13 @@ once, in `src/services/api_keys.py` (`resolve_create_limit`,
 
 **Why 5,000.** ~1,600 tool calls per 30 days across all credentials, so
 5,000/day is two orders of magnitude of headroom and cannot interrupt a real
-session, while a runaway stops the same day. At 120/min it takes ≥ 42 minutes
+session, while a runaway stops the same day. At 600/min it takes ≥ 8 minutes
 to spend. It binds only keys created after this shipped.
 
 ## Key creation is one budget across two representations (#323)
 
 Every new API key is a new `/mcp` principal, and a new principal starts with a
-full general (30) and write (15) burst. Until #323 only `POST /api/keys` was
+full general (120) and write (30) burst. Until #323 only `POST /api/keys` was
 throttled (5/min per address, slowapi); `POST /admin/keys/create` was not, so a
 session plus its CSRF token could script it and reset both per-principal
 buckets at will — and, with a blank limit field, skip the daily quota too.
@@ -903,10 +904,10 @@ the page to see. The full reading rules are in
 | `TRUSTED_PROXY_IPS` | `127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16` | The peers whose `X-Forwarded-*` headers are honoured — the address every control here keys on. CSV or JSON, stored canonicalised, empty trusts nobody. The only such control; uvicorn's is off. |
 | `PANEL_LOGIN_FAILURE_LIMIT` | `10` | Failed panel sign-ins one **account** may accrue per window before further attempts are refused without comparing the password. Null disables. |
 | `PANEL_LOGIN_FAILURE_WINDOW_SECONDS` | `900` | The window that budget is counted over. |
-| `MCP_RATE_LIMIT_PER_MINUTE` | `120` | Sustained tool calls per minute per principal. Null (with the burst) disables the general bucket. |
-| `MCP_RATE_LIMIT_BURST` | `30` | Capacity of the general bucket. |
-| `MCP_WRITE_RATE_LIMIT_PER_MINUTE` | `60` | Sustained vault-mutating calls per minute per principal (the eight write tools plus `PUT /transfer/upload`). |
-| `MCP_WRITE_RATE_LIMIT_BURST` | `15` | Capacity of the write bucket. |
+| `MCP_RATE_LIMIT_PER_MINUTE` | `600` | Sustained tool calls per minute per principal. Null (with the burst) disables the general bucket. |
+| `MCP_RATE_LIMIT_BURST` | `120` | Capacity of the general bucket. |
+| `MCP_WRITE_RATE_LIMIT_PER_MINUTE` | `120` | Sustained vault-mutating calls per minute per principal (the eight write tools plus `PUT /transfer/upload`). |
+| `MCP_WRITE_RATE_LIMIT_BURST` | `30` | Capacity of the write bucket. |
 | `MCP_LIMITER_MAX_TRACKED_PRINCIPALS` | `10000` | Principals holding their own limiter entry before the shared overflow entry. |
 | `MCP_REFUSAL_LOG_INTERVAL_SECONDS` | `10` | How long one coalescing window stays open. |
 | `DEFAULT_DAILY_REQUEST_LIMIT` | `5000` | Daily quota a **newly created** key receives when the caller names none (omitted JSON field, blank form field). Null makes the limit **required** on create; unlimited is only ever an administrator's explicit request (#323). |
@@ -1486,8 +1487,10 @@ means raising the multiplier's default and floor, never loosening the guard.
 - Past 10,000 principals the shared overflow entries lose per-principal
   attribution but not their counts.
 - **The defaults are guesses against a small sample** (~1,600 calls per 30
-  days). Every one of them is a setting; read `/admin/performance` for a week
-  before treating any as settled.
+  days). The velocity buckets were raised once already (2026-10-23: 120/30 →
+  600/120 general, 60/15 → 120/30 write) after a real agent scan of ~400 reads
+  at 8–13 calls/s was refused mid-task. Every one of them is a setting; read
+  `/admin/performance` for a week before treating any as settled.
 - A shared key is a shared bucket. Two agents on one credential contend,
   exactly as they do for the daily quota — an agent that deserves isolation
   deserves its own credential.

@@ -207,7 +207,7 @@ def test_sustained_calls_under_the_rate_are_all_admitted(monkeypatch):
         rate_limits, "time", SimpleNamespace(monotonic=lambda: clock.now)
     )
     for _ in range(200):
-        clock.now += 0.6  # 100/min, under the configured 120/min
+        clock.now += 0.12  # 500/min, under the configured 600/min
         admitted, _retry = rate_limits.take(API_KEY_PRINCIPAL, refusals.SCOPE_PRINCIPAL)
         assert admitted
 
@@ -1100,7 +1100,7 @@ def test_a_depleted_or_unflushed_entry_is_never_evicted(monkeypatch):
         rate_limits, "time", SimpleNamespace(monotonic=lambda: clock.now)
     )
     # A bucket slow enough that idling past the TTL does **not** refill it, so
-    # "depleted" and "idle" are separable facts. At the configured 120/min they
+    # "depleted" and "idle" are separable facts. At the configured 600/min they
     # never are, which is why the guard is stated as an invariant rather than
     # left to the arithmetic.
     monkeypatch.setattr(mcp_auth.settings, "mcp_rate_limit_per_minute", 1)
