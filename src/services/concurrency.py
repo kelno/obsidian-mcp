@@ -42,7 +42,7 @@ TOOL_CLASSES = {
     "find_related": "vector",
     **dict.fromkeys(("create_note", "edit_note", "move_note", "delete_note",
                      "set_frontmatter", "write_file", "delete_file", "move_file",
-                     "import_from_url"), "write"),
+                     "delete_folder", "import_from_url"), "write"),
     **dict.fromkeys(("keyword_search", "list_notes", "get_tags",
                      "get_neighborhood", "find_orphans", "list_files"), "scan"),
     **dict.fromkeys(("read_note", "read_file", "get_recent", "get_vault_guide",

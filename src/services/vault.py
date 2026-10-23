@@ -2910,6 +2910,29 @@ def unlink_at(
     vault_fs.flush_dir_quietly(dir_fd, f"parent directory of {target.rel}")
 
 
+def remove_empty_folder_at(
+    target: MutableTarget, *, confirmation: RootConfirmation | None = None
+) -> None:
+    """Remove an empty folder through its parent descriptor, never its contents.
+
+    One `rmdir` (`unlinkat(AT_REMOVEDIR)`) against the descriptor validation
+    opened. The kernel refuses a folder that holds anything, hidden entries
+    included, with `ENOTEMPTY` at the instant of the call, so a file that lands
+    in the folder while the tool runs is never removed with it; nothing here
+    lists the folder first. `rmdir` follows no symlink, and the parent's entry
+    is flushed afterwards, as in `unlink_at` (#97).
+
+    Uses `parent_fd`, never `dir_fd`: a delete must not create the missing
+    parents of the folder it was asked to remove.
+    """
+    _require_confirmation(confirmation, target, "remove folder")
+    dir_fd = target.parent_fd
+    if dir_fd is None:
+        raise FileNotFoundError(f"Folder not found: {target.rel}")
+    os.rmdir(target.name, dir_fd=dir_fd)
+    vault_fs.flush_dir_quietly(dir_fd, f"parent directory of {target.rel}")
+
+
 def write_file(
     relative_path: str,
     content: str,

@@ -316,6 +316,9 @@ async def _call(ctx, name: str):
         return await tools.delete_file_impl("picture.png")
     if name == "move_file":
         return await tools.move_file_impl("picture.png", "moved.png")
+    if name == "delete_folder":
+        (ctx.vault / "Empty").mkdir(exist_ok=True)
+        return await tools.delete_folder_impl("Empty")
     raise AssertionError(name)  # pragma: no cover
 
 
@@ -329,6 +332,7 @@ MUTATING_TOOLS = [
     "delete_note_permanent",
     "delete_file",
     "move_file",
+    "delete_folder",
 ]
 
 
@@ -353,6 +357,8 @@ async def test_a_changed_assignment_refuses_every_mutating_tool(
     assert not (ctx.vault / "fresh.md").exists()
     assert not (ctx.vault / "moved.md").exists()
     assert not (ctx.vault / "blob.bin").exists()
+    if tool_name == "delete_folder":
+        assert (ctx.vault / "Empty").is_dir()
     assert ctx.assignment["reads"] >= 1, "the confirmation issued no query"
 
 
@@ -1567,6 +1573,7 @@ def test_the_write_tool_detector_finds_the_tools_we_know_about():
         "write_file",
         "delete_file",
         "move_file",
+        "delete_folder",
         "import_from_url",
         "request_upload",
     } <= found, found
@@ -1596,10 +1603,14 @@ DIR_FD_KEYWORDS = {"dir_fd", "src_dir_fd", "dst_dir_fd"}
 #                          standing as its `os.replace`.
 #   `unlink_at`          — the permanent-unlink helper #88 added; the call
 #                          site C.2a moved out of `delete_note`.
+#   `remove_empty_folder_at` — `delete_folder`'s `os.rmdir`, behind the same
+#                          `_require_confirmation` as `unlink_at`.
 # `_discard_temp` left this list when #104 delegated it to
 # `vault_fs.discard_staged_name` (the D27 consolidation): the unlink now lives
 # in the primitive module the scan deliberately does not police.
-PUBLISH_HELPERS = {"_atomic_write_at", "_link_staged_name", "unlink_at"}
+PUBLISH_HELPERS = {
+    "_atomic_write_at", "_link_staged_name", "unlink_at", "remove_empty_folder_at"
+}
 
 
 def _enclosing_function(tree: ast.AST, target: ast.AST) -> str | None:
@@ -1663,6 +1674,7 @@ def test_the_structural_scan_actually_sees_the_permitted_call_sites():
     assert ("vault.py", "replace", "_atomic_write_at") in seen
     assert ("vault.py", "link", "_link_staged_name") in seen
     assert ("vault.py", "unlink", "unlink_at") in seen
+    assert ("vault.py", "rmdir", "remove_empty_folder_at") in seen
     # And nothing under `src/mcp_server/` reaches one at all any more.
     assert not [entry for entry in seen if entry[0] != "vault.py"], seen
 

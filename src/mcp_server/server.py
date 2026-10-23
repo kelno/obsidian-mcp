@@ -10,6 +10,7 @@ from src.mcp_server.tools import (
     check_upload_impl,
     create_note_impl,
     delete_file_impl,
+    delete_folder_impl,
     delete_note_impl,
     edit_note_impl,
     find_orphans_impl,
@@ -1318,6 +1319,31 @@ async def move_file(
         expected_hash: Optional whole-file raw-byte digest of `from_path`.
     """
     return await move_file_impl(from_path, to_path, expected_hash=expected_hash)
+
+
+@mcp.tool()
+async def delete_folder(path: str) -> str:
+    """Delete an empty folder from the vault. Requires write permission — a
+    `readwrite` API key, or an OAuth token carrying the `readwrite` scope.
+
+    Only an **empty** folder is removed; there is no recursive mode. To remove
+    a folder with content, delete its notes with `delete_note` and its other
+    files with `delete_file` first (both soft-delete into `.trash/`), then the
+    folder. Emptiness is checked by the filesystem at the moment of the delete,
+    so a file that appears in the meantime is never removed with it. A folder
+    holding only hidden entries (names starting with `.`, which `list_files`
+    does not show) is not empty, and this server cannot remove those entries.
+
+    The removal is permanent, as an empty folder holds nothing to recover.
+    Refuses files (use `delete_note` or `delete_file`), the vault root, hidden
+    paths (any component starting with `.`), symlinks and path traversal. A
+    trailing `/` is accepted. Refusals end with one `MCP-REFUSAL {"code":…}`
+    line; a non-empty folder is `folder_not_empty`.
+
+    Args:
+        path: Vault-relative path of the folder (e.g. "Projects/Old").
+    """
+    return await delete_folder_impl(path)
 
 
 def _forbid_unknown_arguments(server: FastMCP) -> None:

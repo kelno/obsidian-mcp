@@ -119,7 +119,7 @@ def _events(records, name):
     return [r for r in records if r.getMessage() == name]
 
 
-#: Every call site the write gate guards, with a call that reaches it. Eight
+#: Every call site the write gate guards, with a call that reaches it. Nine
 #: tools call `_require_write` as their first statement; `request_upload` and
 #: `import_from_url` reach it through `_mint_preflight(need_write=True)`.
 GATED = [
@@ -131,6 +131,7 @@ GATED = [
     ("write_file", lambda: tools.write_file_impl("a.bin", "AAAA")),
     ("delete_file", lambda: tools.delete_file_impl("a.bin")),
     ("move_file", lambda: tools.move_file_impl("a.bin", "b.bin")),
+    ("delete_folder", lambda: tools.delete_folder_impl("Folder")),
     ("request_upload", lambda: tools.request_upload_impl("a.bin")),
     (
         "import_from_url",
@@ -146,7 +147,7 @@ REFUSAL = (
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 1. All ten call sites, marked and recorded at one definition
+# 1. All eleven call sites, marked and recorded at one definition
 # ══════════════════════════════════════════════════════════════════════════
 
 

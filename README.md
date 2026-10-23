@@ -310,6 +310,10 @@ no embedding or indexing of non-markdown files.
   folders. Refuses markdown at either path (that is `move_note`),
   directories, symlinks and an existing destination. Links to the file
   in notes are not rewritten.
+- `delete_folder(path)`, removes an empty folder with a single `rmdir`,
+  so a folder holding anything (hidden entries included) is refused
+  rather than emptied. No recursive mode; refuses files, the vault
+  root and symlinks.
 
 All of them reuse the path-traversal guard and exclude any path with a
 component starting with `.` (dot-directories and dot-files)

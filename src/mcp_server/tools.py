@@ -97,6 +97,7 @@ from src.services.vault import (
     read_bytes,
     read_bytes_at,
     read_file,
+    remove_empty_folder_at,
     soft_delete_target,
     unlink_at,
     validate_visible_path,
@@ -7234,3 +7235,76 @@ async def move_file_impl(
     finally:
         for opened in targets:
             opened.close()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# delete_folder
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@_tracked("delete_folder", ["path"], write_class=True)
+async def delete_folder_impl(path: str) -> str:
+    """Remove an empty vault folder.
+
+    The one tool that acts on a directory, and it removes only an **empty**
+    one, with `remove_empty_folder_at`: a single `rmdir` against the parent
+    descriptor `open_mutable` anchored, inside one confirmed step (#88). The
+    kernel decides emptiness at the instant of the call, so a file that lands
+    in the folder meanwhile is never removed with it, and nothing lists the
+    folder first. There is no recursive mode: a subtree is emptied with the
+    tools that know what they delete (`delete_note`, `delete_file`), each of
+    which soft-deletes into `.trash/`.
+
+    Not soft itself: an empty folder holds nothing to recover, and a `.trash`
+    entry for it would only be clutter. Folders are not indexed, so no database
+    work follows. A trailing `/` is accepted, since that is how callers write a
+    folder; everything else is `open_mutable`'s path policy (hidden
+    components, traversal, a symlinked final component, the vault root).
+    """
+    if err := _require_write():
+        return err
+    uid = current_user_id.get()
+    try:
+        target = open_mutable(path.rstrip("/"), user_id=uid)
+    except ValueError as e:
+        return _body_refusal(str(e), "validation_failed")
+    except OSError as e:
+        return _body_refusal(f"Could not open {path}: {e}", "io_failure")
+
+    not_a_folder = (
+        f"{target.rel} is a file, not a folder. Use `delete_note` for notes and "
+        "`delete_file` for other files."
+    )
+    try:
+        info = target.lstat()
+        if info is None:
+            return _body_refusal(f"Folder not found: {path}", "not_found")
+        if not stat.S_ISDIR(info.st_mode):
+            return _body_refusal(not_a_folder, "invalid_argument")
+
+        def _remove(confirmation):
+            remove_empty_folder_at(target, confirmation=confirmation)
+
+        try:
+            err, _ = await _confirmed_publication(uid, _remove)
+        except FileNotFoundError:
+            return _body_refusal(f"Folder not found: {path}", "not_found")
+        except NotADirectoryError:
+            # Replaced by a file between the `lstat` and the `rmdir`.
+            return _body_refusal(not_a_folder, "invalid_argument")
+        except OSError as e:
+            if e.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                return _body_refusal(
+                    f"Folder is not empty: {target.rel}. Only an empty folder "
+                    "can be deleted: delete what it holds first, notes with "
+                    "`delete_note` and other files with `delete_file`. Hidden "
+                    "entries (names starting with `.`) count too; `list_files` "
+                    "does not show them and these tools cannot remove them.",
+                    "folder_not_empty",
+                )
+            return _body_refusal(f"Delete failed: {e}", "io_failure")
+        if err:
+            return err
+        return f"Deleted empty folder {target.rel}"
+    finally:
+        target.close()

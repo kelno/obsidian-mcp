@@ -287,6 +287,11 @@ Each entry identifies every direct return branch. PROPAGATE means classify at th
 - **PROPAGATE** `_confirmed_publication` and `_verify_the_moved_inode` outcomes (partial/uncertain, as for `move_note`).
 - **SUCCESS — no outcome marker**: `Moved <from> to <to>. …`
 
+### delete_folder_impl — src/mcp_server/tools.py (added after #263, typed from the start)
+- **PROPAGATE** write permission and `_confirmed_publication` outcomes.
+- **REFUSE validation_failed** for `open_mutable`'s `ValueError`; **io_failure** for any other `OSError`; **not_found** for a missing folder; **invalid_argument** for a file; **folder_not_empty** for `ENOTEMPTY`/`EEXIST` from the `rmdir`.
+- **SUCCESS — no outcome marker**: `Deleted empty folder <path>`
+
 ## Shared/nested helper inventory
 
 ### _confirmed_publication — tools.py:706

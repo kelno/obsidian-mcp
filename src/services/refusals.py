@@ -116,7 +116,7 @@ BODY_CODES = frozenset({
     "permission_denied", "related_source_not_found", "related_source_not_embedded",
     "vault_assignment_changed", "vault_anchor_lost_at_publish",
     "vault_confirmation_unavailable", "invalid_argument", "validation_failed",
-    "invalid_path", "unsafe_path", "not_found", "already_exists",
+    "invalid_path", "unsafe_path", "not_found", "already_exists", "folder_not_empty",
     "read_window_unavailable", "selector_unresolved", "match_not_found",
     "match_ambiguous", "content_unsafe", "size_limit", "resource_limit",
     "unsupported_filesystem", "io_failure", "index_not_ready",
