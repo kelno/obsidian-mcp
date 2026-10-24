@@ -73,6 +73,7 @@ from src.services.quotas import (
     consumed_today,
     parse_limit_form_value,
     utc_day,
+    utc_day_start,
 )
 from src.services.usage_filters import (
     LOG_LIMIT,
@@ -890,6 +891,29 @@ async def _graph_stats(session: AsyncSession, user_id: int | None) -> dict:
     }
 
 
+async def _requests_today(
+    session: AsyncSession, uid: int | None, now: datetime | None = None
+) -> int:
+    """The dashboard's "Requests Today (UTC)": usage rows since UTC midnight.
+
+    "Today" is the UTC day — the same day the per-key quota counts
+    (`quotas.utc_day`) — computed here and bound as a parameter, never
+    `date_trunc('day', now())`, which truncates in the session's TimeZone and
+    so counted from the database server's local midnight.
+    """
+    day_start = utc_day_start(now)
+    if uid is not None:
+        stmt = text(
+            "SELECT count(*) FROM usage_logs "
+            "WHERE created_at >= :day_start AND user_id = :uid"
+        )
+        params = {"day_start": day_start, "uid": uid}
+    else:
+        stmt = text("SELECT count(*) FROM usage_logs WHERE created_at >= :day_start")
+        params = {"day_start": day_start}
+    return (await session.execute(stmt, params)).scalar() or 0
+
+
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(
     request: Request,
@@ -950,19 +974,7 @@ async def dashboard(
 
     keys_count = (await session.execute(keys_q)).scalar() or 0
 
-    if uid is not None:
-        requests_today = (await session.execute(
-            text(
-                "SELECT count(*) FROM usage_logs "
-                "WHERE created_at >= date_trunc('day', now()) "
-                "AND user_id = :uid"
-            ),
-            {"uid": uid},
-        )).scalar() or 0
-    else:
-        requests_today = (await session.execute(
-            text("SELECT count(*) FROM usage_logs WHERE created_at >= date_trunc('day', now())")
-        )).scalar() or 0
+    requests_today = await _requests_today(session, uid)
 
     embedding_pct = round(notes_with_embeddings / notes_count * 100) if notes_count else 0
 

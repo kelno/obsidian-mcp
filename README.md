@@ -246,7 +246,8 @@ and ops layer around them.
 - `semantic_search(query, folder?, tags?, frontmatter?, limit=15)`,
   vector similarity via pgvector, one preview chunk per note
 - `list_notes(folder?, limit=50)`, sorted by modified time
-- `get_recent(folder?, limit=20)`, recently changed
+- `get_recent(folder?, limit=20)`, recently changed, with each
+  modification time in UTC (`YYYY-MM-DD HH:MM UTC`)
 - `get_tags(limit=50)`, tag and count
 - `get_vault_guide()`, the Obsidian primer plus this vault's
   `CLAUDE.md`, served live

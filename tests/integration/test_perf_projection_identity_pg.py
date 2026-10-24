@@ -430,7 +430,14 @@ async def _old_get_recent(sessionmaker, uid, limit=20, folder=None, tags=None,
         return "No recent notes found"
     lines = [f"Last {len(notes)} modified notes:\n"]
     for n in notes:
-        mod = n.modified_at.strftime("%Y-%m-%d %H:%M") if n.modified_at else "unknown"
+        # The one deliberate render change since the projection (#280): the
+        # time is converted to UTC and labelled (utc-time-fixes). The query —
+        # what this reference pins — is the pre-change body verbatim.
+        mod = (
+            n.modified_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            if n.modified_at
+            else "unknown"
+        )
         tags_str = f" [{', '.join(n.tags)}]" if n.tags else ""
         lines.append(f"- `{n.file_path}` — {n.title}{tags_str} (modified {mod})")
     return "\n".join(lines)

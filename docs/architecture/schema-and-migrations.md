@@ -557,6 +557,30 @@ and `RESET`. The gate's head literal is `030`; its cases cover the fresh
 shape, the chain from 029, no backfill, stamp-back with a recorded marker
 kept, four impostor-column refusals, and both downgrade directions.
 
+## The session TimeZone is UTC
+
+Every DateTime column is `timestamptz` and the application reasons in UTC
+(the quota's accounting day, the usage chart, the dashboard's "Requests
+Today"). SQL `date_trunc` on a `timestamptz`, `now()::date` and
+`timestamptz`-to-text casts follow the **session's** `TimeZone`, which
+defaults to the server's — UTC in the `pgvector/pgvector` image, the host's
+zone on a typical distro-installed Postgres. So both engines (`src/database.py`
+and `alembic/env.py`) send `timezone: UTC` in asyncpg's `server_settings`,
+from one constant in `src/services/db_session.py`. Before this, on a non-UTC
+server the usage chart's day buckets began at the server's local midnight but
+were labelled with the UTC date (a day early east of UTC) and "Requests Today"
+counted from local midnight while the per-key quota counted from UTC midnight.
+
+The pin is a backstop. The queries whose answer depends on a zone also say
+UTC on their own — `date_trunc(field, ts, 'UTC')` in `chart_series` (the
+three-argument form needs PostgreSQL 12; the floor is 16) and a
+Python-computed UTC midnight (`quotas.utc_day_start`) bound into "Requests
+Today" — so they stay right on a connection that did not come through either
+engine (a test fixture, `psql`). `tests/integration/test_utc_time_pg.py` runs
+them on sessions set to `Asia/Kolkata` and `America/Los_Angeles`. New SQL time
+arithmetic should do the same: bind a UTC instant computed in Python, or name
+the zone.
+
 ## Database transport (#184)
 
 Before this change the engine passed no `ssl` argument and `DATABASE_URL`

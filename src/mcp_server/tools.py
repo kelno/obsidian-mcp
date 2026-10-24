@@ -2368,7 +2368,13 @@ async def get_recent_impl(
 
     lines = [f"Last {len(notes)} modified notes:\n"]
     for n in notes:
-        mod = n.modified_at.strftime("%Y-%m-%d %H:%M") if n.modified_at else "unknown"
+        # Explicitly UTC, like `list_notes`, and labelled: a bare HH:MM is read
+        # as the reader's local time, which an agent then reports to a person.
+        mod = (
+            n.modified_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            if n.modified_at
+            else "unknown"
+        )
         tags_str = f" [{', '.join(n.tags)}]" if n.tags else ""
         lines.append(f"- `{n.file_path}` — {n.title}{tags_str} (modified {mod})")
     return "\n".join(lines)

@@ -560,6 +560,27 @@ how the panel says so.
   directly, so the "a detection failure must not abort the caller" handling is
   not re-implemented in a second place.
 
+## Times: UTC from the server, local in the browser, labelled when not
+
+Instants leave the server as ISO-8601 UTC and are rendered in the viewer's
+zone by `base.html`'s `time[data-localize]` script (request log, last seen).
+Where the panel shows a *UTC day* rather than an instant, it says so instead
+of localising it, because a local date on a UTC day names a calendar day the
+number does not count:
+
+- **Usage chart.** Buckets are cut in UTC (`date_trunc(…, 'UTC')`).
+  Hour buckets (24h window) are rendered in the viewer's zone from the
+  bucket's `instants` with the same `Intl.DateTimeFormat` approach — an hour is
+  an hour anywhere; in a half-hour zone they read `:30`, which is the truth.
+  Day buckets (7d/30d) stay UTC dates, the card header says "per UTC day" and
+  the tooltip "(UTC day)".
+- **"Requests Today (UTC)"** on the dashboard counts from UTC midnight —
+  `quotas.utc_day_start`, the same day the per-key limit counts and the keys
+  page calls "UTC day".
+- **The consent page** extends neither base and carries no localisation
+  script, so the client's registration date is the UTC date with a literal
+  "UTC".
+
 ## The usage page's outcome column
 
 - **A refused write must not look like a successful one.** A read-only

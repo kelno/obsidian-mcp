@@ -274,7 +274,10 @@ async def get_recent(
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
 ) -> str:
-    """Get recently modified notes.
+    """Get recently modified notes, newest first.
+
+    Each line shows the note's modification time in UTC, as
+    "YYYY-MM-DD HH:MM UTC".
 
     Args:
         limit: Number of recent notes to return (default 20).

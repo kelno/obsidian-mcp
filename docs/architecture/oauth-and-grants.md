@@ -529,7 +529,7 @@ the redirect URI.
 | Application | `client.client_name` | client-supplied text, escaped, never `\|safe` |
 | **Destination** | `redirect_display_host(uri)` | host only — no scheme, path, port or userinfo. An unnameable host renders "Destination could not be determined" |
 | **Client ID** | `client.client_id` | server-generated hex, the one identifier the client did not choose |
-| **Registered** | `client.created_at`, date only | `getattr(..., None)` and "unknown" when absent: the column is server-defaulted, so a row constructed and not yet flushed carries `None` |
+| **Registered** | `client.created_at`, UTC date, rendered "YYYY-MM-DD UTC" (the page carries no localisation script) | `getattr(..., None)` and "unknown" when absent: the column is server-defaulted, so a row constructed and not yet flushed carries `None` |
 | **Standing notice** | static | unconditional, on every render |
 | Badge or warning | `known_redirect_host(uri)` | exact host equality against `OAUTH_KNOWN_REDIRECT_HOSTS` |
 

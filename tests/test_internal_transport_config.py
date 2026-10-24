@@ -350,7 +350,8 @@ _ALEMBIC_WRAPPER = textwrap.dedent(
 
     async def _sentinel(*args, **kwargs):
         s = kwargs.get("ssl")
-        note({"call": "connect", "ssl": type(s).__name__ if not isinstance(s, (str, bool)) else s})
+        note({"call": "connect", "ssl": type(s).__name__ if not isinstance(s, (str, bool)) else s,
+              "server_settings": kwargs.get("server_settings")})
         raise ConnectionRefusedError("sentinel: no connection may be attempted")
 
     async def _unix_sentinel(*args, **kwargs):
@@ -469,6 +470,10 @@ def test_alembic_connects_under_the_shared_transport_arguments(
     assert ("listener" in kinds) is listener
     connects = [c for c in calls if c["call"] == "connect"]
     assert connects and all(c["ssl"] == expected_ssl for c in connects), calls
+    # The migration session runs in UTC, like the application's.
+    assert all(
+        c["server_settings"] == {"timezone": "UTC"} for c in connects
+    ), calls
     assert "unix" not in kinds
 
 
@@ -589,8 +594,12 @@ def test_the_application_engine_carries_the_helpers_ssl_value(
     seen = json.loads(result.stdout.strip().splitlines()[-1])
     assert seen["ssl"] == ssl_value
     assert seen["listener"] is listener
-    # The existing server settings are kept beside the TLS argument.
-    assert seen["server_settings"] == {"statement_timeout": "60000"}
+    # The existing server settings are kept beside the TLS argument, and the
+    # session TimeZone is pinned to UTC whatever the server's own zone is.
+    assert seen["server_settings"] == {
+        "statement_timeout": "60000",
+        "timezone": "UTC",
+    }
     if mode == "verify-full":
         assert seen["check_hostname"] is True
     if mode == "verify-ca":

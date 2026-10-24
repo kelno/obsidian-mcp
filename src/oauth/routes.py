@@ -724,11 +724,18 @@ async def authorize_get(
     # through as `None` and the template says so, taking the warning branch.
     redirect_host = redirect_display_host(redirect_uri)
     client_trust = "known" if known_redirect_host(redirect_uri) else "unverified"
-    # Date only. `getattr` because `created_at` is server-defaulted and a row
-    # constructed but not yet flushed carries `None` there.
+    # Date only, the UTC date, and the template says so ("… UTC"): this page
+    # extends neither panel base, so the panel's `data-localize` script that
+    # renders instants in the viewer's zone is not on it. `getattr` because
+    # `created_at` is server-defaulted and a row constructed but not yet
+    # flushed carries `None` there. A naive value is taken as UTC.
     registered_at = getattr(client, "created_at", None)
+    if registered_at is not None and registered_at.tzinfo is None:
+        registered_at = registered_at.replace(tzinfo=timezone.utc)
     client_registered_at = (
-        registered_at.date().isoformat() if registered_at is not None else None
+        registered_at.astimezone(timezone.utc).date().isoformat()
+        if registered_at is not None
+        else None
     )
 
     # The consent form posts to `/authorize`, which redirects to the registered

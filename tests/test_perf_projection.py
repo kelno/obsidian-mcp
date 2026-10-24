@@ -275,7 +275,7 @@ async def test_get_recent_projects_and_renders_unchanged(monkeypatch):
     )
     assert out == (
         "Last 2 modified notes:\n\n"
-        "- `a.md` — A [x, y] (modified 2026-09-01 12:30)\n"
+        "- `a.md` — A [x, y] (modified 2026-09-01 12:30 UTC)\n"
         "- `b.md` — B (modified unknown)"
     )
 
