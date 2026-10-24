@@ -7,12 +7,21 @@
   `EMBEDDING_MODEL`; sequential `/api/embed` requests of at most
   `OLLAMA_EMBED_BATCH_SIZE` inputs each (default 16, 1–256; `1` is the
   pre-#281 one-chunk-per-request shape). A query is a one-element array.
+  Each request is bounded by `OLLAMA_REQUEST_TIMEOUT_SECONDS` (default 30,
+  0 < t ≤ 3600; fork). Nothing retries.
 - `EMBEDDING_PROVIDER=openai` — requires `OPENAI_API_KEY` (validated at
   startup). Uses `OPENAI_BASE_URL` (default `https://api.openai.com/v1`)
   and `OPENAI_EMBEDDING_MODEL` (default `text-embedding-3-small`). Native
-  batching: up to 96 inputs per `/v1/embeddings` POST, with sub-batching
-  for larger lists. Retries 429/5xx with exponential backoff, max 3
-  attempts.
+  batching: up to `OPENAI_EMBED_BATCH_SIZE` inputs (default and maximum 96)
+  per `/v1/embeddings` POST, with sub-batching for larger lists, each POST
+  bounded by `OPENAI_REQUEST_TIMEOUT_SECONDS` (default 60). Retries 429/5xx
+  and transport errors with exponential backoff, max 3 attempts — **but never
+  a read timeout** (fork): the request reached the server, which is likely
+  still computing it, since neither a gateway nor the model server behind it
+  is guaranteed to cancel on disconnect. Re-sending to a single-slot server
+  queued a duplicate behind the abandoned original, tripling the load per
+  batch while every attempt still timed out. The batch size changes request
+  shape, not vectors, so it is not in the embedding fingerprint.
 - `EMBEDDING_DIMENSIONS` (default 1024) controls both the pgvector column
   width and the `dimensions` param on OpenAI requests.
 - Reset workflow: `make reset-embeddings` (or **Settings → Danger zone →
@@ -145,18 +154,21 @@ exemption. The client is:
   belongs to.
 - **closed in the lifespan's shutdown** (`close_provider_client()`), after the
   indexer task has been cancelled and awaited and before `engine.dispose()`.
-- **given its timeout per request**: every `post(..., timeout=)` carries 30 s
-  for Ollama and 60 s for OpenAI (the values are unchanged; the client-level
-  timeout is the same number). Pool limits are httpx's defaults.
+- **given its timeout per request**: every `post(..., timeout=)` carries
+  `OLLAMA_REQUEST_TIMEOUT_SECONDS` (30 s) for Ollama and
+  `OPENAI_REQUEST_TIMEOUT_SECONDS` (60 s) for OpenAI, read at call time; the
+  client-level timeout is built from the same setting. Pool limits are
+  httpx's defaults.
 
 **D15 — Ollama embeds through fixed-size `/api/embed` batches.** `embed_batch`
 splits the chunk list into consecutive slices of `OLLAMA_EMBED_BATCH_SIZE` and
 sends each as one request with an `input` array, awaited under
-`asyncio.wait_for(..., 30.0)`. Every response must carry exactly
+`asyncio.wait_for(..., OLLAMA_REQUEST_TIMEOUT_SECONDS)`. Every response must carry exactly
 `len(slice)` vectors, in input order, or the batch raises and no vector of it
 is used; `embed_note`'s whole-note cardinality check stays above it. The
-input-limit translation (#194) is unchanged. OpenAI keeps its native 96-input
-batching and its own retry contract; it is adapted to the shared client only.
+input-limit translation (#194) is unchanged. OpenAI keeps its native batching
+(at most 96 inputs) and its own retry contract; it is adapted to the shared
+client only.
 Why the size is fixed and there is still no aggregate deadline is the D5
 bullet under "Indexing decisions" below.
 
@@ -301,7 +313,8 @@ text) alone; the fingerprint names the model.
   `TsvectorRebuildAborted`, rolling the single transaction back rather than
   committing around it.
 - **`OllamaProvider.embed_batch` has no aggregate deadline** (#127 D5); the
-  30 s per-request `wait_for` is the only liveness bound. The old fixed 300 s
+  per-request `wait_for` (`OLLAMA_REQUEST_TIMEOUT_SECONDS`, default 30 s) is
+  the only liveness bound. The old fixed 300 s
   whole-batch budget could fire only when every request was individually
   healthy — i.e. exactly on a note with more chunks than 300 s of normal
   latency covers, which then never certified and was re-selected every tick: a
@@ -309,12 +322,17 @@ text) alone; the fingerprint names the model.
   *proportional* replacement re-introduces the same boundary one size class up
   and was rejected. **Batching (#281, D15) keeps that argument because the
   batch size is fixed**: each request carries at most `OLLAMA_EMBED_BATCH_SIZE`
-  inputs whatever the note's size, so the 30 s bound covers the same amount of
-  work on a two-chunk note and a thousand-chunk one. A per-note or
+  inputs whatever the note's size, so the per-request bound covers the same
+  amount of work on a two-chunk note and a thousand-chunk one. Making it a
+  setting (fork) keeps this: a slow CPU raises it to fit one fixed slice
+  (batch × per-chunk time plus headroom), never a note. A timeout too short
+  for one slice is the failure this note describes, one level down: every
+  slice of every note times out, nothing certifies, and every pass re-selects
+  the same notes while the server keeps computing the abandoned requests. A per-note or
   proportional batch size would make one request's answer time grow with the
   note and bring the size class back, so neither the deadline nor a
   note-derived batch size may return. `OpenAIProvider` keeps its own contract.
-  The cost is a giant note holding the pass for 30 s × requests once; the
+  The cost is a giant note holding the pass for timeout × requests once; the
   pause is honoured at the next note boundary, as always. `embed_note` still
   refuses to certify partial chunk coverage.
 - Indexer runs on startup then every 5 minutes. Change detection is by

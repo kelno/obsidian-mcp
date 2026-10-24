@@ -365,6 +365,13 @@ class Settings(BaseSettings):
     # is deliberately no aggregate deadline over the batch (#127 D5). `1`
     # reproduces the pre-batching request shape, one chunk per request.
     ollama_embed_batch_size: int = Field(16, ge=1, le=256)
+    # Per-request bound on one Ollama `/api/embed` call, in seconds: the
+    # `post(..., timeout=)` and the `wait_for` around each batch slice. It
+    # stays a bound on **one request** of at most `ollama_embed_batch_size`
+    # inputs, never on a note (#127 D5). 30 s suits a GPU; a CPU-only Ollama
+    # needs batch size x measured per-chunk time plus headroom. The query
+    # path (`semantic_search`) waits under the same bound.
+    ollama_request_timeout_seconds: float = Field(30.0, gt=0, le=3600)
     vault_path: str = "/obsidian"
     secret_key: str = "changeme"
     index_interval_seconds: int = Field(300, ge=1)
@@ -482,6 +489,13 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
     openai_embedding_model: str = "text-embedding-3-small"
+    # Inputs per `/embeddings` request, at most the native 96. Lower it for an
+    # OpenAI-compatible gateway in front of a slow local model. Not in the
+    # embedding fingerprint: it changes request shape, not stored vectors.
+    openai_embed_batch_size: int = Field(96, ge=1, le=96)
+    # Per-request bound on one `/embeddings` call, in seconds. A read timeout
+    # is not retried (the server may still be computing the request).
+    openai_request_timeout_seconds: float = Field(60.0, gt=0, le=3600)
     # ── Embedding transport (#185) ─────────────────────────────────────────
     #
     # The **active** provider's URL (`OLLAMA_URL` or `OPENAI_BASE_URL`) must be

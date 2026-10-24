@@ -5406,7 +5406,9 @@ async def _embed_vault_pinned(
                 # embedded, no error. The count and the first message go into
                 # the row so the history can tell the two apart.
                 outcome.record_failure(e)
-                logger.warning(f"Failed to embed {row.file_path}: {e}")
+                logger.warning(
+                    f"Failed to embed {row.file_path}: {type(e).__name__}: {e}"
+                )
                 await session.rollback()
             finally:
                 # A note that reached `embed_note` reached a note boundary,

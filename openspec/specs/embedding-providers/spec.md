@@ -33,7 +33,7 @@ When `EMBEDDING_PROVIDER=openai`, the system SHALL validate at startup that `OPE
 
 ### Requirement: Provider-native batch embedding
 
-The system SHALL embed multiple chunks per indexer pass using the provider's batch mechanism. For OpenAI, this SHALL be a batched request that sends up to 96 inputs in one HTTP call. For Ollama, this SHALL be a sequence of `/api/embed` requests, each carrying an `input` array of at most `OLLAMA_EMBED_BATCH_SIZE` consecutive chunks. The batch size SHALL default to 16 and SHALL be bounded to 1–256. Each Ollama request SHALL be bounded by a 30 s timeout, and there SHALL be no aggregate deadline across requests. Each response SHALL carry exactly as many vectors as the request carried inputs, in input order, or the batch SHALL fail. Setting the batch size to 1 reproduces the pre-batching request shape.
+The system SHALL embed multiple chunks per indexer pass using the provider's batch mechanism. For OpenAI, this SHALL be a batched request that sends up to `OPENAI_EMBED_BATCH_SIZE` inputs (default and maximum 96) in one HTTP call. For Ollama, this SHALL be a sequence of `/api/embed` requests, each carrying an `input` array of at most `OLLAMA_EMBED_BATCH_SIZE` consecutive chunks. The batch size SHALL default to 16 and SHALL be bounded to 1–256. Each Ollama request SHALL be bounded by `OLLAMA_REQUEST_TIMEOUT_SECONDS` (default 30 s), and there SHALL be no aggregate deadline across requests. Each response SHALL carry exactly as many vectors as the request carried inputs, in input order, or the batch SHALL fail. Setting the batch size to 1 reproduces the pre-batching request shape.
 
 #### Scenario: OpenAI batch request
 - **WHEN** the indexer calls `get_embeddings_batch` with N chunks (N ≤ 96) and provider is `openai`

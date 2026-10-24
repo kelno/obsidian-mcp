@@ -243,10 +243,13 @@ List-valued settings: `TRUSTED_PROXY_IPS`, `FTS_CONFIGS` and
 | `OPENAI_API_KEY` | unset | **Secret.** Required for `openai`. |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible embeddings endpoint. |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Model name. A change needs a reset. |
+| `OPENAI_EMBED_BATCH_SIZE` | `96` | Inputs per `/embeddings` request (1 to 96). |
+| `OPENAI_REQUEST_TIMEOUT_SECONDS` | `60` | Timeout for one `/embeddings` request (above 0, at most 3600). A read timeout is not retried. |
 | `OLLAMA_URL` | `http://ollama:11434` | Ollama endpoint. Plaintext to a non-loopback host needs `EMBEDDING_ALLOW_PLAINTEXT=true`. |
 | `EMBEDDING_MODEL` | `bge-m3` | Ollama model. A change needs a reset. |
 | `OLLAMA_KEEP_ALIVE` | `-1` | How long Ollama keeps the model loaded (`-1` = forever, or a Go duration). |
 | `OLLAMA_EMBED_BATCH_SIZE` | `16` | Chunks per `/api/embed` request (1 to 256). |
+| `OLLAMA_REQUEST_TIMEOUT_SECONDS` | `30` | Timeout for one `/api/embed` request (above 0, at most 3600). On a CPU-only Ollama: batch 1–2, timeout ≈ 3 × batch × seconds per chunk. |
 | `EMBEDDING_ALLOW_PLAINTEXT` | `false` | Acknowledge a plaintext `http://` embedding URL to a non-loopback host. |
 | `EMBEDDING_CA_FILE` | unset | PEM CA for an `https` embedding endpoint behind a private CA. Replaces the default bundle. |
 | `EMBEDDING_EXCLUDE_PATTERNS` | `["*.excalidraw.md","Excalidraw/*"]` | fnmatch globs that are keyword-indexed but not embedded (JSON list). |

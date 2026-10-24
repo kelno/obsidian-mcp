@@ -33,6 +33,10 @@ SETTINGS_ENV_KEYS = (
     "OLLAMA_KEEP_ALIVE",
     # Ollama request batching (#281).
     "OLLAMA_EMBED_BATCH_SIZE",
+    # Per-request embedding timeouts, OpenAI batch size (fork).
+    "OLLAMA_REQUEST_TIMEOUT_SECONDS",
+    "OPENAI_EMBED_BATCH_SIZE",
+    "OPENAI_REQUEST_TIMEOUT_SECONDS",
     "VAULT_PATH",
     "SECRET_KEY",
     "INDEX_INTERVAL_SECONDS",

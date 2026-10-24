@@ -584,21 +584,21 @@ class _SharedClient:
 _OLLAMA_CLIENT = _SharedClient()
 _OPENAI_CLIENT = _SharedClient()
 
-#: Per-request bounds, passed on every `post(...)`. Unchanged values; the
-#: client-level timeout is the same number, so the two cannot disagree.
-OLLAMA_REQUEST_TIMEOUT_SECONDS = 30.0
-OPENAI_REQUEST_TIMEOUT_SECONDS = 60.0
+#: Per-request bounds, passed on every `post(...)`, are the settings
+#: `ollama_request_timeout_seconds` (default 30 s) and
+#: `openai_request_timeout_seconds` (default 60 s), read at call time. The
+#: client-level timeout is built from the same setting, so the two agree.
 
 
 def _ollama_client() -> httpx.AsyncClient:
     return _OLLAMA_CLIENT.get(
-        lambda: embedding_http_client(OLLAMA_REQUEST_TIMEOUT_SECONDS)
+        lambda: embedding_http_client(settings.ollama_request_timeout_seconds)
     )
 
 
 def _openai_client() -> httpx.AsyncClient:
     return _OPENAI_CLIENT.get(
-        lambda: embedding_http_client(OPENAI_REQUEST_TIMEOUT_SECONDS)
+        lambda: embedding_http_client(settings.openai_request_timeout_seconds)
     )
 
 
@@ -626,7 +626,7 @@ class OllamaProvider:
                 "input": inputs,
                 "keep_alive": _coerce_keep_alive(settings.ollama_keep_alive),
             },
-            timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS,
+            timeout=settings.ollama_request_timeout_seconds,
         )
         if response.status_code >= 400:
             # Ollama **truncates** rather than rejecting on the ordinary
@@ -662,7 +662,7 @@ class OllamaProvider:
 
         There used to be a fixed 300 s budget over the whole batch. It could
         only ever fire when every individual request was healthy — a hung
-        provider trips the 30 s `wait_for` long before it — so the one thing it
+        provider trips the per-request `wait_for` long before it — so the one thing it
         actually caught was a note with more chunks than 300 s of normal
         latency covers. Such a note timed out, was never certified, and was
         re-selected on the next pass: a permanent 300 s burn per tick, under
@@ -673,11 +673,13 @@ class OllamaProvider:
         The batch size is **fixed** (`OLLAMA_EMBED_BATCH_SIZE`), never derived
         from the note, for the same reason: a per-note or proportional batch
         makes one request's answer time grow with the note and reintroduces
-        the size class D5 removed. With a fixed size, the 30 s bound covers the
-        same amount of work on a two-chunk note and on a thousand-chunk one.
+        the size class D5 removed. With a fixed size, the per-request bound
+        (`OLLAMA_REQUEST_TIMEOUT_SECONDS`, default 30 s) covers the same amount
+        of work on a two-chunk note and on a thousand-chunk one. Raising it for
+        a slow CPU keeps that property: it is still sized to one fixed slice.
 
         Liveness is unaffected: a provider that stops responding still fails
-        in ≤ 30 s. `OpenAIProvider` keeps its native 96-input batches.
+        within one request timeout. Nothing here retries.
         """
         size = settings.ollama_embed_batch_size
         results: list[list[float]] = []
@@ -685,17 +687,18 @@ class OllamaProvider:
             results.extend(
                 await asyncio.wait_for(
                     self._embed_inputs(texts[start : start + size]),
-                    timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS,
+                    timeout=settings.ollama_request_timeout_seconds,
                 )
             )
         return results
 
 
 class OpenAIProvider:
-    """OpenAI / OpenAI-compatible provider. Uses native batch endpoint and
-    retries 429/5xx with exponential backoff."""
+    """OpenAI / OpenAI-compatible provider. Uses native batch endpoint
+    (`OPENAI_EMBED_BATCH_SIZE` inputs per request, at most 96) and retries
+    429/5xx and transport errors with exponential backoff — except a read
+    timeout, which is never retried (see `_post`)."""
 
-    OPENAI_BATCH_LIMIT = 96
     MAX_ATTEMPTS = 3
     BASE_DELAY = 1.0
 
@@ -720,8 +723,17 @@ class OpenAIProvider:
                     url,
                     headers=headers,
                     json=payload,
-                    timeout=OPENAI_REQUEST_TIMEOUT_SECONDS,
+                    timeout=settings.openai_request_timeout_seconds,
                 )
+            except httpx.ReadTimeout:
+                # **Not retried.** The request was sent and the server is most
+                # likely still computing it: neither an OpenAI-compatible
+                # gateway nor the model server behind it is guaranteed to
+                # cancel on client disconnect, and a single-slot server queues
+                # the re-send behind the abandoned original. Retrying a slow
+                # server's timeout multiplied its load by `MAX_ATTEMPTS` per
+                # batch and still failed. Size the timeout instead.
+                raise
             except httpx.HTTPError as e:
                 last_exc = e
                 if attempt >= self.MAX_ATTEMPTS:
@@ -788,8 +800,9 @@ class OpenAIProvider:
         if not texts:
             return []
         out: list[list[float]] = []
-        for start in range(0, len(texts), self.OPENAI_BATCH_LIMIT):
-            sub = texts[start : start + self.OPENAI_BATCH_LIMIT]
+        size = settings.openai_embed_batch_size
+        for start in range(0, len(texts), size):
+            sub = texts[start : start + size]
             out.extend(await self._post(sub))
         return out
 
@@ -1299,7 +1312,10 @@ async def embed_note(
             # one — nothing certified, previous vectors intact, the note
             # retried next pass. Only the search tools translate this
             # exception into a caller-facing refusal.
-            logger.warning(f"Failed to embed {note.file_path}: {e}")
+            # The class name too: an httpx timeout's message is empty.
+            logger.warning(
+                f"Failed to embed {note.file_path}: {type(e).__name__}: {e}"
+            )
             return EmbedNoteResult(
                 outcome=NoteEmbedOutcome.PROVIDER_FAILED,
                 chunks_submitted=len(sent),
