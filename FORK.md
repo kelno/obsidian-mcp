@@ -17,6 +17,7 @@ Last checked against `upstream/main` at `564e9e0` (#338) on 2026-10-23.
 | `list_files` reports a missing folder as `not_found` ("Folder not found"), not `invalid_path` | `d0d67c1` | Not proposed yet |
 | `move_file` and `move_note` precondition refusals say "move" instead of "write" | `f3cfef6` | Not proposed yet; depends on `move_file` |
 | `delete_file` names `.trash/` entries in UTC, like `delete_note` | `5744b33` | [#339](https://github.com/maxkuminov/obsidian-mcp/pull/339), open |
+| Embedding per-request timeouts as settings (`OLLAMA_REQUEST_TIMEOUT_SECONDS`, `OPENAI_REQUEST_TIMEOUT_SECONDS`), `OPENAI_EMBED_BATCH_SIZE`; the OpenAI provider no longer retries a read timeout | `312d740` | Not proposed yet |
 | Higher default MCP rate limits (600/120 general, 120/30 write) | `f3618a0` | Upstream's own [#337](https://github.com/maxkuminov/obsidian-mcp/pull/337), open; merged here early |
 | `fork-image` workflow: builds and publishes the image on every push to `main`, without the test suite | `4ee2d8a`, `8f540b4` | Fork-only, never proposed |
 
@@ -40,6 +41,28 @@ that have nothing to do with the code:
   (`--tmpfs /tmp`), or every no-clobber write refuses.
 - **No `psql`.** `record-backup.sh` calls it; install `postgresql-client` in
   the container.
+
+## Embedding on a slow CPU
+
+On a CPU-only Ollama the default 30 s per request is too short, every
+request times out, and the same notes are re-selected every pass while
+Ollama keeps computing the abandoned requests. Talk to Ollama directly
+(`EMBEDDING_PROVIDER=ollama`, not an OpenAI-compatible gateway in front of
+it), then size one request:
+
+1. Measure N, the seconds Ollama takes to embed one 512-token chunk on that
+   machine.
+2. Set `OLLAMA_EMBED_BATCH_SIZE` to 1 or 2.
+3. Set `OLLAMA_REQUEST_TIMEOUT_SECONDS` to about 3 × batch × N, at most
+   3600.
+
+The timeout bounds one request, never a note: a long note is many requests,
+each under the full timeout. A `semantic_search` query waits under the same
+bound, and on a single-slot Ollama (`-np 1`) it queues behind any indexing
+request already running, so a query during indexing can take up to one
+request's time. Changing the provider or model changes the embedding
+fingerprint and needs a re-embed; the URL does not, so the bulk embed can
+run against a fast machine first and `OLLAMA_URL` be switched afterwards.
 
 ## Pending pull requests
 
