@@ -21,6 +21,7 @@ Last checked against `upstream/main` at `564e9e0` (#338) on 2026-10-23.
 | Higher default MCP rate limits (600/120 general, 120/30 write) | `f3618a0` | Upstream's own [#337](https://github.com/maxkuminov/obsidian-mcp/pull/337), open; merged here early |
 | `fetch_page` tool: fetch a public page under `import_from_url`'s SSRF policy and return its text (HTML → Markdown via markdownify, main content only) to the agent in structured fields marked untrusted; new deps `markdownify`, `beautifulsoup4`; setting `FETCH_PAGE_MAX_BYTES` | `4aa8987` | Not proposed yet |
 | Outbound fetches send an identifiable `User-Agent` (`OUTBOUND_USER_AGENT`); httpx's default was refused with a 403 by Wikipedia | `e20e5cd` | Not proposed yet |
+| Tests pass on Windows checkouts and outside UTC: `.gitattributes` keeps `*.sh` LF; `test_a_naive_expires_at_does_not_raise` builds its naive time in UTC | `f81f2c8`, `9cccebd` | [#342](https://github.com/maxkuminov/obsidian-mcp/pull/342), open |
 | `image-no-tests` workflow: builds and publishes the image on every push to `main`, without the test suite | `4ee2d8a`, `8f540b4` | Fork-only, never proposed |
 
 Upstream's `ci.yml` and `image.yml` are disabled in this fork's Actions
@@ -33,16 +34,21 @@ a change.
 The suite takes about 22 minutes. Run it as CI does: Python 3.12 with a
 `pgvector/pgvector:pg16` server, `PGVECTOR_TEST_ADMIN_URL` and
 `TEST_DATABASE_URL` pointing at it, in a privileged Linux container (for
-`unshare -Urm`). Three differences from CI's Ubuntu runner make tests fail
+`unshare -Urm`). Two differences from CI's Ubuntu runner make tests fail
 that have nothing to do with the code:
 
-- **CRLF line endings.** Git on Windows checks the `docker/*.sh` scripts out
-  with CRLF, and bash refuses to run them. Convert copies to LF inside the
-  container (`sed -i 's/\r$//'`) before running.
 - **No `O_TMPFILE` on overlayfs.** The container's `/tmp` must be a tmpfs
   (`--tmpfs /tmp`), or every no-clobber write refuses.
 - **No `psql`.** `record-backup.sh` calls it; install `postgresql-client` in
   the container.
+
+The CRLF line endings that used to break the `docker/*.sh` scripts on a
+Windows checkout are fixed by `.gitattributes` (#342). A checkout made before
+it needs `rm docker/*.sh && git checkout -- docker/` once.
+
+For the offline suite only (everything outside `tests/integration/`, about
+5 minutes), a Python 3.12 venv in WSL is enough, with no container and no
+database: `pytest --ignore=tests/integration tests`.
 
 ## Embedding on a slow CPU
 
