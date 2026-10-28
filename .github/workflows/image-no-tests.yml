@@ -6,7 +6,7 @@
 # settings rather than edited, so syncing with upstream never conflicts here.
 # Run the suite locally, or through a pull request to upstream, before relying
 # on a change.
-name: fork-image
+name: image-no-tests
 
 on:
   push:
@@ -16,7 +16,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: fork-image
+  group: image-no-tests
   cancel-in-progress: false
 
 env:
