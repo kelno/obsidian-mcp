@@ -73,8 +73,9 @@ SETTINGS_ENV_KEYS = (
     "TRANSFER_MAX_UPLOAD_SECONDS",
     "TRANSFER_MAX_CONCURRENT_UPLOADS",
     "IMPORT_ALLOW_HTTP",
-    # Outbound fetch identity (fork).
+    # Outbound fetch identity and the `fetch_page` byte cap (fork).
     "OUTBOUND_USER_AGENT",
+    "FETCH_PAGE_MAX_BYTES",
     "VAULT_ALLOW_NAMED_STAGING_FALLBACK",
     "MULTI_USER_MODE",
     "SESSION_MAX_AGE",

@@ -34,6 +34,14 @@ idna==3.18
 # Pinned to the version already running in the production image.
 numpy==2.5.1
 
+# Web page conversion for `fetch_page` (`src/services/page_text.py`):
+# markdownify turns HTML into Markdown, beautifulsoup4 (which it requires)
+# parses the page, trims it to its main content and detects its encoding.
+# Picked over html2text after a side-by-side on real pages: html2text glued
+# words at link boundaries and lost code fences.
+markdownify==1.2.3
+beautifulsoup4==4.15.0
+
 # YAML parsing
 pyyaml==6.0.3
 

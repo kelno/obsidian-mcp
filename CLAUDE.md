@@ -374,7 +374,7 @@ update it in the same change.** What stays here is the short list:
 
 ## MCP tools
 
-25 tools, all registered in `src/mcp_server/server.py` and all wrapped by
+28 tools, all registered in `src/mcp_server/server.py` and all wrapped by
 `_tracked`, which resolves the caller's vault root *before* the tool body runs
 — that decorator is the whole enforcement of "this user has no vault"
 ([vault roots and tenancy](docs/architecture/vault-roots-and-tenancy.md)).
@@ -405,6 +405,11 @@ indexing.
 `import_from_url`, plus the public `/transfer/*` routes. A capability pins
 everything it may do at mint time; see
 [file transfer](docs/architecture/file-transfer.md).
+
+**Web** — `fetch_page`: the same guarded fetch as `import_from_url`, but the
+page's text goes back to the agent, never into the vault. Structured result
+(`src/mcp_server/fetch_result.py`) so the page cannot forge server text;
+conversion in `src/services/page_text.py`.
 
 ## Architecture notes
 

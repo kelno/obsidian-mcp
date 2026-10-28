@@ -363,6 +363,15 @@ redeemed over the public `/transfer/*` routes.
   asset straight into the vault under an explicit outbound deny policy
   (no private, loopback, link-local, metadata or tunnelled addresses,
   in any spelling, re-checked at every redirect).
+- `fetch_page(url, keep_links=False, raw=False, max_chars=None)`, fetches
+  a public page under the same outbound policy and returns its text to the
+  agent instead of saving it. HTML is cut down to its main content and
+  converted to Markdown (links dropped unless `keep_links`); other text
+  types come back unchanged; `raw=True` returns the body as served. The
+  page sits alone in structured fields beside a fixed untrusted-content
+  notice, so a page cannot pass itself off as server text. Read-only keys
+  may call it. Useful for random content (`Special:Random`, random.org)
+  and for agents that cannot browse.
 
 The token travels in the URL *fragment*, which browsers never send, so
 no server-generated request target or access log contains it. Uploads
@@ -1061,8 +1070,9 @@ to multi-user later resumes where you left off without re-bootstrapping
 | `TRANSFER_TOKEN_TTL_SECONDS` | `600` | Default life of a transfer link. Per-call `expires_in` is clamped to 60–3600. |
 | `TRANSFER_MAX_UPLOAD_SECONDS` | `600` | How long one claimed upload may stream before the token is spent |
 | `TRANSFER_MAX_CONCURRENT_UPLOADS` | `4` | Simultaneous upload streams |
-| `IMPORT_ALLOW_HTTP` | `false` | Let `import_from_url` fetch plain http. Off by default. |
-| `OUTBOUND_USER_AGENT` | `obsidian-mcp (+https://github.com/kelno/obsidian-mcp)` | `User-Agent` sent by `import_from_url`. Some sites (Wikipedia) refuse anonymous clients. |
+| `IMPORT_ALLOW_HTTP` | `false` | Let `import_from_url` and `fetch_page` fetch plain http. Off by default. |
+| `OUTBOUND_USER_AGENT` | `obsidian-mcp (+https://github.com/kelno/obsidian-mcp)` | `User-Agent` sent by `import_from_url` and `fetch_page`. Some sites (Wikipedia) refuse anonymous clients. |
+| `FETCH_PAGE_MAX_BYTES` | `4194304` | Largest page `fetch_page` downloads before converting it |
 | `VAULT_ALLOW_NAMED_STAGING_FALLBACK` | `false` | Accept named staging on filesystems without `O_TMPFILE`. One flag, both write paths. See [System requirements](#system-requirements). |
 | `WRITE_PRECONDITION_REQUIRED` | `false` | Require `expected_hash` on supported destructive calls. Creation is exempt; enable after clients adopt read hashes. |
 | `EMBEDDING_PROVIDER` | `ollama` | `ollama` or `openai` |
@@ -1683,8 +1693,10 @@ backup, `alembic upgrade head`, then recreate the container. Run
   Unknown, expired, consumed and revoked tokens all get one identical
   404 from the public routes; precise status comes from the
   authenticated `check_upload` tool.
-- `import_from_url` fetches only genuinely public addresses, under an
-  explicit deny list re-applied at every redirect.
+- `import_from_url` and `fetch_page` fetch only genuinely public
+  addresses, under an explicit deny list re-applied at every redirect.
+  `fetch_page` returns third-party text to the agent in structured fields
+  marked untrusted, never framed inside a string a page could forge.
 - Failed `/mcp` authentication is budgeted per client address, counted
   before the credential lookup so a refused probe costs no database
   session and no query. The address comes from the proxy headers the app

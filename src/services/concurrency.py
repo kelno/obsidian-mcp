@@ -47,7 +47,7 @@ TOOL_CLASSES = {
                      "get_neighborhood", "find_orphans", "list_files"), "scan"),
     **dict.fromkeys(("read_note", "read_file", "get_recent", "get_vault_guide",
                      "get_backlinks", "get_links", "request_upload",
-                     "check_upload", "request_download"), "light"),
+                     "check_upload", "request_download", "fetch_page"), "light"),
 }
 CLASSES = frozenset(("embedding", "vector", "write", "scan", "light"))
 assert CLASSES == frozenset(CLASS_CONNECTIONS)

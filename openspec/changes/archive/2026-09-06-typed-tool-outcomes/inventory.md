@@ -292,6 +292,12 @@ Each entry identifies every direct return branch. PROPAGATE means classify at th
 - **REFUSE validation_failed** for `open_mutable`'s `ValueError`; **io_failure** for any other `OSError`; **not_found** for a missing folder; **invalid_argument** for a file; **folder_not_empty** for `ENOTEMPTY`/`EEXIST` from the `rmdir`.
 - **SUCCESS — no outcome marker**: `Deleted empty folder <path>`
 
+### fetch_page_impl — src/mcp_server/tools.py (added after #263, typed from the start)
+- Structured result (`FetchPageResult`), like `read_note`: every outcome rides on `_body_outcome`, and the admission gate's refusal is mapped through `refusal_result=_fetch_page_refusal`.
+- **REFUSE invalid_argument** for `max_chars` outside 1..`max_read_response_chars`, before any fetch.
+- **REFUSE fetch_refused** for `SSRFError` and for a non-text `Content-Type` (checked before the body is read); **size_limit** for `TooLarge` (declared or streamed past `FETCH_PAGE_MAX_BYTES`); **transfer_timeout** for `Timeout`.
+- **SUCCESS — no outcome marker**: the page in `content`/`title` beside the fixed untrusted-content `notice`.
+
 ## Shared/nested helper inventory
 
 ### _confirmed_publication — tools.py:706

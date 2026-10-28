@@ -187,7 +187,12 @@ MAX_LIST_PATTERN_CHARS = 1024
 # purpose.
 MAX_SEARCH_QUERY_CHARS = 8192
 
-# Upper bound on `import_from_url`'s `url` argument (#322), through the same
+# Characters of page text `fetch_page` returns when the caller does not pass
+# `max_chars`: about 5,000 tokens, enough for a full encyclopedia article
+# without links. A caller may ask for more, up to `max_read_response_chars`.
+FETCH_PAGE_DEFAULT_CHARS = 20_000
+
+# Upper bound on `import_from_url`'s (and `fetch_page`'s) `url` argument (#322), through the same
 # declarative `arg_char_caps` screen as the search query: the existing
 # `argument_too_long` refusal, before any DNS resolution, connection or quota
 # statement. Presigned S3/GCS URLs carrying session tokens reach 2–4 KB, so
@@ -535,11 +540,15 @@ class Settings(BaseSettings):
     # `import_from_url` refuses plain http by default. Turning this on also
     # admits ports 80/8080 for the http scheme (443/8443 stay https-only).
     import_allow_http: bool = False
-    # `User-Agent` sent on every outbound fetch (`import_from_url`). httpx's
-    # default `python-httpx/<version>` is refused with a 403 by sites that
-    # require an identifiable client, Wikipedia among them; a product token
-    # plus a contact URL is what their policies ask for.
+    # `User-Agent` sent on every outbound fetch (`import_from_url`,
+    # `fetch_page`). httpx's default `python-httpx/<version>` is refused with
+    # a 403 by sites that require an identifiable client, Wikipedia among
+    # them; a product token plus a contact URL is what their policies ask for.
     outbound_user_agent: str = "obsidian-mcp (+https://github.com/kelno/obsidian-mcp)"
+    # Largest response body `fetch_page` downloads before conversion. The page
+    # is held in memory and parsed, so this bounds the work per call; the
+    # text returned to the agent is bounded separately, by `max_chars`.
+    fetch_page_max_bytes: int = Field(4 * 1024 * 1024, ge=1)
 
     # ── Named-staging fallback (one flag, both write paths) ──────────────────
     # Both write paths stage into an unnamed `O_TMPFILE` inode and publish it

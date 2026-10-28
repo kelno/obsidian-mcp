@@ -33,6 +33,7 @@ COVERAGE = {
     'check_upload': [('success', 'test_transfer_tools.py::test_check_upload_reports_pending'), ('refused', 'test_issue_263_tool_outcomes.py::test_actual_body_branches_are_typed')],
     'request_download': [('success', 'test_transfer_tools.py::test_request_download_mints_a_fingerprinted_link')],
     'import_from_url': [('partial', 'test_transfer_tools.py::test_import_reports_a_post_publish_failure_as_written')],
+    'fetch_page': [('success', 'test_fetch_page.py::test_returns_the_page_as_structured_untrusted_fields'), ('refused', 'test_fetch_page.py::test_a_non_text_response_is_refused_before_its_body_is_read')],
     'delete_file': [('refused', 'test_transfer_tools.py::test_delete_file_reports_a_missing_file')],
     'move_file': [('success', 'test_move_file.py::test_moves_a_file_and_creates_parents'), ('refused', 'test_move_file.py::test_an_existing_destination_is_never_replaced')],
     'delete_folder': [('success', 'test_delete_folder.py::test_removes_an_empty_folder'), ('refused', 'test_delete_folder.py::test_a_folder_with_content_is_never_removed')],
@@ -43,7 +44,7 @@ def test_every_registered_tool_has_inventory_and_live_behavioral_references():
     from src.mcp_server.server import mcp
     registered = {tool.name for tool in mcp._tool_manager.list_tools()}
     assert set(COVERAGE) == registered
-    assert len(registered) == 27
+    assert len(registered) == 28
     root = Path(__file__).resolve().parents[1]
     inventory = (root / 'openspec/changes/archive/2026-09-06-typed-tool-outcomes/inventory.md').read_text()
     for tool, references in COVERAGE.items():

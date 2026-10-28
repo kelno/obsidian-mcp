@@ -35,6 +35,7 @@ from src.auth.session import (
     current_user_id,
 )
 from src.config import (
+    FETCH_PAGE_DEFAULT_CHARS,
     MAX_CHUNKS_PER_NOTE,
     MAX_IMPORT_URL_CHARS,
     MAX_LINKS_PER_NOTE,
@@ -52,6 +53,7 @@ from src.mcp_server.auth import (
     current_permission,
     current_transport_queue_ms,
 )
+from src.mcp_server.fetch_result import UNTRUSTED_NOTICE, FetchPageResult
 from src.mcp_server.read_result import (
     ReadNoteResult,
     apply_metadata_budget,
@@ -68,7 +70,7 @@ from src.services.quotas import admit as _admit_quota, quota_refusal_message
 from src.services.search import full_text_search
 from src.services.usage_params import render_usage_params
 from src.services.usage_stats import OVER_QUOTA_PARAM
-from src.services import transfer, vault_fs
+from src.services import page_text, transfer, vault_fs
 from src.services.vault import (
     MAX_PATH_CHARS,
     VAULT_ROOT_NOT_READY_ERROR,
@@ -1859,7 +1861,8 @@ def _tracked(
                     # A plain string, even one quoting a sentinel, is content.
                     body_outcome = (
                         result if isinstance(result, BodyOutcome)
-                        else result._body_outcome if isinstance(result, ReadNoteResult)
+                        else result._body_outcome
+                        if isinstance(result, (ReadNoteResult, FetchPageResult))
                         else None
                     ) if refusal is None else None
                     if body_outcome is not None:
@@ -6986,6 +6989,110 @@ async def import_from_url_impl(url: str, path: str, overwrite: bool = False) -> 
         f"sha256: {written['sha256']}\n"
         f"mime: {written['mime']}\n"
         f"source: {final_url}"
+    )
+
+
+def _fetch_page_refusal(message: str) -> FetchPageResult:
+    """The admission gate's refusal, in the shape this tool declares.
+
+    Same reason as `_read_note_refusal`: a tool with an output schema cannot
+    hand back a bare string. The URL is not echoed — the gate runs before the
+    length cap is known to hold.
+    """
+    return FetchPageResult(error=message)
+
+
+async def _read_capped(chunks, cap: int) -> bytes:
+    """The whole body, refused past `cap` bytes.
+
+    `fetch_url_guarded` only checks a declared `Content-Length`; a server that
+    declares none, or lies, is bounded here.
+    """
+    body = bytearray()
+    async for chunk in chunks:
+        body += chunk
+        if len(body) > cap:
+            raise transfer.TooLarge(f"The page is larger than the {cap:,}-byte limit")
+    return bytes(body)
+
+
+@_tracked(
+    "fetch_page",
+    ["url", "keep_links", "raw", "max_chars"],
+    transforms={"url": _url_host},
+    refusal_result=_fetch_page_refusal,
+    arg_char_caps={"url": MAX_IMPORT_URL_CHARS},
+)
+async def fetch_page_impl(
+    url: str,
+    keep_links: bool = False,
+    raw: bool = False,
+    max_chars: int | None = None,
+) -> FetchPageResult:
+    """Fetch a public page and return its text, under `import_from_url`'s outbound policy.
+
+    Reads nothing from and writes nothing to the vault, so it needs no write
+    permission and none of the transfer tools' vault preflight.
+    """
+
+    def _fail(outcome: BodyOutcome) -> FetchPageResult:
+        result = FetchPageResult(error=str(outcome))
+        result._body_outcome = outcome
+        return result
+
+    ceiling = settings.max_read_response_chars
+    if max_chars is None:
+        max_chars = min(FETCH_PAGE_DEFAULT_CHARS, ceiling)
+    elif not 1 <= max_chars <= ceiling:
+        return _fail(_body_refusal(
+            f"max_chars must be between 1 and {ceiling:,}. Nothing was fetched.",
+            "invalid_argument",
+        ))
+
+    cap = settings.fetch_page_max_bytes
+    try:
+        async with transfer.fetch_url_guarded(url, max_bytes=cap) as fetched:
+            mtype = page_text.media_type(fetched.content_type)
+            if not page_text.is_text_type(mtype):
+                # Checked before the body is read: a PDF or an image is not
+                # downloaded just to be refused.
+                return _fail(_body_refusal(
+                    f"Refused to fetch that URL: it is not a text page (Content-Type: "
+                    f"{mtype or 'none'}). To save a file into the vault, use "
+                    "`import_from_url`.",
+                    "fetch_refused",
+                ))
+            body = await _read_capped(fetched.chunks, cap)
+            final_url, content_type = fetched.final_url, fetched.content_type
+    except transfer.SSRFError as e:
+        return _fail(_body_refusal(f"Refused to fetch that URL: {e}", "fetch_refused"))
+    except transfer.TooLarge as e:
+        return _fail(_body_refusal(f"{e} (FETCH_PAGE_MAX_BYTES).", "size_limit"))
+    except transfer.Timeout as e:
+        return _fail(_body_refusal(f"{e}.", "transfer_timeout"))
+
+    # Parsing a page of up to `fetch_page_max_bytes` is CPU work measured in
+    # hundreds of milliseconds; off the event loop, it stalls no other call.
+    converted = await asyncio.to_thread(
+        page_text.page_text,
+        body,
+        content_type,
+        page_url=final_url,
+        keep_links=keep_links,
+        raw=raw,
+    )
+    total = len(converted.content)
+    return FetchPageResult(
+        notice=UNTRUSTED_NOTICE,
+        url=url,
+        final_url=final_url,
+        content_type=content_type,
+        format=converted.format,
+        title=converted.title,
+        content=converted.content[:max_chars],
+        truncated=total > max_chars,
+        total_chars=total,
+        lossy_decoding=converted.lossy_decoding or None,
     )
 
 
