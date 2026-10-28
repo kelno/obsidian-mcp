@@ -1062,6 +1062,7 @@ to multi-user later resumes where you left off without re-bootstrapping
 | `TRANSFER_MAX_UPLOAD_SECONDS` | `600` | How long one claimed upload may stream before the token is spent |
 | `TRANSFER_MAX_CONCURRENT_UPLOADS` | `4` | Simultaneous upload streams |
 | `IMPORT_ALLOW_HTTP` | `false` | Let `import_from_url` fetch plain http. Off by default. |
+| `OUTBOUND_USER_AGENT` | `obsidian-mcp (+https://github.com/kelno/obsidian-mcp)` | `User-Agent` sent by `import_from_url`. Some sites (Wikipedia) refuse anonymous clients. |
 | `VAULT_ALLOW_NAMED_STAGING_FALLBACK` | `false` | Accept named staging on filesystems without `O_TMPFILE`. One flag, both write paths. See [System requirements](#system-requirements). |
 | `WRITE_PRECONDITION_REQUIRED` | `false` | Require `expected_hash` on supported destructive calls. Creation is exempt; enable after clients adopt read hashes. |
 | `EMBEDDING_PROVIDER` | `ollama` | `ollama` or `openai` |

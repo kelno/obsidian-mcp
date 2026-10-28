@@ -1363,6 +1363,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             "host": self.headers.get("Host"),
             "peer": self.client_address[0],
             "accept_encoding": self.headers.get("Accept-Encoding"),
+            "user_agent": self.headers.get("User-Agent"),
             "path": self.path,
         }
         routes = {
@@ -1474,6 +1475,8 @@ async def test_local_fetch_pins_the_address_and_keeps_the_identity(
     assert _Handler.captured["peer"] == "127.0.0.1"
     assert _Handler.captured["host"] == f"127.0.0.1:{HTTP_TEST_PORT}"
     assert _Handler.captured["accept_encoding"] == "identity"
+    # Identifiable, not httpx's default: some sites refuse anonymous clients.
+    assert _Handler.captured["user_agent"] == transfer.settings.outbound_user_agent
     # The URL was rewritten to the pinned address while Host and SNI kept the
     # caller's name — here they coincide because the host *is* the literal.
     assert recording_transport["sni_hostname"] == "127.0.0.1"

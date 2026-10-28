@@ -2453,7 +2453,12 @@ async def _fetch_hops(
         redirect_to: str | None = None
         try:
             request = client.build_request(
-                "GET", parts.url, headers={"Accept-Encoding": "identity"}
+                "GET",
+                parts.url,
+                headers={
+                    "Accept-Encoding": "identity",
+                    "User-Agent": settings.outbound_user_agent,
+                },
             )
             try:
                 response = await client.send(request, stream=True)

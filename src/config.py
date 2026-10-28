@@ -535,6 +535,11 @@ class Settings(BaseSettings):
     # `import_from_url` refuses plain http by default. Turning this on also
     # admits ports 80/8080 for the http scheme (443/8443 stay https-only).
     import_allow_http: bool = False
+    # `User-Agent` sent on every outbound fetch (`import_from_url`). httpx's
+    # default `python-httpx/<version>` is refused with a 403 by sites that
+    # require an identifiable client, Wikipedia among them; a product token
+    # plus a contact URL is what their policies ask for.
+    outbound_user_agent: str = "obsidian-mcp (+https://github.com/kelno/obsidian-mcp)"
 
     # ── Named-staging fallback (one flag, both write paths) ──────────────────
     # Both write paths stage into an unnamed `O_TMPFILE` inode and publish it
