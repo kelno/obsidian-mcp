@@ -145,7 +145,8 @@ async def env(engine, monkeypatch, tmp_path):
     async def fetched(*args, **kwargs):
         async def chunks():
             yield b'imported bytes'
-        yield SimpleNamespace(chunks=chunks(), final_url='https://fixture.example/source')
+        yield SimpleNamespace(chunks=chunks(), final_url='https://fixture.example/source',
+                              content_type='text/plain; charset=utf-8')
     monkeypatch.setattr(transfer, 'fetch_url_guarded', fetched)
     monkeypatch.setattr(settings, '_public_origin_explicit', True)
     monkeypatch.setattr(settings, 'base_url', 'https://fixture.example')
@@ -220,6 +221,7 @@ CALLS = [
     ('request_download', 'request_download_impl', lambda s: (('f.bin',), {})),
     ('import_from_url', 'import_from_url_impl',
      lambda s: (('https://fixture.example/source', 'import.bin'), {})),
+    ('fetch_page', 'fetch_page_impl', lambda s: (('https://fixture.example/source',), {})),
     # The task tools: create_task makes the inbox, and the next two act on
     # the line it wrote, whose bytes (and so whose hash) are known up front.
     ('list_tasks', 'list_tasks_impl', lambda s: ((), {})),
