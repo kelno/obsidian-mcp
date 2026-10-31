@@ -75,15 +75,9 @@ hostnames) must stay out of tracked files. The mechanism:
 `make help` lists the rest. Deployment detail lives in `DEPLOYMENT.md`, the
 user-facing documentation in `README.md`.
 
-## Engineering workflow
+## Review and checks
 
-The standard flow — supervisor main thread, **Opus** subagents, OpenSpec, the
-two Codex audit gates, `openspec-verifier`, and the `user-representative`
-browser pass — is defined once in `~/.claude/rules/engineering-workflow.md` and
-applies here. Read it; don't restate it. This section records only what is
-specific to this MCP server.
-
-**Review budget (from the workflow file):** triage adversarial findings on plausible input and real impact, two full Codex rounds by default and verification-only after that, accepted limitations recorded in the spec rather than polished away, and say which findings were declined. Rigor on what matters; ship in a day what can ship in a day.
+**Review budget:** triage adversarial findings on plausible input and real impact, accepted limitations recorded in the relevant architecture note rather than polished away, and say which findings were declined. Rigor on what matters; ship in a day what can ship in a day.
 
 **Local gates**
 
@@ -112,21 +106,22 @@ database and the models disagree, which makes the next autogenerate emit noise
 and, worse, hides a real missing constraint in it — see
 [schema and migrations](docs/architecture/schema-and-migrations.md).
 
-**Codex framing for this product.** The consumer here is an **agent**, not a
-person, and the vault is Max's single source of truth for every project. The
-expensive failures are **destructive writes** (an edit or append that clobbers
-a note — this has actually happened) and **silently wrong search results**,
-which an agent will act on without a human ever seeing the query. Treat any
-change to the write tools, section addressing, or the chunking/embedding path
-as a mandatory adversarial-pass trigger.
+**Adversarial review for this product.** The consumer here is an **agent**, not
+a person, and the vault is the owner's single source of truth for every
+project. The expensive failures are **destructive writes** (an edit or append
+that clobbers a note — this has actually happened) and **silently wrong search
+results**, which an agent will act on without a human ever seeing the query.
+Any change to the write tools, section addressing, or the chunking/embedding
+path gets a mandatory adversarial review before it is merged: a separate pass
+(another agent or session, not the author) that tries to break it on plausible
+input, triaged under the review budget above.
 
-**No `user-representative` pass** for MCP-side changes — the consumer is an
-agent. Substitute an end-to-end exercise of the affected MCP tools against the
-live server, and say in the report which tools were actually called. Changes to
-panel, auth or consent templates (or `panel.js`) do get a browser pass: the
-panel sits behind SSO, so Max walks the affected controls by hand with devtools
-open and zero CSP violations is part of the bar (see the `panel-csp` change,
-tasks §6).
+**End-to-end check, not a browser pass**, for MCP-side changes — the consumer
+is an agent. Exercise the affected MCP tools against the live server, and say
+in the report which tools were actually called. Changes to panel, auth or
+consent templates (or `panel.js`) do get a browser pass: the panel sits behind
+SSO, so the owner walks the affected controls by hand with devtools open and
+zero CSP violations is part of the bar (see the `panel-csp` change, tasks §6).
 
 ## Key decisions
 
