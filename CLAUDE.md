@@ -369,7 +369,7 @@ update it in the same change.** What stays here is the short list:
 
 ## MCP tools
 
-28 tools, all registered in `src/mcp_server/server.py` and all wrapped by
+32 tools, all registered in `src/mcp_server/server.py` and all wrapped by
 `_tracked`, which resolves the caller's vault root *before* the tool body runs
 — that decorator is the whole enforcement of "this user has no vault"
 ([vault roots and tenancy](docs/architecture/vault-roots-and-tenancy.md)).
@@ -406,6 +406,16 @@ page's text goes back to the agent, never into the vault. Structured result
 (`src/mcp_server/fetch_result.py`) so the page cannot forge server text;
 conversion in `src/services/page_text.py`.
 
+**Tasks** (fork) — `list_tasks`, `create_task`, `edit_task`,
+`set_task_status`: the Obsidian Tasks plugin's emoji format, ported from the
+plugin's 8.6.0 source (`src/services/task_format.py`) and following the
+plugin's settings file in the vault. `list_tasks` answers from `note_tasks`
+(migration 031, filled by the index pass next to the links) and checks each
+returned line on disk; the writers change one line through the same ladder as
+`edit_note`, read it back first, and re-index that note's task rows at once.
+Recurring tasks are read, never changed. Read
+[task tools](docs/architecture/tasks.md) first.
+
 ## Architecture notes
 
 One file per area, each holding the decisions that must not be silently
@@ -425,6 +435,7 @@ summaries.
 | [rate-limits.md](docs/architecture/rate-limits.md) | `src/services/rate_limits.py`, `src/services/concurrency.py`, `src/services/pool_budget.py`, `src/services/concurrency_counters.py`, `src/services/concurrency_readiness.py`, `src/services/refusals.py`, the pool subclass in `src/database.py`, the failed-auth budget in `APIKeyMiddleware`, the gate order in `_tracked`, the worker count, the key-creation budget and active-key cap (`src/services/api_keys.py`), and every `MCP_RATE_LIMIT_*` / `MCP_AUTH_FAILURE_*` / `MCP_CONCURRENCY_*` / `KEY_CREATION_*` / `KEY_MAX_ACTIVE_PER_ACCOUNT` / `DEFAULT_DAILY_REQUEST_LIMIT` setting |
 | [usage-attribution.md](docs/architecture/usage-attribution.md) | `usage_logs`, `_log_usage`, actor columns |
 | [control-panel.md](docs/architecture/control-panel.md) | panel templates, flash messages, admin guards, the Danger zone |
+| [tasks.md](docs/architecture/tasks.md) | the four task tools, `src/services/task_*.py`, `note_tasks` / migration 031, and any Tasks plugin upgrade |
 
 Formal requirements live in `openspec/specs/`; the change history and its
 reasoning in `openspec/changes/archive/`.

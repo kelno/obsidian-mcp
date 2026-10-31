@@ -76,6 +76,10 @@ SETTINGS_ENV_KEYS = (
     # Outbound fetch identity and the `fetch_page` byte cap (fork).
     "OUTBOUND_USER_AGENT",
     "FETCH_PAGE_MAX_BYTES",
+    # Task tools (fork).
+    "TASKS_INBOX_PATH",
+    "TASKS_TIMEZONE",
+    "TASKS_PLUGIN_SETTINGS_PATH",
     "VAULT_ALLOW_NAMED_STAGING_FALLBACK",
     "MULTI_USER_MODE",
     "SESSION_MAX_AGE",

@@ -45,11 +45,18 @@ nothing to slow it and nothing to tell it to stop.
 | K | Key-creation budget (#323) — *upstream of every row above: it bounds how fast new principals appear* | `POST /api/keys` **and** `POST /admin/keys/create`, after validation, the unlimited rule and the cap | account (exact) **and** trusted address, both must admit | 10 / account and 20 / address per 3600 s (`KEY_CREATION_ACCOUNT_LIMIT`, `KEY_CREATION_ADDRESS_LIMIT`, `KEY_CREATION_WINDOW_SECONDS`; null ⇒ that counter off) | JSON **429** + `Retry-After`; form flash + 303 | `key_creation_throttled` event; no `usage_logs` row |
 | K2 | Active-key cap (#323) | the same two routes, under a `users` row lock | non-admin account | 25 active keys (`KEY_MAX_ACTIVE_PER_ACCOUNT`; null ⇒ off); admins and single-user exempt | JSON **409**; form flash + 303 | none — an ordinary, visible quota |
 
-The eight write-class tools (L3) are `create_note`, `edit_note`, `move_note`,
-`delete_note`, `set_frontmatter`, `write_file`, `delete_file` and
-`import_from_url` — every `_tracked` tool that changes vault bytes and
-therefore amplifies into the next indexer pass — **plus `PUT /transfer/upload`**,
-which changes vault bytes without being a tool call at all.
+The write-class tools (L3) — upstream's eight, `create_note`, `edit_note`,
+`move_note`, `delete_note`, `set_frontmatter`, `write_file`, `delete_file` and
+`import_from_url`, plus the fork's `move_file`, `delete_folder` and the three
+task writers `create_task`, `edit_task` and `set_task_status` — are every
+`_tracked` tool that changes vault bytes and therefore amplifies into the next
+indexer pass — **plus `PUT /transfer/upload`**, which changes vault bytes
+without being a tool call at all. `list_tasks` is a read (concurrency class
+`scan`). The task writers' immediate re-index of the note they wrote
+(`task_index.reindex_note_tasks_now`) runs inside the tool call, so it is
+covered by the call's own write-bucket token and concurrency slot; see
+[task tools](tasks.md). Adding the task tools moved `TOOL_CLASSES`, so
+`CLASS_MAPPING_VERSION` is 3.
 
 ## The principal is the grant, not the token, and not (client, user)
 
@@ -151,7 +158,7 @@ the [vault tools](vault-tools.md) disciplines are for.
 ## The write bucket follows the bytes, not the decorator
 
 `PUT /transfer/upload` publishes into the vault by redeeming a capability and
-**never passes through `_tracked`**. Bounding only the eight tools would
+**never passes through `_tracked`**. Bounding only the write-class tools would
 therefore leave the write rate escapable: mint capabilities at the general
 rate, then redeem them without limit.
 
@@ -906,7 +913,7 @@ the page to see. The full reading rules are in
 | `PANEL_LOGIN_FAILURE_WINDOW_SECONDS` | `900` | The window that budget is counted over. |
 | `MCP_RATE_LIMIT_PER_MINUTE` | `600` | Sustained tool calls per minute per principal. Null (with the burst) disables the general bucket. |
 | `MCP_RATE_LIMIT_BURST` | `120` | Capacity of the general bucket. |
-| `MCP_WRITE_RATE_LIMIT_PER_MINUTE` | `120` | Sustained vault-mutating calls per minute per principal (the eight write tools plus `PUT /transfer/upload`). |
+| `MCP_WRITE_RATE_LIMIT_PER_MINUTE` | `120` | Sustained vault-mutating calls per minute per principal (the write-class tools plus `PUT /transfer/upload`). |
 | `MCP_WRITE_RATE_LIMIT_BURST` | `30` | Capacity of the write bucket. |
 | `MCP_LIMITER_MAX_TRACKED_PRINCIPALS` | `10000` | Principals holding their own limiter entry before the shared overflow entry. |
 | `MCP_REFUSAL_LOG_INTERVAL_SECONDS` | `10` | How long one coalescing window stays open. |
@@ -1031,7 +1038,7 @@ ending in a 500, shared with the panel and `/token`.
 | --- | --- | --- | --- |
 | `embedding` | `semantic_search` | 1 | 1 |
 | `vector` | `find_related` | 1 | 1 |
-| `write` | the eight write-class tools (L3) | 1 | 2 |
+| `write` | the write-class tools (L3) | 1 | 2 |
 | `scan` | `keyword_search`, `list_notes`, `get_tags`, `get_neighborhood`, `find_orphans`, `list_files` | 2 | 1 |
 | `light` | `read_note`, `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download` | 4 | 1 |
 

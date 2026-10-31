@@ -511,6 +511,28 @@ def _log_unknown_arguments_mode() -> None:
         )
 
 
+def _check_tasks_timezone() -> None:
+    """Refuse to start when `TASKS_TIMEZONE` names no zone this process knows.
+
+    Every "today" the task tools use (done and cancelled dates, `due before
+    today`, urgency) is the date in this zone. A zone that cannot be loaded
+    would make every task call refuse; stopping here says so once, at deploy
+    time, instead of on the owner's first voice request. Needs no database and
+    no vault.
+    """
+    from src.services.task_ops import TaskOpError, owner_today
+
+    try:
+        owner_today(settings.tasks_timezone)
+    except TaskOpError as exc:
+        logging.getLogger(__name__).critical(
+            "%s. Set TASKS_TIMEZONE to an IANA zone name (e.g. Europe/Brussels); the "
+            "image's timezone database is what Python's zoneinfo reads.",
+            exc,
+        )
+        sys.exit(1)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # First, before any guard can fail: the panel's health page reads this
@@ -552,6 +574,7 @@ async def lifespan(app: FastAPI):
         # First of the guards: it needs no database and no vault. Sandbox
         # mode bypasses `APIKeyMiddleware`, so it skips this like the rest.
         _configure_body_budget()
+        _check_tasks_timezone()
         _check_openat2_support()
         _check_mount_identity_support()
         # First database contact, deliberately: a strict `DATABASE_SSL_MODE`

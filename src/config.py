@@ -550,6 +550,20 @@ class Settings(BaseSettings):
     # text returned to the agent is bounded separately, by `max_chars`.
     fetch_page_max_bytes: int = Field(4 * 1024 * 1024, ge=1)
 
+    # ── Task tools (fork) ────────────────────────────────────────────────────
+    # The note `create_task` writes to when no note is named: the inbox for
+    # tasks with no area. Vault-relative. The only note `create_task` creates
+    # when it is missing.
+    tasks_inbox_path: str = "Tasks inbox.md"
+    # The owner's time zone. Every "today" the task tools use (done and
+    # cancelled dates, `due before today`, urgency) is the date in this zone,
+    # never the server clock's day, so it agrees with Obsidian on the owner's
+    # devices. Checked at startup: an unknown zone stops the server.
+    tasks_timezone: str = "Europe/Brussels"
+    # The Tasks plugin's settings file inside the vault, read (never written)
+    # on every task tool call.
+    tasks_plugin_settings_path: str = ".obsidian/plugins/obsidian-tasks-plugin/data.json"
+
     # ── Named-staging fallback (one flag, both write paths) ──────────────────
     # Both write paths stage into an unnamed `O_TMPFILE` inode and publish it
     # by descriptor, so no staging name ever exists for a peer to observe,
@@ -731,7 +745,7 @@ class Settings(BaseSettings):
     mcp_rate_limit_per_minute: NullableLimit = 600
     mcp_rate_limit_burst: NullableLimit = 120
 
-    # L3 — the write bucket, which the eight vault-mutating tools must pass in
+    # L3 — the write bucket, which the vault-mutating tools must pass in
     # addition (and `PUT /transfer/upload`, which writes vault bytes without
     # being a tool call at all). A **velocity** bound, not a blast-radius one:
     # neither bucket bounds the total work a credential can do in a day, which

@@ -11,6 +11,7 @@ import math
 import mimetypes
 import os
 import posixpath
+import random
 import re
 import stat
 import time
@@ -1308,7 +1309,7 @@ def _bucket_admission(write_class: bool) -> tuple[str, int] | None:
 
     Two buckets, because velocity and destruction are different questions. The
     general one bounds the rate at which *any* work is created; the write one
-    halves that for the eight tools that change vault bytes. Neither bounds
+    halves that for the tools that change vault bytes. Neither bounds
     totality — 120 deletes a minute empties this vault in about twenty minutes
     — which is what the daily quota is for, and only for the credentials it
     reaches.
@@ -1454,6 +1455,12 @@ def _first_over_long_argument(bound, caps: dict[str, int]) -> tuple[str, int] | 
     return None
 
 
+#: Structured results that carry their outcome privately (`_body_outcome`).
+#: The task tools' two are appended where they are defined, at the end of
+#: this module.
+_TYPED_OUTCOME_RESULTS: tuple = (ReadNoteResult, FetchPageResult)
+
+
 def _tracked(
     tool_name: str,
     param_keys: list[str],
@@ -1483,10 +1490,11 @@ def _tracked(
     format.
 
     `write_class` marks a tool that changes vault bytes, so it must pass the
-    per-principal **write** bucket in addition to the general one. Eight tools
-    carry it — the five note tools, `write_file`, `delete_file` and
-    `import_from_url` — because those are the calls that amplify into the next
-    indexer pass. `PUT /transfer/upload` writes vault bytes without being a
+    per-principal **write** bucket in addition to the general one. Every tool
+    that changes vault bytes carries it — the five note tools, `write_file`,
+    `delete_file`, `import_from_url`, the fork's `move_file` and
+    `delete_folder`, and the three task writers — because those are the calls
+    that amplify into the next indexer pass. `PUT /transfer/upload` writes vault bytes without being a
     tool call at all and consumes the same bucket at redemption, in
     `src/transfer/routes.py`; bounding only the tools would leave the write
     rate escapable by minting capabilities and redeeming them.
@@ -1862,7 +1870,7 @@ def _tracked(
                     body_outcome = (
                         result if isinstance(result, BodyOutcome)
                         else result._body_outcome
-                        if isinstance(result, (ReadNoteResult, FetchPageResult))
+                        if isinstance(result, _TYPED_OUTCOME_RESULTS)
                         else None
                     ) if refusal is None else None
                     if body_outcome is not None:
@@ -7426,3 +7434,583 @@ async def delete_folder_impl(path: str) -> str:
         return f"Deleted empty folder {target.rel}"
     finally:
         target.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Task tools (fork): the Tasks plugin's emoji format, read and written
+# ══════════════════════════════════════════════════════════════════════════
+#
+# `list_tasks`, `create_task`, `edit_task` and `set_task_status` answer and
+# write as the owner's Obsidian Tasks plugin would. The format is ported in
+# `src/services/task_format.py`; which lines count, in `task_scan.py`; the
+# filters, in `task_query.py`; the text operations, in `task_ops.py`; the
+# index rows, in `task_index.py`. See docs/architecture/tasks.md.
+
+from src.mcp_server.task_result import (  # noqa: E402
+    StaleTask,
+    TaskItem,
+    TaskListResult,
+    TaskProblem,
+    TaskWriteResult,
+)
+from src.services import task_format as _tf, task_index as _task_index, task_ops as _task_ops  # noqa: E402
+from src.services import task_query as _tq  # noqa: E402
+from src.services.task_scan import split_lines as _task_split_lines  # noqa: E402
+from src.services.task_settings import TasksSettingsError, read_settings as _read_task_settings  # noqa: E402
+
+_TYPED_OUTCOME_RESULTS = (*_TYPED_OUTCOME_RESULTS, TaskListResult, TaskWriteResult)
+
+#: `list_tasks` returns at most this many tasks per call (`limit`).
+TASK_LIST_MAX_LIMIT = 500
+#: Problem lines returned per call; `problems_total` counts them all.
+TASK_LIST_MAX_PROBLEMS = 50
+
+
+def _task_list_refusal(message: str) -> TaskListResult:
+    """The admission gate's refusal in `list_tasks`' declared shape."""
+    return TaskListResult(error=message)
+
+
+def _task_write_refusal(message: str) -> TaskWriteResult:
+    """The admission gate's refusal in the task write tools' declared shape."""
+    return TaskWriteResult(error=message)
+
+
+def _task_failed(result_cls, outcome: BodyOutcome):
+    result = result_cls(error=str(outcome))
+    result._body_outcome = outcome
+    return result
+
+
+async def _task_context(uid: int | None):
+    """`(settings, registry, today)` for this caller, or `TaskOpError`."""
+    try:
+        root = _vault_root(uid)
+        task_settings = await asyncio.to_thread(
+            _read_task_settings, root, settings.tasks_plugin_settings_path
+        )
+    except TasksSettingsError as exc:
+        raise _task_ops.TaskOpError(
+            "task_settings_invalid",
+            f"The Tasks plugin settings in this vault cannot be applied: {exc}. The task tools "
+            "follow those settings and will not guess them. Nothing was read or written.",
+        ) from None
+    registry = _tf.StatusRegistry.from_settings(task_settings)
+    today = _task_ops.owner_today(settings.tasks_timezone)
+    return task_settings, registry, today
+
+
+async def _area_index(uid: int | None) -> _tq.AreaIndex:
+    """Every `area_tag` the caller's indexed notes declare."""
+    from sqlalchemy import select
+
+    from src.models.db import NoteMetadata
+
+    async with async_session() as session:
+        rows = (await session.execute(
+            select(NoteMetadata.file_path, NoteMetadata.frontmatter).where(
+                _note_owner_predicate(uid), NoteMetadata.frontmatter.has_key("area_tag")
+            )
+        )).all()
+    return _tq.AreaIndex.from_rows([(r.file_path, r.frontmatter) for r in rows])
+
+
+def _task_item(entry: _tq.Entry, content_hash: str, today) -> TaskItem:
+    task = entry.task
+
+    def text(d):
+        return d.text if d is not None else None
+
+    return TaskItem(
+        ref=f"{entry.path}:{entry.line_number}",
+        path=entry.path,
+        line=entry.line_number,
+        text=entry.text,
+        status_symbol=task.status.symbol,
+        status_name=task.status.name,
+        status_type=task.status.type,
+        description=task.description,
+        tags=list(task.tags),
+        priority=_tf.PRIORITY_NAME_OF[task.priority],
+        created=text(task.created),
+        start=text(task.start),
+        scheduled=text(task.scheduled),
+        scheduled_from_filename=True if task.scheduled_inferred else None,
+        due=text(task.due),
+        done=text(task.done),
+        cancelled=text(task.cancelled),
+        recurrence=task.recurrence,
+        on_completion=task.on_completion or None,
+        id=task.id or None,
+        depends_on=list(task.depends_on) or None,
+        urgency=round(_tf.urgency(task, today), 3),
+        warnings=list(task.warnings) or None,
+        content_hash=content_hash,
+    )
+
+
+def _read_current_note(path: str, uid: int | None) -> tuple[str | None, list | None, str]:
+    """`(content_hash, lines, reason)` for a note as it is on disk now."""
+    try:
+        data = read_bytes(path, user_id=uid, max_bytes=MAX_NOTE_BYTES)
+    except FileNotFoundError:
+        return None, None, "the note no longer exists"
+    except (ValueError, OSError) as exc:
+        return None, None, f"the note could not be read ({type(exc).__name__})"
+    try:
+        lines = _task_split_lines(data.decode("utf-8"))
+    except UnicodeDecodeError:
+        return None, None, "the note is not UTF-8"
+    return content_hash_for_bytes(data), lines, ""
+
+
+@_tracked(
+    "list_tasks",
+    ["path", "status", "status_types", "tags", "exclude_tags", "area", "due", "scheduled",
+     "starts", "happens", "priority", "text", "sort", "limit"],
+    refusal_result=_task_list_refusal,
+)
+async def list_tasks_impl(
+    path: str | None = None,
+    status: str = "not_done",
+    status_types: list[str] | None = None,
+    tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
+    area: str | None = None,
+    due: str | None = None,
+    scheduled: str | None = None,
+    starts: str | None = None,
+    happens: str | None = None,
+    priority: str | None = None,
+    text: str | None = None,
+    sort: str = "default",
+    limit: int = 50,
+) -> TaskListResult:
+    """Tasks matching a Tasks query, from the index, verified against the disk.
+
+    Mirrors Obsidian CLI `tasks` (`path=`, `todo`/`done`/`status=`, `verbose`,
+    `format=json`); every other parameter is the Tasks query line it equals
+    (`task_query.query_lines`), and the result's `query` field is that block.
+    The index finds the candidates; each returned task's line is then checked
+    on disk and its note's current `content_hash` read, so a write based on
+    this answer is checked against the bytes it describes.
+    """
+    from sqlalchemy import select
+
+    from src.models.db import NoteMetadata, NoteTask
+
+    def fail(prose, code="invalid_argument"):
+        return _task_failed(TaskListResult, _body_refusal(prose, code))
+
+    if not 1 <= limit <= TASK_LIST_MAX_LIMIT:
+        return fail(f"limit must be between 1 and {TASK_LIST_MAX_LIMIT} (got {limit}).")
+    if sort not in _tq.SORTS:
+        return fail(f"sort must be one of {', '.join(_tq.SORTS)} (got {sort!r}).")
+    uid = current_user_id.get()
+    try:
+        task_settings, registry, today = await _task_context(uid)
+        area_tag = None
+        overlaps: list[str] = []
+        if area is not None:
+            areas_index = await _area_index(uid)
+            resolved = areas_index.lookup(area)
+            area_tag = "#" + resolved
+            overlaps = areas_index.overlapping(resolved)
+        lines = _tq.query_lines(
+            path=path, status=status, status_types=status_types, tags=tags, exclude_tags=exclude_tags,
+            area_tag=area_tag, due=due, scheduled=scheduled, starts=starts, happens=happens,
+            priority=priority, text=text,
+        )
+        gf = task_settings.global_filter
+        filters = _tq.parse_global_query(task_settings.global_query, today, global_filter=gf)
+        filters += [_tq.parse_filter_line(line, today, global_filter=gf) for line in lines]
+    except _task_ops.TaskOpError as exc:
+        return fail(str(exc), exc.code)
+    except _tq.QueryError as exc:
+        return fail(f"{exc}. Nothing was listed.")
+
+    async with async_session() as session:
+        rows = (await session.execute(
+            select(NoteMetadata.file_path, NoteTask.line_number, NoteTask.kind, NoteTask.line, NoteTask.reason)
+            .join(NoteMetadata, NoteMetadata.id == NoteTask.note_id)
+            .where(_note_owner_predicate(uid))
+        )).all()
+
+    def evaluate():
+        entries, problems = [], []
+        for row in rows:
+            if row.kind == "problem":
+                # Problems are reported within the `path` filter's scope only:
+                # they are not tasks, so no other filter can apply to them.
+                if not path or path.lower() in row.file_path.lower():
+                    problems.append(row)
+                continue
+            parsed = _task_ops.parse_line(row.line, row.file_path, task_settings, registry)
+            if parsed is not None:
+                entries.append(_tq.Entry(row.file_path, row.line_number, parsed, row.line))
+        page, total = _tq.run_query(
+            entries, filters, sort=sort, limit=limit, today=today, rng=random.SystemRandom()
+        )
+        problems.sort(key=lambda r: (r.file_path, r.line_number))
+        return page, total, problems
+
+    try:
+        page, total, problems = await asyncio.to_thread(evaluate)
+    except _task_ops.TaskOpError as exc:
+        return fail(str(exc), exc.code)
+
+    current: dict[str, tuple] = {}
+    for entry_path in sorted({e.path for e in page}):
+        current[entry_path] = await asyncio.to_thread(_read_current_note, entry_path, uid)
+    tasks, stale = [], []
+    for entry in page:
+        content_hash, note_lines, reason = current[entry.path]
+        on_disk = (
+            note_lines[entry.line_number - 1][0]
+            if note_lines is not None and entry.line_number <= len(note_lines) else None
+        )
+        if content_hash is None or on_disk != entry.text:
+            stale.append(StaleTask(
+                ref=f"{entry.path}:{entry.line_number}", path=entry.path, line=entry.line_number,
+                indexed_text=entry.text,
+                reason=reason or "the line changed since the index read it; it is re-indexed at the next pass",
+            ))
+            continue
+        tasks.append(_task_item(entry, content_hash, today))
+
+    query = "\n".join(
+        ["```tasks", *lines]
+        + ([f"sort by {sort}"] if sort != "default" else [])
+        + [f"limit {limit}", "```"]
+    )
+    notes = []
+    if overlaps:
+        notes.append(
+            f"`tags include {area_tag}` is a substring match, as in Obsidian, so it also matches "
+            f"the tasks of {', '.join('#' + t for t in overlaps)}."
+        )
+    if task_settings.global_query.strip():
+        notes.append("The plugin's global query was applied as well, as Obsidian applies it to every query.")
+    if sort == "random":
+        notes.append("random order is this server's own shuffle; Obsidian's `sort by random` orders differently.")
+    return TaskListResult(
+        tasks=tasks,
+        total_matched=total,
+        truncated=total > len(page),
+        query=query,
+        problems=[
+            TaskProblem(ref=f"{r.file_path}:{r.line_number}", path=r.file_path, line=r.line_number,
+                        text=r.line, reason=r.reason or "unknown")
+            for r in problems[:TASK_LIST_MAX_PROBLEMS]
+        ],
+        problems_total=len(problems),
+        stale=stale or None,
+        today=today.isoformat(),
+        settings=task_settings.describe(),
+        notes=notes or None,
+    )
+
+
+def _task_write_parameters(tool: str, expected_hash: str | None, path: str):
+    """The checks every task write runs first: permission, hash syntax."""
+    if err := _require_write():
+        return err
+    if err := _precondition_syntax_error(tool, expected_hash, path=path):
+        return err
+    return None
+
+
+async def _publish_task_text(uid, target, path: str, new_text: str, existing: bytes | None):
+    """Publish `new_text` over `existing` (no-clobber create when it is None)."""
+    if err := _note_size_error(new_text):
+        return err
+    try:
+        err, _ = await _confirmed_publication(
+            uid,
+            lambda c: write_file_at(
+                target, new_text, overwrite=existing is not None, expected=existing, confirmation=c
+            ),
+        )
+        return err
+    except FileExistsError:
+        return _leaf_state_error(target, path) or _body_refusal(
+            f"{path} appeared while the task was being added. Nothing was written; call again.",
+            "already_exists",
+        )
+    except (ValueError, RuntimeError, vault_fs.VaultFSError) as e:
+        if _is_in_call_conflict(e):
+            return _concurrent_write_refusal(str(e), path)
+        return _body_refusal(str(e), "validation_failed")
+    except OSError as e:
+        return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
+
+
+async def _read_task_note(tool: str, target, path: str, expected_hash: str | None):
+    """`(err, existing_bytes, text)` for the note behind `target`, hash-checked."""
+    cap_name, cap_bytes = _note_precondition_cap()
+    try:
+        existing = read_bytes_at(target, max_bytes=cap_bytes, label=path)
+    except ValueError:
+        return (_precondition_error(tool, path, None, expected_hash, cap_name=cap_name,
+                                    cap_bytes=cap_bytes, over_cap=True)
+                or _body_refusal(f"{path} is larger than {cap_name} ({cap_bytes:,} bytes). "
+                                 "Nothing was written.", "size_limit")), None, None
+    except OSError as e:
+        return _body_refusal(f"Failed to read {path}: {e}", "io_failure"), None, None
+    if err := _precondition_error(tool, path, existing, expected_hash, cap_name=cap_name, cap_bytes=cap_bytes):
+        return err, None, None
+    try:
+        text_ = existing.decode("utf-8")
+    except UnicodeDecodeError:
+        return _body_refusal(f"{path} is not UTF-8 text. Nothing was written.", "content_unsafe"), None, None
+    return None, existing, text_
+
+
+async def _task_written(uid, target, line_number, previous, written, new_text, today, **extra):
+    """The success result, after re-indexing the note's task rows."""
+    indexed, note = await _task_index.reindex_note_tasks_now(uid, target.rel, new_text)
+    return TaskWriteResult(
+        path=target.rel,
+        ref=f"{target.rel}:{line_number}",
+        line=line_number,
+        previous_text=previous,
+        text=written,
+        content_hash=content_hash_for_bytes(new_text.encode("utf-8")),
+        indexed=indexed,
+        index_note=note,
+        today=today.isoformat(),
+        **extra,
+    )
+
+
+def _task_refused(exc: "_task_ops.TaskOpError") -> TaskWriteResult:
+    return _task_failed(TaskWriteResult, _body_refusal(str(exc), exc.code))
+
+
+@_tracked(
+    "create_task",
+    ["path", "heading", "areas", "status", "priority", "created", "start", "scheduled", "due",
+     "on_completion", "expected_hash"],
+    refusal_result=_task_write_refusal,
+    write_class=True,
+)
+async def create_task_impl(
+    description: str,
+    path: str | None = None,
+    heading: str | None = None,
+    areas: list[str] | None = None,
+    status: str | None = None,
+    priority: str | None = None,
+    created: str | None = None,
+    start: str | None = None,
+    scheduled: str | None = None,
+    due: str | None = None,
+    on_completion: str | None = None,
+    expected_hash: str | None = None,
+) -> TaskWriteResult:
+    """Add one task line, as the plugin's `createTaskLineModal()` dialog writes it.
+
+    `expected_hash` is optional: the call only adds a line, and the in-call
+    compare already refuses when the note changes between this tool's read and
+    its write. A missing note is created only when it is the inbox
+    (`TASKS_INBOX_PATH`) and no heading is named.
+    """
+    if path is None:
+        path = settings.tasks_inbox_path
+    if not path.endswith(".md"):
+        path += ".md"
+    if err := _task_write_parameters("create_task", expected_hash, path):
+        return _task_failed(TaskWriteResult, err)
+    uid = current_user_id.get()
+    try:
+        task_settings, registry, today = await _task_context(uid)
+        areas_index = await _area_index(uid)
+        if areas is not None:
+            area_tags = [areas_index.lookup(a) for a in areas]
+        else:
+            inferred = areas_index.area_for_path(path)
+            area_tags = [inferred] if inferred else []
+        new_status = _task_ops.resolve_status(registry, status, None) if status is not None else None
+        task = _task_ops.new_task(
+            description=description, settings=task_settings, registry=registry, today=today,
+            area_tags=area_tags, status=new_status, priority=priority, on_completion=on_completion,
+            dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
+        )
+    except _task_ops.TaskOpError as exc:
+        return _task_refused(exc)
+    except _tq.QueryError as exc:
+        return _task_failed(TaskWriteResult, _body_refusal(f"{exc}. Nothing was written.", "invalid_argument"))
+    new_line = _tf.to_file_line(task)
+
+    try:
+        target = open_mutable(path, user_id=uid)
+    except ValueError as e:
+        return _task_failed(TaskWriteResult, _body_refusal(str(e), "validation_failed"))
+    with target:
+        if err := _leaf_state_error(target, path):
+            return _task_failed(TaskWriteResult, err)
+        inbox = settings.tasks_inbox_path if settings.tasks_inbox_path.endswith(".md") else settings.tasks_inbox_path + ".md"
+        if not target.exists():
+            if target.rel != inbox or heading is not None:
+                return _task_failed(TaskWriteResult, _body_refusal(
+                    f"Note not found: {path}. create_task creates only the inbox ({inbox}), and only "
+                    "without a heading; create the note first. Nothing was written.", "not_found"))
+            if err := _precondition_error("create_task", path, None, expected_hash,
+                                          no_incumbent=True, enforceable=False):
+                return _task_failed(TaskWriteResult, err)
+            existing, new_text, number = None, new_line + "\n", 1
+        else:
+            err, existing, old_text = await _read_task_note("create_task", target, path, expected_hash)
+            if err:
+                return _task_failed(TaskWriteResult, err)
+            try:
+                _task_ops.refuse_unsafe_note(old_text, path)
+                new_text, number = _task_ops.insert_line(old_text, new_line, heading, path)
+            except _task_ops.TaskOpError as exc:
+                return _task_refused(exc)
+        try:
+            _task_ops.verify_written(new_text, number, task, path, task_settings, registry, allow_field_text=False)
+            if existing is not None:
+                _task_ops.verify_other_lines(old_text, new_text, number, 1, path)
+        except _task_ops.TaskOpError as exc:
+            return _task_refused(exc)
+        if err := await _publish_task_text(uid, target, path, new_text, existing):
+            return _task_failed(TaskWriteResult, err)
+        return await _task_written(uid, target, number, None, new_line, new_text, today,
+                                   changed=True, created_note=True if existing is None else None)
+
+
+async def _existing_task(tool, uid, target, path, line, expected_line, expected_hash):
+    """`(err, existing_bytes, located, settings, registry, today)` for a task write."""
+    if err := _leaf_state_error(target, path, missing=f"Note not found: {path}"):
+        return err, None, None, None, None, None
+    err, existing, text_ = await _read_task_note(tool, target, path, expected_hash)
+    if err:
+        return err, None, None, None, None, None
+    try:
+        task_settings, registry, today = await _task_context(uid)
+        located = _task_ops.locate(text_, path, line, expected_line, task_settings, registry)
+    except _task_ops.TaskOpError as exc:
+        return _body_refusal(str(exc), exc.code), None, None, None, None, None
+    return None, existing, located, task_settings, registry, today
+
+
+@_tracked(
+    "edit_task",
+    ["path", "line", "description", "priority", "created", "start", "scheduled", "due",
+     "on_completion", "clear", "expected_hash"],
+    refusal_result=_task_write_refusal,
+    write_class=True,
+)
+async def edit_task_impl(
+    path: str,
+    line: int,
+    expected_line: str,
+    expected_hash: str,
+    description: str | None = None,
+    priority: str | None = None,
+    created: str | None = None,
+    start: str | None = None,
+    scheduled: str | None = None,
+    due: str | None = None,
+    on_completion: str | None = None,
+    clear: list[str] | None = None,
+) -> TaskWriteResult:
+    """Change one task's description or fields, as `editTaskLineModal(line)` returns it."""
+    if err := _task_write_parameters("edit_task", expected_hash, path):
+        return _task_failed(TaskWriteResult, err)
+    if all(v is None for v in (description, priority, created, start, scheduled, due, on_completion)) and not clear:
+        return _task_failed(TaskWriteResult, _body_refusal(
+            "edit_task was given nothing to change. Nothing was written.", "invalid_argument"))
+    uid = current_user_id.get()
+    try:
+        target = open_mutable(path, user_id=uid)
+    except ValueError as e:
+        return _task_failed(TaskWriteResult, _body_refusal(str(e), "validation_failed"))
+    with target:
+        err, existing, located, task_settings, registry, today = await _existing_task(
+            "edit_task", uid, target, path, line, expected_line, expected_hash)
+        if err:
+            return _task_failed(TaskWriteResult, err)
+        old = located.task
+        if old.recurrence is not None:
+            return _task_failed(TaskWriteResult, _body_refusal(
+                "This task repeats (🔁). Editing recurring tasks is not supported by the task tools yet: "
+                "the Tasks plugin rewrites the rule in its own wording when it saves, which these tools "
+                "cannot reproduce. Edit it in Obsidian. Nothing was written.", "recurring_task"))
+        try:
+            updated = _task_ops.apply_fields(
+                old, today=today,
+                description=_task_ops.edited_description(old, description, task_settings),
+                priority=priority, on_completion=on_completion,
+                dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
+                clear=clear,
+            )
+            new_line = _tf.to_file_line(updated)
+            if new_line == expected_line:
+                return TaskWriteResult(
+                    path=target.rel, ref=f"{target.rel}:{line}", line=line, previous_text=expected_line,
+                    text=new_line, changed=False, content_hash=content_hash_for_bytes(existing),
+                    today=today.isoformat(),
+                )
+            new_text = _task_ops.splice(located.lines, located.index, [new_line])
+            _task_ops.verify_written(new_text, line, updated, path, task_settings, registry,
+                                     allow_field_text="field_in_description" in old.warnings)
+            _task_ops.verify_other_lines(located.text, new_text, line, 0, path)
+        except _task_ops.TaskOpError as exc:
+            return _task_refused(exc)
+        if err := await _publish_task_text(uid, target, path, new_text, existing):
+            return _task_failed(TaskWriteResult, err)
+        return await _task_written(uid, target, line, expected_line, new_line, new_text, today, changed=True)
+
+
+@_tracked(
+    "set_task_status",
+    ["path", "line", "status", "symbol", "expected_hash"],
+    refusal_result=_task_write_refusal,
+    write_class=True,
+)
+async def set_task_status_impl(
+    path: str,
+    line: int,
+    expected_line: str,
+    expected_hash: str,
+    status: str | None = None,
+    symbol: str | None = None,
+) -> TaskWriteResult:
+    """Set one task's status, as the plugin's status change (`handleNewStatus`) does."""
+    if err := _task_write_parameters("set_task_status", expected_hash, path):
+        return _task_failed(TaskWriteResult, err)
+    uid = current_user_id.get()
+    try:
+        target = open_mutable(path, user_id=uid)
+    except ValueError as e:
+        return _task_failed(TaskWriteResult, _body_refusal(str(e), "validation_failed"))
+    with target:
+        err, existing, located, task_settings, registry, today = await _existing_task(
+            "set_task_status", uid, target, path, line, expected_line, expected_hash)
+        if err:
+            return _task_failed(TaskWriteResult, err)
+        try:
+            new_status = _task_ops.resolve_status(registry, status, symbol)
+            result = _task_ops.new_status_tasks(located.task, new_status, today, task_settings)
+            if result is None:
+                return TaskWriteResult(
+                    path=target.rel, ref=f"{target.rel}:{line}", line=line, previous_text=expected_line,
+                    text=expected_line, changed=False, content_hash=content_hash_for_bytes(existing),
+                    today=today.isoformat(),
+                )
+            new_lines = [_tf.to_file_line(t) for t in result]
+            new_text = _task_ops.splice(located.lines, located.index, new_lines)
+            if result:
+                _task_ops.verify_written(new_text, line, result[0], path, task_settings, registry,
+                                         allow_field_text=True)
+            _task_ops.verify_other_lines(located.text, new_text, line, 0 if result else -1, path)
+        except _task_ops.TaskOpError as exc:
+            return _task_refused(exc)
+        if err := await _publish_task_text(uid, target, path, new_text, existing):
+            return _task_failed(TaskWriteResult, err)
+        return await _task_written(
+            uid, target, line, expected_line, "\n".join(new_lines), new_text, today,
+            changed=True, removed=True if not result else None,
+        )

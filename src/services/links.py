@@ -497,6 +497,16 @@ def _split_lines(text: str, start: int) -> list[_Line]:
         i = end
 
 
+def split_lines(text: str) -> list[tuple[int, int, int]]:
+    """`(start, content_end, end)` for every line of `text`, universal-newline rule.
+
+    The public form of the splitter the fence grammar scans with, so a consumer
+    that numbers lines (the task scanner) counts them exactly as fences are
+    recognised: LF, CRLF as a unit, or a lone CR.
+    """
+    return [(line.start, line.content_end, line.end) for line in _split_lines(text, 0)]
+
+
 def _fence_run(text: str, line: _Line) -> tuple[str, int, int, int] | None:
     """`(char, run_length, indent, offset_after_run)` for a fence-shaped line.
 

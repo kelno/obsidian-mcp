@@ -553,9 +553,37 @@ ORM so `alembic check` compares it.
   leaves every row NULL.
 
 `search_path` pinned and asserted, `lock_timeout` / `statement_timeout` set
-and `RESET`. The gate's head literal is `030`; its cases cover the fresh
+and `RESET`. Its gate cases cover the fresh
 shape, the chain from 029, no backfill, stamp-back with a recorded marker
 kept, four impostor-column refusals, and both downgrade directions.
+
+## 031: `note_tasks` (task tools)
+
+One row per task line or task-like problem line of an indexed note, derived
+by the index pass next to the note's links (see [task tools](tasks.md)).
+`(id serial PK, note_id → notes_metadata.id ON DELETE CASCADE, line_number,
+kind, line, reason)`, with `ck_note_tasks_kind` (`kind IN ('task',
+'problem')`), `ck_note_tasks_line_number` (`>= 1`) and the unique
+`uq_note_tasks_note_line` on `(note_id, line_number)`, which is also the
+per-note index.
+
+- **No backfill in the migration.** The same change raises
+  `CURRENT_EXTRACTION_VERSION` to 4, so the next pass re-derives every note
+  once and writes its rows; the version-4 cleaner is version 3's, so no note
+  is re-embedded.
+- **Marker-owned, verified, not adopted** (021's shape): a pre-existing
+  `note_tasks` must match the whole shape — columns, primary key, the id
+  serial, the foreign key's definition including `ON DELETE CASCADE`, both
+  CHECKs by definition (scratch TEMP table), the unique constraint, no other
+  constraint — or the upgrade is refused by name. `downgrade()` drops only a
+  marked table; losing it loses derived rows only.
+- `pg_constraint.contype` is the one-byte `"char"` type, which the driver
+  returns as bytes: it is cast to text before it is compared. The stamp-back
+  re-run in the gate is what caught it.
+
+The gate's head literal is `031`; its cases cover the fresh shape, the chain
+from 030, the cascade and both CHECKs, stamp-back with a row kept, four
+impostor-table refusals, and both downgrade directions.
 
 ## The session TimeZone is UTC
 

@@ -35,16 +35,18 @@ from src.services.pool_budget import CLASS_CONNECTIONS, budget_terms
 
 # Bump whenever TOOL_CLASSES changes shape: it is part of the epoch, so rows
 # and counters from a different classification never mix in one window.
-CLASS_MAPPING_VERSION = 2
+CLASS_MAPPING_VERSION = 3
 
 TOOL_CLASSES = {
     "semantic_search": "embedding",
     "find_related": "vector",
     **dict.fromkeys(("create_note", "edit_note", "move_note", "delete_note",
                      "set_frontmatter", "write_file", "delete_file", "move_file",
-                     "delete_folder", "import_from_url"), "write"),
+                     "delete_folder", "import_from_url", "create_task",
+                     "edit_task", "set_task_status"), "write"),
     **dict.fromkeys(("keyword_search", "list_notes", "get_tags",
-                     "get_neighborhood", "find_orphans", "list_files"), "scan"),
+                     "get_neighborhood", "find_orphans", "list_files",
+                     "list_tasks"), "scan"),
     **dict.fromkeys(("read_note", "read_file", "get_recent", "get_vault_guide",
                      "get_backlinks", "get_links", "request_upload",
                      "check_upload", "request_download", "fetch_page"), "light"),

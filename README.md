@@ -373,6 +373,27 @@ redeemed over the public `/transfer/*` routes.
   may call it. Useful for random content (`Special:Random`, random.org)
   and for agents that cannot browse.
 
+**Tasks** (fork), in the [Obsidian Tasks](https://publish.obsidian.md/tasks/)
+plugin's emoji format, following the plugin's own settings file in the vault
+and needing no running Obsidian:
+
+- `list_tasks(path=None, status="not_done", tags=None, area=None, due=None, …,
+  sort="default", limit=50)`, lists tasks; each argument is one Tasks query
+  line, with the plugin's meaning, and the result carries the query block it
+  equals. Each task comes with its `path:line`, its exact text and its note's
+  `content_hash`.
+- `create_task(description, path=None, heading=None, areas=None, …)`, adds a
+  task line as the plugin's dialog writes it (default note: the inbox).
+- `edit_task(path, line, expected_line, expected_hash, …)`, changes a task's
+  description or fields (postpone with `scheduled`).
+- `set_task_status(path, line, expected_line, expected_hash, status=None,
+  symbol=None)`, marks a task done, to-do, cancelled or any configured status,
+  with the done/cancelled dates the settings ask for; refuses recurring tasks.
+
+Every task write is refused when the line or the note changed since it was
+read, and changes only that one line. See
+[docs/architecture/tasks.md](docs/architecture/tasks.md).
+
 The token travels in the URL *fragment*, which browsers never send, so
 no server-generated request target or access log contains it. Uploads
 are claimed before a body byte is read, published atomically with
@@ -1075,6 +1096,9 @@ to multi-user later resumes where you left off without re-bootstrapping
 | `IMPORT_ALLOW_HTTP` | `false` | Let `import_from_url` and `fetch_page` fetch plain http. Off by default. |
 | `OUTBOUND_USER_AGENT` | `obsidian-mcp (+https://github.com/kelno/obsidian-mcp)` | `User-Agent` sent by `import_from_url` and `fetch_page`. Some sites (Wikipedia) refuse anonymous clients. |
 | `FETCH_PAGE_MAX_BYTES` | `4194304` | Largest page `fetch_page` downloads before converting it |
+| `TASKS_INBOX_PATH` | `Tasks inbox.md` | Note `create_task` writes to when none is named; the only note it creates when missing |
+| `TASKS_TIMEZONE` | `Europe/Brussels` | The owner's time zone: every "today" the task tools use. An unknown zone stops the server at startup. |
+| `TASKS_PLUGIN_SETTINGS_PATH` | `.obsidian/plugins/obsidian-tasks-plugin/data.json` | The Tasks plugin's settings file in the vault, read on every task call |
 | `VAULT_ALLOW_NAMED_STAGING_FALLBACK` | `false` | Accept named staging on filesystems without `O_TMPFILE`. One flag, both write paths. See [System requirements](#system-requirements). |
 | `WRITE_PRECONDITION_REQUIRED` | `false` | Require `expected_hash` on supported destructive calls. Creation is exempt; enable after clients adopt read hashes. |
 | `EMBEDDING_PROVIDER` | `ollama` | `ollama` or `openai` |

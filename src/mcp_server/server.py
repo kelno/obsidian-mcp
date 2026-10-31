@@ -7,13 +7,16 @@ from pydantic import ConfigDict
 from src.config import settings
 from src.mcp_server.fetch_result import FetchPageResult
 from src.mcp_server.read_result import ReadNoteResult
+from src.mcp_server.task_result import TaskListResult, TaskWriteResult
 from src.mcp_server.tools import (
     check_upload_impl,
     create_note_impl,
+    create_task_impl,
     delete_file_impl,
     delete_folder_impl,
     delete_note_impl,
     edit_note_impl,
+    edit_task_impl,
     fetch_page_impl,
     find_orphans_impl,
     find_related_impl,
@@ -26,6 +29,7 @@ from src.mcp_server.tools import (
     import_from_url_impl,
     list_files_impl,
     list_notes_impl,
+    list_tasks_impl,
     move_file_impl,
     move_note_impl,
     read_file_impl,
@@ -35,6 +39,7 @@ from src.mcp_server.tools import (
     search_notes_impl,
     semantic_search_impl,
     set_frontmatter_impl,
+    set_task_status_impl,
     write_file_impl,
 )
 
@@ -1412,6 +1417,215 @@ async def delete_folder(path: str) -> str:
         path: Vault-relative path of the folder (e.g. "Projects/Old").
     """
     return await delete_folder_impl(path)
+
+
+@mcp.tool()
+async def list_tasks(
+    path: str | None = None,
+    status: str = "not_done",
+    status_types: list[str] | None = None,
+    tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
+    area: str | None = None,
+    due: str | None = None,
+    scheduled: str | None = None,
+    starts: str | None = None,
+    happens: str | None = None,
+    priority: str | None = None,
+    text: str | None = None,
+    sort: str = "default",
+    limit: int = 50,
+) -> TaskListResult:
+    """List tasks (Obsidian Tasks plugin, emoji format) matching a Tasks query.
+
+    Gives the same tasks as a Tasks query block in Obsidian asking the same
+    question: each argument is one Tasks query line, with the plugin's own
+    meaning, and the result's `query` field is that block. Follows the owner's
+    Tasks plugin settings in the vault (statuses, global filter, global query).
+    Counterpart: Obsidian CLI `tasks` (`path=`, `todo`/`done`, `format=json`).
+
+    A task is a list item with a checkbox (`- [ ] …`, `1. [x] …`, also in
+    quotes and callouts), outside code blocks and frontmatter. `- \\[ ] …`
+    (escaped) is not a task. Lines that look like tasks but may not be read
+    as one by the plugin are listed under `problems`, never dropped.
+
+    Each task gives `ref` (`path:line`, 1-based), the exact line (`text`),
+    parsed fields, and the note's `content_hash`. To change a task, pass
+    `path`, `line`, `text` (as `expected_line`) and `content_hash` (as
+    `expected_hash`) to `edit_task` or `set_task_status`. Tasks whose line
+    changed since the index read it are listed under `stale`, not returned.
+
+    Args:
+        path: `path includes …` — a case-insensitive substring of the note's
+            vault path, `.md` included, anywhere in it (not only a prefix).
+        status: `not_done` (default; status types todo, in progress, on
+            hold), `done` (done, cancelled, non-task), or `any`.
+        status_types: `status.type is …`, any of TODO, IN_PROGRESS, ON_HOLD,
+            DONE, CANCELLED, NON_TASK.
+        tags: `tags include …` for each (all must match): a case-insensitive
+            substring of any tag on the line, so `#area/x` also matches
+            `#area/x-y` and `#area/x/sub`, and `next` matches `#nextweek`.
+            Tags in the note's frontmatter do not count, as in the plugin.
+        exclude_tags: `tags do not include …` for each.
+        area: an area's tag: its slug (`agent-personnel`), tag
+            (`#area/agent-personnel`) or main note's name. Resolved through the
+            `area_tag` frontmatter of the area's main note, to `tags include
+            #area/<slug>`, a substring match as in Obsidian: `agent` also
+            matches `#area/agent-personnel`, and the result's `notes` say so.
+            The folder never counts. Unknown areas are refused.
+        due / scheduled / starts / happens: `<field> <phrase>`, the phrase
+            being `before`, `after`, `on`, `on or before` or `on or after`
+            followed by `YYYY-MM-DD`, `today`, `tomorrow` or `yesterday`
+            (e.g. `due="on or before today"`); or `has` / `none` for `has …
+            date` / `no … date`. A missing date never matches, except for
+            `starts`. `happens` is any of start, scheduled and due.
+        priority: `priority is …`: highest, high, medium, none, low, lowest,
+            optionally after `above`, `below` or `not` (e.g. "above none").
+        text: `description includes …`, case-insensitive.
+        sort: `default` (the plugin's default sort: status, urgency, due date,
+            priority, path), `due`, `priority`, or `random` (the server's own
+            shuffle, for "give me one at random").
+        limit: at most this many tasks (1–500), after sorting.
+    """
+    return await list_tasks_impl(
+        path=path, status=status, status_types=status_types, tags=tags, exclude_tags=exclude_tags,
+        area=area, due=due, scheduled=scheduled, starts=starts, happens=happens, priority=priority,
+        text=text, sort=sort, limit=limit,
+    )
+
+
+@mcp.tool()
+async def create_task(
+    description: str,
+    path: str | None = None,
+    heading: str | None = None,
+    areas: list[str] | None = None,
+    status: str | None = None,
+    priority: str | None = None,
+    created: str | None = None,
+    start: str | None = None,
+    scheduled: str | None = None,
+    due: str | None = None,
+    on_completion: str | None = None,
+    expected_hash: str | None = None,
+) -> TaskWriteResult:
+    """Add a task, written exactly as the Tasks plugin's "Create task" dialog writes it.
+
+    Requires write permission. Counterpart: Tasks API `createTaskLineModal()`.
+    Writes one new line `- [ ] description #area/… <fields>` in the plugin's
+    field order, adding the plugin's created date if its settings say so.
+    Changes no other line. The line is read back before writing and the call
+    is refused if the plugin would read it differently.
+
+    Args:
+        description: the task's text, one line. Tags (`#next`) may be part of
+            it. Do not put dates or priority emojis in it: use the arguments.
+        path: the note to add it to; default the tasks inbox
+            (`Tasks inbox.md` unless configured). Only the inbox is created
+            when missing.
+        heading: add it under this heading (same selectors as
+            `edit_note(section=…)`: text, `Parent/Child` or `#N`), after the
+            section's last non-blank line. Default: the end of the note.
+        areas: area tags to add (slug, `#area/<slug>` or the area's main
+            note's name). Unknown areas are refused. Omitted: a note inside an
+            area's folder gets that area's tag; elsewhere none. `[]`: none.
+        status: todo (default), done, cancelled or in_progress.
+        priority: highest, high, medium, none, low or lowest.
+        created / start / scheduled / due: `YYYY-MM-DD`, `today`, `tomorrow`
+            or `yesterday` (the owner's local day).
+        on_completion: `keep` or `delete` (🏁: delete removes the line when
+            the task is done).
+        expected_hash: optional; the note's `content_hash`, to refuse if it
+            changed since you read it.
+    """
+    return await create_task_impl(
+        description, path=path, heading=heading, areas=areas, status=status, priority=priority,
+        created=created, start=start, scheduled=scheduled, due=due, on_completion=on_completion,
+        expected_hash=expected_hash,
+    )
+
+
+@mcp.tool()
+async def edit_task(
+    path: str,
+    line: int,
+    expected_line: str,
+    expected_hash: str,
+    description: str | None = None,
+    priority: str | None = None,
+    created: str | None = None,
+    start: str | None = None,
+    scheduled: str | None = None,
+    due: str | None = None,
+    on_completion: str | None = None,
+    clear: list[str] | None = None,
+) -> TaskWriteResult:
+    """Change one task's description or fields, as the Tasks plugin's "Edit task" dialog does.
+
+    Requires write permission. Counterpart: Tasks API `editTaskLineModal(line)`.
+    Postpone a task by setting `scheduled` (⏳). Only that line changes; it
+    is written back in the plugin's field order, as the plugin itself does on
+    any edit. Status changes go through `set_task_status`. Recurring tasks
+    (🔁) are refused for now: edit them in Obsidian.
+
+    Refused, writing nothing, when the note changed since `expected_hash`
+    (`stale_precondition`), when line `line` is not `expected_line`
+    (`line_mismatch`), or when it is not a task (`not_a_task`).
+
+    Args:
+        path / line / expected_line / expected_hash: the task's `path`,
+            `line`, `text` and `content_hash` from `list_tasks`.
+        description: the new text (tags included). Omit to keep it.
+        priority: highest, high, medium, none, low or lowest.
+        created / start / scheduled / due: `YYYY-MM-DD`, `today`, `tomorrow`
+            or `yesterday`.
+        on_completion: `keep`, `delete` or `none`.
+        clear: fields to remove: any of priority, on_completion, created,
+            start, scheduled, due.
+    """
+    return await edit_task_impl(
+        path, line, expected_line, expected_hash, description=description, priority=priority,
+        created=created, start=start, scheduled=scheduled, due=due, on_completion=on_completion,
+        clear=clear,
+    )
+
+
+@mcp.tool()
+async def set_task_status(
+    path: str,
+    line: int,
+    expected_line: str,
+    expected_hash: str,
+    status: str | None = None,
+    symbol: str | None = None,
+) -> TaskWriteResult:
+    """Mark one task done, to-do, cancelled, in progress, or any status the plugin has.
+
+    Requires write permission. Counterparts: Obsidian CLI `task
+    ref=<path:line> done|todo|status=<char>`, and the Tasks plugin's status
+    change (`executeToggleTaskDoneCommand` does the same with the next status).
+    Adds or removes the done (✅) and cancelled (❌) dates as the owner's Tasks
+    settings say, with today's date in the owner's time zone. A task with
+    `🏁 delete` is removed when it is done (`removed: true`).
+
+    **Recurring tasks (🔁) are refused** (`recurring_task`): ticking one must
+    also create its next occurrence, which these tools do not do yet. Tick it
+    in Obsidian instead.
+
+    Refused, writing nothing, when the note changed since `expected_hash`
+    (`stale_precondition`), when line `line` is not `expected_line`
+    (`line_mismatch`), or when it is not a task (`not_a_task`).
+
+    Args:
+        path / line / expected_line / expected_hash: the task's `path`,
+            `line`, `text` and `content_hash` from `list_tasks`.
+        status: todo, done, cancelled or in_progress.
+        symbol: instead of `status`, the checkbox character of any status set
+            up in the Tasks plugin (e.g. `/`). Exactly one of the two.
+    """
+    return await set_task_status_impl(
+        path, line, expected_line, expected_hash, status=status, symbol=symbol
+    )
 
 
 def _forbid_unknown_arguments(server: FastMCP) -> None:

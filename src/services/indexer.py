@@ -75,6 +75,8 @@ from src.services.links import (
     extract_links_bounded,
     resolve_target,
 )
+from src.services.task_index import delete_task_rows, insert_task_rows, task_rows
+from src.services.task_scan import scan_note
 from src.oauth.grants import lock_account_guard
 from src.services import vault_overlap
 from src.services.transfer import canonical_vault_root
@@ -745,6 +747,11 @@ def _content_hash(content: str) -> str:
 # Version 3 rejects links whose deciding target/href was changed by code
 # masking (#218). It also shares the version-1/2 cleaner: unchanged bytes
 # need repaired link rows, but no embedding invalidation from this bump.
+# Version 4 adds a derived kind, `note_tasks` (migration 031, the task tools):
+# no grammar changed, but every existing note needs its task rows derived
+# once, and this marker is the mechanism that makes an unchanged note
+# "changed" for one pass. It shares the version-1/2/3 cleaner, so nothing is
+# re-embedded.
 #
 # Embedding invalidation is scoped, not blanket: the pass compares the text the
 # row's *stamped* version would have embedded against the text the current one
@@ -756,7 +763,7 @@ def _content_hash(content: str) -> str:
 # CLEARS, so it can never suppress an invalidation another rule mandates — a
 # content change, a `file_path` change, a provider change, exclusion
 # reconciliation.
-CURRENT_EXTRACTION_VERSION = 3
+CURRENT_EXTRACTION_VERSION = 4
 
 
 def _grammar_changed_the_embedding_text(stamped_version: int, body: str) -> bool:
@@ -3257,6 +3264,9 @@ async def _index_vault_attempt(
         # pass treats every note as changed and therefore holds the whole
         # vault's parsed bodies for the duration of the pass.
         path_to_content: dict[str, str] = {}
+        # Each changed note's task lines (`task_scan`), from the same raw text
+        # the body came from, written next to its links below.
+        path_to_tasks: dict[str, tuple] = {}
         for rel_path, found in scan.files.items():
             h = found.content_hash
             # A stale extraction marker makes a note changed even when its
@@ -3339,6 +3349,10 @@ async def _index_vault_attempt(
                         _loggable_path(rel_path),
                         MAX_TAG_BYTES,
                     )
+                # Off the loop for `extract_tags`' reason. Line numbers are
+                # over the whole note, so the scan takes the raw text, not
+                # the body.
+                note_tasks = await asyncio.to_thread(lambda: scan_note(raw).lines)
             except Exception as e:
                 logger.warning(f"Failed to parse {rel_path}: {e}")
                 entry = f"{rel_path} (parse: {e})"
@@ -3348,6 +3362,7 @@ async def _index_vault_attempt(
                     withholding.append(entry)
                 continue
             path_to_content[rel_path] = content
+            path_to_tasks[rel_path] = note_tasks
             title = _note_title(frontmatter, found.name)
 
             # Grammar-attributable embedding invalidation, scoped to notes
@@ -3866,6 +3881,30 @@ async def _index_vault_attempt(
             skips.extend(link_skips)
             withholding.extend(link_skips)
 
+        # ── Task lines for changed notes (task tools, migration 031) ─────
+        # The links' rule exactly: every changed or moved note's rows are
+        # replaced from this pass's own read, in this transaction, each
+        # note's insert in its own poison savepoint; a skip withholds.
+        if to_upsert or moved_new_paths:
+            task_skips: list[str] = []
+            poisoned_tasks: list[tuple[str, str]] = []
+            await _update_tasks_for_changed(
+                session,
+                [n["file_path"] for n in to_upsert] + list(moved_new_paths),
+                user_id=user_id,
+                path_to_tasks=path_to_tasks,
+                skips=task_skips,
+                poisoned=poisoned_tasks,
+                skipped_paths=underived,
+            )
+            if poisoned_tasks:
+                raise PoisonNote([
+                    PoisonCandidate(path, upsert_hash[path], code, "tasks")
+                    for path, code in poisoned_tasks
+                ])
+            skips.extend(task_skips)
+            withholding.extend(task_skips)
+
         # ── Re-derive progress (#311, D3) ─────────────────────────────────
         # Mark every row this re-deriving pass fully derived — upserted or
         # move-repaired, keyword vector and links written without a skip —
@@ -4232,6 +4271,61 @@ async def _recheck_empty_prune(
     # Expiry and assignment together, with no await after this line.
     if not auth.valid_for(current):
         raise _indeterminate_root_empty(rows)
+
+
+async def _update_tasks_for_changed(
+    session,
+    changed_paths: list[str],
+    *,
+    user_id: int | None,
+    path_to_tasks: dict[str, tuple],
+    skips: list[str],
+    poisoned: list[tuple[str, str]],
+    skipped_paths: set[str] | None,
+) -> None:
+    """Replace the `note_tasks` rows of every changed or moved note.
+
+    The task lines come from `path_to_tasks`, the scan's own read of the bytes
+    this pass hashed, so the rows describe exactly the content the row's
+    `content_hash` names. Bounded per note by `task_scan.MAX_TASK_ROWS_PER_NOTE`
+    (a capped note says so in its last row). Deleted notes need nothing here:
+    `note_tasks.note_id` cascades with the prune.
+    """
+    if not changed_paths:
+        return
+    # The link rebuild's own lookup, statement for statement: the scope's
+    # `(file_path, id)` pairs, selected after the upsert in this transaction.
+    stmt = select(NoteMetadata.file_path, NoteMetadata.id)
+    if user_id is None:
+        stmt = stmt.where(NoteMetadata.user_id.is_(None))
+    else:
+        stmt = stmt.where(NoteMetadata.user_id == user_id)
+    wanted = set(changed_paths)
+    ids = {row.file_path: row.id for row in (await session.execute(stmt)).all() if row.file_path in wanted}
+    await delete_task_rows(session, list(ids.values()))
+    for path in changed_paths:
+        note_id = ids.get(path)
+        lines = path_to_tasks.get(path)
+        # A skip is a task row this pass could not write, so it withholds the
+        # re-derive stamp. A note with no task lines has none to write, with or
+        # without an id.
+        if lines is not None and not lines:
+            continue
+        if note_id is None or lines is None:
+            what = "no index row" if note_id is None else "no buffered task scan"
+            skips.append(f"{path} ({what} for the task rebuild)")
+            if skipped_paths is not None:
+                skipped_paths.add(path)
+            continue
+        rows = task_rows(note_id, lines)
+
+        async def _insert(rows=rows):
+            await insert_task_rows(session, rows)
+
+        exc = await _savepoint_poison(session, _insert)
+        if exc is not None:
+            code = await _confirm_poison(session, _insert, exc, site="tasks")
+            poisoned.append((path, code))
 
 
 async def _update_links_for_changed(

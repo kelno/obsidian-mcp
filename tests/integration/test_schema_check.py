@@ -60,7 +60,7 @@ DIM = 64  # irrelevant here; keeps the migration cheap.
 # The current head. Every case that migrates forward asserts it, so adding a
 # revision without teaching this module about it fails loudly rather than
 # leaving the new migration unexercised.
-HEAD_REVISION = "030"
+HEAD_REVISION = "031"
 
 CONSTRAINT = "ck_oauth_clients_auth_method_secret"
 MARKER = "created by 013_schema_reconciliation"
@@ -6540,7 +6540,7 @@ def refuse_030(url, *, must_mention):
 
 def test_030_adds_one_nullable_marked_column_with_no_default():
     with throwaway_db("schema_030_fresh") as url:
-        assert alembic_version(url) == HEAD_REVISION == "030"
+        assert alembic_version(url) == HEAD_REVISION
         assert column_state_029(url, "notes_metadata", "derived_under") == (
             "character varying(64)",
             False,
@@ -6557,7 +6557,7 @@ def test_030_chains_from_029():
     config = Config()
     config.set_main_option("script_location", str(_harness.ROOT / "alembic"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_current_head() == HEAD_REVISION == "030"
+    assert script.get_revision("030") is not None
     assert script.get_revision("030").down_revision == "029"
 
 
@@ -6646,3 +6646,143 @@ def test_downgrade_030_leaves_a_column_it_did_not_create():
         )
         assert alembic_version(url) == "029"
         assert column_state_029(url, "notes_metadata", "derived_under") is not None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 031 — note_tasks (task tools)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# A marker-owned table: columns, primary key, the id serial, the foreign key
+# to notes_metadata with ON DELETE CASCADE, both CHECKs and the unique
+# (note_id, line_number). `alembic check` sees the columns and the unique
+# constraint; the CHECK predicates, the FK's ON DELETE and the default are
+# asserted here.
+
+NOTE_TASKS_MARKER_031 = "task lines and near misses per note (031_note_tasks)"
+
+
+def note_tasks_constraints(url):
+    return {
+        row["conname"]: row["def"]
+        for row in fetch(
+            url,
+            "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint "
+            "WHERE conrelid = 'public.note_tasks'::regclass",
+        )
+    }
+
+
+def refuse_031(url, *, must_mention):
+    _harness.run_alembic(url, "stamp", "030", dimensions=DIM)
+    result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
+    assert result.returncode != 0, "031 should have refused"
+    combined = result.stdout + result.stderr
+    for phrase in must_mention:
+        assert phrase in combined, f"refusal did not mention {phrase!r}:\n{combined}"
+    assert alembic_version(url) == "030", "nothing should have been recorded"
+    return combined
+
+
+def test_031_creates_the_marked_table_with_its_constraints():
+    with throwaway_db("schema_031_fresh") as url:
+        assert alembic_version(url) == HEAD_REVISION
+        assert fetchval(
+            url, "SELECT obj_description('public.note_tasks'::regclass, 'pg_class')"
+        ) == NOTE_TASKS_MARKER_031
+        constraints = note_tasks_constraints(url)
+        assert constraints["fk_note_tasks_note_id"] == (
+            "FOREIGN KEY (note_id) REFERENCES notes_metadata(id) ON DELETE CASCADE"
+        )
+        assert "'task'" in constraints["ck_note_tasks_kind"]
+        assert constraints["ck_note_tasks_line_number"] == "CHECK ((line_number >= 1))"
+        assert constraints["uq_note_tasks_note_line"] == "UNIQUE (note_id, line_number)"
+        assert_alembic_check_clean(url, DIM)
+
+
+def test_031_chains_from_030():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config()
+    config.set_main_option("script_location", str(_harness.ROOT / "alembic"))
+    script = ScriptDirectory.from_config(config)
+    assert script.get_current_head() == HEAD_REVISION == "031"
+    assert script.get_revision("031").down_revision == "030"
+
+
+def test_031_rows_cascade_with_their_note_and_the_checks_hold():
+    with throwaway_db("schema_031_cascade") as url:
+        insert_stat_note(url, 1, "a.md", (1, 2, 3, 4))
+        sql(url, "INSERT INTO note_tasks (note_id, line_number, kind, line) VALUES (1, 1, 'task', '- [ ] a')")
+        for bad in (
+            "INSERT INTO note_tasks (note_id, line_number, kind, line) VALUES (1, 2, 'other', 'x')",
+            "INSERT INTO note_tasks (note_id, line_number, kind, line) VALUES (1, 0, 'task', 'x')",
+            "INSERT INTO note_tasks (note_id, line_number, kind, line) VALUES (1, 1, 'task', 'dup')",
+        ):
+            with pytest.raises(asyncpg.PostgresError):
+                sql(url, bad)
+        sql(url, "DELETE FROM notes_metadata WHERE id = 1")
+        assert fetchval(url, "SELECT count(*) FROM note_tasks") == 0
+
+
+def test_031_stamp_back_rerun_accepts_its_own_table():
+    with throwaway_db("schema_031_rerun") as url:
+        insert_stat_note(url, 1, "a.md", (1, 2, 3, 4))
+        sql(url, "INSERT INTO note_tasks (note_id, line_number, kind, line) VALUES (1, 1, 'task', '- [ ] a')")
+        _harness.run_alembic(url, "stamp", "030", dimensions=DIM)
+        _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
+        assert alembic_version(url) == HEAD_REVISION
+        assert fetchval(url, "SELECT count(*) FROM note_tasks") == 1
+        assert_alembic_check_clean(url, DIM)
+
+
+@pytest.mark.parametrize(
+    "label,ddl,fragment",
+    [
+        ("unmarked", [], "does not carry 031's comment marker"),
+        (
+            "no_cascade",
+            [
+                "ALTER TABLE note_tasks DROP CONSTRAINT fk_note_tasks_note_id",
+                "ALTER TABLE note_tasks ADD CONSTRAINT fk_note_tasks_note_id "
+                "FOREIGN KEY (note_id) REFERENCES notes_metadata(id)",
+            ],
+            "fk_note_tasks_note_id",
+        ),
+        (
+            "weak_check",
+            [
+                "ALTER TABLE note_tasks DROP CONSTRAINT ck_note_tasks_kind",
+                "ALTER TABLE note_tasks ADD CONSTRAINT ck_note_tasks_kind CHECK (true)",
+            ],
+            "ck_note_tasks_kind",
+        ),
+        ("extra_column", ["ALTER TABLE note_tasks ADD COLUMN extra text"], "its columns are"),
+    ],
+)
+def test_031_refuses_a_pre_existing_table_of_another_shape(label, ddl, fragment):
+    with throwaway_db(f"schema_031_foreign_{label}") as url:
+        if label == "unmarked":
+            sql(url, "COMMENT ON TABLE note_tasks IS 'somebody else'")
+        for statement in ddl:
+            sql(url, statement)
+        refuse_031(url, must_mention=[fragment, "Nothing has been changed"])
+
+
+def test_downgrade_031_drops_the_marked_table_and_upgrade_rebuilds_it():
+    with throwaway_db("schema_031_downgrade") as url:
+        _harness.run_alembic(url, "downgrade", "030", dimensions=DIM)
+        assert alembic_version(url) == "030"
+        assert fetchval(url, "SELECT to_regclass('public.note_tasks')") is None
+        _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
+        assert alembic_version(url) == HEAD_REVISION
+        assert_alembic_check_clean(url, DIM)
+
+
+def test_downgrade_031_refuses_a_table_it_did_not_create():
+    with throwaway_db("schema_031_downgrade_foreign") as url:
+        sql(url, "COMMENT ON TABLE note_tasks IS 'somebody else'")
+        result = _harness.run_alembic(url, "downgrade", "030", dimensions=DIM, check=False)
+        assert result.returncode != 0
+        assert "did not create it and will not drop it" in (result.stdout + result.stderr)
+        assert alembic_version(url) == HEAD_REVISION

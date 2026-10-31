@@ -2295,6 +2295,25 @@ scope's markers are current. The version-2 row repair and unchanged vectors
 are pinned against PostgreSQL in
 `tests/integration/test_issue_150_extraction_version_pg.py`.
 
+### Version 4 adds a derived kind: task lines (task tools)
+
+No grammar moved. Version 4 exists because the task tools added a derived
+table, `note_tasks` (migration 031), and every existing note needs its rows
+derived once; the marker is the mechanism that makes an unchanged note
+"changed" for one pass. It shares version 3's cleaner
+(`_EXTRACTION_CLEANERS[4]`), so no note is re-embedded, which
+`tests/integration/test_task_tools_pg.py` pins against PostgreSQL.
+
+In the pass, the scan computes each changed note's task lines
+(`task_scan.scan_note`) from the same raw text the body came from, and
+`_update_tasks_for_changed` replaces the rows of every changed or moved note
+right after the link rebuild, in the same transaction, each note's insert in
+its own poison savepoint (site `tasks`, the fifth). A note with no index row
+or no buffered scan is a skip that withholds, as a link skip does. Deleted
+notes need nothing: the rows cascade. The task write tools also replace one
+note's rows outside the pass, under the generation lock — see
+[task tools](tasks.md), choice 2 and T5.
+
 ### The frozen v0 cleaner is a line scanner with the regexes as its oracle
 
 `_v0_clean` must keep producing byte-identical output forever — the

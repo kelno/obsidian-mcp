@@ -37,6 +37,10 @@ COVERAGE = {
     'delete_file': [('refused', 'test_transfer_tools.py::test_delete_file_reports_a_missing_file')],
     'move_file': [('success', 'test_move_file.py::test_moves_a_file_and_creates_parents'), ('refused', 'test_move_file.py::test_an_existing_destination_is_never_replaced')],
     'delete_folder': [('success', 'test_delete_folder.py::test_removes_an_empty_folder'), ('refused', 'test_delete_folder.py::test_a_folder_with_content_is_never_removed')],
+    'list_tasks': [('success', 'test_task_tools.py::test_list_tasks_success_shape'), ('refused', 'test_task_tools.py::test_list_tasks_refuses_an_unsupported_global_query')],
+    'create_task': [('success', 'test_task_tools.py::test_create_appends_the_dialog_line_in_canonical_order'), ('refused', 'test_task_tools.py::test_create_refuses_a_missing_note_other_than_the_inbox')],
+    'edit_task': [('success', 'test_task_tools.py::test_postpone_sets_scheduled'), ('refused', 'test_task_tools.py::test_edit_recurring_is_refused')],
+    'set_task_status': [('success', 'test_task_tools.py::test_done_adds_done_date_and_changes_only_that_line'), ('refused', 'test_task_tools.py::test_recurring_task_is_refused')],
 }
 
 
@@ -44,7 +48,7 @@ def test_every_registered_tool_has_inventory_and_live_behavioral_references():
     from src.mcp_server.server import mcp
     registered = {tool.name for tool in mcp._tool_manager.list_tools()}
     assert set(COVERAGE) == registered
-    assert len(registered) == 28
+    assert len(registered) == 32
     root = Path(__file__).resolve().parents[1]
     inventory = (root / 'openspec/changes/archive/2026-09-06-typed-tool-outcomes/inventory.md').read_text()
     for tool, references in COVERAGE.items():

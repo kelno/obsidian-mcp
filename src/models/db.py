@@ -630,6 +630,57 @@ class NoteLink(Base):
     )
 
 
+# Migration 031's ownership marker for `note_tasks`, mirrored here so `alembic
+# check` compares it. Keep byte identical to `MARKER` in
+# `alembic/versions/031_note_tasks.py`.
+_NOTE_TASKS_TABLE_MARKER = "task lines and near misses per note (031_note_tasks)"
+
+#: `note_tasks.kind`: a line the Tasks plugin reads as a task, or one that
+#: looks like a task but may not be one (`task_scan` names the reason).
+NOTE_TASK_KINDS = ("task", "problem")
+
+
+class NoteTask(Base):
+    """One task line (or near miss) of an indexed note (migration 031).
+
+    Derived data, written by the index pass in the same transaction as the
+    note's links and keyword vector, and by the task tools for the one note
+    they just wrote. It stores the line's **text**, not its meaning: status
+    types, the global filter and "today" come from the owner's Tasks settings
+    and the clock, so `list_tasks` parses the lines at query time and a
+    settings change needs no reindex. See docs/architecture/tasks.md.
+
+    Owner scoping goes through `note_id` → `notes_metadata.user_id`, as
+    `note_links` does; the cascade removes a note's rows with the note (prune,
+    quarantine, provenance discard, user deletion).
+    """
+
+    __tablename__ = "note_tasks"
+
+    _TABLE_MARKER: ClassVar[str] = _NOTE_TASKS_TABLE_MARKER
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    note_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("notes_metadata.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # 1-based over the whole file, frontmatter included: the editor's and the
+    # Obsidian CLI's `path:line`.
+    line_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    line: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('task', 'problem')", name="ck_note_tasks_kind"),
+        CheckConstraint("line_number >= 1", name="ck_note_tasks_line_number"),
+        # Also the index every per-note read and delete uses.
+        UniqueConstraint("note_id", "line_number", name="uq_note_tasks_note_line"),
+        {"comment": _NOTE_TASKS_TABLE_MARKER},
+    )
+
+
 class OAuthClient(Base):
     """One RFC 7591 dynamic registration.
 

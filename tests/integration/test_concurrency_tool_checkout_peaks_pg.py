@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import re
 from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
@@ -219,7 +220,21 @@ CALLS = [
     ('request_download', 'request_download_impl', lambda s: (('f.bin',), {})),
     ('import_from_url', 'import_from_url_impl',
      lambda s: (('https://fixture.example/source', 'import.bin'), {})),
+    # The task tools: create_task makes the inbox, and the next two act on
+    # the line it wrote, whose bytes (and so whose hash) are known up front.
+    ('list_tasks', 'list_tasks_impl', lambda s: ((), {})),
+    ('create_task', 'create_task_impl', lambda s: (('peaks task',), {})),
+    ('edit_task', 'edit_task_impl',
+     lambda s: (('Tasks inbox.md', 1, '- [ ] peaks task', _hash('- [ ] peaks task\n')),
+                {'due': '2026-11-01'})),
+    ('set_task_status', 'set_task_status_impl',
+     lambda s: (('Tasks inbox.md', 1, '- [ ] peaks task 📅 2026-11-01',
+                 _hash('- [ ] peaks task 📅 2026-11-01\n')), {'status': 'done'})),
 ]
+
+
+def _hash(text_: str) -> str:
+    return 'sha256:' + hashlib.sha256(text_.encode('utf-8')).hexdigest()
 
 
 def test_the_call_table_covers_every_registered_tool():

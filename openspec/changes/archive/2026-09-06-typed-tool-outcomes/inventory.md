@@ -298,6 +298,25 @@ Each entry identifies every direct return branch. PROPAGATE means classify at th
 - **REFUSE fetch_refused** for `SSRFError` and for a non-text `Content-Type` (checked before the body is read); **size_limit** for `TooLarge` (declared or streamed past `FETCH_PAGE_MAX_BYTES`); **transfer_timeout** for `Timeout`.
 - **SUCCESS — no outcome marker**: the page in `content`/`title` beside the fixed untrusted-content `notice`.
 
+### list_tasks_impl — src/mcp_server/tools.py (added after #263, typed from the start)
+- Structured result (`TaskListResult`): every outcome rides on `_body_outcome`, and the admission gate's refusal is mapped through `refusal_result=_task_list_refusal`.
+- **REFUSE invalid_argument** for `limit` outside 1..500, an unknown `sort` or `status`, an unknown or ambiguous `area`, a date or query line the tools cannot apply (`QueryError`, including an unsupported line in the plugin's global query); **task_settings_invalid** for a Tasks settings file that cannot be applied or an unknown `TASKS_TIMEZONE`.
+- **SUCCESS — no outcome marker**: `tasks`, `problems`, `stale`, `query` (an empty list is a success).
+
+### create_task_impl — src/mcp_server/tools.py (added after #263, typed from the start)
+- Structured result (`TaskWriteResult`), `refusal_result=_task_write_refusal`.
+- **PROPAGATE** write permission, precondition syntax and ladder, leaf state, `_note_size_error` and `_confirmed_publication` outcomes; in-call conflict as **concurrent_write**.
+- **REFUSE not_found** for a missing note other than the inbox (or the inbox with a heading); **invalid_argument** for bad arguments, an unknown area, a description that reads back differently or holds a field emoji; **content_unsafe** for an unclosed indented fence, a line that would not be a task where it lands, a non-UTF-8 note; **selector_unresolved** for the heading; **task_settings_invalid**; **validation_failed** / **io_failure** / **already_exists** as for `create_note`.
+- **SUCCESS — no outcome marker**: the written line, its `ref`, the new `content_hash`, `indexed`.
+
+### edit_task_impl — src/mcp_server/tools.py (added after #263, typed from the start)
+- As `create_task_impl` for the shared ladder. **REFUSE line_mismatch** (line out of range or not `expected_line`), **not_a_task** (not a task, or a line a rewrite would damage), **recurring_task**, **invalid_argument** (nothing to change, bad field, read-back mismatch).
+- **SUCCESS — no outcome marker**: `changed` false with nothing written when the line would not change.
+
+### set_task_status_impl — src/mcp_server/tools.py (added after #263, typed from the start)
+- As `edit_task_impl`; **REFUSE recurring_task** for any `🔁` task before anything is computed; **invalid_argument** for an unknown status or symbol.
+- **SUCCESS — no outcome marker**: `removed` true when `🏁 delete` removed the line; `changed` false when the status is identical.
+
 ## Shared/nested helper inventory
 
 ### _confirmed_publication — tools.py:706

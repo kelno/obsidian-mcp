@@ -122,6 +122,10 @@ BODY_CODES = frozenset({
     "unsupported_filesystem", "io_failure", "index_not_ready",
     "transfer_unavailable", "credential_unusable", "fetch_refused",
     "transfer_busy", "transfer_timeout", "partial_completion", "publication_uncertain",
+    # Task tools (fork): the caller's `line` does not hold `expected_line`; the
+    # line is not a task the plugin reads; a status change on a `🔁` task; the
+    # vault's Tasks plugin settings cannot be applied.
+    "line_mismatch", "not_a_task", "recurring_task", "task_settings_invalid",
 })
 
 CODES = frozenset(
