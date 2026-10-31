@@ -238,8 +238,7 @@ all four. Base64 reads are token-heavy — prefer `list_files` first.
 `write_file` needs the bytes, and most clients cannot give a tool the bytes
 of a file the user is looking at. Four tools cover the gap:
 `request_upload(path)` returns a short-lived link bound to that one
-destination — hand it to the person, they open it and pick a file, then
-`check_upload(upload_id)` confirms the bytes landed and reports the sha256.
+destination. If the file is in your own shell or code sandbox (a file attached in the chat often is), upload it yourself with the `curl` line the tool gives; otherwise hand the link to the person, they open it and pick a file. Then `check_upload(upload_id)` confirms the bytes landed and reports the sha256.
 `request_download(path)` returns the mirror image, a link the person can
 save one vault file from. `import_from_url(url, path)` pulls a public https
 asset straight in without it passing through the conversation. Transfer

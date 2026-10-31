@@ -1115,11 +1115,11 @@ async def request_upload(
     Peer to `write_file`, which takes the bytes directly — use this one when you
     do not have them.
 
-    No MCP client can hand a tool the bytes of a file the user is looking at,
-    and your shell cannot reach their machine. This mints a link bound to
-    exactly one destination path: hand it to the person you are helping, they
-    open it and pick a file, and it lands at `path`. Nothing else can be
-    written with it.
+    No MCP client can hand a tool the bytes of a file the user is looking at. This mints a link bound to exactly one destination path: whatever is uploaded through it lands at `path`, and nothing else can be written with it.
+
+    **If the file is already in your own shell or code sandbox** — a file the user attached in the chat often is — upload it yourself with the `curl` line below instead of asking the person. If the sandbox's proxy refuses this server (for example a 403 on CONNECT), its hostname is not in the sandbox's network allowlist: the person can add it in their client's settings (claude.ai: Settings → Capabilities → "Additional allowed domains"), and until then, hand them the link.
+
+    Otherwise your shell cannot reach their machine: hand the link to the person you are helping, they open it and pick a file.
 
     The token lives in the URL's `#` fragment, which browsers never send to a
     server, so it stays out of access logs. **Treat the whole URL as a secret**
@@ -1132,7 +1132,7 @@ async def request_upload(
     silently undo an edit someone made while it was waiting.
 
     From a shell you can upload without the page:
-    `curl -H "Authorization: Bearer <token>" -T <file> <base>/transfer/upload`.
+    `curl -H "Authorization: Bearer <token>" -T <file> <base>/transfer/upload`, where `<token>` is the part of the link after `#` and the URL is the link without it.
 
     Then call `check_upload(upload_id)` to confirm the bytes landed and get
     their sha256. See `get_vault_guide` for how files fit into the vault.

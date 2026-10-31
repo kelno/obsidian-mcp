@@ -1,5 +1,7 @@
 # Fork notes
 
+What this note is for: tell agents and the owner how this fork differs from upstream and how to work on it here. Agents wrote it and the owner hasn't reviewed it yet, so don't hesitate to slash through it, restructure it or change what's here when it's wrong, outdated or in the way. (owner)
+
 This is `kelno/obsidian-mcp`, a fork of
 [`maxkuminov/obsidian-mcp`](https://github.com/maxkuminov/obsidian-mcp). It
 runs on a home server, deployed by the `obsidian_mcp` task of `sgl-pyinfra`,
@@ -22,6 +24,7 @@ Last checked against `upstream/main` at `564e9e0` (#338) on 2026-10-23.
 | `fetch_page` tool: fetch a public page under `import_from_url`'s SSRF policy and return its text (HTML → Markdown via markdownify, main content only) to the agent in structured fields marked untrusted; new deps `markdownify`, `beautifulsoup4`; setting `FETCH_PAGE_MAX_BYTES` | `4aa8987` | Not proposed yet |
 | Outbound fetches send an identifiable `User-Agent` (`OUTBOUND_USER_AGENT`); httpx's default was refused with a 403 by Wikipedia | `e20e5cd` | Not proposed yet |
 | Tests pass on Windows checkouts and outside UTC: `.gitattributes` keeps `*.sh` LF; `test_a_naive_expires_at_does_not_raise` builds its naive time in UTC | `f81f2c8`, `9cccebd` | [#342](https://github.com/maxkuminov/obsidian-mcp/pull/342), open |
+| `request_upload` (description, result text) and the vault guide tell an agent that has the file in its own shell or code sandbox, such as a chat attachment, to upload it itself with `curl`; the README gives the claude.ai setup step (the server's hostname in the sandbox's allowed domains) | not committed yet | Not proposed yet |
 | `image-no-tests` workflow: builds and publishes the image on every push to `main`, without the test suite | `4ee2d8a`, `8f540b4` | Fork-only, never proposed |
 
 Upstream's `ci.yml` and `image.yml` are disabled in this fork's Actions

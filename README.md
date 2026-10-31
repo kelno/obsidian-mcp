@@ -350,7 +350,7 @@ redeemed over the public `/transfer/*` routes.
 - `request_upload(path, overwrite=False, expires_in?)`, mints a
   single-use link bound to exactly one destination path. The human
   opens it, picks a file, and it lands at `path` — nothing else can be
-  written with it.
+  written with it. An agent that has the file in its own shell or code sandbox (a file attached in a claude.ai chat, for example) redeems the link itself with `curl`; on claude.ai that needs the setup step in [Connect a client](#4-connect-a-client).
 - `check_upload(upload_id)`, reports `pending` / `uploading` /
   `completed` (with path, size, sha256 and MIME) / `unknown` (a stream
   started and the server never recorded how it ended — read the path
@@ -807,6 +807,8 @@ claude mcp add obsidian --transport http \
   --url "https://obsidian-mcp.<your-domain>/mcp" \
   --header "Authorization: Bearer omcp_..."
 ```
+
+For claude.ai, so that an agent can file what the user attaches in a chat: the chat's code sandbox only reaches allowlisted hosts. In claude.ai, go to Settings → Capabilities → "Code execution and file creation", turn on network egress and add the server's hostname (`obsidian-mcp.<your-domain>`) under "Additional allowed domains". The setting is per account. The agent then uploads from the sandbox with `request_upload` and `curl`; without it, the sandbox's proxy refuses the host and the user has to pick the file again on the upload page.
 
 The first thing any agent should do in a new session is call
 `get_vault_guide()`. That's how it learns your folder structure,
