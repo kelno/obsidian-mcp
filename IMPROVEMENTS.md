@@ -340,6 +340,19 @@ Small items that don't need their own roadmap section but are worth doing:
   Dockerfile install from it instead of the loose `requirements.txt`. (A prior
   `requirements-lock.txt` was a stray host `pip freeze` and has been removed.)
 
+- **`move_note` with `rewrite_links=True` should publish the moved note once.**
+  Today it renames, then rewrites the moved note's own body a moment later.
+  Any device whose Obsidian touches new files (Templater's new-file trigger
+  did, until it was disabled on 2026-11-01) re-stamps the renamed file in
+  between, and the second write lands as a Syncthing conflict. Apply the
+  body rewrite before the rename (stage the rewritten bytes, publish them at
+  the destination in one `renameat2`), so a move is a single version change.
+  Same reasoning for any create-then-edit pair a tool does internally.
+- **Skip `*.sync-conflict-*` files in the indexer and `list_tasks`.** Syncthing
+  conflict copies are stale duplicates; today they get indexed and their
+  checkboxes show up as real tasks (seen 2026-11-01). Treat the name pattern
+  like a hidden file: not indexed, not listed, still readable by path.
+
 **Effort.** ½ day across the lot.
 
 ---
