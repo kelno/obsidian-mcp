@@ -197,6 +197,8 @@ wikilink to a vault note titled `NodeName`.
   - [ ] Subtask
 ```
 
+Vaults that use the Tasks plugin keep tasks as checkbox lines in its emoji format (`- [ ] Pay rent 📅 2026-11-05`). List them with `list_tasks`, and add or change them with `create_task`, `edit_task` and `set_task_status` rather than writing the line yourself: the tools follow the vault's own Tasks settings. If the vault sets a global filter (a marker every task carries, such as `#task`), the tools add it themselves; don't put it in the description. A checkbox without it is then an ordinary checkbox, not a task.
+
 ## Plugin syntax (Dataview, Templater, etc.)
 
 Notes may contain plugin syntax that looks executable:
