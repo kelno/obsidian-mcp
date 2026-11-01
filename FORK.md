@@ -28,6 +28,7 @@ Last checked against `upstream/main` at `564e9e0` (#338) on 2026-10-23.
 | The index walk skips Syncthing conflict copies (`*.sync-conflict-*`) like dot-files, so their checkboxes never show up as tasks; the vault guide's primer says to manage tasks with the task tools, which add the vault's global filter themselves | `55e1d79`, `0bb51d1` | Fork-only, never proposed |
 | `CLAUDE.md` / `AGENTS.md` no longer point to upstream's machine-local `~/.claude/rules/engineering-workflow.md` (OpenSpec flow, Codex audit gates); the review budget, the adversarial review of write-tool changes and the end-to-end check stay as repo rules | `d9cf6cf` | Fork-only, never proposed |
 | `request_upload` (description, result text) and the vault guide tell an agent that has the file in its own shell or code sandbox, such as a chat attachment, to upload it itself with `curl`; the README gives the claude.ai setup step (the server's hostname in the sandbox's allowed domains) | `054a0c9` | Not proposed yet |
+| `get_vault_guide`'s first line tells agents to read it before any other tool (claude.ai shows only about 80 characters of a description); `CLAUDE.md` records the design assumption that agents read the guide and every tool's first line stands on its own | `1bbbf61` | Not proposed yet |
 | `image-no-tests` workflow: builds and publishes the image on every push to `main`, without the test suite | `4ee2d8a`, `8f540b4` | Fork-only, never proposed |
 
 Upstream's `ci.yml` and `image.yml` are disabled in this fork's Actions
