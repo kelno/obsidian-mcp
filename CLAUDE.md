@@ -75,6 +75,12 @@ hostnames) must stay out of tracked files. The mechanism:
 `make help` lists the rest. Deployment detail lives in `DEPLOYMENT.md`, the
 user-facing documentation in `README.md`.
 
+## Git
+
+Agents commit in this repo freely, without asking the owner first: branches, commits, rebases of unpushed work. This is an exception to the owner's general rule of leaving work uncommitted, so that a finished change lands as a reviewable commit.
+
+Agents never push. A push to `main` builds the image and deploys it (see `FORK.md`), so pushing is the owner's decision, every time.
+
 ## Review and checks
 
 **Review budget:** triage adversarial findings on plausible input and real impact, accepted limitations recorded in the relevant architecture note rather than polished away, and say which findings were declined. Rigor on what matters; ship in a day what can ship in a day.
