@@ -150,6 +150,7 @@ Recorded so they are never mistaken for the owner's rules; each can be changed.
 | T7 | A year `0000` date is invalid here and valid to moment.js. | No real task has one. |
 | T8 | CommonMark HTML block type 7 (any complete tag alone on a line) is not recognised. | Cannot interrupt a paragraph; rare in notes. |
 | T9 | Recurrence is not implemented: recurring tasks are read but not changed. | Owner's decision for the first version. |
+| T10 | A task write to a note the index does not know yet (the inbox, just created by `create_task`) cannot update the task rows at once: they hang off the note's `notes_metadata` row, which only the index pass creates. The result says `indexed: false` with the reason, and the task is listed after the next pass. | Creating the note's row outside the pass would bypass the indexer's ordering and stale-row rules; it only affects the first write to a new note. Change 2 narrows it to seconds. Found in the live check, 2026-11-01. |
 
 ## Refusal codes added
 
