@@ -365,6 +365,7 @@ update it in the same change.** What stays here is the short list:
   mount is not detected (L1) — see
   [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
 - Wikilink graph extracted from note bodies into `note_links`; resolved at index time with same-folder-first preference
+- **Agents read the guide** (fork, owner's design assumption). `get_vault_guide` is the agent's manual; an agent that skips it is a bug to fix (in the guide's description or the client's setup), not a case to design around. claude.ai shows an agent only about the first 80 characters of a tool's description until it searches its tools, so every tool's first line must stand on its own, and the guide's must say to read it first.
 - `MCP_SANDBOX_MODE=true` is a registry-eval-only switch: lifespan skips `_check_embedding_dim` and the indexer, and `APIKeyMiddleware` bypasses auth on `/mcp/*`. Lets Glama's sandbox build the image and validate MCP introspection without external deps. Never enable in production — tools register but cannot run.
 
 ## MCP tools

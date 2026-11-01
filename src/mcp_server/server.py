@@ -596,7 +596,9 @@ async def edit_note(
 
 @mcp.tool()
 async def get_vault_guide() -> str:
-    """Returns a two-part guide for working with this Obsidian vault:
+    """Read first, before other tools: how to use these tools, and this vault's rules.
+
+    Returns a two-part guide for working with this Obsidian vault:
 
     1. **Obsidian primer** — generic syntax (wikilinks, embeds, block refs,
        heading refs, tags, frontmatter, callouts, comments, highlights,
