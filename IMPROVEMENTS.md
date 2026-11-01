@@ -348,10 +348,6 @@ Small items that don't need their own roadmap section but are worth doing:
   body rewrite before the rename (stage the rewritten bytes, publish them at
   the destination in one `renameat2`), so a move is a single version change.
   Same reasoning for any create-then-edit pair a tool does internally.
-- **Skip `*.sync-conflict-*` files in the indexer and `list_tasks`.** Syncthing
-  conflict copies are stale duplicates; today they get indexed and their
-  checkboxes show up as real tasks (seen 2026-11-01). Treat the name pattern
-  like a hidden file: not indexed, not listed, still readable by path.
 
 **Effort.** ½ day across the lot.
 

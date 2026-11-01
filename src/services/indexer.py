@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -1786,6 +1787,21 @@ def _warn_not_indexable(rel: str, reason: str) -> None:
     )
 
 
+#: Syncthing's name for the losing side of a conflict:
+#: `<stem>.sync-conflict-<YYYYMMDD>-<HHMMSS>-<device id prefix>.<ext>`.
+_SYNC_CONFLICT_NAME = re.compile(r"\.sync-conflict-\d{8}-\d{6}-[A-Z0-9]+(\.|$)")
+
+
+def is_sync_conflict_copy(name: str) -> bool:
+    """Whether `name` (a file name, not a path) is a Syncthing conflict copy.
+
+    Fork: such copies are stale duplicates of a note, so the walk skips them
+    like a dot-file: not indexed, so not searched or listed (their checkboxes
+    would otherwise show up as real tasks), and still readable by path.
+    """
+    return _SYNC_CONFLICT_NAME.search(name) is not None
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # The anchored, read-only walk
 # ══════════════════════════════════════════════════════════════════════════
@@ -1828,6 +1844,8 @@ def discover_markdown_files_at(
     rather than by a library's traversal habit:
 
     - dot-directories are skipped (`.obsidian`, `.git`, `.trash`, `.smart-env`);
+    - Syncthing conflict copies (`*.sync-conflict-*`) are skipped (fork, see
+      `is_sync_conflict_copy`);
     - directory symbolic links are **not** descended — `O_DIRECTORY |
       O_NOFOLLOW` per descent, and the resulting `ELOOP`/`ENOTDIR` is a
       deliberate non-descent, **not** a skip;
@@ -1896,7 +1914,7 @@ def discover_markdown_files_at(
                 finally:
                     os.close(child_fd)
                 continue
-            if not name.endswith(".md"):
+            if not name.endswith(".md") or is_sync_conflict_copy(name):
                 continue
             yield DiscoveredFile(rel=rel, parent_fd=parent_fd, name=name)
 
@@ -1916,7 +1934,8 @@ def discover_markdown_files(vault: Path) -> dict[str, Path]:
     decides what `notes_metadata.file_path` holds — which the write tools must
     agree with. Two properties matter:
 
-    - dot-directories are skipped (`.obsidian`, `.git`, `.trash`, …);
+    - dot-directories and Syncthing conflict copies are skipped (`.obsidian`,
+      `.git`, `.trash`, `Note.sync-conflict-….md`, …);
     - directory symbolic links are **not** descended, so a note under a
       symlinked folder is discovered once, at its real path (`Real/A.md`),
       never at the alias (`Shared/A.md`). `open_mutable` reports that same real
