@@ -239,7 +239,7 @@ def _embed_world(monkeypatch, vault, *, backlog, sweep):
     async def current(*_a, **_k):
         return True
 
-    async def budget(*_a, **_k):
+    def budget(*_a, **_k):
         return indexer.EmbedBudget()
 
     monkeypatch.setattr(indexer, "_embedding_generation_current", current)

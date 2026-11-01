@@ -385,6 +385,14 @@ class Settings(BaseSettings):
     # enumeration) at which `/health` reports `degraded` and the CRITICAL
     # "manual intervention required" line is logged once (#308, D4).
     indexer_degraded_after_failures: int = Field(3, ge=1)
+    # Seconds without indexer progress (a tick starting or finishing, an index
+    # stage finishing, or a paused tick) after which `/health` reports
+    # `index_stalled` and `degraded`, and one CRITICAL line is logged when
+    # `/health` is read. Catches a stage that does not return rather than one
+    # that fails. The sleep between ticks is not counted, so any interval is
+    # safe; a healthy single-scope tick is the index stage plus at most the
+    # embed time budget and one note. 0 disables the check.
+    indexer_stalled_after_seconds: int = Field(1800, ge=0)
     # How many times one invocation of an index pass may roll back and re-run
     # a scope after quarantining a poison note (#308, D3). Beyond it the pass
     # fails as an ordinary failure; the notes already quarantined stay so.
@@ -418,14 +426,13 @@ class Settings(BaseSettings):
     # infinite-loop guard turns the equal case from a hang into a quiet
     # catastrophe, which is not the same as making it sane.
     chunk_overlap: int = Field(0, ge=0)
-    # Per-user bounds on one pass's *embed stage*, so one tenant's backlog
-    # cannot hold every later tenant's new and edited notes out of the index.
-    # `0` disables either. Both are checked only at a note boundary, after at
-    # least one note, and **only when the pass serves more than one active user
-    # scope** — in single-user mode, and in a multi-user deployment with one
-    # active user, there is no other tenant to be fair to and a budget would
-    # turn a first index of a few thousand notes into several passes separated
-    # by five-minute sleeps for no benefit.
+    # Per-user bounds on one pass's *embed stage*, so a backlog cannot hold new
+    # and edited notes out of the index — another tenant's, or the same
+    # scope's own, since the next index stage runs only after this stage
+    # returns. `0` disables either. Both are checked only at a note boundary,
+    # after at least one note, on every deployment, one scope included. A stop
+    # starts the next tick after a few seconds instead of the interval, so a
+    # large backlog drains at full speed with an index stage between slices.
     #
     # The chunk budget debits chunks *submitted* to the provider, never chunks
     # stored: a budget debited by stored chunks is not debited at all when the
@@ -439,6 +446,13 @@ class Settings(BaseSettings):
     embed_chunk_budget_per_user: int = Field(5000, ge=0)
     # 300 s matches one `INDEX_INTERVAL_SECONDS`.
     embed_time_budget_seconds_per_user: int = Field(300, ge=0)
+    # Notes in a row that fail at the embedding provider before the embed
+    # stage stops for this pass (at a note boundary). Every further note would
+    # only wait out the same failure, holding the next index stage back, and a
+    # server that does not cancel abandoned requests keeps computing each one.
+    # A note refused as too large does not count. The failures are recorded as
+    # usual; the rest of the backlog is retried next pass. 0 disables.
+    embed_stop_after_provider_failures: int = Field(3, ge=0)
     # Wall-clock bound on observing ONE vault root during overlap detection —
     # the `os.open` + `os.fstat` + `os.path.realpath` in
     # `src/services/vault_overlap.py`. Vault roots are bind mounts, and a

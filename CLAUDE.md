@@ -325,9 +325,10 @@ update it in the same change.** What stays here is the short list:
   failures and incomplete re-derives, a tick-level enumeration counter and
   "task not running", updated from **every** entrypoint (startup, periodic in
   both modes, panel Reindex). Any counter at `INDEXER_DEGRADED_AFTER_FAILURES`
-  (3), a dead task or a quarantined note makes `/health` `status: "degraded"`
-  — counts only, no path/error/user id — and logs one CRITICAL, re-armed on
-  reset. Never turn it into a non-200: `/health` is the liveness probe, and a
+  (3), a dead task, a quarantined note or a stalled loop (no index stage or
+  tick finished for `INDEXER_STALLED_AFTER_SECONDS`, 1800, fork) makes
+  `/health` `status: "degraded"` — counts only, no path/error/user id — and
+  logs one CRITICAL, re-armed on reset. Never turn it into a non-200: `/health` is the liveness probe, and a
   restart cannot fix vault content. In single-user mode an index failure no
   longer skips the embed stage, and `cleanup_expired_tokens` runs in the
   tick's `finally`. A note whose own write fails with SQLSTATE class 22 or
@@ -363,6 +364,16 @@ update it in the same change.** What stays here is the short list:
   (`src/services/empty_prune.py`) taken by the scope's next pass either way.
   The provenance discard is the stated exception. A wrong but non-empty
   mount is not detected (L1) — see
+  [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
+- **The embed stage cannot hold the index stage back** (fork, 2026-11-01).
+  The next index stage runs only after the embed stage returns, so an
+  unbounded embed stage freezes keyword search and the link graph (1h50 on
+  2026-11-01). The `EMBED_*_BUDGET_PER_USER` budget therefore applies to a
+  single scope too, and a budget stop re-ticks after
+  `EMBED_BACKLOG_RETICK_SECONDS` (5) instead of the interval; the stage also
+  stops after `EMBED_STOP_AFTER_PROVIDER_FAILURES` (3) notes in a row fail at
+  the provider, and the loop then waits the ordinary interval. Do not restore
+  the "only with more than one scope" clause. See
   [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
 - Wikilink graph extracted from note bodies into `note_links`; resolved at index time with same-folder-first preference
 - **Agents read the guide** (fork, owner's design assumption). `get_vault_guide` is the agent's manual; an agent that skips it is a bug to fix (in the guide's description or the client's setup), not a case to design around. claude.ai shows an agent only about the first 80 characters of a tool's description until it searches its tools, so every tool's first line must stand on its own, and the guide's must say to read it first.

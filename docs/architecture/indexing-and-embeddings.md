@@ -1621,15 +1621,22 @@ already sits.
   user's pass has completed, so a tenant whose very first note exceeds the
   whole budget still advances by one note per pass instead of zero for ever.
   Without this clause a small budget is a livelock.
-- **Only when the pass serves more than one scope** (`_active_scope_count`, and
-  `enforced` is `scopes > 1`). In single-user mode, and in a multi-user
-  deployment with one active user, there is no other tenant to be fair to; a
-  budget there would spread a first index of 2,577 notes over several
-  five-minute-spaced passes for no benefit and would look like a stall. This
-  clause is what keeps the default deployment's behaviour identical to today's.
-  A *failed* scope count returns 1 and leaves the pass unbudgeted, which is the
-  safe direction: a bookkeeping query that fails must not start stopping
-  tenants short.
+- **On every deployment, one scope included** (fork, 2026-11-01). It used to
+  be enforced only when the pass served more than one scope, on the grounds
+  that a single scope has no other tenant to be fair to. That missed the
+  tenant it was starving: the scope's *own* next index stage, which runs only
+  after the embed stage returns. On 2026-11-01 a single-user embed pass ground
+  through 208 notes against an overloaded embedding server (an
+  OpenAI-compatible gateway in front of a CPU-bound Ollama) for about 1h50, and
+  for all of it no index stage ran — keyword search, backlinks and
+  `get_recent` stayed at 16:39 while `read_note` saw every edit. The cost the
+  old clause avoided, a first index spread over five-minute-spaced passes, is
+  removed rather than accepted: a budget stop reports `EmbedStop.BUDGET`
+  (`EmbedPassResult.stopped`), `record_embed_outcome` notes it, and
+  `run_indexer_loop` starts the next tick after `EMBED_BACKLOG_RETICK_SECONDS`
+  (5) instead of the interval. A large backlog therefore drains at the same
+  speed as before, in 300 s slices with an index stage between them. The scope
+  count (`_active_scope_count`) is gone with the clause.
 - **A stop is not a failure and writes nothing to `error`.** It is a deliberate
   decision, the same class of event as a pause, and writing it into
   `indexer_runs.error` would fire #201's own outage signal on a healthy server.
@@ -1655,6 +1662,107 @@ already sits.
   committing a partial derive — which A.7a exists to forbid — or discarding the
   whole pass's work. The starvation #202 measured was the embed stage's; the
   scoping is recorded rather than implied.
+
+### The embed stage stops when the provider is down (fork, 2026-11-01)
+
+`EMBED_STOP_AFTER_PROVIDER_FAILURES` (3; `0` disables) ends the embed stage
+before the next provider call once that many notes **in a row** have failed at
+the provider. It lives on `EmbedBudget` (`record_provider_result`,
+`provider_unavailable`, `stop_for_provider`) so the backlog and the sweep share
+one streak. The rules below came out of the adversarial review; each closes a
+way the stop recreated the incident it exists to prevent.
+
+- **Why the budget alone is not enough.** Against a failing provider the time
+  budget still lets a stage spend 300 s plus one note per tick on calls that
+  will fail, and a server that does not cancel abandoned requests (Ollama, and
+  Open WebUI in front of it) keeps computing every one the client gave up on.
+  Pressing on is what kept that server at full CPU in the 2026-11-01 incident,
+  which made every later request slower and more likely to fail.
+- **What counts.** `PROVIDER_FAILED` and `PROVIDER_CARDINALITY_MISMATCH` from a
+  note that sent chunks. `ProviderInputTooLarge` is the note's fault, not the
+  provider's, and neither counts nor resets. `EMBEDDED` and
+  `GENERATION_MISMATCH` reset (the provider answered). A note that sent
+  nothing — zero chunks, or every chunk reused — is neutral. An exception that
+  escapes `embed_note` (a database error, `StaleCertification`) is neutral:
+  it says nothing about the provider.
+- **Notes that failed before are tried last** (`_embed_failed_notes`, per
+  scope, keyed by note id and content hash, in process). Some notes fail on
+  every attempt with a healthy provider — an input the model server errors on,
+  a note slower than one request's timeout. The backlog is ordered newest
+  first and successes leave it, so after a pass or two those notes are its
+  head, and three of them would trip the stop at the start of every pass with
+  nothing behind them ever tried. Tried last, they stop a stage only when
+  nothing healthy is left. Edited or embedded notes drop out of the set at the
+  next stage. A down provider still stops within three *fresh* notes.
+- **It is checked just before a provider call, not at the head of a note.**
+  Three failures that end the backlog are therefore not a stop, the record does
+  not claim one, and the exclusion sweep that follows still does everything
+  that needs no call — above all deleting a newly excluded note's vectors —
+  and can complete. Checked at the head, an inherited streak stopped the sweep
+  at its first row on every pass, and newly excluded notes kept answering
+  `semantic_search`.
+- **The streak carries over between stages** (`_provider_failure_streaks`), and
+  a stage needs one provider result of its own before it can stop. A time
+  budget shorter than three failing notes (one failing note ≥ 100 s, which a
+  slow-CPU timeout sized per FORK.md reaches) used to end every stage as a
+  budget stop with the streak below the limit, reset it, and re-tick every 5 s
+  for ever. Carried over, the third failure lands in the next stage; and that
+  stage always probes one note, so a provider that has recovered is found.
+- **At a boundary where the budget and the streak both ran out, the provider
+  stop wins,** and a budget stop whose stage ended with a non-zero streak does
+  not re-tick promptly (`EmbedPassResult.provider_failure_streak`). Either
+  would otherwise re-tick in 5 s against a failing provider. A budget check
+  later in the same stage (the sweep) never overwrites
+  `EmbedStop.PROVIDER_FAILURES` with `BUDGET`.
+- **It is a failure, unlike a budget stop.** The failures were recorded as
+  always; `failure_summary` adds that the stage stopped, so the run row says
+  the rest was not tried. It logs one ERROR naming how many notes or sweep rows
+  were left. The loop waits the **ordinary** interval afterwards.
+
+Accepted limitations (review findings declined, owner's review budget):
+
+- **A panel-started stage does not shorten the loop's current sleep.** A budget
+  stop in the panel's Reindex now or after reset-embeddings is noted, but the
+  loop reads the note only when its sleep ends, so the rest of that backlog
+  waits up to one interval, and a clean tick after it may be followed by one
+  extra 5 s re-tick. An `asyncio.Event` would fix both; not worth the change.
+- **Progress lines are emitted at note boundaries** (every 50 notes or 60 s,
+  whichever first), so one slow note prints nothing until it ends, and the
+  exclusion sweep has no progress line.
+- **The re-tick note is global.** In multi-user mode one tenant's budget stop
+  re-ticks every tenant; each tenant's stage still carries its own streak.
+- **One note can still hold `index_pass_lock` for a long time** (L4 above):
+  `MAX_CHUNKS_PER_NOTE` ÷ batch size × the per-request timeout. The 8.3 h
+  figure assumes batch 1 at 30 s; a slow-CPU sizing (batch 2, 120 s) gives
+  about 17 h of failing calls, or hours of successful ones. The stall signal
+  below reports it.
+
+### `/health` reports a stalled loop, not only a failing one (fork, 2026-11-01)
+
+Every #308 counter moves when a stage *returns*. A stage that does not return
+moves none of them, which is how `/health` said `ok` for the whole 1h50
+incident. `indexer_health.record_loop_progress()` stamps the loop's progress
+when a tick starts, when an index stage finishes (`record_index`, either
+outcome), when a tick finishes (`_record_index_run`, either outcome) and when
+a tick is skipped by the pause; `record_loop_idle()` before the sleep stops
+the clock until the next tick starts, so an `INDEX_INTERVAL_SECONDS` longer
+than the threshold is not a stall. If no stamp has happened for
+`INDEXER_STALLED_AFTER_SECONDS` (1800; `0` disables) outside a sleep,
+`snapshot()` reports `index_stalled: true`, `degraded`, and
+`seconds_since_progress`, and logs one CRITICAL line per episode (re-armed by
+the next stamp). **The check runs when `/health` is read**: a deployment
+whose `/health` nobody polls never logs the CRITICAL line. Before the first
+stamp the clock runs from process start, so a startup pass that never returns
+is caught too. A dead task or a disabled indexer is not a stall; each has its
+own signal.
+
+The per-scope stamp is what keeps a long multi-user tick from reading as a
+stall: only one scope's own pass exceeding the threshold does. With the
+budget now on a single scope, a healthy tick is the index stage plus at most
+the time budget and one note, well under 30 minutes (the sleep is not
+counted). The
+residual case is one note whose provider calls alone exceed the threshold
+(the L4 arithmetic above); that is reported as a stall, which is what it is.
 
 ## The settings fingerprints (#206, migration 023)
 

@@ -263,10 +263,12 @@ List-valued settings: `TRUSTED_PROXY_IPS`, `FTS_CONFIGS` and
 | `INDEX_STAT_SHORTCUT` | `true` | Skip unchanged files by `(size, mtime, ctime, inode)`. **Set `false` for NFS, SMB, FUSE or FAT vault volumes.** |
 | `INDEX_FULL_HASH_INTERVAL_HOURS` | `24` | Backstop full-hash pass. One also runs at startup and on panel Reindex. |
 | `INDEXER_DEGRADED_AFTER_FAILURES` | `3` | Consecutive failed index, embedding or re-derive passes before `/health` reports `degraded`. |
+| `INDEXER_STALLED_AFTER_SECONDS` | `1800` | Seconds without an index stage or tick finishing before `/health` reports `index_stalled` (degraded). `0` disables. |
 | `INDEXER_QUARANTINE_RETRIES_PER_TICK` | `5` | Re-runs per user per pass while isolating notes whose database writes fail on their own data. |
 | `FTS_CONFIGS` | `english` | Postgres text-search configs for keyword search. A change needs `rebuild-tsvectors`. |
-| `EMBED_CHUNK_BUDGET_PER_USER` | `5000` | Chunks embedded per user per pass (multi-user fairness). |
-| `EMBED_TIME_BUDGET_SECONDS_PER_USER` | `300` | Seconds of embedding per user per pass. |
+| `EMBED_CHUNK_BUDGET_PER_USER` | `5000` | Chunks embedded per user per pass, so a backlog cannot hold the next index stage or another user back; a stop starts the next tick within seconds. |
+| `EMBED_TIME_BUDGET_SECONDS_PER_USER` | `300` | Seconds of embedding per user per pass, same purpose. |
+| `EMBED_STOP_AFTER_PROVIDER_FAILURES` | `3` | Notes in a row failing at the embedding provider before the embed stage stops for the pass. `0` disables. |
 | `VAULT_ROOT_OBSERVE_TIMEOUT_SECONDS` | `10` | How long the overlap check waits on one vault root before quarantining that account (multi-user). |
 
 ### Vault I/O and transfer

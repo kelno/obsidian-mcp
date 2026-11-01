@@ -55,7 +55,7 @@ from src.services.embeddings import (
     embed_note,
 )
 from src.services.fts import index_tsvector_sql
-from src.services import empty_prune, indexer_health
+from src.services import empty_prune, indexer_health, refusals
 from src.services.rate_limits import flush_expired
 from src.services.index_state import (
     KEY_EMBEDDING_FINGERPRINT,
@@ -119,6 +119,7 @@ def _record_index_run(ok: bool) -> None:
     global last_index_run_at, last_index_run_ok
     last_index_run_at = datetime.now(timezone.utc)
     last_index_run_ok = ok
+    indexer_health.record_loop_progress()
 
 
 # ── Persistent pass history (#160, migration 019) ──────────────────────────
@@ -138,6 +139,46 @@ MAX_INDEXER_RUNS = 500
 # One pass's error column is for an operator to read, not for a machine to
 # parse, and a stack of per-stage failures from a multi-user pass can be long.
 MAX_RUN_ERROR_CHARS = 4000
+
+
+#: The longest an embed stage goes without a progress line. The count-based
+#: line (every 50 notes) alone left a slow-provider pass silent for most of an
+#: hour.
+EMBED_PROGRESS_LOG_SECONDS = 60
+
+#: How long the loop waits before the next tick when an embed stage stopped at
+#: its budget with work left. Short, because the work left is work a healthy
+#: provider can do now; not zero, so the tick's housekeeping and a waiting
+#: panel action are not starved. `index_pass_lock` is FIFO, so a panel
+#: Reindex already queued still goes first.
+EMBED_BACKLOG_RETICK_SECONDS = 5
+
+#: The outcomes that count towards `EmbedBudget`'s provider-failure streak.
+_PROVIDER_DOWN_OUTCOMES = frozenset(
+    {
+        NoteEmbedOutcome.PROVIDER_FAILED,
+        NoteEmbedOutcome.PROVIDER_CARDINALITY_MISMATCH,
+    }
+)
+#: A provider refusing one note as too large says nothing about the provider.
+_INPUT_TOO_LARGE = refusals.ProviderInputTooLarge.__name__
+
+
+class EmbedStop(enum.Enum):
+    """Why an embed stage stopped before the end of its backlog, when it did.
+
+    Both stops happen between notes, like the pause, and neither is a failure
+    on its own. They differ in what the loop does next: a budget stop leaves
+    work a healthy provider can do, so the next tick starts promptly
+    (`EMBED_BACKLOG_RETICK_SECONDS`); a provider stop leaves work the provider
+    just refused, so the next tick waits the ordinary interval.
+    """
+
+    #: The chunk or time budget ran out (`EmbedBudget.exhausted`).
+    BUDGET = "budget"
+    #: `EMBED_STOP_AFTER_PROVIDER_FAILURES` notes in a row failed at the
+    #: provider (`EmbedBudget.provider_unavailable`).
+    PROVIDER_FAILURES = "provider_failures"
 
 
 @dataclass
@@ -180,6 +221,14 @@ class EmbedPassResult:
     #: and 2,000 identical "connection refused" lines say nothing the count
     #: does not already say.
     first_error: str | None = None
+    #: Set when the stage stopped before the end of its backlog or sweep;
+    #: `None` when it ran to the end (or was paused). Copied from the stage's
+    #: `EmbedBudget` once, at the end of `_embed_vault_pinned`.
+    stopped: EmbedStop | None = None
+    #: The provider-failure streak the stage ended on. A budget stop with a
+    #: non-zero streak does not re-tick promptly: the provider was failing
+    #: when the clock ran out.
+    provider_failure_streak: int = 0
 
     def record_attempt(self) -> None:
         """One note issued a provider call. The only writer of `attempted`."""
@@ -243,15 +292,24 @@ class EmbedPassResult:
         if not self.failures:
             return None
         if self.failures > self.attempted:
-            return (
+            summary = (
                 f"embed failures: {self.failures} "
                 f"({self.attempted} provider call(s) issued) — "
                 f"first: {self.first_error}"
             )
-        return (
-            f"embed failures: {self.failures} of {self.attempted} — "
-            f"first: {self.first_error}"
-        )
+        else:
+            summary = (
+                f"embed failures: {self.failures} of {self.attempted} — "
+                f"first: {self.first_error}"
+            )
+        if self.stopped is EmbedStop.PROVIDER_FAILURES:
+            # The run row is where an operator looks for an outage, so it says
+            # the rest of the backlog was not tried, not only what failed.
+            summary += (
+                " — stage stopped after consecutive provider failures; the "
+                "rest of the stage waits for the next pass"
+            )
+        return summary
 
     def __int__(self) -> int:
         return self.embedded
@@ -4998,13 +5056,33 @@ class EmbedBudget:
     user's pass has completed, so a tenant whose very first note exceeds the
     whole budget still advances by one note per pass instead of zero for ever.
 
-    **Only when the pass serves more than one scope.** With one active scope
-    there is no other tenant to be fair to, and a budget there would spread a
-    first index of a few thousand notes over several five-minute-spaced passes
-    for no benefit. That clause is what keeps the default deployment's
-    behaviour identical to today's.
+    **On every deployment, one scope included.** It used to be enforced only
+    when the pass served more than one scope ("no other tenant to be fair
+    to"), but the scope's *own* index stage is waiting behind it: the next
+    tick's scan, keyword index and link graph run only after this stage
+    returns. On 2026-11-01 a single-scope embed pass ground through 208 notes
+    against an overloaded embedding server for about 1h50, and for all of it
+    nothing new reached keyword search, backlinks or `get_recent`. The cost
+    the old clause avoided — a first index of a few thousand notes spread over
+    five-minute-spaced passes — is gone because a budget stop now starts the
+    next tick after `EMBED_BACKLOG_RETICK_SECONDS` instead of the interval.
 
-    A stop is **not** a failure: it writes nothing to `indexer_runs.error` and
+    **It also stops the stage when the provider is clearly down.** After
+    `EMBED_STOP_AFTER_PROVIDER_FAILURES` notes in a row fail at the provider,
+    the stage ends before its next provider call (never at a row that needs
+    none). The streak carries over to the scope's next stage, which probes one
+    note before it can stop, and notes that failed before are tried last
+    (`_embed_failed_notes`), so notes that fail with a healthy provider cannot
+    stop the stage ahead of the rest. Every further note would only
+    wait out the same timeout, and an embedding server that does not cancel
+    abandoned requests keeps computing each one, so pressing on makes the
+    overload that caused the failures worse. A note refused as too large is
+    not evidence of an outage and neither counts nor resets the streak; a
+    note that made no provider call (every chunk reused, or zero chunks)
+    tells nothing about the provider either way. The failures themselves are
+    recorded as always, so this stop does reach the run row's `error`.
+
+    A budget stop is **not** a failure: it writes nothing to `indexer_runs.error` and
     logs once per user per pass, the same class of event as a pause. The
     operator-visible signal for a tenant permanently over budget is the
     dashboard's pending count, which is a property of the index rather than of
@@ -5019,6 +5097,20 @@ class EmbedBudget:
     started_at: float = field(default_factory=time.monotonic)
     #: One WARNING per user per pass, shared by the backlog loop and the sweep.
     announced: bool = False
+    #: `EMBED_STOP_AFTER_PROVIDER_FAILURES`; 0 disables the provider stop.
+    provider_failure_limit: int = 0
+    #: Notes in a row whose provider call failed, across backlog and sweep,
+    #: and carried over from this scope's previous stage
+    #: (`_provider_failure_streaks`), so a stage cut short by the time budget
+    #: does not restart the count at zero.
+    provider_failure_streak: int = 0
+    #: Provider answers or failures this stage has seen. The stop needs one:
+    #: a stage that inherits a full streak still probes one note, so a
+    #: provider that has recovered is found at the next pass instead of never.
+    provider_results: int = 0
+    #: What stopped this stage, if anything did. Set by `stop` and
+    #: `stop_for_provider`, read once into `EmbedPassResult.stopped`.
+    stopped: EmbedStop | None = None
 
     @property
     def active(self) -> bool:
@@ -5044,17 +5136,63 @@ class EmbedBudget:
             return True
         return False
 
+    def record_provider_result(self, result) -> None:
+        """Feed one note's `EmbedNoteResult` to the provider-failure streak."""
+        if not result.chunks_submitted:
+            return
+        self.provider_results += 1
+        if result.outcome in _PROVIDER_DOWN_OUTCOMES:
+            if not (
+                result.failure is not None
+                and result.failure.exc_type == _INPUT_TOO_LARGE
+            ):
+                self.provider_failure_streak += 1
+        else:
+            # Embedded, or a generation mismatch: the provider answered.
+            self.provider_failure_streak = 0
+
+    def provider_unavailable(self) -> bool:
+        return bool(
+            self.provider_failure_limit
+            and self.provider_results
+            and self.provider_failure_streak >= self.provider_failure_limit
+        )
+
+    def stop_for_provider(self, log_suffix: str, stage: str, left: int) -> None:
+        """Log the provider stop once, whether the backlog or the sweep
+        reached it: the sweep re-checks a streak the backlog already ended on."""
+        if self.stopped is EmbedStop.PROVIDER_FAILURES:
+            return
+        self.stopped = EmbedStop.PROVIDER_FAILURES
+        logger.error(
+            "Embedding stopped%s during %s: %d notes in a row failed at the "
+            "embedding provider, so the remaining %d are left for the next "
+            "pass instead of each waiting out the same failure. Notes that "
+            "failed before are tried last, so this means fresh notes are "
+            "failing too: check the embedding server.",
+            log_suffix,
+            stage,
+            self.provider_failure_streak,
+            left,
+        )
+
     def stop(self, log_suffix: str, stage: str) -> None:
         """Log the stop once per user per pass, whichever stage reached it."""
+        # A provider stop is the stronger fact and must survive the sweep's
+        # budget check: it is what keeps the loop from re-ticking promptly
+        # against a provider that is down.
+        if self.stopped is None:
+            self.stopped = EmbedStop.BUDGET
         if self.announced:
             return
         self.announced = True
         logger.warning(
             "Embed budget exhausted%s during %s: %d chunk(s) submitted against "
-            "a budget of %s, %.1fs elapsed against %ss. Stopping this user at a "
-            "note boundary so the next tenant is served in this pass; the "
-            "remaining backlog stays visible as the dashboard's pending count. "
-            "This is not a failure and is not recorded in the run row's error.",
+            "a budget of %s, %.1fs elapsed against %ss. Stopping at a note "
+            "boundary so the index stage and any other tenant are served; the "
+            "next tick starts shortly and continues the backlog, which stays "
+            "visible as the dashboard's pending count. This is not a failure "
+            "and is not recorded in the run row's error.",
             log_suffix,
             stage,
             self.chunks_submitted,
@@ -5118,48 +5256,74 @@ class _ProviderCallAccounting:
         self.issued(result.chunks_submitted)
 
 
-async def _active_scope_count(session) -> int:
-    """How many scopes this pass is serving — the budget's on/off switch.
+#: Each scope's provider-failure streak at the end of its last embed stage.
+#: In-process: a restart starts every scope at zero.
+_provider_failure_streaks: dict[int | None, int] = {}
 
-    Counted from `users` rather than threaded down from the loop so that the
-    panel's reindex, the startup pass and the periodic tick all get the same
-    answer without three call sites agreeing about it. A failure to count
-    returns 1, which leaves the pass **unbudgeted** — today's behaviour, and
-    the safe direction: a bookkeeping query that fails must not start stopping
-    tenants short.
-    """
-    if not settings.multi_user_mode:
-        return 1
-    try:
-        result = await session.execute(
-            text(
-                "SELECT count(*) FROM users "
-                "WHERE is_active = true AND vault_path IS NOT NULL"
-            )
-        )
-        return int(result.scalar() or 0)
-    except Exception as e:
-        logger.warning(
-            "Could not count active scopes for the embed budget (%s); this "
-            "pass runs unbudgeted",
-            e,
-        )
-        return 1
+#: Per scope, the `(note id, content_hash)` pairs whose provider call failed in
+#: an earlier stage. The backlog tries them **last**. Without this, notes that
+#: fail on every attempt with a healthy provider (an input the model server
+#: errors on, a note slower than one request's timeout) sink to the head of a
+#: backlog that is otherwise draining — the rest succeed and leave — and three
+#: of them then trip the provider stop at the start of every pass, so nothing
+#: behind them is ever tried. Tried last, they can only stop the stage when
+#: there is nothing healthy left to stop. In-process and pruned each stage to
+#: the rows still selected.
+_embed_failed_notes: dict[int | None, set[tuple[int, str]]] = {}
 
 
-async def _budget_for_pass(session, log_suffix: str) -> EmbedBudget:
+def _budget_for_pass(scope: int | None = None) -> EmbedBudget:
     chunk_budget = int(settings.embed_chunk_budget_per_user or 0)
     time_budget = float(settings.embed_time_budget_seconds_per_user or 0)
+    provider_failure_limit = int(settings.embed_stop_after_provider_failures or 0)
+    streak = _provider_failure_streaks.get(scope, 0)
     if not (chunk_budget or time_budget):
-        # Both settings at 0 disables the machinery entirely — no scope count,
-        # no clock, nothing to reason about.
-        return EmbedBudget()
-    scopes = await _active_scope_count(session)
+        # Both budgets at 0 disables the budget entirely; the provider stop is
+        # its own setting and still applies.
+        return EmbedBudget(
+            provider_failure_limit=provider_failure_limit,
+            provider_failure_streak=streak,
+        )
     return EmbedBudget(
         chunk_budget=chunk_budget,
         time_budget=time_budget,
-        enforced=scopes > 1,
+        enforced=True,
+        provider_failure_limit=provider_failure_limit,
+        provider_failure_streak=streak,
     )
+
+
+def clear_embed_stop_state() -> None:
+    """Forget the carried provider-failure streaks, the failed-note order and
+    the pending re-tick. Tests only; a restart does the same in production."""
+    _provider_failure_streaks.clear()
+    _embed_failed_notes.clear()
+    _embed_backlog_left.clear()
+
+
+def _failed_notes_last(scope: int | None, rows: list) -> list:
+    """`rows` with the ones that failed at the provider before moved to the
+    end, each group keeping its order; forgets failures of rows no longer
+    selected (embedded since, edited, or gone)."""
+    failed = _embed_failed_notes.get(scope)
+    if not failed:
+        return rows
+    selected = {(r.id, r.content_hash) for r in rows}
+    failed &= selected
+    fresh = [r for r in rows if (r.id, r.content_hash) not in failed]
+    retried = [r for r in rows if (r.id, r.content_hash) in failed]
+    return fresh + retried
+
+
+def _remember_provider_result(scope: int | None, row, result) -> None:
+    """Keep `_embed_failed_notes` in step with one backlog note's outcome."""
+    if not result.chunks_submitted:
+        return
+    key = (row.id, row.content_hash)
+    if result.outcome in _PROVIDER_DOWN_OUTCOMES:
+        _embed_failed_notes.setdefault(scope, set()).add(key)
+    else:
+        _embed_failed_notes.get(scope, set()).discard(key)
 
 
 async def embed_vault(user_id: int | None = None):
@@ -5266,7 +5430,8 @@ async def _embed_vault_pinned(
             params = {"uid": user_id}
         result = await session.execute(text(sql), params)
         unembedded = result.fetchall()
-        budget = await _budget_for_pass(session, log_suffix)
+        budget = _budget_for_pass(user_id)
+        unembedded = _failed_notes_last(user_id, list(unembedded))
         # Discovery is a read-only transaction. Its table locks must end before
         # filesystem/provider work or a later generation-lock acquisition.
         # SQL result rows retain the hash/path snapshot after the commit.
@@ -5290,6 +5455,7 @@ async def _embed_vault_pinned(
         # chunk debit are recorded where the provider call is *issued* rather
         # than where its result is read.
         accounting = _ProviderCallAccounting(outcome, budget)
+        last_progress_log = time.monotonic()
         for i, row in enumerate(unembedded):
             entered_embed = False
             accounting.begin()
@@ -5304,7 +5470,16 @@ async def _embed_vault_pinned(
             # user's pass has completed a note. A stop is not a failure and
             # moves neither counter.
             if budget.exhausted():
-                budget.stop(log_suffix, "the hash-mismatch backlog")
+                # When the streak ran out at the same boundary, the provider
+                # stop wins: a budget stop re-ticks within seconds, which
+                # against a failing provider is a tight loop of timeouts.
+                if budget.provider_unavailable():
+                    budget.stop_for_provider(
+                        log_suffix, "the hash-mismatch backlog",
+                        len(unembedded) - i,
+                    )
+                else:
+                    budget.stop(log_suffix, "the hash-mismatch backlog")
                 break
             try:
                 # Skip files matching exclude patterns. Drop any pre-existing
@@ -5417,6 +5592,17 @@ async def _embed_vault_pinned(
                 # single vector, and raises `StaleCertification` if the row has
                 # moved.
                 was_truncated = bool(getattr(note, "chunks_truncated", False))
+                # The provider stop, checked only where a provider call is
+                # about to be made: a streak that ended the backlog must not
+                # stop rows that need no call (the sweep's deletions), nor be
+                # reported as a stop with nothing behind it. Still between
+                # notes — nothing of this one has been sent.
+                if budget.provider_unavailable():
+                    budget.stop_for_provider(
+                        log_suffix, "the hash-mismatch backlog",
+                        len(unembedded) - i,
+                    )
+                    break
                 # Past this line the note has reached the provider path, so it
                 # has reached a note *boundary* whatever happens next — that is
                 # what the `finally` below keys on.
@@ -5434,6 +5620,8 @@ async def _embed_vault_pinned(
                     on_provider_call=accounting.issued,
                 )
                 accounting.reconcile(result)
+                budget.record_provider_result(result)
+                _remember_provider_result(user_id, row, result)
 
                 # ── Read the result by field, never as a number ────────────
                 # `embed_note` used to return an int and `0` meant three
@@ -5500,9 +5688,6 @@ async def _embed_vault_pinned(
                     # nothing else.
                     outcome.record_failure_detail(result.failure)
                     await session.rollback()
-
-                if (i + 1) % 50 == 0:
-                    logger.info(f"Embedded {i + 1}/{len(unembedded)} notes ({total_chunks} chunks)")
             except StaleCertification as e:
                 # Not a failure of this note, and not a hole in the index: the
                 # row moved between the byte verification and the
@@ -5533,6 +5718,29 @@ async def _embed_vault_pinned(
                 # notes that were burning the provider time.
                 if entered_embed:
                     budget.note_finished()
+                # By count *or* by time: on a slow provider fifty notes can be
+                # most of an hour, and a pass that is silent for that long
+                # cannot be told apart from a hung one.
+                now = time.monotonic()
+                if (i + 1) % 50 == 0 or (
+                    now - last_progress_log >= EMBED_PROGRESS_LOG_SECONDS
+                ):
+                    last_progress_log = now
+                    logger.info(
+                        "Embedding progress%s: %d/%d notes visited, %d "
+                        "embedded, %d failed, %d chunks, %.0fs elapsed",
+                        log_suffix,
+                        i + 1,
+                        len(unembedded),
+                        outcome.embedded,
+                        outcome.failures,
+                        total_chunks,
+                        now - budget.started_at,
+                    )
+
+        # Read here for the log lines below, and again after the sweep, which
+        # can stop the stage too.
+        outcome.stopped = budget.stopped
 
         if outcome.failures:
             # The same rendering as the run row's, from the same property, so
@@ -5545,8 +5753,13 @@ async def _embed_vault_pinned(
 
         if unembedded:
             logger.info(
-                f"Embedding complete{log_suffix}: {len(unembedded)} notes, "
-                f"{total_chunks} chunks"
+                (
+                    f"Embedding stopped early ({outcome.stopped.value}){log_suffix}: "
+                    if outcome.stopped is not None
+                    else f"Embedding complete{log_suffix}: "
+                )
+                + f"{len(unembedded)} notes selected, {outcome.embedded} "
+                f"embedded, {total_chunks} chunks"
                 + (
                     f", {skipped_excluded} skipped by exclude patterns"
                     if skipped_excluded else ""
@@ -5561,6 +5774,9 @@ async def _embed_vault_pinned(
             session, user_id, root_fd, exclude_patterns, log_suffix,
             outcome, budget,
         )
+        outcome.stopped = budget.stopped
+        outcome.provider_failure_streak = budget.provider_failure_streak
+        _provider_failure_streaks[user_id] = budget.provider_failure_streak
 
     return outcome
 
@@ -5674,7 +5890,7 @@ async def _reconcile_exclusions(
     # The same accounting rule as the backlog's, over the same `outcome` and
     # the same `budget`.
     accounting = _ProviderCallAccounting(outcome, budget)
-    for row in rows:
+    for visited, row in enumerate(rows):
         entered_embed = False
         accounting.begin()
         # Between notes only, exactly as the backlog checks it: a partially
@@ -5689,7 +5905,13 @@ async def _reconcile_exclusions(
         # one stopped by the pause: already-repaired rows stay repaired and the
         # next unexhausted pass runs a fresh, idempotent sweep.
         if budget.exhausted():
-            budget.stop(log_suffix, "the exclusion-reconciliation sweep")
+            if budget.provider_unavailable():
+                budget.stop_for_provider(
+                    log_suffix, "the exclusion-reconciliation sweep",
+                    len(rows) - visited,
+                )
+            else:
+                budget.stop(log_suffix, "the exclusion-reconciliation sweep")
             clean = False
             break
 
@@ -5778,6 +6000,15 @@ async def _reconcile_exclusions(
             # the certified predicate in a fresh transaction after provider I/O.
             await session.commit()
             was_truncated = bool(getattr(note, "chunks_truncated", False))
+            # Only before a provider call, as in the backlog: rows that need
+            # none (deleting an excluded note's vectors) are not stopped.
+            if budget.provider_unavailable():
+                budget.stop_for_provider(
+                    log_suffix, "the exclusion-reconciliation sweep",
+                    len(rows) - visited,
+                )
+                clean = False
+                break
             # Past this line the note has reached the provider path, so it has
             # reached a note boundary whatever happens next.
             entered_embed = True
@@ -5790,6 +6021,7 @@ async def _reconcile_exclusions(
                 on_provider_call=accounting.issued,
             )
             accounting.reconcile(result)
+            budget.record_provider_result(result)
 
             if result.outcome in (
                 NoteEmbedOutcome.EMBEDDED,
@@ -7540,15 +7772,37 @@ def record_index_outcome(user_id: int | None, ok: bool, result=None) -> None:
         )
 
 
+#: Scopes whose embed stage stopped at its budget with work left since the
+#: loop last looked. `run_indexer_loop` takes it after each tick and, when it
+#: is not empty, starts the next tick after `EMBED_BACKLOG_RETICK_SECONDS`
+#: instead of the interval. Filled by `record_embed_outcome`, which every
+#: embed call site already calls, so a stop is seen whichever site made it.
+_embed_backlog_left: set[int | None] = set()
+
+
+def take_embed_backlog_left() -> bool:
+    """Whether any embed stage stopped at its budget since the last call."""
+    left = bool(_embed_backlog_left)
+    _embed_backlog_left.clear()
+    return left
+
+
 def record_embed_outcome(
     user_id: int | None, result=None, *, raised: bool = False
 ) -> None:
     """Record one embed stage's outcome for `indexer_health` (#308, D4).
 
     A stage that raised counts as one failed embed pass; one that returned
-    counts its `EmbedPassResult.failures`.
+    counts its `EmbedPassResult.failures`. A stage that stopped at its budget
+    is noted for the loop's re-tick decision.
     """
     indexer_health.record_embed(user_id, 1 if raised else _embed_failures(result))
+    if (
+        isinstance(result, EmbedPassResult)
+        and result.stopped is EmbedStop.BUDGET
+        and not result.provider_failure_streak
+    ):
+        _embed_backlog_left.add(user_id)
 
 
 async def _index_pass_once(
@@ -7751,7 +8005,24 @@ async def run_indexer_loop():
         f"multi_user={settings.multi_user_mode})"
     )
     while True:
-        await asyncio.sleep(settings.index_interval_seconds)
+        # A budget-stopped embed stage left work a healthy provider can do
+        # now, so the next tick comes promptly; its index stage runs first, so
+        # the scan, keyword index and link graph keep up while the backlog
+        # drains. Taken (and cleared) here so a stop from any call site counts
+        # once.
+        if take_embed_backlog_left():
+            delay = min(EMBED_BACKLOG_RETICK_SECONDS, settings.index_interval_seconds)
+            logger.info(
+                "Embedding backlog left by the embed budget; next indexer tick "
+                f"in {delay}s"
+            )
+        else:
+            delay = settings.index_interval_seconds
+        # The sleep is the loop working as configured, whatever the interval:
+        # the stall clock must not count it.
+        indexer_health.record_loop_idle()
+        await asyncio.sleep(delay)
+        indexer_health.record_loop_progress()
         logger.info("Periodic indexer tick")
         # The whole tick body is guarded so the housekeeping below runs on
         # **every** path out of it — see the `finally`.
@@ -7766,6 +8037,9 @@ async def run_indexer_loop():
             if _is_paused():
                 logger.info("Periodic tick skipped (paused)")
                 indexer_health.record_enumeration(overlap_ok)
+                # A deliberate skip, not a stall: the loop is alive and an
+                # operator chose this.
+                indexer_health.record_loop_progress()
                 # The snapshot has been published and the ERROR logged; the run
                 # rows are the half that survives a restart, so a paused
                 # iteration writes them before it returns. No index or embed

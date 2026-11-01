@@ -42,6 +42,9 @@ SETTINGS_ENV_KEYS = (
     "INDEX_INTERVAL_SECONDS",
     "INDEXER_DEGRADED_AFTER_FAILURES",
     "INDEXER_QUARANTINE_RETRIES_PER_TICK",
+    # Stall detection and the embed stage's provider stop (fork).
+    "INDEXER_STALLED_AFTER_SECONDS",
+    "EMBED_STOP_AFTER_PROVIDER_FAILURES",
     # The scan's stat shortcut and its backstop (#282).
     "INDEX_STAT_SHORTCUT",
     "INDEX_FULL_HASH_INTERVAL_HOURS",
@@ -489,8 +492,10 @@ def _reset_indexer_scan_state():
     if indexer is not None:
         indexer._last_full_hash.clear()
         indexer.clear_sweep_state()
+        indexer.clear_embed_stop_state()
     yield
     indexer = sys.modules.get("src.services.indexer")
     if indexer is not None:
         indexer._last_full_hash.clear()
         indexer.clear_sweep_state()
+        indexer.clear_embed_stop_state()

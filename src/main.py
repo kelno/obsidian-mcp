@@ -872,10 +872,12 @@ async def health():
     in-process state (`src/services/indexer_health.py`): `status`
     (`ok` | `degraded` | `disabled`), `task_running`, `failing_scopes`,
     `embedding_failing_scopes`, `max_consecutive_failures`,
-    `quarantined_notes` and `last_success_at`. When it is `degraded` — the
-    indexer task is dead, any index / embedding / incomplete-re-derive /
-    enumeration counter has reached `INDEXER_DEGRADED_AFTER_FAILURES`, or a
-    note is quarantined — the top-level `status` is `degraded` too.
+    `quarantined_notes`, `last_success_at`, `index_stalled` and
+    `seconds_since_progress`. When it is `degraded` — the indexer task is
+    dead, any index / embedding / incomplete-re-derive / enumeration counter
+    has reached `INDEXER_DEGRADED_AFTER_FAILURES`, a note is quarantined, or
+    no index stage or tick has finished for `INDEXER_STALLED_AFTER_SECONDS` —
+    the top-level `status` is `degraded` too.
     `disabled` (`MCP_SANDBOX_MODE`) does not by itself degrade the top level.
 
     **The HTTP status is 200 in every case.** Kubernetes uses this endpoint

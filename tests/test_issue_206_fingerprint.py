@@ -423,12 +423,13 @@ def test_an_overlap_below_the_chunk_size_is_accepted():
 
 
 def test_the_embed_budgets_default_and_admit_zero_as_disabled():
-    """`0` disables either budget; both are enforced only when a pass serves
-    more than one active user scope, which is what keeps the single-tenant
-    deployment's behaviour identical to today's."""
+    """`0` disables either budget; both are enforced on every deployment, one
+    scope included (2026-11-01), and the provider stop defaults to 3."""
     loaded = Settings(secret_key=_A_REAL_KEY, _env_file=None)
     assert loaded.embed_chunk_budget_per_user == 5000
     assert loaded.embed_time_budget_seconds_per_user == 300
+    assert loaded.embed_stop_after_provider_failures == 3
+    assert loaded.indexer_stalled_after_seconds == 1800
 
     disabled = Settings(
         embed_chunk_budget_per_user=0,

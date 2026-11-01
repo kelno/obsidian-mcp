@@ -23,7 +23,23 @@ can read it.
 **Process-wide**: consecutive tick-level failures not attributable to a scope
 (user enumeration, root-overlap detection, a tick that raised outside any
 scope's stages); whether the indexer task is still running; whether indexing
-is disabled (`MCP_SANDBOX_MODE`); and a pluggable count of quarantined notes.
+is disabled (`MCP_SANDBOX_MODE`); a pluggable count of quarantined notes; and
+when the loop last made progress.
+
+**Progress, not failure.** Every counter above moves only when a stage
+*returns*. On 2026-11-01 an embed stage did not return for about 1h50 — it was
+working through a backlog against an overloaded embedding server — and for all
+of it no index stage ran, nothing new reached keyword search or the link
+graph, and `/health` said `ok`, because nothing had failed yet. So the loop
+also stamps its progress: when a tick starts or finishes (either way), when an
+index stage finishes (either way) and when a tick is skipped by the pause; the
+sleep between ticks stops the clock. If none of those has happened for
+`INDEXER_STALLED_AFTER_SECONDS` outside a sleep, `/health` reports
+`index_stalled` and `degraded`, and one CRITICAL line is logged when `/health`
+is read (it is evaluated there, so a deployment that never polls `/health`
+never logs it), re-armed by the next stamp. A tick in progress for one scope stamps when that scope's
+index stage finishes, so a long multi-user tick is not a stall unless one
+scope's pass alone exceeds the threshold.
 
 **In-process only and never persisted**: a restart starts clean, which is the
 same horizon as the task it describes. `/health` reads `snapshot()`, which
@@ -108,6 +124,10 @@ _enumeration_alerted = False
 _task_running = True
 _disabled = False
 _quarantine_count_provider: Callable[[], int] | None = None
+_last_progress_at: datetime | None = None
+_stall_alerted = False
+#: True while the loop sleeps between ticks; a sleep is never a stall.
+_idle = False
 
 
 def _threshold() -> int:
@@ -116,6 +136,10 @@ def _threshold() -> int:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+#: The stall clock's origin until the loop stamps its first progress.
+_process_started_at = _now()
 
 
 def _scope(scope: Scope) -> ScopeHealth:
@@ -148,8 +172,63 @@ def _reset(state: ScopeHealth, counter: str, attr: str) -> None:
     state.alerted.discard(counter)
 
 
+def record_loop_progress() -> None:
+    """The loop reached a point that proves it is not stuck: a tick started
+    or finished, an index stage finished, or a tick was skipped by the
+    pause."""
+    global _last_progress_at, _stall_alerted, _idle
+    _last_progress_at = _now()
+    _stall_alerted = False
+    _idle = False
+
+
+def record_loop_idle() -> None:
+    """The loop is about to sleep until its next tick. The stall clock stops
+    until `record_loop_progress` (the tick's start) restarts it, so an
+    `INDEX_INTERVAL_SECONDS` longer than the stall threshold is not a stall."""
+    global _idle
+    record_loop_progress()
+    _idle = True
+
+
+def _index_stalled(now: datetime) -> tuple[bool, int]:
+    """Whether the loop has made no progress for the stall threshold, and
+    for how many whole seconds it has not.
+
+    Measured from process start until the first stamp, so a startup pass that
+    never returns is caught too. Not a stall when the task is not running
+    (that is its own signal) or indexing is disabled.
+    """
+    global _stall_alerted
+    since = _last_progress_at or _process_started_at
+    # While idle this reports the time since the sleep began, which is not
+    # a stall and is never compared below.
+    seconds = max(0, int((now - since).total_seconds()))
+    limit = settings.indexer_stalled_after_seconds
+    stalled = (
+        bool(limit)
+        and not _idle
+        and _task_running
+        and not _disabled
+        and seconds >= limit
+    )
+    if stalled and not _stall_alerted:
+        _stall_alerted = True
+        logger.critical(
+            "Indexer has made no progress for %ds (no index stage or tick "
+            "finished; threshold INDEXER_STALLED_AFTER_SECONDS=%d): keyword "
+            "search, backlinks and recent notes are not being updated. A stage "
+            "is running far longer than it should — check the embedding "
+            "server and the indexer's progress lines",
+            seconds,
+            limit,
+        )
+    return stalled, seconds
+
+
 def record_index(scope: Scope, ok: bool) -> None:
     """One index pass for `scope` returned (`ok`) or raised."""
+    record_loop_progress()
     state = _scope(scope)
     if ok:
         _reset(state, _INDEX, "index_consecutive_failures")
@@ -285,6 +364,7 @@ def snapshot() -> dict:
         ]
     )
     quarantined = _quarantined_notes()
+    stalled, since_progress = _index_stalled(_now())
     successes = [s.last_success_at for s in states if s.last_success_at is not None]
     last_success = max(successes).isoformat() if successes else None
 
@@ -293,6 +373,7 @@ def snapshot() -> dict:
         or embed_failing > 0
         or _enumeration_failures >= threshold
         or quarantined > 0
+        or stalled
         or (not _task_running and not _disabled)
     )
     if degraded:
@@ -309,14 +390,21 @@ def snapshot() -> dict:
         "max_consecutive_failures": max_failures,
         "quarantined_notes": quarantined,
         "last_success_at": last_success,
+        "index_stalled": stalled,
+        "seconds_since_progress": since_progress,
     }
 
 
 def reset() -> None:
     """Forget everything. Tests only."""
     global _enumeration_failures, _enumeration_alerted, _task_running, _disabled
-    global _quarantine_count_provider
+    global _quarantine_count_provider, _last_progress_at, _stall_alerted
+    global _process_started_at, _idle
     _scopes.clear()
+    _last_progress_at = None
+    _stall_alerted = False
+    _idle = False
+    _process_started_at = _now()
     _enumeration_failures = 0
     _enumeration_alerted = False
     _task_running = True

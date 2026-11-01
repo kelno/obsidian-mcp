@@ -16,9 +16,10 @@ than decorative:
   burn arriving by a new route.
 * **at least one note, always** — otherwise a tenant whose first note alone
   exceeds the budget advances by zero notes per pass, for ever.
-* **only with more than one scope** — with one active scope there is no other
-  tenant to be fair to, and budgeting there would spread a first index over
-  several five-minute-spaced passes for nothing.
+* **on every deployment, one scope included** — a single scope's own next
+  index stage waits behind its embed stage (2026-11-01), and a budget stop
+  re-ticks within seconds, so a first index is not spread over five-minute
+  sleeps.
 * **debited by chunks *submitted*, never chunks stored** — a failing provider
   stores nothing, so a budget debited by stored chunks is never debited by an
   outage and a tenant whose every note fails would burn the whole pass, every
@@ -200,17 +201,15 @@ def test_a_first_note_larger_than_the_whole_budget_still_embeds(
     assert result.embedded == 1
 
 
-def test_a_single_scope_is_unbudgeted(monkeypatch, tmp_path):
-    """The clause that keeps the default deployment identical to today's.
-
-    Single-user mode, and a multi-user deployment with one active user, have no
-    other tenant to be fair to. Budgeting there turns a first index of a few
-    thousand notes into several passes separated by five-minute sleeps and
-    looks like a stall.
-    """
+def test_a_single_scope_is_budgeted_too(monkeypatch, tmp_path):
+    """One scope is budgeted like many: its own next index stage waits behind
+    the embed stage, so an unbounded embed stage holds keyword search and the
+    link graph stale (2026-11-01, about 1h50). The stop is reported as
+    `EmbedStop.BUDGET`, which is what makes the loop re-tick promptly."""
     _fixture(monkeypatch, tmp_path, _vault_of(10), active_scopes=1)
     _no_sweep(monkeypatch)
     _budgets(monkeypatch, chunks=1)
+    monkeypatch.setattr(indexer.settings, "multi_user_mode", False, raising=False)
 
     calls = []
 
@@ -221,8 +220,27 @@ def test_a_single_scope_is_unbudgeted(monkeypatch, tmp_path):
     monkeypatch.setattr(indexer, "embed_note", _ok)
 
     result = asyncio.run(indexer.embed_vault(user_id=7))
-    assert len(calls) == 10, "a single-scope pass was stopped by the budget"
-    assert result.embedded == 10
+    assert calls == ["n0.md"], "a single-scope pass ignored the budget"
+    assert result.embedded == 1
+    assert result.stopped is indexer.EmbedStop.BUDGET
+    assert result.failure_summary is None, "a budget stop is not a failure"
+
+
+def test_a_budget_stop_makes_the_loop_retick_promptly():
+    """`record_embed_outcome` notes a budget stop, and only a budget stop,
+    for the loop's next-tick delay."""
+    indexer.take_embed_backlog_left()
+    stopped = indexer.EmbedPassResult(stopped=indexer.EmbedStop.BUDGET)
+    indexer.record_embed_outcome(None, stopped)
+    assert indexer.take_embed_backlog_left() is True
+    assert indexer.take_embed_backlog_left() is False, "not cleared once taken"
+
+    down = indexer.EmbedPassResult(stopped=indexer.EmbedStop.PROVIDER_FAILURES)
+    indexer.record_embed_outcome(None, down)
+    indexer.record_embed_outcome(None, indexer.EmbedPassResult())
+    assert indexer.take_embed_backlog_left() is False, (
+        "a provider stop or a finished stage must wait the ordinary interval"
+    )
 
 
 def test_both_budgets_at_zero_disables_the_machinery(monkeypatch, tmp_path):

@@ -1578,7 +1578,9 @@ Mid-note preemption is forbidden because a note is certified only on full covera
 
 The pass SHALL process **at least one note** for a user before the budget can stop it, so that a user whose first note alone exceeds the budget still advances by one note per pass rather than never advancing.
 
-The budget SHALL be enforced only when the pass is serving more than one active user scope. With a single scope there is no other tenant for the budget to be fair to, and stopping there would only spread an initial index across several passes.
+The budget SHALL be enforced on every deployment, including one serving a single scope. The scope's own next index stage runs only after its embed stage returns, so an unbudgeted single-scope embed stage holds the scan, the keyword index and the link graph stale for as long as its backlog takes against the provider (about 1h50 on 2026-11-01). When a budget stop leaves work behind, the periodic loop SHALL start its next tick after a short fixed delay (`EMBED_BACKLOG_RETICK_SECONDS`) instead of the indexing interval, so a large backlog drains at full speed with an index stage between slices.
+
+The embed stage SHALL also stop, at the next note boundary, once `EMBED_STOP_AFTER_PROVIDER_FAILURES` consecutive notes have failed at the provider (a provider failure or a cardinality mismatch, from a note that submitted chunks). A note the provider refused as too large SHALL neither count towards nor reset the streak; a note that submitted no chunks SHALL be neutral; any provider answer, including a generation mismatch, SHALL reset it. The stop SHALL be checked only immediately before a provider call, so failures that end the backlog stop nothing and the exclusion sweep still performs every repair that needs no provider call. Notes whose provider call failed in an earlier stage SHALL be tried after every other note of the backlog, so that notes which fail with a healthy provider cannot keep the rest of the backlog from being tried. The streak SHALL carry over to the scope's next stage, and a stage SHALL make at least one provider call before this stop can end it. Unlike a budget stop, this stop accompanies recorded failures, and the pass record's `error` SHALL say that the stage stopped. The loop SHALL then wait the ordinary interval. When the budget and the streak run out at the same boundary the stop SHALL be this one, a later budget check in the same stage SHALL NOT turn it into a budget stop, and a budget stop whose stage ended with a non-zero streak SHALL NOT start the next tick early.
 
 A budget stop SHALL NOT be recorded as a failure and SHALL NOT be written into the pass record's `error`: it is a deliberate decision of the same class as a pause, and recording it as an error would make a healthy server report the outage signal. It SHALL be logged once per user per pass, and the remaining backlog SHALL remain visible as the pending count the panel reports.
 
@@ -1625,10 +1627,17 @@ Both the hash-mismatch backlog and the exclusion-reconciliation sweep SHALL draw
 - **THEN** the pass record's `error` SHALL be null and its failure count SHALL be zero
 - **AND** one warning SHALL be logged naming the user and the budget
 
-#### Scenario: A single-scope deployment is unbudgeted
+#### Scenario: A single-scope deployment is budgeted and re-ticks promptly
 
 - **WHEN** the pass serves exactly one scope — single-user mode, or a multi-user deployment with one active user — and that scope's backlog exceeds the budget
-- **THEN** the pass SHALL embed the whole backlog without stopping at the budget
+- **THEN** the embed stage SHALL stop at a note boundary once the budget is exhausted
+- **AND** the next tick SHALL start after `EMBED_BACKLOG_RETICK_SECONDS`, not after the indexing interval
+
+#### Scenario: A down provider stops the embed stage
+
+- **WHEN** `EMBED_STOP_AFTER_PROVIDER_FAILURES` notes in a row fail at the provider and the backlog has more notes
+- **THEN** the embed stage SHALL stop before the next note, the failures SHALL be recorded, and the pass record SHALL say that the stage stopped
+- **AND** the next tick SHALL wait the ordinary indexing interval
 
 #### Scenario: A budget-stopped sweep converges on a later pass
 

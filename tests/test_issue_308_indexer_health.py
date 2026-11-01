@@ -122,6 +122,8 @@ EXPECTED_KEYS = {
     "max_consecutive_failures",
     "quarantined_notes",
     "last_success_at",
+    "index_stalled",
+    "seconds_since_progress",
 }
 
 
