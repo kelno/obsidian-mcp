@@ -1522,6 +1522,9 @@ async def create_task(
     Args:
         description: the task's text, one line. Tags (`#next`) may be part of
             it. Do not put dates or priority emojis in it: use the arguments.
+            Leave out the global filter (e.g. `#task`): the tool puts it in
+            front, once, and drops any whole-word copy given here, even
+            mid-sentence.
         path: the note to add it to; default the tasks inbox
             (`Tasks inbox.md` unless configured). Only the inbox is created
             when missing.
@@ -1577,7 +1580,9 @@ async def edit_task(
     Args:
         path / line / expected_line / expected_hash: the task's `path`,
             `line`, `text` and `content_hash` from `list_tasks`.
-        description: the new text (tags included). Omit to keep it.
+        description: the new text (tags included). Omit to keep it. The
+            global filter (e.g. `#task`) is put back in front, once; a copy
+            given here as a whole word is dropped, even mid-sentence.
         priority: highest, high, medium, none, low or lowest.
         created / start / scheduled / due: `YYYY-MM-DD`, `today`, `tomorrow`
             or `yesterday`.

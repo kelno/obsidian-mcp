@@ -261,7 +261,7 @@ def edited_description(task: tf.Task, description: str | None, settings: TasksSe
         shown = _remove_as_word(task.description, gf)
         add_back = shown != task.description or gf not in task.description
         if add_back:
-            new = f"{gf} {new}"
+            new = f"{gf} {_without_global_filter(new, gf)}"
     return new
 
 
@@ -273,11 +273,32 @@ def _remove_as_word(description: str, gf: str) -> str:
     return description
 
 
+def _without_global_filter(description: str, gf: str) -> str:
+    """The description argument with every whole-word copy of the global filter removed.
+
+    Deliberate divergence from the dialog, which shows the description without
+    the filter, so a person never types it: an agent does, often by passing
+    back the `description` `list_tasks` returned. The dialog would then save
+    the filter twice (`#task #task a`); the tools put it in front once.
+    Each copy goes with the whitespace character before it, so the gaps left
+    are the ones the text already had (not `_remove_as_word`, whose double-
+    space collapse hits the first one anywhere in the text).
+    """
+    pattern = re.compile("(?:^|" + tf._WS + ")" + re.escape(gf) + "(?=$|" + tf._WS + ")")
+    description = tf.js_trim(pattern.sub("", description))
+    if not description:
+        raise TaskOpError("invalid_argument", "a task needs a description besides the global filter "
+                          f"({gf!r}), which the tools add themselves")
+    return description
+
+
 def new_task(*, description: str, settings: TasksSettings, registry: tf.StatusRegistry, today: date,
              area_tags: list[str], status: tf.Status | None, priority: str | None, on_completion: str | None,
              dates: dict[str, str | None]) -> tf.Task:
     """`createTaskLineModal`: the dialog's new task, as it would be saved."""
     text = _description_arg(description)
+    if settings.global_filter:
+        text = _without_global_filter(text, settings.global_filter)
     for tag in area_tags:
         if not re.search("(^|" + tf._WS + ")" + re.escape("#" + tag) + "($|" + tf._WS + ")", text):
             text = f"{text} #{tag}"

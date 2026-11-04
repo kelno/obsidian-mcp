@@ -194,6 +194,42 @@ async def test_create_follows_set_created_date_and_global_filter(vault):
     assert read(vault, "n.md") == "- [ ] #task a ➕ 2026-10-31\n"
 
 
+@pytest.mark.parametrize("description", ["#task a", "#task #task a", "a #task", "#task a #task", "a  #task"])
+async def test_create_writes_the_global_filter_once(vault, description):
+    write_settings(vault, {**OWNER_SETTINGS, "globalFilter": "#task"})
+    note(vault, "n.md", "")
+    result = await tools.create_task_impl(description, path="n.md")
+    assert result.error is None
+    assert read(vault, "n.md") == "- [ ] #task a\n"
+
+
+@pytest.mark.parametrize(("description", "written"), [
+    ("x  y #task z", "x  y z"),
+    ("a #task #task #task b", "a b"),
+    ("a #task b", "a b"),
+])
+async def test_create_drops_the_filter_without_touching_other_spacing(vault, description, written):
+    write_settings(vault, {**OWNER_SETTINGS, "globalFilter": "#task"})
+    note(vault, "n.md", "")
+    await tools.create_task_impl(description, path="n.md")
+    assert read(vault, "n.md") == f"- [ ] #task {written}\n"
+
+
+async def test_create_keeps_a_tag_that_only_starts_with_the_global_filter(vault):
+    write_settings(vault, {**OWNER_SETTINGS, "globalFilter": "#task"})
+    note(vault, "n.md", "")
+    await tools.create_task_impl("#tasks a #task/x", path="n.md")
+    assert read(vault, "n.md") == "- [ ] #task #tasks a #task/x\n"
+
+
+async def test_create_with_only_the_global_filter_is_refused(vault):
+    write_settings(vault, {**OWNER_SETTINGS, "globalFilter": "#task"})
+    note(vault, "n.md", "")
+    result = await tools.create_task_impl("#task #task", path="n.md")
+    assert code(result) == "invalid_argument"
+    assert read(vault, "n.md") == ""
+
+
 async def test_create_refuses_a_stale_hash(vault):
     note(vault, "n.md", "a\n")
     result = await tools.create_task_impl("b", path="n.md", expected_hash="sha256:" + "0" * 64)
@@ -388,6 +424,24 @@ async def test_edit_rewrites_in_canonical_order_like_the_plugin(vault):
     text = "- [ ] a 📅 2026-11-05 🔼"
     await edit(vault, text + "\n", 1, text, description="b #next")
     assert read(vault, "n.md") == "- [ ] b #next 🔼 📅 2026-11-05\n"
+
+
+@pytest.mark.parametrize("description", ["#task b #area/x", "b #area/x", "#task #task b #area/x"])
+async def test_edit_round_trips_the_listed_description_without_doubling_the_filter(vault, description):
+    # The postbox case: an agent passes back `list_tasks`' description, which carries the filter.
+    write_settings(vault, {**OWNER_SETTINGS, "globalFilter": "#task"})
+    text = "- [ ] #task a #area/x"
+    result = await edit(vault, text + "\n", 1, text, description=description)
+    assert result.error is None
+    assert read(vault, "n.md") == "- [ ] #task b #area/x\n"
+
+
+async def test_edit_with_only_the_global_filter_is_refused(vault):
+    write_settings(vault, {**OWNER_SETTINGS, "globalFilter": "#task"})
+    text = "- [ ] #task a"
+    result = await edit(vault, text + "\n", 1, text, description="#task")
+    assert code(result) == "invalid_argument"
+    assert read(vault, "n.md") == text + "\n"
 
 
 async def test_edit_clear_and_priority(vault):
