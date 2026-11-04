@@ -59,6 +59,12 @@ For the offline suite only (everything outside `tests/integration/`, about
 5 minutes), a Python 3.12 venv in WSL is enough, with no container and no
 database: `pytest --ignore=tests/integration tests`.
 
+Agents on the Windows PC: call `wsl` from PowerShell, for example
+`wsl -e bash -lc "cd /mnt/d/work/obsidian-mcp && ~/.venvs/obsidian-mcp-test/bin/python -m pytest -q tests/test_task_tools.py"`,
+not from Git Bash. Git Bash expands `$variables` inside the quoted command
+before WSL sees it and rewrites `/mnt/...` paths to
+`C:/Program Files/Git/mnt/...`.
+
 ## Embedding on a slow CPU
 
 On a CPU-only Ollama the default 30 s per request is too short, every
