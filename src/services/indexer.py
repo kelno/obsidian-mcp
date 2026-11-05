@@ -5777,7 +5777,7 @@ async def _embed_vault_pinned(
         # The agent ledger's entries whose vector is missing or outdated, after
         # the notes and under the same budget, so the ledger can never hold the
         # next index stage back (see docs/architecture/agent-ledger.md).
-        await ledger_embed.sweep(user_id, budget, outcome, log_suffix, _is_paused)
+        await ledger_embed.sweep(user_id, budget, outcome, log_suffix, _is_paused, async_session)
         outcome.stopped = budget.stopped
         outcome.provider_failure_streak = budget.provider_failure_streak
         _provider_failure_streaks[user_id] = budget.provider_failure_streak

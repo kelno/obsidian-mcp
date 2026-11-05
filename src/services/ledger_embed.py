@@ -91,13 +91,15 @@ class EntryEmbedResult:
     skipped: str | None = None
 
 
-async def embed_entry(entry_id: int) -> EntryEmbedResult:
+async def embed_entry(entry_id: int, sessions=None) -> EntryEmbedResult:
     """Embed one entry's current text and store it, or write nothing.
 
     Raises what the provider raised (the caller counts it); returns
     `skipped` when there was nothing to do or the entry moved meanwhile.
+    `sessions` is the session factory (the indexer passes its own).
     """
-    async with async_session() as session:
+    sessions = sessions or async_session
+    async with sessions() as session:
         row = (await session.execute(
             select(LedgerEntry).where(LedgerEntry.id == entry_id))).scalar_one_or_none()
         if row is None:
@@ -112,7 +114,7 @@ async def embed_entry(entry_id: int) -> EntryEmbedResult:
         # psql) whose hash does not describe its text: re-stamp it from the
         # text, so the vector and the hash agree.
         expected = ledger.content_hash(text_)
-        async with async_session() as session:
+        async with sessions() as session:
             # Conditional, so a tool update committed meanwhile is not overwritten.
             await session.execute(update(LedgerEntry).where(
                 LedgerEntry.id == entry_id, LedgerEntry.content_hash == row_hash).values(content_hash=expected))
@@ -126,7 +128,7 @@ async def embed_entry(entry_id: int) -> EntryEmbedResult:
     if len(vectors) != len(chunks):
         raise ProviderFailed(len(chunks), RuntimeError(
             f"the embedding provider returned {len(vectors)} vectors for {len(chunks)} chunks"))
-    async with async_session() as session:
+    async with sessions() as session:
         if not await _generation_ok(session):
             await session.rollback()
             result.skipped = "configuration changed"
@@ -227,17 +229,20 @@ async def wait_idle(timeout: float = 30.0) -> None:
 #: them would ever be embedded. In-process, pruned to the rows still selected.
 _failed_entries: dict[int | None, set[tuple[int, str]]] = {}
 
-async def sweep(user_id: int | None, budget, outcome, log_suffix: str, is_paused) -> int:
+async def sweep(user_id: int | None, budget, outcome, log_suffix: str, is_paused, sessions=None) -> int:
     """Embed this scope's entries whose vector is missing or outdated, within `budget`.
 
     Runs at the end of the scope's embed stage, after the notes, under the
     same `EmbedBudget` (chunks, time, provider-failure stop) and feeding the
     same `EmbedPassResult` failures, so the ledger can neither hold the index
     stage back nor hide an outage. Returns how many entries it embedded.
+    `sessions` is the indexer's session factory, so the sweep reads and
+    writes the database the stage does.
     """
     if budget.stopped is not None:
         return 0
-    async with async_session() as session:
+    sessions = sessions or async_session
+    async with sessions() as session:
         rows = (await session.execute(
             select(LedgerEntry.id, LedgerEntry.ref, LedgerEntry.content_hash)
             .where(LedgerEntry.owner_key == ledger.owner_key(user_id),
@@ -267,7 +272,7 @@ async def sweep(user_id: int | None, budget, outcome, log_suffix: str, is_paused
             continue
         _in_flight.add(row.id)
         try:
-            result = await embed_entry(row.id)
+            result = await embed_entry(row.id, sessions)
             if result.chunks_submitted:
                 outcome.record_attempt()
                 budget.debit(result.chunks_submitted)

@@ -1418,6 +1418,12 @@ TOOLS_FUNCTIONS = {
 # not weakened to the optimistic confirmation, and the specification says so.
 LOCKED_GATE_TOOLS = {"import_from_url", "request_upload"}
 
+# The agent ledger's writers (migration 032) require write permission but
+# publish no vault byte: they write `ledger_*` rows, which belong to the user,
+# not to a vault root, so there is no target to confirm. Adding a tool here is
+# a claim that it never reaches the filesystem; the next test keeps it honest.
+DATABASE_ONLY_WRITE_TOOLS = {"ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit"}
+
 
 def _called_names(node: ast.AST) -> set[str]:
     return {
@@ -1497,7 +1503,7 @@ def test_every_write_tool_publishes_through_a_confirmed_target():
         reachable = _reachable(impl.__name__)
         if not _needs_write(reachable):
             continue
-        if tool.name in LOCKED_GATE_TOOLS:
+        if tool.name in LOCKED_GATE_TOOLS or tool.name in DATABASE_ONLY_WRITE_TOOLS:
             continue
         confirms = any(
             callee.startswith("_confirmed_publication")
@@ -1510,6 +1516,19 @@ def test_every_write_tool_publishes_through_a_confirmed_target():
         "these write tools publish without confirming the vault assignment: "
         f"{unconfirmed}"
     )
+
+
+def test_the_database_only_writers_reach_no_vault_write():
+    """`DATABASE_ONLY_WRITE_TOOLS` is exempt only while it stays true: nothing
+    they reach in `tools.py` calls into the vault, the filesystem layer or a
+    publication helper."""
+    vault_calls = ("vault_service.", "vault_fs.", "_atomic_write_at", "_confirmed_publication", "_publish")
+    for tool in mcp._tool_manager.list_tools():
+        if tool.name not in DATABASE_ONLY_WRITE_TOOLS:
+            continue
+        for name in _reachable(_impl_for(tool).__name__):
+            body = ast.unparse(TOOLS_FUNCTIONS[name])
+            assert not [c for c in vault_calls if c in body], (tool.name, name)
 
 
 def test_no_read_tool_confirms_anything():

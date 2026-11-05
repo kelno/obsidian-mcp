@@ -116,6 +116,8 @@ async def env(postgres, monkeypatch, tmp_path):
     gate.entered, gate.release = asyncio.Event(), asyncio.Event()
     gate.reached, gate.expected = 0, 1
     async with maker() as session:
+        # The cascade reaches the agent ledger, whose triggers refuse TRUNCATE without the switch.
+        await session.execute(text("SET LOCAL ledger.allow_delete = 'on'"))
         await session.execute(text('TRUNCATE users, api_keys, quota_counters, usage_logs, notes_metadata CASCADE'))
         user = User(username='concurrency-fixture', password_hash='unused',
                     is_active=True, vault_path=str(tmp_path))

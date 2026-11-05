@@ -38,7 +38,7 @@ from src.auth.session import current_principal, current_user_id, current_vault_r
 from src.config import Settings, settings
 from src.mcp_server import auth, tools
 from src.models.db import APIKey, NoteEmbedding, NoteLink, NoteMetadata, User
-from src.services import concurrency, quotas, rate_limits, transfer, vault_overlap
+from src.services import concurrency, ledger_embed, quotas, rate_limits, transfer, vault_overlap
 from src.services import embeddings as embeddings_service
 from src.services.pool_budget import CLASS_CONNECTIONS, POOL_OVERFLOW, POOL_SIZE
 from src.services.usage_stats import PRE_BODY_REFUSAL_BINDS, pre_body_refusal_sql
@@ -102,6 +102,8 @@ async def env(engine, monkeypatch, tmp_path):
     (root / 'lonely.md').write_text('# Lonely\n')
     (root / 'f.bin').write_bytes(b'\x00\x01binary')
     async with maker() as session:
+        # The cascade reaches the agent ledger, whose triggers refuse TRUNCATE without the switch.
+        await session.execute(text("SET LOCAL ledger.allow_delete = 'on'"))
         await session.execute(text(
             'TRUNCATE users, api_keys, quota_counters, usage_logs, notes_metadata, '
             'note_embeddings, note_links, transfer_tokens CASCADE'))
@@ -140,6 +142,11 @@ async def env(engine, monkeypatch, tmp_path):
     async def fake_embedding(_text):
         return list(UNIT)
     monkeypatch.setattr(embeddings_service, 'get_embedding', fake_embedding)
+    # The agent ledger: its query embedding is imported by name, and the
+    # background embed queue is off so a worker's connection cannot count
+    # against the tool that queued it (the sweep embeds; it is not a tool).
+    monkeypatch.setattr(ledger_embed, 'get_embedding', fake_embedding)
+    monkeypatch.setattr(ledger_embed, 'enqueue', lambda _entry_id: False)
 
     @asynccontextmanager
     async def fetched(*args, **kwargs):
@@ -232,6 +239,22 @@ CALLS = [
     ('set_task_status', 'set_task_status_impl',
      lambda s: (('Tasks inbox.md', 1, '- [ ] peaks task 📅 2026-11-01',
                  _hash('- [ ] peaks task 📅 2026-11-01\n')), {'status': 'done'})),
+    # The agent ledger: a topic, an entry under it, a change to the entry,
+    # then a summary view citing it.
+    ('ledger_topics', 'ledger_topics_impl', lambda s: ((), {})),
+    ('ledger_topic_edit', 'ledger_topic_edit_impl', lambda s: (('create', 'peaks-topic', 'fixture'), {})),
+    ('ledger_add', 'ledger_add_impl',
+     lambda s: (('quirk', 'peaks quirk'), {'body': 'quartzite', 'topics': ['peaks-topic'],
+                                           'details': {'certainty': 'tested'}})),
+    ('ledger_search', 'ledger_search_impl', lambda s: ((), {'query': 'quartzite'})),
+    ('ledger_get', 'ledger_get_impl', lambda s: ((['Q1'],), {})),
+    ('ledger_update', 'ledger_update_impl',
+     lambda s: ((), {'ref': 'Q1', 'expected_revision': 1, 'reason': 'fixture',
+                     'title': 'peaks quirk, renamed'})),
+    ('ledger_digest_edit', 'ledger_digest_edit_impl',
+     lambda s: (('peaks-view', 'fixture', [{'op': 'create', 'title': 'Peaks', 'description': 'fixture'},
+                                           {'op': 'add', 'text': 'quartzite', 'sources': ['Q1']}]), {})),
+    ('ledger_digest', 'ledger_digest_impl', lambda s: (('peaks-view',), {})),
 ]
 
 

@@ -240,6 +240,9 @@ class _AdminSession:
             return _Result(rows=self._peers)
         if "count(" in sql.lower():
             return _Result(self._remaining_admins)
+        if "ledger_" in sql:
+            # `_has_ledger`: these users own no agent-ledger rows.
+            return _Result(False)
         return _Result(self._target)
 
     def _revoke(self, stmt, sql: str) -> _Result:

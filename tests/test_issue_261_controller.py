@@ -221,15 +221,17 @@ def test_class_mapping_is_the_design_table():
     for tool, cls in TOOL_CLASSES.items():
         by_class.setdefault(cls, set()).add(tool)
     assert by_class == {
-        "embedding": {"semantic_search"},
+        "embedding": {"semantic_search", "ledger_search"},
         "vector": {"find_related"},
         "write": {"create_note", "edit_note", "move_note", "delete_note", "set_frontmatter",
                   "write_file", "delete_file", "move_file", "delete_folder",
-                  "import_from_url", "create_task", "edit_task", "set_task_status"},
+                  "import_from_url", "create_task", "edit_task", "set_task_status",
+                  "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit"},
         "scan": {"keyword_search", "list_notes", "get_tags", "get_neighborhood",
                  "find_orphans", "list_files", "list_tasks"},
         "light": {"read_note", "read_file", "get_recent", "get_vault_guide", "get_backlinks",
-                  "get_links", "request_upload", "check_upload", "request_download", "fetch_page"},
+                  "get_links", "request_upload", "check_upload", "request_download", "fetch_page",
+                  "ledger_get", "ledger_digest", "ledger_topics"},
     }
 
 

@@ -13,10 +13,12 @@ class _FakeResult:
 
 
 class _FakeSession:
+    """Every vector column (notes' and the agent ledger's) answers the same."""
+
     def __init__(self, atttypmod: int | None):
         self._atttypmod = atttypmod
 
-    async def execute(self, _stmt):
+    async def execute(self, _stmt, _params=None):
         return _FakeResult(self._atttypmod)
 
     async def __aenter__(self):

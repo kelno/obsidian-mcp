@@ -43,7 +43,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select, update as sa_update
+from sqlalchemy import exists, func, or_, select, update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -312,10 +312,11 @@ async def _lock_admin_guard(session: AsyncSession) -> None:
 async def _has_ledger(session: AsyncSession, user_id: int) -> bool:
     """Whether the user owns agent-ledger rows. Every other ledger table hangs
     off an entry, a topic or a view, or is written with one."""
-    for model in (LedgerEntry, LedgerTopic, LedgerDigest, LedgerRefCounter):
-        if (await session.execute(select(model.user_id).where(model.user_id == user_id).limit(1))).first():
-            return True
-    return False
+    owned = or_(*(
+        exists().where(model.user_id == user_id)
+        for model in (LedgerEntry, LedgerTopic, LedgerDigest, LedgerRefCounter)
+    ))
+    return bool((await session.execute(select(owned))).scalar())
 
 
 async def _actor_still_privileged(

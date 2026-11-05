@@ -39,9 +39,14 @@ docs/architecture/agent-ledger.md.
 ## House shape
 
 Every table carries a `COMMENT ON TABLE` marker, mirrored in
-`src/models/db.py`. A pre-existing table of any of these names is refused,
-never adopted: rows the server did not write would be served as the ledger.
-`downgrade()` refuses while any entry exists, since the ledger cannot be
+`src/models/db.py`. Pre-existing tables are adopted only when they are
+exactly 032's own — every table and both functions present, and the
+catalog (columns, constraints, indexes, triggers, markers, function
+bodies) identical to a scratch build of this migration, made in a
+throwaway schema inside a savepoint and rolled back — which is what a
+stamp-back rerun finds. Anything else (a stray table, a partial set, one
+altered constraint) is refused: rows the server did not write would be
+served as the ledger. `downgrade()` refuses while any entry exists, since the ledger cannot be
 rebuilt. `search_path` is pinned; `lock_timeout` / `statement_timeout` are set
 and `RESET`, for 013's to 031's reasons.
 
@@ -486,6 +491,91 @@ def _existing(bind) -> list[str]:
     ]
 
 
+def _create(dim: int) -> None:
+    for statement in _ddl(dim):
+        op.execute(statement)
+    for table, marker in MARKERS.items():
+        op.execute(f"COMMENT ON TABLE {table} IS {_quote(marker)}")
+    for statement in _trigger_ddl():
+        op.execute(statement)
+
+
+#: The throwaway schema a stamp-back rerun builds 032 in, to compare with.
+SCRATCH = "ledger_032_shape"
+
+
+def _shape(bind, schema: str) -> dict:
+    """Everything about the ledger's objects in `schema` that 032 decides.
+
+    Read with `search_path` set to `pg_catalog` alone, so every name prints
+    schema-qualified, and the scratch build's schema name is then rewritten
+    to `public` for the comparison.
+    """
+    def rows(query: str, **params) -> list:
+        return [tuple(r) for r in bind.execute(sa.text(query), params).all()]
+
+    shape: dict = {}
+    for table in TABLES:
+        rel = f"{schema}.{table}"
+        shape[table] = {
+            "comment": bind.execute(sa.text(
+                "SELECT obj_description(CAST(:r AS regclass), 'pg_class')"), {"r": rel}).scalar(),
+            "columns": rows(
+                "SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, a.attgenerated, "
+                "pg_get_expr(d.adbin, d.adrelid) FROM pg_attribute a "
+                "LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum "
+                "WHERE a.attrelid = CAST(:r AS regclass) AND a.attnum > 0 AND NOT a.attisdropped "
+                "ORDER BY a.attnum", r=rel),
+            "constraints": sorted(rows(
+                "SELECT conname, contype, pg_get_constraintdef(oid), convalidated, condeferrable, condeferred "
+                "FROM pg_constraint WHERE conrelid = CAST(:r AS regclass) AND contype <> 't'", r=rel)),
+            "indexes": sorted(rows(
+                "SELECT c.relname, pg_get_indexdef(i.indexrelid) FROM pg_index i "
+                "JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = CAST(:r AS regclass)", r=rel)),
+            "triggers": sorted(rows(
+                "SELECT tgname, pg_get_triggerdef(oid), tgenabled FROM pg_trigger "
+                "WHERE tgrelid = CAST(:r AS regclass) AND NOT tgisinternal", r=rel)),
+        }
+    for function in FUNCTIONS:
+        shape[function] = bind.execute(sa.text(
+            "SELECT pg_get_functiondef(to_regprocedure(:f))"), {"f": f"{schema}.{function}()"}).scalar()
+    return shape
+
+
+def _as_public(value):
+    """The scratch build's shape with its schema name read as `public`."""
+    if isinstance(value, str):
+        return value.replace(f"{SCRATCH}.", "public.")
+    if isinstance(value, dict):
+        return {key: _as_public(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_as_public(item) for item in value)
+    return value
+
+
+def _verify_own(bind, dim: int) -> None:
+    """Accept the ledger already in `public` only if it is exactly 032's."""
+    op.execute(f"SAVEPOINT {SCRATCH}")
+    op.execute(f"CREATE SCHEMA {SCRATCH}")
+    op.execute(f"SET LOCAL search_path TO {SCRATCH}, public")
+    _create(dim)
+    op.execute("SET LOCAL search_path TO pg_catalog")
+    expected = _shape(bind, SCRATCH)
+    live = _shape(bind, "public")
+    op.execute(f"ROLLBACK TO SAVEPOINT {SCRATCH}")
+    op.execute(f"RELEASE SAVEPOINT {SCRATCH}")
+    _pin_search_path()
+    expected = _as_public(expected)
+    differing = sorted(name for name in expected if expected[name] != live[name])
+    if differing:
+        raise RuntimeError(
+            f"032 will not adopt pre-existing ledger objects that differ from what it creates "
+            f"({', '.join(differing)}): the ledger is primary data, and rows this server did not "
+            "write would be served as agents' records. Inspect them, move them aside by hand, "
+            "then re-run. Nothing has been changed."
+        )
+
+
 def upgrade() -> None:
     from src.config import settings
 
@@ -493,27 +583,29 @@ def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '10s'")
     op.execute("SET LOCAL statement_timeout = '60s'")
     _pin_search_path()
+    dim = int(settings.embedding_dimensions)
 
     present = _existing(bind)
-    if present:
+    functions = [
+        function for function in FUNCTIONS
+        if bind.execute(sa.text("SELECT to_regprocedure(:f)"), {"f": f"public.{function}()"}).scalar()
+    ]
+    if len(present) == len(TABLES) and len(functions) == len(FUNCTIONS):
+        # A stamp-back rerun: adopt only an exact match.
+        _verify_own(bind, dim)
+    elif present:
         raise RuntimeError(
             f"032 will not adopt pre-existing tables ({', '.join(present)}): the ledger is "
             "primary data, and rows this server did not write would be served as agents' "
             "records. Inspect them, move them aside by hand, then re-run. Nothing has been changed."
         )
-    for function in FUNCTIONS:
-        if bind.execute(sa.text("SELECT to_regprocedure(:f)"), {"f": f"public.{function}()"}).scalar():
-            raise RuntimeError(
-                f"032 found a function public.{function}() it did not create. Drop it by "
-                "hand, then re-run. Nothing has been changed."
-            )
-
-    for statement in _ddl(int(settings.embedding_dimensions)):
-        op.execute(statement)
-    for table, marker in MARKERS.items():
-        op.execute(f"COMMENT ON TABLE {table} IS {_quote(marker)}")
-    for statement in _trigger_ddl():
-        op.execute(statement)
+    elif functions:
+        raise RuntimeError(
+            f"032 found a function public.{functions[0]}() it did not create. Drop it by "
+            "hand, then re-run. Nothing has been changed."
+        )
+    else:
+        _create(dim)
 
     op.execute("RESET lock_timeout")
     op.execute("RESET statement_timeout")

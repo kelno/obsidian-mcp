@@ -127,6 +127,9 @@ class _FakeSession:
             )
         if "count(" in sql.lower():
             return _Result(self._remaining_admins)
+        if "ledger_" in sql:
+            # `_has_ledger`: these users own no agent-ledger rows.
+            return _Result(False)
         return _Result(self._target)
 
     async def delete(self, obj):

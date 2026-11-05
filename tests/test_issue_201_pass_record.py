@@ -159,6 +159,9 @@ class _Session:
 
     async def execute(self, statement, params=None):
         self.statements.append(statement)
+        if "ledger_entries" in str(statement):
+            # The agent ledger's sweep, at the end of the stage: no entries.
+            return _Result()
         if isinstance(statement, TextClause):
             sql = statement.text
             if "to_regclass" in sql:

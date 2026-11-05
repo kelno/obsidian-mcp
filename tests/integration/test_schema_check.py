@@ -6793,9 +6793,10 @@ def test_downgrade_031_refuses_a_table_it_did_not_create():
 #
 # Its own module (`test_ledger_pg.py`) checks the shape constraint by
 # constraint against the model, the triggers and every refusal. The gate
-# here is the migration's own contract: a fresh head is clean, a
-# pre-existing table is refused rather than adopted, and the downgrade
-# refuses while an entry exists, since nothing can rebuild one.
+# here is the migration's own contract: a fresh head is clean, a stamp-back
+# rerun adopts its own exact ledger and keeps the rows, a stray or altered
+# table is refused rather than adopted, and the downgrade refuses while an
+# entry exists, since nothing can rebuild one.
 
 LEDGER_ENTRY_032 = (
     "INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
@@ -6821,6 +6822,50 @@ def test_032_refuses_a_pre_existing_ledger_table():
         result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
         assert result.returncode != 0
         assert "will not adopt pre-existing tables (ledger_topics)" in (result.stdout + result.stderr)
+        assert alembic_version(url) == "031"
+
+
+def test_032_stamp_back_rerun_adopts_its_own_ledger_and_keeps_the_entries():
+    with throwaway_db("schema_032_rerun") as url:
+        sql(url, LEDGER_ENTRY_032)
+        _harness.run_alembic(url, "stamp", "031", dimensions=DIM)
+        _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
+        assert alembic_version(url) == HEAD_REVISION
+        assert fetchval(url, "SELECT count(*) FROM ledger_entries") == 1
+        assert fetchval(url, "SELECT to_regnamespace('ledger_032_shape')") is None
+        assert_alembic_check_clean(url, DIM)
+
+
+@pytest.mark.parametrize(
+    "label,ddl,fragment",
+    [
+        (
+            "weak_check",
+            [
+                "ALTER TABLE ledger_entries DROP CONSTRAINT ck_ledger_entries_origin",
+                "ALTER TABLE ledger_entries ADD CONSTRAINT ck_ledger_entries_origin CHECK (true)",
+            ],
+            "(ledger_entries)",
+        ),
+        ("no_trigger", ["DROP TRIGGER trg_ledger_revisions_no_update ON ledger_revisions"], "(ledger_revisions)"),
+        ("unmarked", ["COMMENT ON TABLE ledger_topics IS NULL"], "(ledger_topics)"),
+        (
+            "weak_function",
+            ["CREATE OR REPLACE FUNCTION ledger_refuse_change() RETURNS trigger LANGUAGE plpgsql "
+             "AS $$ BEGIN RETURN NULL; END $$"],
+            "(ledger_refuse_change)",
+        ),
+    ],
+)
+def test_032_stamp_back_rerun_refuses_an_altered_ledger(label, ddl, fragment):
+    with throwaway_db(f"schema_032_altered_{label}") as url:
+        for statement in ddl:
+            sql(url, statement)
+        _harness.run_alembic(url, "stamp", "031", dimensions=DIM)
+        result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
+        assert result.returncode != 0
+        assert "will not adopt pre-existing ledger objects that differ" in (result.stdout + result.stderr)
+        assert fragment in (result.stdout + result.stderr)
         assert alembic_version(url) == "031"
 
 
