@@ -1948,7 +1948,7 @@ class LedgerRevision(Base):
     revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     action: Mapped[str] = mapped_column(String(32), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
-    before: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    before: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     created_at: Mapped[datetime.datetime] = _ledger_now()
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
     author: Mapped[str | None] = mapped_column(String(100), nullable=True)

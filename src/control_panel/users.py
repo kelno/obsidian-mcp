@@ -61,7 +61,16 @@ from src.control_panel.routes import (
 )
 from src.csrf import verify_csrf
 from src.database import get_session
-from src.models.db import APIKey, NoteMetadata, UsageLog, User
+from src.models.db import (
+    APIKey,
+    LedgerDigest,
+    LedgerEntry,
+    LedgerRefCounter,
+    LedgerTopic,
+    NoteMetadata,
+    UsageLog,
+    User,
+)
 from src.oauth.grants import ACCOUNT_GUARD_LOCK_KEY, lock_account_guard
 from src.services import panel_csp, security_events, vault_overlap
 from src.services.vault import clear_user_vault_cache, validate_vault_root_path
@@ -298,6 +307,15 @@ async def _lock_admin_guard(session: AsyncSession) -> None:
     only where it is written down moved.
     """
     await lock_account_guard(session)
+
+
+async def _has_ledger(session: AsyncSession, user_id: int) -> bool:
+    """Whether the user owns agent-ledger rows. Every other ledger table hangs
+    off an entry, a topic or a view, or is written with one."""
+    for model in (LedgerEntry, LedgerTopic, LedgerDigest, LedgerRefCounter):
+        if (await session.execute(select(model.user_id).where(model.user_id == user_id).limit(1))).first():
+            return True
+    return False
 
 
 async def _actor_still_privileged(
@@ -828,6 +846,17 @@ async def delete_user(
                 request,
                 "Refusing to delete the last active admin — promote someone else first."
             )
+
+    if permanent and await _has_ledger(session, target.id):
+        # The agent ledger is primary data that nothing rebuilds, and its
+        # tables reference `users.id` with no action: the database would refuse
+        # this delete anyway. Say why, instead of a failed commit. Clearing a
+        # ledger is a deliberate act done by hand (docs/architecture/agent-ledger.md).
+        return _back_to_list_with_error(
+            request,
+            f"User '{target.username}' still has an agent ledger, which cannot be rebuilt. Export it "
+            "(scripts/ledger_export.py) and clear it by hand first; deactivating the user keeps it."
+        )
 
     if permanent:
         # `usage_logs.key_id` has no `ON DELETE` — deliberately, so a log row
