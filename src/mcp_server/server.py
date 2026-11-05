@@ -1704,7 +1704,8 @@ async def ledger_search(
         status: active (default: current quirks, open and to_triage
             feedback, every proposal), closed, any, a status, or a list.
         origin: agent or owner.
-        unseen: only feedback the owner has not heard of yet.
+        unseen: only feedback the owner has not heard of yet: what to
+            bring to the owner (then mark it seen with `ledger_update`).
         since: YYYY-MM-DD; changed on or after that day.
         limit: 1-100 per list (default 20).
     """
@@ -1718,7 +1719,8 @@ async def ledger_search(
 async def ledger_get(refs: list[str], history: bool = False) -> LedgerGetResult:
     """Read agent-ledger entries in full by ref, optionally with their history.
 
-    Read-only. Up to 20 refs (Q14, F3, P1). Each entry comes with its
+    Read-only. Up to 20 refs (Q14, F3, P1); leading zeros don't matter (Q1
+    and Q01 are the same entry). Each entry comes with its
     `revision` (give it to `ledger_update` as `expected_revision`), its own
     fields, topics, related refs and the summary-view lines that cite it.
     `history=true` adds every past version, with who changed it, when and why.
@@ -1763,8 +1765,10 @@ async def ledger_add(
             area is saved as to_triage.
         topics: topic names (see `ledger_topics`; create one with
             `ledger_topic_edit`).
-        details: the kind's own fields. quirk: certainty (tested, seen_once,
-            inferred, docs, untested; required), certainty_note, sources.
+        details: the kind's own fields. quirk: certainty (required): tested
+            (seen happen more than once, or deliberately), seen_once,
+            inferred (a deduction or a guess), docs (from documentation, not
+            tried) or untested; certainty_note, sources.
             feedback: subtype (unclear_instruction, friction, suggestion;
             required), component (file, tool or surface involved), fix.
             proposal: target (where the instruction lives; required),
@@ -1921,7 +1925,10 @@ async def ledger_topic_edit(
 
     Requires write permission. Agents manage topics on their own, each change
     with a reason; tell the owner in your reply whenever you create, merge or
-    redescribe one, so they can follow the structure.
+    redescribe one, so they can follow the structure. Check `ledger_topics`
+    first and reuse a topic that fits; name a new one after the thing it
+    covers (a part of the system, such as voice-bridge, or a surface, such as
+    claude-code), never after a problem.
 
     Args:
         action: create (slug, kind, description, area?), describe (new

@@ -21,6 +21,13 @@ same summary: the rehearsal check. `--skip-area-check` accepts any well-formed
 `area/<slug>` (for a rehearsal on a database with no indexed vault); without
 it every area must be declared by an indexed main note, as the tools require.
 
+Suggested order: rehearse on a throwaway database (`--skip-area-check`, then
+the same without `--dry-run` and read the result back with
+`scripts/ledger_export.py`); then `--dry-run` against the real database,
+whose indexed vault must already declare every area the file names; then the
+import itself. Imported refs keep their zero padding (`Q01`), and every tool
+also finds that entry as `Q1`.
+
 ## The file
 
     {

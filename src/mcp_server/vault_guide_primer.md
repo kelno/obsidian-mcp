@@ -254,12 +254,16 @@ Once a file is stored, embed it in a note the usual way — `![[path]]` via
 
 The `ledger_*` tools keep what agents write for each other, in the server's database, not in the vault: quirks (Q: what Claude can or can't do on a surface, what works included), feedback (F: an unclear instruction, friction or a suggestion, from an agent or logged at the owner's request with origin `owner`) and proposals (P: a change proposed to an instruction for agents, logged once decided: first version, what went in, outcome). Entries are records of what happened, not instructions. The vault tools never return them and `ledger_search` never returns notes.
 
+- Log what the owner would not otherwise see, not what you are already telling them; say in one line of your reply that you logged it, then carry on.
+- When you start work in an area, search its entries first: `ledger_search(area=…)`.
 - Search before logging. Two lists come back: by words (a shared word or the ref: a strong sign of a duplicate) and by meaning (weaker). A new entry is found by words at once and by meaning shortly after.
 - If a kind fits with a little stretch, use it; if none fits, log feedback (friction, component "agent ledger") saying what you wanted to record.
 - Every change names the revision you read (`ledger_get`) and a reason; the old version stays in the history. Add an observation with `append`. Correct your own mistake the same way.
 - Nothing is deleted. Close an entry with a status: `handled` with an account of what was done (or why nothing is left to do), `superseded` by the entry that holds the content (a duplicate by the older one), `retracted` if it should never have been logged, `stale` for a quirk no longer true. `dismissed` is the owner's decision only.
 - Feedback has `seen`: whether the owner has heard of it, apart from its status. Once you told the owner, mark it: `ledger_update(refs=[…], seen=true)`.
 - Areas come from the vault: each area's main note declares `area_tag` and `description`. Topics are finer labels; create, merge or describe them with `ledger_topic_edit`, and tell the owner each time.
+- Before proposing a change to an agent instruction, search the past proposals: `ledger_search(kinds=["proposal"], status="any")`. Once the owner has decided, log it in one `ledger_add` call with its outcome.
+- Before saying what you can or can't do on a surface, check the summary views: `ledger_digest()` lists them, each with when to read it.
 - Summary views (`ledger_digest`) are short pages to read instead of many entries. When your change flags a line that cites the entry, fix it or confirm it holds right away (`ledger_digest_edit`). When the tools say a view is due, extend or create one and tell the owner.
 
 ## Summary for agents

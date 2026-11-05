@@ -417,7 +417,10 @@ and short summary views:
 
 Nothing is ever deleted by a tool, and the database enforces it.
 `scripts/ledger_import.py` and `scripts/ledger_export.py` move a ledger in
-and out as JSON (or Markdown, for export). See
+and out as JSON (or Markdown, for export). After deploying a version that
+adds or changes tools, refresh the connector in the MCP client and start new
+sessions: a client lists a server's tools when it connects, so sessions that
+were already open keep the old list. See
 [docs/architecture/agent-ledger.md](docs/architecture/agent-ledger.md).
 
 The token travels in the URL *fragment*, which browsers never send, so
