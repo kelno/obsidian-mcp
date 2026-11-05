@@ -417,7 +417,7 @@ def _reset_provider_cache():
 
 
 @pytest.fixture(autouse=True)
-def _no_ledger_sweep_offline(request, monkeypatch):
+def _no_ledger_sweep_offline(request):
     """Offline tests do not run the agent ledger's sweep at the end of the
     embed stage.
 
@@ -425,6 +425,11 @@ def _no_ledger_sweep_offline(request, monkeypatch):
     notes' statements, and the sweep's own queries would reach those fakes.
     The sweep is exercised on real Postgres: by every integration test that
     runs an embed stage, and by `tests/integration/test_ledger_pg.py`.
+
+    Its own `MonkeyPatch`, not the `monkeypatch` fixture: requesting that
+    fixture here would set it up before the other autouse fixtures and so
+    tear it down after them, leaving a test's patches in place while, for
+    instance, `_reset_provider_cache` clears the real provider cache.
     """
     if "integration" in request.node.path.parts:
         yield
@@ -434,8 +439,9 @@ def _no_ledger_sweep_offline(request, monkeypatch):
     async def _no_sweep(*_args, **_kwargs):
         return 0
 
-    monkeypatch.setattr(ledger_embed, "sweep", _no_sweep)
-    yield
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ledger_embed, "sweep", _no_sweep)
+        yield
 
 
 @pytest.fixture(autouse=True)
