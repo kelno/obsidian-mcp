@@ -211,7 +211,7 @@ async def test_shutdown_wakes_queued_without_grants_and_off_exemption():
     assert (await make().tool("internal", None, None, resource_class="light")).admitted
     with pytest.raises(ValueError): await make().tool("unregistered", 1, 1)
     with pytest.raises(ValueError): await make().tool("internal", 1, 1, resource_class="other")
-    assert len(TOOL_CLASSES) == 32
+    assert len(TOOL_CLASSES) == 40
     assert set(TOOL_CLASSES.values()) == CLASSES == {"embedding", "vector", "write", "scan", "light"}
     assert shadow_metadata(()) is None
 

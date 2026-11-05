@@ -235,7 +235,7 @@ looks the way it does.
 
 ## What's in the box
 
-The server exposes 25 MCP tools across five families, plus the auth
+The server exposes 40 MCP tools, plus the auth
 and ops layer around them.
 
 ### Search and discovery
@@ -393,6 +393,32 @@ and needing no running Obsidian:
 Every task write is refused when the line or the note changed since it was
 read, and changes only that one line. See
 [docs/architecture/tasks.md](docs/architecture/tasks.md).
+
+**Agent ledger** (fork): what agents log for each other — quirks (what an
+assistant can or can't do on a surface), feedback (unclear instructions,
+friction, suggestions) and proposals (changes to agent instructions and their
+outcome) — kept in the server's database rather than the vault, with topics
+and short summary views:
+
+- `ledger_search(query=None, mode="both", kinds=None, area=None, topics=None,
+  status="active", …)` returns two separate lists, by words and by meaning
+  (or one of them); without a query, a filtered list.
+- `ledger_get(refs, history=False)` reads entries in full, with every past
+  version on request.
+- `ledger_add(kind, title, body, area, topics, details, …)` logs an entry and
+  answers with similar ones, so duplicates are caught.
+- `ledger_update(ref, expected_revision, reason, …)` changes or closes one
+  (refused if it changed since it was read; the old version is kept), or
+  marks feedback seen in bulk.
+- `ledger_digest(slug)` / `ledger_digest_edit(slug, reason, operations)`
+  read and edit the summary views; `ledger_topics()` /
+  `ledger_topic_edit(action, slug, reason, …)` list and manage areas and
+  topics.
+
+Nothing is ever deleted by a tool, and the database enforces it.
+`scripts/ledger_import.py` and `scripts/ledger_export.py` move a ledger in
+and out as JSON (or Markdown, for export). See
+[docs/architecture/agent-ledger.md](docs/architecture/agent-ledger.md).
 
 The token travels in the URL *fragment*, which browsers never send, so
 no server-generated request target or access log contains it. Uploads

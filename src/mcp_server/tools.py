@@ -1309,7 +1309,7 @@ def _bucket_admission(write_class: bool) -> tuple[str, int] | None:
 
     Two buckets, because velocity and destruction are different questions. The
     general one bounds the rate at which *any* work is created; the write one
-    halves that for the tools that change vault bytes. Neither bounds
+    halves that for the write-budget tools (`write_class`). Neither bounds
     totality — 120 deletes a minute empties this vault in about twenty minutes
     — which is what the daily quota is for, and only for the credentials it
     reaches.
@@ -1489,12 +1489,14 @@ def _tracked(
     tool refuses over quota in its own shape rather than by breaking the wire
     format.
 
-    `write_class` marks a tool that changes vault bytes, so it must pass the
-    per-principal **write** bucket in addition to the general one. Every tool
-    that changes vault bytes carries it — the five note tools, `write_file`,
+    `write_class` charges a tool to the per-principal **write** bucket (the
+    write budget) in addition to the general one. Two groups carry it. Every
+    tool that changes vault bytes — the five note tools, `write_file`,
     `delete_file`, `import_from_url`, the fork's `move_file` and
     `delete_folder`, and the three task writers — because those are the calls
-    that amplify into the next indexer pass. `PUT /transfer/upload` writes vault bytes without being a
+    that amplify into the next indexer pass. And the fork's four agent-ledger
+    writers, which change no vault byte but write primary data an agent acts
+    on (docs/architecture/agent-ledger.md). `PUT /transfer/upload` writes vault bytes without being a
     tool call at all and consumes the same bucket at redemption, in
     `src/transfer/routes.py`; bounding only the tools would leave the write
     rate escapable by minting capabilities and redeeming them.

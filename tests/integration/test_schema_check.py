@@ -60,7 +60,7 @@ DIM = 64  # irrelevant here; keeps the migration cheap.
 # The current head. Every case that migrates forward asserts it, so adding a
 # revision without teaching this module about it fails loudly rather than
 # leaving the new migration unexercised.
-HEAD_REVISION = "031"
+HEAD_REVISION = "032"
 
 CONSTRAINT = "ck_oauth_clients_auth_method_secret"
 MARKER = "created by 013_schema_reconciliation"
@@ -6706,8 +6706,9 @@ def test_031_chains_from_030():
     config = Config()
     config.set_main_option("script_location", str(_harness.ROOT / "alembic"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_current_head() == HEAD_REVISION == "031"
     assert script.get_revision("031").down_revision == "030"
+    assert script.get_revision("032").down_revision == "031"
+    assert script.get_current_head() == HEAD_REVISION == "032"
 
 
 def test_031_rows_cascade_with_their_note_and_the_checks_hold():
@@ -6786,3 +6787,57 @@ def test_downgrade_031_refuses_a_table_it_did_not_create():
         assert result.returncode != 0
         assert "did not create it and will not drop it" in (result.stdout + result.stderr)
         assert alembic_version(url) == HEAD_REVISION
+
+
+# ── 032: the agent ledger ───────────────────────────────────────────────────
+#
+# Its own module (`test_ledger_pg.py`) checks the shape constraint by
+# constraint against the model, the triggers and every refusal. The gate
+# here is the migration's own contract: a fresh head is clean, a
+# pre-existing table is refused rather than adopted, and the downgrade
+# refuses while an entry exists, since nothing can rebuild one.
+
+LEDGER_ENTRY_032 = (
+    "INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
+    "certainty) VALUES ('quirk', 1, 'Q1', 'current', 't', '2026-11-05', 'gate', 'h', 'tested')"
+)
+
+
+def test_032_fresh_head_is_clean_and_marked():
+    with throwaway_db("schema_032_fresh") as url:
+        assert alembic_version(url) == HEAD_REVISION == "032"
+        assert fetchval(
+            url, "SELECT obj_description('public.ledger_entries'::regclass, 'pg_class')"
+        ) == "agent ledger entries, primary data (032_agent_ledger)"
+        sql(url, LEDGER_ENTRY_032)
+        with pytest.raises(asyncpg.PostgresError, match="refused"):
+            sql(url, "DELETE FROM ledger_entries")
+        assert_alembic_check_clean(url, DIM)
+
+
+def test_032_refuses_a_pre_existing_ledger_table():
+    with throwaway_db("schema_032_foreign", revision="031") as url:
+        sql(url, "CREATE TABLE ledger_topics (id serial PRIMARY KEY)")
+        result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
+        assert result.returncode != 0
+        assert "will not adopt pre-existing tables (ledger_topics)" in (result.stdout + result.stderr)
+        assert alembic_version(url) == "031"
+
+
+def test_downgrade_032_refuses_while_an_entry_exists_and_drops_an_empty_ledger():
+    with throwaway_db("schema_032_downgrade") as url:
+        sql(url, LEDGER_ENTRY_032)
+        result = _harness.run_alembic(url, "downgrade", "031", dimensions=DIM, check=False)
+        assert result.returncode != 0
+        assert "holds 1 entries, which nothing can rebuild" in (result.stdout + result.stderr)
+        assert alembic_version(url) == HEAD_REVISION
+        async def empty(conn):
+            async with conn.transaction():
+                await conn.execute("SET LOCAL ledger.allow_delete = 'on'")
+                await conn.execute("DELETE FROM ledger_entries")
+        asyncio.run(_run(url, empty))
+        _harness.run_alembic(url, "downgrade", "031", dimensions=DIM)
+        assert fetchval(url, "SELECT to_regclass('public.ledger_entries')") is None
+        assert fetchval(url, "SELECT to_regprocedure('public.ledger_refuse_change()')") is None
+        _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
+        assert_alembic_check_clean(url, DIM)

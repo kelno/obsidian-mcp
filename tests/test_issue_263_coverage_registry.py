@@ -41,6 +41,14 @@ COVERAGE = {
     'create_task': [('success', 'test_task_tools.py::test_create_appends_the_dialog_line_in_canonical_order'), ('refused', 'test_task_tools.py::test_create_refuses_a_missing_note_other_than_the_inbox')],
     'edit_task': [('success', 'test_task_tools.py::test_postpone_sets_scheduled'), ('refused', 'test_task_tools.py::test_edit_recurring_is_refused')],
     'set_task_status': [('success', 'test_task_tools.py::test_done_adds_done_date_and_changes_only_that_line'), ('refused', 'test_task_tools.py::test_recurring_task_is_refused')],
+    'ledger_search': [('refused', 'test_ledger_tools.py::test_search_refuses_a_bad_limit_or_mode'), ('success', 'integration/test_ledger_pg.py::test_search_words_and_meaning_are_two_lists')],
+    'ledger_get': [('refused', 'test_ledger_tools.py::test_get_refuses_no_refs_or_a_malformed_one'), ('success', 'integration/test_ledger_pg.py::test_update_needs_the_revision_keeps_history_and_closes')],
+    'ledger_add': [('refused', 'test_ledger_tools.py::test_writes_refuse_a_read_only_credential'), ('success', 'integration/test_ledger_pg.py::test_add_numbers_refs_refuses_unknowns_and_returns_similar')],
+    'ledger_update': [('refused', 'integration/test_ledger_pg.py::test_update_needs_the_revision_keeps_history_and_closes'), ('success', 'integration/test_ledger_pg.py::test_seen_is_bulk_without_reason_and_feedback_only')],
+    'ledger_digest': [('success', 'integration/test_ledger_pg.py::test_views_cite_entries_and_are_flagged_when_one_changes')],
+    'ledger_digest_edit': [('refused', 'integration/test_ledger_pg.py::test_views_cite_entries_and_are_flagged_when_one_changes'), ('success', 'integration/test_ledger_pg.py::test_views_cite_entries_and_are_flagged_when_one_changes')],
+    'ledger_topics': [('success', 'integration/test_ledger_pg.py::test_topics_create_merge_and_count')],
+    'ledger_topic_edit': [('refused', 'test_ledger_tools.py::test_writes_refuse_a_read_only_credential'), ('success', 'integration/test_ledger_pg.py::test_topics_create_merge_and_count')],
 }
 
 
@@ -48,7 +56,7 @@ def test_every_registered_tool_has_inventory_and_live_behavioral_references():
     from src.mcp_server.server import mcp
     registered = {tool.name for tool in mcp._tool_manager.list_tools()}
     assert set(COVERAGE) == registered
-    assert len(registered) == 32
+    assert len(registered) == 40
     root = Path(__file__).resolve().parents[1]
     inventory = (root / 'openspec/changes/archive/2026-09-06-typed-tool-outcomes/inventory.md').read_text()
     for tool, references in COVERAGE.items():

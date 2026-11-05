@@ -56,7 +56,18 @@ without being a tool call at all. `list_tasks` is a read (concurrency class
 (`task_index.reindex_note_tasks_now`) runs inside the tool call, so it is
 covered by the call's own write-bucket token and concurrency slot; see
 [task tools](tasks.md). Adding the task tools moved `TOOL_CLASSES`, so
-`CLASS_MAPPING_VERSION` is 3.
+`CLASS_MAPPING_VERSION` was 3.
+
+The fork's four **agent-ledger writers** — `ledger_add`, `ledger_update`,
+`ledger_digest_edit` and `ledger_topic_edit` — carry `write_class` too, and
+are concurrency class `write`, though they change no vault byte: they write
+primary data an agent acts on, so they share the write budget (owner's
+design). `write_class` therefore means "charged to the write bucket", which
+is all it ever selected in code; it no longer implies "changes vault bytes".
+The ledger readers are `ledger_search` (class `embedding`: its default mode
+embeds the query) and `ledger_get`, `ledger_digest`, `ledger_topics`
+(`light`). Adding them moved `TOOL_CLASSES`, so `CLASS_MAPPING_VERSION` is 4.
+See [agent ledger](agent-ledger.md).
 
 ## The principal is the grant, not the token, and not (client, user)
 
@@ -913,7 +924,7 @@ the page to see. The full reading rules are in
 | `PANEL_LOGIN_FAILURE_WINDOW_SECONDS` | `900` | The window that budget is counted over. |
 | `MCP_RATE_LIMIT_PER_MINUTE` | `600` | Sustained tool calls per minute per principal. Null (with the burst) disables the general bucket. |
 | `MCP_RATE_LIMIT_BURST` | `120` | Capacity of the general bucket. |
-| `MCP_WRITE_RATE_LIMIT_PER_MINUTE` | `120` | Sustained vault-mutating calls per minute per principal (the write-class tools plus `PUT /transfer/upload`). |
+| `MCP_WRITE_RATE_LIMIT_PER_MINUTE` | `120` | Sustained write-budget calls per minute per principal (the write-class tools — the vault writers and the agent-ledger writers — plus `PUT /transfer/upload`). |
 | `MCP_WRITE_RATE_LIMIT_BURST` | `30` | Capacity of the write bucket. |
 | `MCP_LIMITER_MAX_TRACKED_PRINCIPALS` | `10000` | Principals holding their own limiter entry before the shared overflow entry. |
 | `MCP_REFUSAL_LOG_INTERVAL_SECONDS` | `10` | How long one coalescing window stays open. |

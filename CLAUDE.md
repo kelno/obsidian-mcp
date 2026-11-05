@@ -19,7 +19,7 @@ Self-hosted MCP server exposing an Obsidian vault (~2,577 markdown files) via se
 - `src/main.py` — FastAPI app, lifespan, MCP mount
 - `src/config.py` — pydantic-settings
 - `src/database.py` — async SQLAlchemy engine/session
-- `src/models/db.py` — ORM models (api_keys, usage_logs, notes_metadata, note_embeddings, note_links, indexer_runs, transfer_tokens, oauth_clients/codes/tokens)
+- `src/models/db.py` — ORM models (api_keys, usage_logs, notes_metadata, note_embeddings, note_links, indexer_runs, transfer_tokens, oauth_clients/codes/tokens, the `ledger_*` agent-ledger tables)
 - `src/mcp_server/` — MCP server, tools, auth middleware
 - `src/services/` — vault ops, search, embeddings, indexer, transfer, anchored FS
 - `src/transfer/` — public `/transfer/*` capability-redemption routes
@@ -156,7 +156,8 @@ update it in the same change.** What stays here is the short list:
   [vault roots and tenancy](docs/architecture/vault-roots-and-tenancy.md).
 - **`/mcp` rate control is in-process, and `--workers 1` is part of the
   contract.** Two per-principal token buckets in `_tracked` (general 600/min
-  burst 120; write 120/min burst 30 on the eight vault-mutating tools *and*
+  burst 120; write 120/min burst 30 on the write-budget tools — the
+  vault-mutating ones and the four agent-ledger writers — *and*
   `PUT /transfer/upload`, charged to the principal that **minted** the
   capability) plus a per-address budget on failed `/mcp` authentication. The
   principal is `("api_key", id)` or `("oauth", grant_id)` — the **grant**, so a
@@ -382,12 +383,28 @@ update it in the same change.** What stays here is the short list:
   the "only with more than one scope" clause. See
   [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
 - Wikilink graph extracted from note bodies into `note_links`; resolved at index time with same-folder-first preference
+- **The agent ledger is primary data: backed up, never rebuilt from the
+  vault** (fork, owner's design, migration 032). The `ledger_*` tables hold
+  what agents write for each other (quirks, feedback, proposals); nothing in
+  the vault can re-derive them, so a restore of last night's dump loses the
+  day's entries — backups protect them. The database itself enforces the
+  structure: per-kind columns and CHECKs, composite foreign keys over a
+  generated `owner_key` (`coalesce(user_id, 0)`, so single-user mode is
+  checked too), and triggers refusing DELETE (entries, topics, views, lines,
+  counters, history), UPDATE of the history and TRUNCATE — unless the
+  session sets `SET LOCAL ledger.allow_delete = 'on'`, the owner's way to
+  remove something for good from `psql`. No foreign key points into the
+  index tables, so a reindex or prune never reaches the ledger; a user with
+  a ledger cannot be deleted. Writes never wait for an embedding (background
+  queue, then the embed stage's sweep within its budget); the reset and the
+  startup dimension check cover `ledger_embeddings`. See
+  [agent ledger](docs/architecture/agent-ledger.md).
 - **Agents read the guide** (fork, owner's design assumption). `get_vault_guide` is the agent's manual; an agent that skips it is a bug to fix (in the guide's description or the client's setup), not a case to design around. claude.ai shows an agent only about the first 80 characters of a tool's description until it searches its tools, so every tool's first line must stand on its own, and the guide's must say to read it first.
 - `MCP_SANDBOX_MODE=true` is a registry-eval-only switch: lifespan skips `_check_embedding_dim` and the indexer, and `APIKeyMiddleware` bypasses auth on `/mcp/*`. Lets Glama's sandbox build the image and validate MCP introspection without external deps. Never enable in production — tools register but cannot run.
 
 ## MCP tools
 
-32 tools, all registered in `src/mcp_server/server.py` and all wrapped by
+40 tools, all registered in `src/mcp_server/server.py` and all wrapped by
 `_tracked`, which resolves the caller's vault root *before* the tool body runs
 — that decorator is the whole enforcement of "this user has no vault"
 ([vault roots and tenancy](docs/architecture/vault-roots-and-tenancy.md)).
@@ -434,6 +451,17 @@ returned line on disk; the writers change one line through the same ladder as
 Recurring tasks are read, never changed. Read
 [task tools](docs/architecture/tasks.md) first.
 
+**Agent ledger** (fork) — `ledger_search`, `ledger_get`, `ledger_add`,
+`ledger_update`, `ledger_digest`, `ledger_digest_edit`, `ledger_topics`,
+`ledger_topic_edit`: what agents log for each other, in the `ledger_*`
+tables (migration 032), never in the vault. Every change names the revision
+it read and a reason, and keeps the previous version; nothing is deleted.
+Search returns two separate lists, by words and by meaning. The four
+writers draw on the write budget (`write_class`) though they change no
+vault byte. Structured results (`src/mcp_server/ledger_result.py`), services
+in `src/services/ledger*.py`, import and export in `scripts/ledger_*.py`.
+Read [agent ledger](docs/architecture/agent-ledger.md) first.
+
 ## Architecture notes
 
 One file per area, each holding the decisions that must not be silently
@@ -454,6 +482,7 @@ summaries.
 | [usage-attribution.md](docs/architecture/usage-attribution.md) | `usage_logs`, `_log_usage`, actor columns |
 | [control-panel.md](docs/architecture/control-panel.md) | panel templates, flash messages, admin guards, the Danger zone |
 | [tasks.md](docs/architecture/tasks.md) | the four task tools, `src/services/task_*.py`, `note_tasks` / migration 031, and any Tasks plugin upgrade |
+| [agent-ledger.md](docs/architecture/agent-ledger.md) | the eight `ledger_*` tools, `src/services/ledger*.py`, the `ledger_*` tables / migration 032, `scripts/ledger_import.py` / `ledger_export.py`, and the ledger's vectors in the reset and the embed stage |
 
 Formal requirements live in `openspec/specs/`; the change history and its
 reasoning in `openspec/changes/archive/`.

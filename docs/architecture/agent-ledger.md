@@ -1,0 +1,133 @@
+# Agent ledger: what agents write for each other, in the database
+
+> Read before touching the eight `ledger_*` tools, `src/services/ledger*.py`, `src/mcp_server/ledger_result.py`, the `ledger_*` tables or migration 032, `scripts/ledger_import.py` / `scripts/ledger_export.py`. The write tools are on the repo's mandatory-adversarial-review surface: they write primary data an agent acts on.
+
+The agent ledger holds the logs agents keep for each other: **quirks** (Q: what Claude can or can't do on a surface, what works included), **feedback** (F: an unclear instruction, friction or a suggestion, from an agent or logged at the owner's request) and **proposals** (P: a change an agent proposed to an instruction for agents, and what went in). Eight MCP tools reach it; nothing else writes it. Fork-only (see `FORK.md`).
+
+## The requirements this design answers to
+
+Set by the owner (the design was reviewed with them on 2026-11-05); they outweigh any technical choice below.
+
+1. **It is primary data.** Nothing in the vault rebuilds it, so it is backed up with the database, never re-derived. It is the first content in this database with that property (accounts and usage logs are the server's own bookkeeping).
+2. **Real foreign keys and constraints wherever possible**, rather than IDs checked only by code: same-owner checks on every link between ledger rows; each kind's own fields as real columns with checks; the database itself refusing deletes and history rewrites. The one exception is links to the vault (an entry's or topic's area), so a reindex or prune can never reach the ledger.
+3. **Nothing is ever lost.** No delete tool; every change states a reason and the revision it was based on, and is refused if the entry moved since; the previous version goes into an append-only history. Removing something for good (a sensitive detail logged by mistake) is the owner's act, from `psql`.
+4. **Writes never wait for an embedding.** The reference server's Ollama is CPU-only and slow, and the claude.ai app drops a tool call after about 30 s.
+5. **Two separate searches, never a merged ranking**: "by words" and "by meaning", side by side or one of them. When the provider is down, the meaning list says so and the words list still answers.
+6. **The ledger and the vault stay apart**: `keyword_search` / `semantic_search` never return ledger entries, `ledger_search` never returns notes.
+7. **What an agent needs goes in the tool descriptions first**, then the vault guide's primer (`vault_guide_primer.md`, "Agent ledger"), and only the rest in vault notes. Each description's first line stands on its own within about 80 characters; descriptions are generic (the repo is public). The read-only tools are marked read-only.
+8. **Only feedback has `seen`** (the owner has heard of it), independent of its status. Every kind can be `superseded` or `retracted`. `dismissed` is the owner's alone — a convention in the tool description, since the server cannot tell the owner from an agent (every call carries the owner's credentials).
+
+## Where the code is
+
+| File | What it holds |
+| --- | --- |
+| `alembic/versions/032_agent_ledger.py` | The tables, constraints and triggers. |
+| `src/models/db.py` (end) | The models, whose CHECKs mirror the migration's text. |
+| `src/services/ledger.py` | Refs, validation, areas and topics as arguments, add, update, seen, get helpers, search filters and the words document, review flags, view hints. |
+| `src/services/ledger_views.py` | Topics (list, create, describe, merge) and summary views (list, render, edit). |
+| `src/services/ledger_embed.py` | Embedding one entry, the background queue, the indexer sweep, the meaning search, the reset. |
+| `src/mcp_server/tools.py` (end), `server.py`, `ledger_result.py` | The eight tools and their structured results. |
+| `scripts/ledger_import.py`, `scripts/ledger_export.py` | JSON import; Markdown or JSON export. |
+
+## Tables
+
+All in the connector's database, apart from the index tables. Each carries `user_id` (NULL in single-user mode) and `owner_key`, a **stored generated column `COALESCE(user_id, 0)`**.
+
+| Table | One row per | Notes |
+| --- | --- | --- |
+| `ledger_entries` | entry | `kind`, `number`, `ref`, `status`, `origin`, `title`, `body`, `area_tag`, `seen`; the kinds' own columns (quirk: `certainty`, `certainty_note`, `sources`; feedback: `subtype`, `component`, `fix`; proposal: `target`, `proposed_text`, `final_text`, `changes`, `owner_reason`); `superseded_by`, `handled_account`, `handled_at`, `observed_on`, `created_at`, `updated_at`, `revision`, `created_by`, `author`, `content_hash`, `embedded_hash`. |
+| `ledger_ref_counters` | owner and kind | The last number handed out, so a ref is never reused. |
+| `ledger_entry_links` | "see also" pair | Stored once, lower id first (`ck_ledger_entry_links_order`). |
+| `ledger_topics` | topic | `slug`, `kind` (system, surface), `description`, `area_tag`, `status` (active, merged), `merged_into`, `revision`. |
+| `ledger_entry_topics` | entry–topic pair | |
+| `ledger_digests` | summary view | `slug`, `title`, `description` (when to read it), `layout` (list, matrix). |
+| `ledger_digest_columns` | matrix column | A line's column is a foreign key to `(digest_id, label)`, so a cell can only name a column its view has. |
+| `ledger_digest_lines` | line or cell | `row_label`, `column_label`, `position`, `text`, `revision`, `needs_review` + `review_reason`, `removed_at`. |
+| `ledger_digest_sources` | line–entry pair | The entries a line rests on. |
+| `ledger_revisions` | past version | Exactly one subject (`entry_id`, `topic_id`, `digest_id`, `line_id`), `revision` (the version it preserves), `action`, `reason` (required), `before` (the fields as they were; NULL only for `action='create'`), who and when. |
+| `ledger_embeddings` | chunk vector | The one derived table; cascades with its entry. |
+
+### What the database enforces
+
+- **Owners.** Every foreign key between two ledger rows is composite over `(…_id, owner_key)` onto a `UNIQUE (id, owner_key)`. A composite key with a NULL column is not checked (MATCH SIMPLE), which is why it is not over `user_id`: in single-user mode every `user_id` is NULL and the check would silently not run. `owner_key` is never NULL, and user ids start at 1, so 0 is single-user mode's owner. The brief suggested keeping a plain key next to a composite one over `user_id`; the generated column makes the composite check total instead, so the plain key would add nothing (choice 1 below).
+- **Kinds.** `ck_ledger_entries_status` allows each kind's own statuses plus `superseded` and `retracted`; one CHECK per group of kind fields says which kind must carry them and which may not (`ck_ledger_entries_quirk_fields`, `_feedback_fields`, `_proposal_fields`); `ck_ledger_entries_ref` ties the ref's letter to the kind and its digits to `number` (imported refs keep their zeros: `Q01` is number 1).
+- **Lifecycle.** `superseded` ⇔ `superseded_by` (never itself); `handled` ⇔ `handled_account` and `handled_at`; an accepted or adjusted proposal has `final_text`; `seen` exists exactly for feedback and is true for feedback from the owner; feedback with an area is not `to_triage`.
+- **Sizes.** Title 150 characters on one line, body 16,000, every other text column capped (CHECK or varchar). These caps are also what bounds `ledger_get`'s answer (L3).
+- **No deletes, append-only history.** `ledger_refuse_change()` is a `BEFORE` trigger: `DELETE` on entries, topics, views, view columns and lines, ref counters and the history; `UPDATE` on the history; `TRUNCATE` on all of those and on the three link tables. Each raises `restrict_violation` naming the table — unless the session set **`SET LOCAL ledger.allow_delete = 'on'`** in the same transaction. That switch is the owner's way to remove something for good from `psql`; with it, deleting an entry cascades to its history, links, topic links, line sources and vectors (those keys are `ON DELETE CASCADE`), while an entry another one is superseded by, or a topic another was merged into, still refuses (no action). The link tables accept deletes: a tool removes a topic from an entry or replaces a line's sources, and writes a history row saying so.
+- **Users.** Every `user_id` references `users(id)` with no action, so the database refuses to delete a user who still has a ledger; the panel's permanent delete says so first (`users._has_ledger`).
+
+What stays in code: the area check (areas live in the vault), the expected revision (compared under the row lock taken by `SELECT … FOR UPDATE`), reasons, the request-dependent limits.
+
+## Entries
+
+- **Refs.** A kind letter and the kind's own number (`Q84`, `F1`, `P1`), handed out by an upsert on `ledger_ref_counters` (row-locked for the transaction); a missing counter starts from the highest number in use. Lookups accept `q014` for `Q14`.
+- **Add.** One transaction: the entry, its topics and links, review flags on `challenges`. Unknown areas, topics, fields or statuses are refused with the valid values in `allowed` (areas with their `description` from the main note's frontmatter). Feedback with no area is saved as `to_triage`, never refused. The answer carries up to five active entries sharing words with the title (`similar`): a word OR query over the same document the search uses; never a refusal. No similarity by meaning there, since the new entry has no vector yet and the write does not wait.
+- **Update.** `ref`, `expected_revision`, `reason` are required (`stale_revision` with `current_revision` otherwise). The row is locked; `before` is a snapshot of every changeable field plus topics and related refs; the revision goes up by one; `content_hash` is recomputed. `append` adds `YYYY-MM-DD: text` as a new paragraph (the owner's local date, `TASKS_TIMEZONE`). Setting an area on `to_triage` feedback moves it to `open` (and clearing it, back), said in `notes`. Leaving `handled` clears the account; leaving `superseded` clears the pointer. An update that changes nothing is refused rather than recorded.
+- **Seen.** `ledger_update(refs=[…], seen=true)` (up to 100) or a single `ref` with only `seen=true`: no reason, no revision bump, no history row — it can overwrite nothing. Non-feedback refs are listed as `not_feedback`, unknown ones as `not_found`.
+- **Get.** Up to 20 refs; each with its fields, topics, related refs (both directions), the view lines citing it, and with `history=true` every past version. The answer is kept within `MAX_READ_RESPONSE_CHARS`: later entries go to `not_returned`, the oldest history of an entry is left out with a note.
+
+## Search
+
+`ledger_search` without a query lists by the filters, most recently changed first. With a query:
+
+- **By words**: an exact ref match first (any status), then `to_tsvector(cfg, ref ‖ title ‖ body ‖ the kind's fields)` OR-ed over every `FTS_CONFIGS` entry, ranked by `ts_rank_cd`. **Computed at query time**, not stored (choice 3).
+- **By meaning**: the query embedded with a timeout of `LEDGER_QUERY_EMBED_TIMEOUT_SECONDS` (20 s, under the ~30 s client drop), then exact cosine distance over `ledger_embeddings` joined to entries whose `embedded_hash = content_hash`, best chunk per entry. An outdated vector is never read; `not_embedded` counts the filtered entries without a current one. A provider failure or timeout fills `meaning_unavailable` and leaves the words list whole.
+- Each list says when the other holds the same entry (`in_both_lists`). There is no merged ranking.
+- Filters: kinds, area (or `none`), topics (all of them; a merged topic's name finds what moved to its target), status, origin, `unseen`, `since` (changed on or after the owner's local day).
+- **`status="active"`** (the default) is quirks `current`, feedback `open` / `to_triage`, and **every proposal outcome**; `closed` is `stale`, `handled`, `dismissed`, `superseded`, `retracted` (choice 4).
+
+## Vectors
+
+- **The text** embedded and hashed is the title, body and the kind's longer fields (`ledger.embed_text`), chunked like a note.
+- **After a write**, the tool hands the entry id to `ledger_embed.enqueue`, which never waits: one background task drains a deduplicated queue one entry at a time. The queue is bounded (`LEDGER_EMBED_QUEUE_MAX`, 200); past it, or while indexing is paused, the entry is left to the sweep, and the log says so.
+- **The sweep** runs at the end of each scope's embed stage (`indexer._embed_vault_pinned`), after the notes and the exclusion reconciliation, under the **same `EmbedBudget`**: it debits chunks, counts a note boundary per entry, stops on the budget or on the provider-failure streak, feeds the same streak, and records provider failures in the run row (`ledger entry F3: …`). So the ledger can neither hold the next index stage back nor hide an outage. It looks at up to 200 entries per stage, newest change first. Embedded entries are not added to the run row's `notes_embedded` (that figure is about notes); they are logged.
+- **Certification** mirrors the notes' (`embeddings._generation_matches`): the provider call runs with no transaction or lock open; then the generation lock, the stored fingerprint compared (match or absent), a conditional `UPDATE … SET embedded_hash = h WHERE id = … AND content_hash = h`, and only then the old vectors deleted and the new ones inserted. An entry edited during the call, or a reset or configuration change in between, writes nothing.
+- **No vector index** on `ledger_embeddings` (choice 2).
+- **Reset and startup.** `make reset-embeddings` and the panel's reset call `ledger_embed.reset_vectors` in their own locked transaction: delete every ledger vector, retype `ledger_embeddings.embedding` to the configured dimension, clear every `embedded_hash`. The stored fingerprint covers both tables, since both are certified under it. `_check_embedding_dim` checks both columns at startup.
+
+## Summary views and topics
+
+- **A view** is a list or a matrix of lines; a matrix's columns are rows of `ledger_digest_columns`, a cell is a line with a row and a column, one live line per cell. Each line cites entries; rendering shows the refs, a closed source's status (`Q5 stale`), and the date of the newest source (later of `observed_on` and the day it last changed); an unsourced line says so.
+- **Flags.** Any entry update that changes something flags every live line citing it, `"<ref> changed: <reason>"`; `challenges` on add or update flags the named lines. A flag bumps the line's revision and writes a history row. The tool's answer lists the flagged lines so the agent that caused them deals with them then: `replace` (clears the flag) or `resolve` (it still holds), both with the line's expected revision.
+- **Edits** are a list of operations applied all or none under one reason; a refusal names the operation. `remove` sets `removed_at`; the row and its history stay.
+- **View hints.** A topic with at least `LEDGER_VIEW_HINT_MIN_QUIRKS` (15) current quirks, more than half of them cited by no live line, is named in `ledger_add`'s answer (for a quirk with that topic) and in `ledger_topics`.
+- **Topics**: create (usable at once), describe, merge. A merge moves the entry–topic rows to the target and marks the source merged; the history row lists the entries that moved. The entries' own revisions do not change (choice 5). A merged topic is refused as an argument with the name of its target, and still works as a search filter.
+
+## Rate control and the write budget
+
+The four writers (`ledger_add`, `ledger_update`, `ledger_digest_edit`, `ledger_topic_edit`) carry `write_class=True`, so they draw on the per-principal write bucket like the vault writers, and are concurrency class `write`. `ledger_search` is class `embedding` (its default mode embeds the query), `ledger_get`, `ledger_digest`, `ledger_topics` are `light`. `CLASS_MAPPING_VERSION` is 4. In code `write_class` only ever selected the bucket; its docstring and `rate-limits.md` used to define it as "changes vault bytes", which the ledger writers do not. The meaning is now "charged to the write budget", and the docs list the two groups (choice 6).
+
+## Import and export
+
+`scripts/ledger_import.py FILE (--user NAME | --single-user) [--dry-run] [--skip-area-check]` reads one JSON file (format in its docstring) and imports it in **one transaction**, keeping refs, dates and statuses, setting the counters, inserting each superseded entry after its replacement (the CHECK is immediate), and refusing any clash rather than merging. `--dry-run` writes everything then rolls back: the rehearsal check. Areas are checked against the indexed vault unless `--skip-area-check`. Entries land unembedded; the sweep embeds them over the next passes. `scripts/ledger_export.py` writes Markdown (optionally with history) or the import's JSON. Both read only the server's own configuration (`DATABASE_URL`), so they run in the app container, a one-off job or any shell with it set; neither assumes a deploy path. The data never enters the repository.
+
+## Choices made by the agent that built this (not requirements)
+
+Recorded so they are never mistaken for the owner's rules; each can be changed.
+
+1. **`owner_key` instead of a plain foreign key beside a composite one** (above).
+2. **No vector index on `ledger_embeddings`.** The proposal suggested the vault's half-precision index. At the ledger's size (hundreds to a few thousand chunks) an exact scan is fast and cannot miss a candidate that a filter discards, which HNSW can; it also keeps the index out of `include_object` and the reset. Add one through `vector_index` if the ledger outgrows ~50,000 chunks.
+3. **The words document is computed at query time**, not stored as a tsvector: a stored one goes stale silently when `FTS_CONFIGS` changes (the notes need `make rebuild-tsvectors` for that), and at the ledger's size the parse is cheap.
+4. **Every proposal outcome is "active".** A proposal's outcome is its record, and the "was this already tried?" check needs rejected ones by default; only `superseded` / `retracted` proposals leave the default searches.
+5. **A topic merge does not bump the entries' revisions**, so it cannot make every agent's next update of those entries stale; the merge is recorded on the topic.
+6. **`write_class` keeps its name** and now means "charged to the write budget"; the brief asked to split a flag that, in code, had only ever meant that.
+7. **`expected_revision` is optional for topic edits**, required for entry updates and for view-line replace / remove / resolve. Creating a view or a topic, or adding a line, has no prior version to name.
+8. **`seen` changes neither the revision nor the history.**
+9. **`created_by`** is `api_key:<name>` or `oauth:<client name>` from the credential; `author` is the agent's own optional name. Imports default to `import`.
+10. **Destructive markers.** The four writers are marked `destructiveHint=False` (nothing they do is lost), the four readers `readOnlyHint=True`. The other connector tools still carry none (design note, "Later").
+
+## Accepted limitations
+
+| # | What | Why accepted |
+| --- | --- | --- |
+| L1 | Owner-only conventions (`dismissed`, topics and views told to the owner) are not enforced. | The server cannot tell the owner from an agent: every call carries the owner's credentials (design). |
+| L2 | A new or changed entry is found by meaning only after its vector lands (seconds to a pass later; longer when the provider is down). | Requirement 4; `not_embedded` says how many, and the words list covers them. |
+| L3 | One entry can make a `ledger_get` answer exceed `MAX_READ_RESPONSE_CHARS` (its fields' caps sum to about 70,000 characters). | Bounded by the column CHECKs; splitting one entry would hide part of a record. Several entries never exceed the cap together. |
+| L4 | The background queue is in-process: a restart loses it. | The sweep re-finds every entry whose vector is missing or outdated. |
+| L5 | An area that is no longer declared (main note renamed or deleted) stays on its entries; `ledger_topics` lists it under `areas_no_longer_declared`. | Links to the vault are deliberately not keys (requirement 2); a re-declared area picks the entries back up. |
+| L6 | Similar entries on add are by words only. | The write must not wait for an embedding. |
+| L7 | The owner's switch can also rewrite the history (`UPDATE` with the switch on). | It is the documented way to remove a sensitive detail for good, and only a direct database session can set it. |
+
+## Refusal codes added
+
+`stale_revision` (`BODY_CODES`), with `current_revision` in the result. The rest are the repo's codes: `invalid_argument` (with `allowed` when a value was unknown), `not_found`, `already_exists`, `size_limit`, `permission_denied`, `validation_failed` (a constraint the database refused).

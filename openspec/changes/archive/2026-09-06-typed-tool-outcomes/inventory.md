@@ -317,6 +317,40 @@ Each entry identifies every direct return branch. PROPAGATE means classify at th
 - As `edit_task_impl`; **REFUSE recurring_task** for any `🔁` task before anything is computed; **invalid_argument** for an unknown status or symbol.
 - **SUCCESS — no outcome marker**: `removed` true when `🏁 delete` removed the line; `changed` false when the status is identical.
 
+### ledger_search_impl — src/mcp_server/tools.py (agent ledger, fork; typed from the start)
+- Structured result (`LedgerSearchResult`), `refusal_result=_ledger_gate(...)`.
+- **REFUSE invalid_argument** for `limit` outside 1..100, an unknown `mode`, kind, status, origin, area or topic (with `allowed`), a malformed `since`.
+- **SUCCESS — no outcome marker**: `entries`, or `by_words` / `by_meaning` (empty lists are successes); a provider that is down or slow is `meaning_unavailable` on a success, never a refusal.
+
+### ledger_get_impl — src/mcp_server/tools.py (agent ledger, fork)
+- **REFUSE invalid_argument** for an empty or over-long `refs` list or a malformed ref.
+- **SUCCESS — no outcome marker**: `entries`, with unknown refs in `not_found` and refs left out for the response cap in `not_returned`.
+
+### ledger_add_impl — src/mcp_server/tools.py (agent ledger, fork)
+- **PROPAGATE** write permission (`permission_denied`).
+- **REFUSE invalid_argument** for an unknown kind, area, topic, field or status (with `allowed`), a bad title, a missing required field; **size_limit** for a body over 16,000 characters; **not_found** for an unknown related ref or summary-view line; **validation_failed** for a change the database's constraints refuse.
+- **SUCCESS — no outcome marker**: the new `ref`, `revision` 1, `similar`, `flagged_lines`, `view_hints`.
+
+### ledger_update_impl — src/mcp_server/tools.py (agent ledger, fork)
+- As `ledger_add_impl`; also **REFUSE stale_revision** (with `current_revision`) when `expected_revision` is not the entry's, **not_found** for an unknown ref, **invalid_argument** for a missing reason or revision and for nothing to change.
+- **SUCCESS — no outcome marker**: the new `revision` and `changed`; bulk seen returns `seen`.
+
+### ledger_digest_impl — src/mcp_server/tools.py (agent ledger, fork)
+- **REFUSE not_found** for an unknown view (with `allowed`), **invalid_argument** for a malformed slug.
+- **SUCCESS — no outcome marker**: `views`, or the view's `markdown` (and `lines` with `with_ids`).
+
+### ledger_digest_edit_impl — src/mcp_server/tools.py (agent ledger, fork)
+- **PROPAGATE** write permission. Operations apply all or none: any refusal names the operation and writes nothing.
+- **REFUSE invalid_argument**, **not_found**, **already_exists**, **stale_revision** (a line's), **validation_failed**.
+- **SUCCESS — no outcome marker**: `applied`, `created`.
+
+### ledger_topics_impl — src/mcp_server/tools.py (agent ledger, fork)
+- **SUCCESS — no outcome marker** only: areas, topics, counts, view hints.
+
+### ledger_topic_edit_impl — src/mcp_server/tools.py (agent ledger, fork)
+- **PROPAGATE** write permission. **REFUSE invalid_argument**, **not_found**, **already_exists**, **stale_revision** (optional `expected_revision`), **validation_failed**.
+- **SUCCESS — no outcome marker**: the topic, and `moved` for a merge.
+
 ## Shared/nested helper inventory
 
 ### _confirmed_publication — tools.py:706
