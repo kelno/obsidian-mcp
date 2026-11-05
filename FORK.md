@@ -3,10 +3,11 @@
 What this note is for: tell agents and the owner how this fork differs from upstream and how to work on it here. Agents wrote it and the owner hasn't reviewed it yet, so don't hesitate to slash through it, restructure it or change what's here when it's wrong, outdated or in the way. (owner)
 
 This is `kelno/obsidian-mcp`, a fork of
-[`maxkuminov/obsidian-mcp`](https://github.com/maxkuminov/obsidian-mcp). It
-runs on a home server, deployed by the `obsidian_mcp` task of `sgl-pyinfra`,
-which follows the image `ghcr.io/kelno/obsidian-mcp:main` with podman
-auto-update.
+[`maxkuminov/obsidian-mcp`](https://github.com/maxkuminov/obsidian-mcp). Every
+push to `main` builds and publishes the image `ghcr.io/kelno/obsidian-mcp:main`
+(the `image-no-tests` workflow, below); a deployment may follow that image
+automatically, so a push can reach production. How and where the fork is
+deployed is not part of this repo.
 
 Last checked against `upstream/main` at `564e9e0` (#338) on 2026-10-23.
 
@@ -60,8 +61,8 @@ For the offline suite only (everything outside `tests/integration/`, about
 5 minutes), a Python 3.12 venv in WSL is enough, with no container and no
 database: `pytest --ignore=tests/integration tests`.
 
-Agents on the Windows PC: call `wsl` from PowerShell, for example
-`wsl -e bash -lc "cd /mnt/d/work/obsidian-mcp && ~/.venvs/obsidian-mcp-test/bin/python -m pytest -q tests/test_task_tools.py"`,
+On Windows, call `wsl` from PowerShell, for example
+`wsl -e bash -lc "cd <the checkout's WSL path> && <the venv's python> -m pytest -q tests/test_task_tools.py"`,
 not from Git Bash. Git Bash expands `$variables` inside the quoted command
 before WSL sees it and rewrites `/mnt/...` paths to
 `C:/Program Files/Git/mnt/...`.
