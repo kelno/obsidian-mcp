@@ -79,7 +79,7 @@ user-facing documentation in `README.md`.
 
 Agents commit in this repo freely, without asking the owner first: branches, commits, rebases of unpushed work. This is an exception to the owner's general rule of leaving work uncommitted, so that a finished change lands as a reviewable commit.
 
-Agents never push. A push to `main` builds the image and deploys it (see `FORK.md`), so pushing is the owner's decision, every time.
+Agents never push. A push to `main` builds and publishes the image, which a deployment may follow automatically (see `FORK.md`), so pushing is the owner's decision, every time.
 
 ## Review and checks
 
