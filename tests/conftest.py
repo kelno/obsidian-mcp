@@ -417,6 +417,28 @@ def _reset_provider_cache():
 
 
 @pytest.fixture(autouse=True)
+def _no_ledger_sweep_offline(request, monkeypatch):
+    """Offline tests do not run the agent ledger's sweep at the end of the
+    embed stage.
+
+    They drive `_embed_vault_pinned` through fake sessions scripted for the
+    notes' statements, and the sweep's own queries would reach those fakes.
+    The sweep is exercised on real Postgres: by every integration test that
+    runs an embed stage, and by `tests/integration/test_ledger_pg.py`.
+    """
+    if "integration" in request.node.path.parts:
+        yield
+        return
+    from src.services import ledger_embed
+
+    async def _no_sweep(*_args, **_kwargs):
+        return 0
+
+    monkeypatch.setattr(ledger_embed, "sweep", _no_sweep)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_concurrency_controller():
     """Give each test its own explicit process-controller boundary (#261).
 
