@@ -497,3 +497,90 @@ async def test_a_vector_for_text_that_changed_meanwhile_is_discarded(sessionmake
     assert result.embedded is False and result.skipped == "changed meanwhile"
     async with sessionmaker() as session:
         assert (await session.execute(text("SELECT count(*) FROM ledger_embeddings"))).scalar() == 0
+
+
+# ── Import and export ───────────────────────────────────────────────────────
+
+IMPORT_FILE = {
+    "topics": [{"slug": "voice", "kind": "surface", "description": "The voice app"}],
+    "entries": [
+        {"ref": "Q01", "status": "current", "title": "Voice cannot read images", "body": "Seen twice.",
+         "area": "area/agent-personnel", "topics": ["voice"], "details": {"certainty": "tested"},
+         "observed_on": "2026-10-02", "created_at": "2026-10-02T09:00:00+00:00", "related": ["Q03"]},
+        {"ref": "Q02", "status": "superseded", "superseded_by": "Q03", "title": "Old wording",
+         "details": {"certainty": "inferred"}, "observed_on": "2026-10-03"},
+        {"ref": "Q03", "status": "current", "title": "Newer wording", "details": {"certainty": "docs"},
+         "observed_on": "2026-10-04"},
+        {"ref": "F1", "status": "handled", "handled_account": "Done by hand.", "title": "Owner asked",
+         "origin": "owner", "area": "area/home", "details": {"subtype": "suggestion"},
+         "observed_on": "2026-10-05"},
+    ],
+    "digests": [{"slug": "claude-surfaces", "title": "Surfaces", "description": "Read first.", "layout": "matrix",
+                 "columns": ["voice"], "lines": [{"row": "Images", "column": "voice", "text": "no",
+                                                  "sources": ["Q01"]}]}],
+}
+
+
+class _NoEngine:
+    async def dispose(self):
+        pass
+
+
+async def test_import_keeps_refs_and_dates_and_exports_back(sessionmaker, ctx, monkeypatch, tmp_path):
+    import argparse
+
+    from scripts import ledger_export, ledger_import
+
+    for module in (ledger_import, ledger_export):
+        monkeypatch.setattr(module, "async_session", sessionmaker)
+        monkeypatch.setattr(module, "engine", _NoEngine())
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(IMPORT_FILE), encoding="utf-8")
+    args = argparse.Namespace(file=str(path), user=None, single_user=True, dry_run=True, skip_area_check=False)
+    dry = await ledger_import.run(args)
+    assert dry["quirk"] == 3 and dry["feedback"] == 1
+    assert (await tools.ledger_search_impl(status="any")).entries == []
+
+    args.dry_run = False
+    await ledger_import.run(args)
+    got = (await tools.ledger_get_impl(["Q1", "Q02", "F1"])).entries
+    assert [g.ref for g in got] == ["Q01", "Q02", "F1"]
+    assert got[0].observed_on == "2026-10-02" and got[0].created_at.startswith("2026-10-02T09:00")
+    assert got[0].related == ["Q03"] and got[1].superseded_by == "Q03"
+    assert got[2].seen is True and got[2].handled_account == "Done by hand."
+    new = await add_quirk("After the import")
+    assert new.ref == "Q4"
+    view = await tools.ledger_digest_impl("claude-surfaces")
+    assert "| Images | no (Q01; newest" in view.markdown
+
+    with pytest.raises(Exception, match="uq_ledger"):
+        await ledger_import.run(args)
+
+    exported = json.loads(ledger_export.as_json(await ledger_export.collect(
+        argparse.Namespace(user=None, single_user=True, history=False))))
+    assert [e["ref"] for e in exported["entries"]] == ["F1", "Q01", "Q02", "Q03", "Q4"]
+    q1 = next(e for e in exported["entries"] if e["ref"] == "Q01")
+    assert q1["topics"] == ["voice"] and q1["related"] == ["Q03"] and q1["details"] == {"certainty": "tested"}
+    assert exported["digests"][0]["lines"][0]["sources"] == ["Q01"]
+    markdown = ledger_export.as_markdown(await ledger_export.collect(
+        argparse.Namespace(user=None, single_user=True, history=True)))
+    assert "### Q01 · Voice cannot read images" in markdown
+
+
+async def test_import_refuses_an_unknown_area_and_writes_nothing(sessionmaker, ctx, monkeypatch, tmp_path):
+    import argparse
+
+    from scripts import ledger_import
+
+    monkeypatch.setattr(ledger_import, "async_session", sessionmaker)
+    monkeypatch.setattr(ledger_import, "engine", _NoEngine())
+    bad = {"topics": [{"slug": "voice", "kind": "surface", "description": "d"}],
+           "entries": [{"ref": "Q1", "status": "current", "title": "t", "area": "area/nowhere",
+                        "details": {"certainty": "tested"}}]}
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(bad), encoding="utf-8")
+    with pytest.raises(ledger_import.ImportError_, match="area/nowhere is declared by no indexed main note"):
+        await ledger_import.run(argparse.Namespace(file=str(path), user=None, single_user=True, dry_run=False,
+                                                   skip_area_check=False))
+    assert (await tools.ledger_search_impl(status="any")).entries == []
+    assert (await tools.ledger_topics_impl()).topics == []
