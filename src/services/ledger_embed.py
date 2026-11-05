@@ -320,18 +320,26 @@ async def meaning_search(session: AsyncSession, uid: int | None, query: str, fil
     that have none yet, which the words list still covers.
     """
     clauses = filters.where(uid)
-    not_embedded = (await session.execute(
+    # Counted in the same statement as the hits (one snapshot): the provider
+    # call below takes long enough for the background queue to commit a
+    # vector meanwhile, and a count read before it then called "not embedded"
+    # an entry the meaning list holds.
+    unembedded = (
         select(func.count()).select_from(LedgerEntry)
         .where(*clauses, LedgerEntry.embedded_hash.is_distinct_from(LedgerEntry.content_hash))
-    )).scalar_one()
+    )
+
+    async def count_unembedded() -> int:
+        return (await session.execute(unembedded)).scalar_one()
+
     try:
         vector = await asyncio.wait_for(get_embedding(query), timeout=float(settings.ledger_query_embed_timeout_seconds))
     except asyncio.TimeoutError:
-        return MeaningResult([], not_embedded, error=(
+        return MeaningResult([], await count_unembedded(), error=(
             f"the embedding provider did not answer within {settings.ledger_query_embed_timeout_seconds:g} s, "
             "so there is no meaning list this time; the words list is complete."))
     except Exception as exc:  # noqa: BLE001 - reported to the caller, words still answer
-        return MeaningResult([], not_embedded, error=(
+        return MeaningResult([], await count_unembedded(), error=(
             f"the embedding provider is unavailable ({type(exc).__name__}), so there is no meaning list this "
             "time; the words list is complete."))
     # Best chunk per entry, ranked in SQL: an over-fetch of chunks deduped in
@@ -344,13 +352,14 @@ async def meaning_search(session: AsyncSession, uid: int | None, query: str, fil
     rows = (await session.execute(
         select(LedgerEntry.id, LedgerEntry.ref, LedgerEntry.kind, LedgerEntry.status, LedgerEntry.area_tag,
                LedgerEntry.title, LedgerEntry.updated_at, LedgerEntry.observed_on, LedgerEntry.origin,
-               LedgerEntry.seen, LedgerEntry.revision, best.c.distance)
+               LedgerEntry.seen, LedgerEntry.revision, best.c.distance,
+               unembedded.correlate(None).scalar_subquery().label("not_embedded"))
         .join(best, best.c.entry_id == LedgerEntry.id)
         .where(*clauses, LedgerEntry.embedded_hash == LedgerEntry.content_hash)
         .order_by(best.c.distance, LedgerEntry.id).limit(limit)
     )).all()
     hits = [{"row": row, "similarity": round(1.0 - float(row.distance), 4)} for row in rows]
-    return MeaningResult(hits, not_embedded)
+    return MeaningResult(hits, rows[0].not_embedded if rows else await count_unembedded())
 
 
 # ── Reset (make reset-embeddings, the panel's reset) ─────────────────────────

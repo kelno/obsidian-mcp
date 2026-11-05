@@ -370,6 +370,23 @@ async def test_search_words_and_meaning_are_two_lists(sessionmaker, ctx):
     assert a.ref not in [e.ref for e in stale.by_meaning] and stale.not_embedded == 1
 
 
+async def test_an_entry_embedded_during_the_query_call_is_not_also_called_unembedded(sessionmaker, ctx, monkeypatch):
+    # Found live: the background queue committed the new entry's vector while
+    # the search waited on the provider for the query's, so the entry was in
+    # by_meaning and counted in not_embedded at once.
+    added = await add_quirk("Smoke test of the ledger tools")
+    real = ledger_embed.get_embedding
+
+    async def slow_query_embedding(text_):
+        await embed_all(sessionmaker)  # the queue's worker, finishing meanwhile
+        return await real(text_)
+
+    monkeypatch.setattr(ledger_embed, "get_embedding", slow_query_embedding)
+    result = await tools.ledger_search_impl(query="Smoke test of the ledger tools", mode="meaning")
+    assert [e.ref for e in result.by_meaning] == [added.ref]
+    assert not result.not_embedded and not result.notes
+
+
 async def test_meaning_list_says_when_the_provider_is_down(ctx, monkeypatch):
     await add_quirk("Something")
 
