@@ -68,33 +68,42 @@ configure_logging()
 _mcp_starlette = mcp.streamable_http_app()
 
 
+#: Every vector column the configured dimension applies to: the notes', and
+#: the agent ledger's (migration 032), which `make reset-embeddings` resets
+#: together.
+EMBEDDING_COLUMNS = ("note_embeddings", "ledger_embeddings")
+
+
 async def _check_embedding_dim() -> None:
-    """Compare the live `note_embeddings.embedding` column dim against
-    `settings.embedding_dimensions`. Exit non-zero on mismatch.
+    """Compare each live vector column's dim against
+    `settings.embedding_dimensions`. Exit non-zero on a mismatch.
     """
     configured = int(settings.embedding_dimensions)
-    async with async_session() as session:
-        result = await session.execute(
-            text(
-                "SELECT atttypmod FROM pg_attribute "
-                "WHERE attrelid = 'note_embeddings'::regclass "
-                "AND attname = 'embedding'"
+    for table in EMBEDDING_COLUMNS:
+        async with async_session() as session:
+            result = await session.execute(
+                text(
+                    "SELECT atttypmod FROM pg_attribute "
+                    "WHERE attrelid = to_regclass(:table) "
+                    "AND attname = 'embedding'"
+                ),
+                {"table": table},
             )
-        )
-        row = result.first()
-    if row is None:
-        # Table not yet migrated; let alembic handle it on first run.
-        return
-    column_dim = int(row[0])
-    if column_dim != configured:
-        logging.getLogger(__name__).critical(
-            "Embedding dim mismatch: configured=%d, column=%d. "
-            "Run `make reset-embeddings` to recreate the column at the "
-            "configured dimension.",
-            configured,
-            column_dim,
-        )
-        sys.exit(1)
+            row = result.first()
+        if row is None:
+            # Table not yet migrated; let alembic handle it on first run.
+            continue
+        column_dim = int(row[0])
+        if column_dim != configured:
+            logging.getLogger(__name__).critical(
+                "Embedding dim mismatch: configured=%d, %s.embedding=%d. "
+                "Run `make reset-embeddings` to recreate the column at the "
+                "configured dimension.",
+                configured,
+                table,
+                column_dim,
+            )
+            sys.exit(1)
 
 
 MIN_PGVECTOR_VERSION = (0, 8, 0)

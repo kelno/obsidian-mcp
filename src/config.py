@@ -578,6 +578,22 @@ class Settings(BaseSettings):
     # on every task tool call.
     tasks_plugin_settings_path: str = ".obsidian/plugins/obsidian-tasks-plugin/data.json"
 
+    # ── Agent ledger (fork) ──────────────────────────────────────────────────
+    # A topic holding at least this many current quirks, more than half of
+    # them cited by no summary-view line, makes `ledger_add` and
+    # `ledger_topics` hint that a view is due. A first guess, to tune after a
+    # few weeks of use (owner).
+    ledger_view_hint_min_quirks: int = Field(15, ge=1)
+    # How long `ledger_search` waits for the query's embedding before it
+    # answers with the words list alone. Below the ~30 s after which the
+    # claude.ai app drops a tool call, so a slow or busy CPU-only provider
+    # costs the meaning list, never the whole answer.
+    ledger_query_embed_timeout_seconds: float = Field(20.0, gt=0, le=60)
+    # Entries waiting for the background embedder after a write. Past this,
+    # an entry is left to the indexer's periodic sweep (logged), so a burst of
+    # writes cannot queue unbounded work behind a slow provider.
+    ledger_embed_queue_max: int = Field(200, ge=1)
+
     # ── Named-staging fallback (one flag, both write paths) ──────────────────
     # Both write paths stage into an unnamed `O_TMPFILE` inode and publish it
     # by descriptor, so no staging name ever exists for a peer to observe,

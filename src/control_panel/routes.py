@@ -58,7 +58,7 @@ from src.oauth.scope import (
     has_vault_scope,
     token_has_write,
 )
-from src.services import panel_csp, security_events, vault_overlap
+from src.services import ledger_embed, panel_csp, security_events, vault_overlap
 from src.services.index_state import (
     KEY_EMBEDDING_FINGERPRINT,
     acquire_generation_lock_unbounded,
@@ -3083,6 +3083,9 @@ async def reset_embeddings(
                 await fresh.execute(
                     text("UPDATE notes_metadata SET embedded_content_hash = NULL")
                 )
+                # The agent ledger's vectors share the fingerprint: reset with
+                # the notes', re-embedded by the indexer's sweep.
+                await ledger_embed.reset_vectors(fresh, dim)
                 if hnsw:
                     await fresh.execute(text(vector_index.create_index_sql(dim)))
                 else:

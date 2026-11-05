@@ -2,10 +2,20 @@ from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 from pydantic import ConfigDict
 
 from src.config import settings
 from src.mcp_server.fetch_result import FetchPageResult
+from src.mcp_server.ledger_result import (
+    LedgerDigestEditResult,
+    LedgerDigestResult,
+    LedgerGetResult,
+    LedgerSearchResult,
+    LedgerTopicEditResult,
+    LedgerTopicsResult,
+    LedgerWriteResult,
+)
 from src.mcp_server.read_result import ReadNoteResult
 from src.mcp_server.task_result import TaskListResult, TaskWriteResult
 from src.mcp_server.tools import (
@@ -27,6 +37,14 @@ from src.mcp_server.tools import (
     get_tags_impl,
     get_vault_guide_impl,
     import_from_url_impl,
+    ledger_add_impl,
+    ledger_digest_edit_impl,
+    ledger_digest_impl,
+    ledger_get_impl,
+    ledger_search_impl,
+    ledger_topic_edit_impl,
+    ledger_topics_impl,
+    ledger_update_impl,
     list_files_impl,
     list_notes_impl,
     list_tasks_impl,
@@ -1632,6 +1650,293 @@ async def set_task_status(
     """
     return await set_task_status_impl(
         path, line, expected_line, expected_hash, status=status, symbol=symbol
+    )
+
+
+# ── Agent ledger (fork) ─────────────────────────────────────────────────────
+# Descriptions are generic on purpose (the repo is public): what an agent
+# needs to use the ledger goes here first, then in the vault guide's primer.
+
+_LEDGER_READ = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+# Nothing a ledger write does is lost: every change keeps the previous
+# version in the history, and no tool deletes.
+_LEDGER_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False,
+                                openWorldHint=False)
+
+
+@mcp.tool(annotations=_LEDGER_READ)
+async def ledger_search(
+    query: str | None = None,
+    mode: str = "both",
+    kinds: list[str] | None = None,
+    area: str | None = None,
+    topics: list[str] | None = None,
+    status: str | list[str] = "active",
+    origin: str | None = None,
+    unseen: bool = False,
+    since: str | None = None,
+    limit: int = 20,
+) -> LedgerSearchResult:
+    """Find agent-ledger entries: quirks, feedback and proposals agents log.
+
+    Read-only. The agent ledger holds records agents write for each other,
+    not instructions, and never vault notes. Kinds: Q quirk (what Claude can
+    or can't do on a surface, what works included), F feedback (an unclear
+    instruction, friction or a suggestion, from an agent or logged for the
+    owner), P proposal (a change proposed to an agent instruction, and its
+    outcome).
+
+    With `query`: two separate lists, `by_words` (shared words or the ref:
+    strong sign of a duplicate) and `by_meaning` (similar meaning: weaker),
+    or one of them with `mode`. When the embedding provider is down the
+    meaning list says so and the words list still answers. Without `query`:
+    the filtered list, most recently changed first. One line per entry, no
+    body: read entries with `ledger_get`.
+
+    Args:
+        query: words, or a ref such as Q14.
+        mode: both (default), words or meaning.
+        kinds: any of quirk, feedback, proposal.
+        area: an area (slug, `area/<slug>` or its main note's name), or "none".
+        topics: topic names; an entry must have them all.
+        status: active (default: current quirks, open and to_triage
+            feedback, every proposal), closed, any, a status, or a list.
+        origin: agent or owner.
+        unseen: only feedback the owner has not heard of yet.
+        since: YYYY-MM-DD; changed on or after that day.
+        limit: 1-100 per list (default 20).
+    """
+    return await ledger_search_impl(
+        query=query, mode=mode, kinds=kinds, area=area, topics=topics, status=status, origin=origin,
+        unseen=unseen, since=since, limit=limit,
+    )
+
+
+@mcp.tool(annotations=_LEDGER_READ)
+async def ledger_get(refs: list[str], history: bool = False) -> LedgerGetResult:
+    """Read agent-ledger entries in full by ref, optionally with their history.
+
+    Read-only. Up to 20 refs (Q14, F3, P1). Each entry comes with its
+    `revision` (give it to `ledger_update` as `expected_revision`), its own
+    fields, topics, related refs and the summary-view lines that cite it.
+    `history=true` adds every past version, with who changed it, when and why.
+
+    Args:
+        refs: entry refs.
+        history: include past versions (default false).
+    """
+    return await ledger_get_impl(refs, history=history)
+
+
+@mcp.tool(annotations=_LEDGER_WRITE)
+async def ledger_add(
+    kind: str,
+    title: str,
+    body: str = "",
+    area: str | None = None,
+    topics: list[str] | None = None,
+    details: dict | None = None,
+    related: list[str] | None = None,
+    origin: str = "agent",
+    status: str | None = None,
+    observed_on: str | None = None,
+    seen: bool | None = None,
+    author: str | None = None,
+    challenges: list[int] | None = None,
+) -> LedgerWriteResult:
+    """Log an agent-ledger entry: a quirk, feedback or a proposal.
+
+    Requires write permission. For what agents write for each other, never
+    the owner's own notes. If no kind fits, log feedback (friction,
+    component "agent ledger") saying what you wanted to record and why.
+    Unknown areas, topics or fields are refused with the valid ones. The
+    answer gives the new ref and up to five similar entries: if one holds the
+    same thing, mark the newer one superseded by the older (`ledger_update`).
+
+    Args:
+        kind: quirk, feedback or proposal.
+        title: one line, at most 150 characters.
+        body: Markdown, at most 16,000 characters.
+        area: the area it concerns (see `ledger_topics`). Feedback with no
+            area is saved as to_triage.
+        topics: topic names (see `ledger_topics`; create one with
+            `ledger_topic_edit`).
+        details: the kind's own fields. quirk: certainty (tested, seen_once,
+            inferred, docs, untested; required), certainty_note, sources.
+            feedback: subtype (unclear_instruction, friction, suggestion;
+            required), component (file, tool or surface involved), fix.
+            proposal: target (where the instruction lives; required),
+            proposed_text (the first version; required), final_text (what
+            went in), changes (summary of what changed), owner_reason (only
+            if the owner gave one; never press for it).
+        related: refs of related entries ("see also").
+        origin: agent (default), or owner when the owner asked to log it.
+        status: a proposal's outcome, required for one: accepted, adjusted,
+            rejected or withdrawn. A quirk may start stale.
+        observed_on: when it happened, YYYY-MM-DD (default today).
+        seen: feedback only: true if you already talked it through with the
+            owner. Always true with origin owner.
+        author: your own name, if you have one.
+        challenges: summary-view line ids this entry contradicts; they get
+            flagged for review.
+    """
+    return await ledger_add_impl(
+        kind, title, body=body, area=area, topics=topics, details=details, related=related, origin=origin,
+        status=status, observed_on=observed_on, seen=seen, author=author, challenges=challenges,
+    )
+
+
+@mcp.tool(annotations=_LEDGER_WRITE)
+async def ledger_update(
+    ref: str | None = None,
+    expected_revision: int | None = None,
+    reason: str | None = None,
+    title: str | None = None,
+    body: str | None = None,
+    append: str | None = None,
+    status: str | None = None,
+    area: str | None = None,
+    topics_add: list[str] | None = None,
+    topics_remove: list[str] | None = None,
+    details: dict | None = None,
+    superseded_by: str | None = None,
+    handled_account: str | None = None,
+    related: list[str] | None = None,
+    observed_on: str | None = None,
+    origin: str | None = None,
+    author: str | None = None,
+    challenges: list[int] | None = None,
+    seen: bool | None = None,
+    refs: list[str] | None = None,
+) -> LedgerWriteResult:
+    """Change an agent-ledger entry (with a reason), or mark feedback as seen.
+
+    Requires write permission. Give `ref`, `expected_revision` (from
+    `ledger_get` or `ledger_search`; refused as stale_revision if the entry
+    changed since) and `reason` (kept in the history with the previous
+    version). Nothing is deleted; close an entry with `status`: handled (with
+    `handled_account`: what was done, or why nothing is left to do),
+    superseded (with `superseded_by`: the entry holding the content; a
+    duplicate is superseded by the older one), retracted (should never have
+    been logged; nothing replaces it), stale (a quirk no longer true).
+    `dismissed` is the owner's call only: never set it on your own judgment.
+    Correct your own mistake by updating, with a reason. Summary-view lines
+    citing the entry get flagged: check each one (`ledger_digest_edit`).
+
+    Marking feedback seen (the owner has heard of it) needs no reason or
+    revision: `refs` plus `seen=true`, many at once.
+
+    Args:
+        append: add an observation as a dated paragraph, without rewriting
+            the body (use instead of `body`).
+        area: an area, or "" to clear it.
+        details: the kind's own fields (see `ledger_add`); null clears an
+            optional one.
+        related: refs to add as related.
+        challenges: summary-view line ids this change contradicts.
+    """
+    return await ledger_update_impl(
+        ref=ref, expected_revision=expected_revision, reason=reason, title=title, body=body, append=append,
+        status=status, area=area, topics_add=topics_add, topics_remove=topics_remove, details=details,
+        superseded_by=superseded_by, handled_account=handled_account, related=related, observed_on=observed_on,
+        origin=origin, author=author, challenges=challenges, seen=seen, refs=refs,
+    )
+
+
+@mcp.tool(annotations=_LEDGER_READ)
+async def ledger_digest(slug: str | None = None, with_ids: bool = False) -> LedgerDigestResult:
+    """Read an agent-ledger summary view, or list the views.
+
+    Read-only. A summary view is a short page agents read instead of every
+    entry, such as what Claude can do on each surface. Without `slug`: the
+    views and when to read each. With `slug`: the view as Markdown, each line
+    with the refs it rests on and the date of its newest source; lines under
+    review are marked.
+
+    Args:
+        slug: the view to read.
+        with_ids: add line ids and revisions, needed only to edit lines.
+    """
+    return await ledger_digest_impl(slug=slug, with_ids=with_ids)
+
+
+@mcp.tool(annotations=_LEDGER_WRITE)
+async def ledger_digest_edit(
+    slug: str, reason: str, operations: list[dict], author: str | None = None,
+) -> LedgerDigestEditResult:
+    """Create an agent-ledger summary view, or add, fix or remove its lines.
+
+    Requires write permission. Views hold standing knowledge (quirks), never
+    open feedback. Each line cites the entries it rests on. The operations
+    apply all or none, under one reason kept in the history. Tell the owner
+    in your reply when you create a view.
+
+    Args:
+        slug: the view (lowercase, hyphens).
+        reason: why.
+        operations: in order, each an object with `op`:
+            create {layout: list|matrix, title, description (when to read
+            it), columns: [labels] for a matrix};
+            describe {title?, description?};
+            add_column {label};
+            add {text, sources: [refs], row (a matrix's row, or a list
+            line's lead word), column (matrix), position?};
+            replace {line, expected_revision, text?, sources?, row?,
+            column?, position?}: also clears a review flag;
+            remove {line, expected_revision}: the line is kept in history;
+            resolve {line, expected_revision}: the flagged line still holds.
+        author: your own name, if you have one.
+    """
+    return await ledger_digest_edit_impl(slug, reason, operations, author=author)
+
+
+@mcp.tool(annotations=_LEDGER_READ)
+async def ledger_topics() -> LedgerTopicsResult:
+    """List agent-ledger areas and topics, with descriptions and entry counts.
+
+    Read-only. Areas come from the vault: each area's main note declares
+    `area_tag` and `description`. Topics are finer labels across areas, of
+    two kinds: system (a part of the system) or surface (where Claude runs).
+    An entry has at most one area and any number of topics. Also says where
+    a summary view is due.
+    """
+    return await ledger_topics_impl()
+
+
+@mcp.tool(annotations=_LEDGER_WRITE)
+async def ledger_topic_edit(
+    action: str,
+    slug: str,
+    reason: str,
+    kind: str | None = None,
+    description: str | None = None,
+    area: str | None = None,
+    into: str | None = None,
+    expected_revision: int | None = None,
+    author: str | None = None,
+) -> LedgerTopicEditResult:
+    """Create, merge or describe an agent-ledger topic.
+
+    Requires write permission. Agents manage topics on their own, each change
+    with a reason; tell the owner in your reply whenever you create, merge or
+    redescribe one, so they can follow the structure.
+
+    Args:
+        action: create (slug, kind, description, area?), describe (new
+            description, kind or area; "" clears the area), or merge (moves
+            every entry of `slug` to `into`; `slug` stays, marked merged).
+        slug: the topic: lowercase letters, digits and hyphens.
+        reason: why.
+        kind: system (a part of the system) or surface (where Claude runs).
+        description: one line.
+        area: the area it belongs to, if one.
+        into: merge target.
+        expected_revision: optional; refused if the topic changed since.
+        author: your own name, if you have one.
+    """
+    return await ledger_topic_edit_impl(
+        action, slug, reason, kind=kind, description=description, area=area, into=into,
+        expected_revision=expected_revision, author=author,
     )
 
 

@@ -1,7 +1,8 @@
-"""Drop and recreate `note_embeddings.embedding` at the configured dim, clear
-every `embedded_content_hash` so the indexer re-embeds the entire vault on its
-next pass, and record the embedding fingerprint the rebuilt rows will be
-produced under.
+"""Drop and recreate `note_embeddings.embedding` (and the agent ledger's
+`ledger_embeddings.embedding`) at the configured dim, clear every
+`embedded_content_hash` and `ledger_entries.embedded_hash` so the indexer
+re-embeds the entire vault and ledger on its next pass, and record the
+embedding fingerprint the rebuilt rows will be produced under.
 
 Invoked by `make reset-embeddings`. Reads `EMBEDDING_DIMENSIONS` and the rest
 of the embedding configuration from settings.
@@ -66,7 +67,7 @@ from sqlalchemy import text
 
 from src.config import settings
 from src.database import async_session, engine
-from src.services import vector_index
+from src.services import ledger_embed, vector_index
 from src.services.index_state import (
     KEY_EMBEDDING_FINGERPRINT,
     acquire_generation_lock_unbounded,
@@ -126,6 +127,10 @@ async def reset() -> None:
         await session.execute(
             text("UPDATE notes_metadata SET embedded_content_hash = NULL")
         )
+        # The agent ledger's vectors, in the same transaction: produced under
+        # the same fingerprint, so they are reset with the notes' (the
+        # indexer's sweep re-embeds them).
+        await ledger_embed.reset_vectors(session, dim)
         if hnsw:
             await session.execute(text(vector_index.create_index_sql(dim)))
         else:

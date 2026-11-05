@@ -8014,3 +8014,435 @@ async def set_task_status_impl(
             uid, target, line, expected_line, "\n".join(new_lines), new_text, today,
             changed=True, removed=True if not result else None,
         )
+
+
+# ── Agent ledger (fork) ─────────────────────────────────────────────────────
+#
+# Eight tools over the `ledger_*` tables (migration 032): what agents write
+# for each other — quirks, feedback, proposals — with topics and summary
+# views. Primary data, not derived from the vault. The rules live in
+# `src/services/ledger.py` (entries), `ledger_views.py` (topics, views) and
+# `ledger_embed.py` (vectors); these wrappers map arguments and results. See
+# docs/architecture/agent-ledger.md.
+
+from zoneinfo import ZoneInfo  # noqa: E402
+
+from sqlalchemy.exc import IntegrityError as _LedgerIntegrityError  # noqa: E402
+
+from src.mcp_server.ledger_result import (  # noqa: E402
+    EntrySummary,
+    FlaggedLine,
+    LedgerDigestEditResult,
+    LedgerDigestResult,
+    LedgerEntryFull,
+    LedgerGetResult,
+    LedgerSearchResult,
+    LedgerTopicEditResult,
+    LedgerTopicsResult,
+    LedgerWriteResult,
+)
+from src.services import ledger as _ledger, ledger_embed as _ledger_embed, ledger_views as _ledger_views  # noqa: E402
+
+_TYPED_OUTCOME_RESULTS = (
+    *_TYPED_OUTCOME_RESULTS, LedgerSearchResult, LedgerGetResult, LedgerWriteResult, LedgerDigestResult,
+    LedgerDigestEditResult, LedgerTopicsResult, LedgerTopicEditResult,
+)
+
+#: Search modes: two separate lists, or one of them. Never a merged ranking.
+LEDGER_SEARCH_MODES = ("both", "words", "meaning")
+
+
+def _ledger_gate(result_cls):
+    """The admission gate's refusal in this tool's declared shape."""
+    return lambda message: result_cls(error=message)
+
+
+def _ledger_failed(result_cls, outcome: BodyOutcome, **extra):
+    result = result_cls(error=str(outcome), **extra)
+    result._body_outcome = outcome
+    return result
+
+
+def _ledger_refused(result_cls, exc: "_ledger.LedgerError"):
+    return _ledger_failed(
+        result_cls, _body_refusal(str(exc), exc.code), allowed=exc.allowed, current_revision=exc.current_revision
+    )
+
+
+def _ledger_integrity(result_cls, exc: _LedgerIntegrityError):
+    """A change the database itself refused (a constraint, the no-delete trigger)."""
+    constraint = getattr(getattr(exc, "orig", None), "__cause__", None)
+    name = getattr(constraint, "constraint_name", None) or "a ledger constraint"
+    return _ledger_failed(result_cls, _body_refusal(
+        f"The database refused this change ({name}); the ledger's structure does not allow it. Nothing was "
+        "written.", "validation_failed"))
+
+
+def _ledger_day(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(ZoneInfo(settings.tasks_timezone)).date().isoformat()
+    return value.isoformat()
+
+
+def _ledger_summary(row, **extra) -> EntrySummary:
+    return EntrySummary(
+        ref=row.ref, kind=row.kind, status=row.status, title=row.title, revision=row.revision,
+        area=row.area_tag, date=_ledger_day(row.updated_at), origin=row.origin if row.origin != "agent" else None,
+        seen=row.seen, **extra,
+    )
+
+
+def _ledger_flagged(flagged) -> list[FlaggedLine] | None:
+    return [FlaggedLine(line=f.line_id, view=f.digest, text=f.text, reason=f.reason) for f in flagged] or None
+
+
+def _ledger_summary_columns():
+    from src.models.db import LedgerEntry
+
+    return (LedgerEntry.id, LedgerEntry.ref, LedgerEntry.kind, LedgerEntry.status, LedgerEntry.title,
+            LedgerEntry.revision, LedgerEntry.area_tag, LedgerEntry.updated_at, LedgerEntry.origin,
+            LedgerEntry.seen)
+
+
+@_tracked(
+    "ledger_search",
+    ["query", "mode", "kinds", "area", "topics", "status", "origin", "unseen", "since", "limit"],
+    refusal_result=_ledger_gate(LedgerSearchResult),
+    arg_char_caps={"query": MAX_SEARCH_QUERY_CHARS},
+)
+async def ledger_search_impl(
+    query: str | None = None,
+    mode: str = "both",
+    kinds: list[str] | None = None,
+    area: str | None = None,
+    topics: list[str] | None = None,
+    status: str | list[str] = "active",
+    origin: str | None = None,
+    unseen: bool = False,
+    since: str | None = None,
+    limit: int = _ledger.SEARCH_DEFAULT_LIMIT,
+) -> LedgerSearchResult:
+    from sqlalchemy import func, select
+
+    from src.models.db import LedgerEntry
+
+    uid = current_user_id.get()
+    if not 1 <= limit <= _ledger.SEARCH_MAX_LIMIT:
+        return _ledger_refused(LedgerSearchResult, _ledger.invalid(
+            f"limit must be between 1 and {_ledger.SEARCH_MAX_LIMIT} (got {limit})."))
+    if mode not in LEDGER_SEARCH_MODES:
+        return _ledger_refused(LedgerSearchResult, _ledger.invalid(
+            f"mode is both, words or meaning (got {mode!r}).", allowed=[{"name": m} for m in LEDGER_SEARCH_MODES]))
+    query = (query or "").strip() or None
+    async with async_session() as session:
+        try:
+            filters = await _ledger.build_filters(
+                session, uid, kinds=kinds, area=area, topics=topics, status=status, origin=origin,
+                unseen=unseen, since=since)
+        except _ledger.LedgerError as exc:
+            return _ledger_refused(LedgerSearchResult, exc)
+        described = {"status": status, "kinds": kinds, "area": filters.area or ("none" if filters.no_area else None),
+                     "topics": topics, "origin": origin, "unseen": unseen or None, "since": since}
+        described = {k: v for k, v in described.items() if v is not None}
+        clauses = filters.where(uid)
+        if query is None:
+            rows = (await session.execute(
+                select(*_ledger_summary_columns()).where(*clauses)
+                .order_by(LedgerEntry.updated_at.desc(), LedgerEntry.id.desc()).limit(limit + 1)
+            )).all()
+            return LedgerSearchResult(entries=[_ledger_summary(r) for r in rows[:limit]],
+                                      truncated=len(rows) > limit, filters=described)
+
+        words: list = []
+        if mode in ("both", "words"):
+            exact = None
+            try:
+                kind, number = _ledger.parse_ref(query)
+                exact = (await session.execute(select(*_ledger_summary_columns()).where(
+                    LedgerEntry.owner_key == _ledger.owner_key(uid), LedgerEntry.kind == kind,
+                    LedgerEntry.number == number))).first()
+            except _ledger.LedgerError:
+                pass
+            tsquery = _ledger.tsquery_for(query)
+            doc = _ledger.search_document()
+            rank = func.ts_rank_cd(doc, tsquery)
+            ranked = (await session.execute(
+                select(*_ledger_summary_columns(), rank.label("rank")).where(*clauses, doc.op("@@")(tsquery))
+                .order_by(rank.desc(), LedgerEntry.id).limit(limit + 1)
+            )).all()
+            words = ([exact] if exact is not None else []) + [r for r in ranked if exact is None or r.id != exact.id]
+        meaning = None
+        if mode in ("both", "meaning"):
+            meaning = await _ledger_embed.meaning_search(session, uid, query, filters, limit)
+    by_words_ids = {r.id for r in words[:limit]}
+    by_meaning_ids = {h["row"].id for h in meaning.hits} if meaning else set()
+    both = mode == "both"
+    result = LedgerSearchResult(filters=described)
+    if mode in ("both", "words"):
+        result.by_words = [_ledger_summary(r, in_both_lists=(r.id in by_meaning_ids) if both else None)
+                           for r in words[:limit]]
+        result.truncated = len(words) > limit
+    if meaning is not None:
+        result.by_meaning = [_ledger_summary(h["row"], similarity=h["similarity"],
+                                             in_both_lists=(h["row"].id in by_words_ids) if both else None)
+                             for h in meaning.hits]
+        result.meaning_unavailable = meaning.error
+        result.not_embedded = meaning.not_embedded
+        if meaning.not_embedded:
+            result.notes = [f"{meaning.not_embedded} matching entr{'y has' if meaning.not_embedded == 1 else 'ies have'} "
+                            "no vector yet (new or just changed): the by_words list covers them."]
+    return result
+
+
+@_tracked("ledger_get", ["refs", "history"], refusal_result=_ledger_gate(LedgerGetResult))
+async def ledger_get_impl(refs: list[str], history: bool = False) -> LedgerGetResult:
+    uid = current_user_id.get()
+    try:
+        refs = _ledger.bounded_list(refs, "refs")
+        if not refs:
+            raise _ledger.invalid("refs is empty: give one or more refs such as Q14 or F3.")
+        async with async_session() as session:
+            found, missing = await _ledger.find_entries(session, uid, refs)
+            entries = list({e.id: e for e in found.values()}.values())
+            ids = [e.id for e in entries]
+            topics = await _ledger.entry_topics(session, ids) if ids else {}
+            related = await _ledger.entry_related(session, ids) if ids else {}
+            cited = await _ledger.lines_for_entries(session, ids) if ids else {}
+            sup = await _ledger.superseding_refs(session, [e.superseded_by for e in entries])
+            past = await _ledger.history(session, ids) if (history and ids) else {}
+    except _ledger.LedgerError as exc:
+        return _ledger_refused(LedgerGetResult, exc)
+    cap = int(settings.max_read_response_chars)
+    out, not_returned, used, notes = [], [], 0, []
+    for entry in entries:
+        item = LedgerEntryFull(
+            ref=entry.ref, kind=entry.kind, status=entry.status, revision=entry.revision, title=entry.title,
+            body=entry.body, origin=entry.origin, observed_on=entry.observed_on.isoformat(),
+            created_at=entry.created_at.isoformat(), updated_at=entry.updated_at.isoformat(),
+            created_by=entry.created_by, area=entry.area_tag, topics=topics.get(entry.id) or None,
+            related=related.get(entry.id) or None, details=_ledger.entry_fields(entry) or None, seen=entry.seen,
+            superseded_by=sup.get(entry.superseded_by), handled_account=entry.handled_account,
+            handled_at=entry.handled_at.isoformat() if entry.handled_at else None, author=entry.author,
+            cited_by=cited.get(entry.id) or None, embedded=entry.embedded_hash == entry.content_hash,
+        )
+        size = _ledger.json_size(item.model_dump())
+        if out and used + size > cap:
+            not_returned.append(entry.ref)
+            continue
+        if history:
+            versions = past.get(entry.id, [])
+            kept = list(versions)
+            while kept and used + size + _ledger.json_size(kept) > cap:
+                kept.pop(0)
+            if len(kept) < len(versions):
+                notes.append(f"{entry.ref}: the {len(versions) - len(kept)} oldest version(s) of its history were "
+                             "left out to stay within the response cap; read it alone to see more.")
+            item.history = kept
+            size += _ledger.json_size(kept)
+        out.append(item)
+        used += size
+    if not_returned:
+        notes.append("Some entries were left out to stay within the response cap: read them in another call.")
+    return LedgerGetResult(entries=out, not_found=missing or None, not_returned=not_returned or None,
+                           notes=notes or None)
+
+
+def _ledger_write_gate():
+    return _require_write()
+
+
+@_tracked(
+    "ledger_add",
+    ["kind", "area", "topics", "origin", "status", "related", "observed_on", "seen", "challenges"],
+    refusal_result=_ledger_gate(LedgerWriteResult),
+    write_class=True,
+)
+async def ledger_add_impl(
+    kind: str,
+    title: str,
+    body: str = "",
+    area: str | None = None,
+    topics: list[str] | None = None,
+    details: dict | None = None,
+    related: list[str] | None = None,
+    origin: str = "agent",
+    status: str | None = None,
+    observed_on: str | None = None,
+    seen: bool | None = None,
+    author: str | None = None,
+    challenges: list[int] | None = None,
+) -> LedgerWriteResult:
+    if err := _ledger_write_gate():
+        return _ledger_failed(LedgerWriteResult, err)
+    uid = current_user_id.get()
+    try:
+        async with async_session() as session:
+            added = await _ledger.add_entry(
+                session, uid, kind=kind, title=title, body=body, area=area, topics=topics, details=details,
+                related=related, origin=origin, status=status, observed_on=observed_on, seen=seen, author=author,
+                challenges=challenges)
+    except _ledger.LedgerError as exc:
+        return _ledger_refused(LedgerWriteResult, exc)
+    except _LedgerIntegrityError as exc:
+        return _ledger_integrity(LedgerWriteResult, exc)
+    entry = added.entry
+    _ledger_embed.enqueue(entry.id)
+    notes = list(added.notes)
+    if entry.status == "to_triage":
+        notes.append(f"{entry.ref} has no area, so it is to_triage until one is set (ledger_update area=…).")
+    if added.flagged:
+        notes.append("Check each flagged summary-view line now: replace it, or resolve it if it still holds "
+                     "(ledger_digest_edit).")
+    return LedgerWriteResult(
+        ref=entry.ref, revision=entry.revision, status=entry.status, similar=added.similar or None,
+        flagged_lines=_ledger_flagged(added.flagged), view_hints=added.hints or None, notes=notes or None,
+    )
+
+
+@_tracked(
+    "ledger_update",
+    ["ref", "refs", "expected_revision", "status", "seen", "area", "topics_add", "topics_remove",
+     "superseded_by", "related", "challenges"],
+    refusal_result=_ledger_gate(LedgerWriteResult),
+    write_class=True,
+)
+async def ledger_update_impl(
+    ref: str | None = None,
+    expected_revision: int | None = None,
+    reason: str | None = None,
+    title: str | None = None,
+    body: str | None = None,
+    append: str | None = None,
+    status: str | None = None,
+    area: str | None = None,
+    topics_add: list[str] | None = None,
+    topics_remove: list[str] | None = None,
+    details: dict | None = None,
+    superseded_by: str | None = None,
+    handled_account: str | None = None,
+    related: list[str] | None = None,
+    observed_on: str | None = None,
+    origin: str | None = None,
+    author: str | None = None,
+    challenges: list[int] | None = None,
+    seen: bool | None = None,
+    refs: list[str] | None = None,
+) -> LedgerWriteResult:
+    if err := _ledger_write_gate():
+        return _ledger_failed(LedgerWriteResult, err)
+    uid = current_user_id.get()
+    changes = {
+        "title": title, "body": body, "append": append, "status": status, "area": area, "topics_add": topics_add,
+        "topics_remove": topics_remove, "details": details, "superseded_by": superseded_by,
+        "handled_account": handled_account, "related": related, "observed_on": observed_on, "origin": origin,
+        "challenges": challenges,
+    }
+    only_seen = all(v is None for v in changes.values())
+    try:
+        async with async_session() as session:
+            if refs is not None or (only_seen and seen is True and ref is not None):
+                if refs is not None and ref is not None:
+                    raise _ledger.invalid("give ref (one entry) or refs (marking feedback seen), not both.")
+                if seen is not True or not only_seen:
+                    raise _ledger.invalid("refs is only for marking feedback seen: refs plus seen=true, nothing else.")
+                if refs is not None and (not isinstance(refs, list) or not all(isinstance(r, str) for r in refs)):
+                    raise _ledger.invalid("refs must be a list of refs such as F3.")
+                marked = await _ledger.mark_seen(session, uid, refs if refs is not None else [ref])
+                return LedgerWriteResult(seen=marked)
+            if ref is None:
+                raise _ledger.invalid("ref is required: the entry to change (or refs plus seen=true).")
+            updated = await _ledger.update_entry(
+                session, uid, ref=ref, expected_revision=expected_revision, reason=reason, author=author, seen=seen,
+                **changes)
+    except _ledger.LedgerError as exc:
+        return _ledger_refused(LedgerWriteResult, exc)
+    except _LedgerIntegrityError as exc:
+        return _ledger_integrity(LedgerWriteResult, exc)
+    entry = updated.entry
+    if entry.embedded_hash != entry.content_hash:
+        _ledger_embed.enqueue(entry.id)
+    notes = list(updated.notes)
+    if updated.flagged:
+        notes.append("This change flagged summary-view lines that cite the entry: check each one now, and "
+                     "replace it or resolve it if it still holds (ledger_digest_edit).")
+    return LedgerWriteResult(ref=entry.ref, revision=entry.revision, status=entry.status,
+                             changed=updated.changed or None, flagged_lines=_ledger_flagged(updated.flagged),
+                             notes=notes or None)
+
+
+@_tracked("ledger_digest", ["slug", "with_ids"], refusal_result=_ledger_gate(LedgerDigestResult))
+async def ledger_digest_impl(slug: str | None = None, with_ids: bool = False) -> LedgerDigestResult:
+    uid = current_user_id.get()
+    try:
+        async with async_session() as session:
+            if slug is None:
+                return LedgerDigestResult(views=await _ledger_views.list_digests(session, uid))
+            return LedgerDigestResult(**await _ledger_views.read_digest(session, uid, slug, with_ids=with_ids))
+    except _ledger.LedgerError as exc:
+        return _ledger_refused(LedgerDigestResult, exc)
+
+
+@_tracked(
+    "ledger_digest_edit", ["slug"], refusal_result=_ledger_gate(LedgerDigestEditResult), write_class=True,
+)
+async def ledger_digest_edit_impl(
+    slug: str, reason: str, operations: list[dict], author: str | None = None,
+) -> LedgerDigestEditResult:
+    if err := _ledger_write_gate():
+        return _ledger_failed(LedgerDigestEditResult, err)
+    uid = current_user_id.get()
+    try:
+        async with async_session() as session:
+            done = await _ledger_views.edit_digest(session, uid, slug=slug, reason=reason, operations=operations,
+                                                   author=author)
+    except _ledger.LedgerError as exc:
+        return _ledger_refused(LedgerDigestEditResult, exc)
+    except _LedgerIntegrityError as exc:
+        return _ledger_integrity(LedgerDigestEditResult, exc)
+    notes = ["Tell the owner in your reply that you created this summary view, and what it is for."] if done.created else None
+    return LedgerDigestEditResult(slug=done.slug, created=done.created, applied=done.applied, notes=notes)
+
+
+@_tracked("ledger_topics", [], refusal_result=_ledger_gate(LedgerTopicsResult))
+async def ledger_topics_impl() -> LedgerTopicsResult:
+    uid = current_user_id.get()
+    async with async_session() as session:
+        listed = await _ledger_views.list_topics(session, uid)
+    return LedgerTopicsResult(
+        areas=listed["areas"], topics=listed["topics"], entries_without_area=listed["entries_without_area"],
+        areas_no_longer_declared=listed["areas_no_longer_declared"] or None, view_hints=listed["hints"] or None,
+    )
+
+
+@_tracked(
+    "ledger_topic_edit", ["action", "slug", "kind", "area", "into", "expected_revision"],
+    refusal_result=_ledger_gate(LedgerTopicEditResult), write_class=True,
+)
+async def ledger_topic_edit_impl(
+    action: str,
+    slug: str,
+    reason: str,
+    kind: str | None = None,
+    description: str | None = None,
+    area: str | None = None,
+    into: str | None = None,
+    expected_revision: int | None = None,
+    author: str | None = None,
+) -> LedgerTopicEditResult:
+    if err := _ledger_write_gate():
+        return _ledger_failed(LedgerTopicEditResult, err)
+    uid = current_user_id.get()
+    try:
+        async with async_session() as session:
+            done = await _ledger_views.edit_topic(
+                session, uid, action=action, slug=slug, reason=reason, kind=kind, description=description, area=area,
+                into=into, expected_revision=expected_revision, author=author)
+    except _ledger.LedgerError as exc:
+        return _ledger_refused(LedgerTopicEditResult, exc)
+    except _LedgerIntegrityError as exc:
+        return _ledger_integrity(LedgerTopicEditResult, exc)
+    verb = {"create": "created", "describe": "redescribed", "merge": "merged"}[action]
+    return LedgerTopicEditResult(topic=done.topic, moved=done.moved or None, notes=[
+        f"Tell the owner in your reply that you {verb} topic {done.topic['name']}, so they can follow the structure."])

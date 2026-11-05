@@ -55,7 +55,7 @@ from src.services.embeddings import (
     embed_note,
 )
 from src.services.fts import index_tsvector_sql
-from src.services import empty_prune, indexer_health, refusals
+from src.services import empty_prune, indexer_health, ledger_embed, refusals
 from src.services.rate_limits import flush_expired
 from src.services.index_state import (
     KEY_EMBEDDING_FINGERPRINT,
@@ -5774,6 +5774,10 @@ async def _embed_vault_pinned(
             session, user_id, root_fd, exclude_patterns, log_suffix,
             outcome, budget,
         )
+        # The agent ledger's entries whose vector is missing or outdated, after
+        # the notes and under the same budget, so the ledger can never hold the
+        # next index stage back (see docs/architecture/agent-ledger.md).
+        await ledger_embed.sweep(user_id, budget, outcome, log_suffix, _is_paused)
         outcome.stopped = budget.stopped
         outcome.provider_failure_streak = budget.provider_failure_streak
         _provider_failure_streaks[user_id] = budget.provider_failure_streak

@@ -292,6 +292,8 @@ def run_query(
 # --- areas -------------------------------------------------------------------
 
 AREA_PREFIX = "area/"
+#: An area's `description` frontmatter is read up to this many characters.
+AREA_DESCRIPTION_MAX = 300
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
 
@@ -300,6 +302,8 @@ class _Declaration:
     path: str
     tag: str            # "area/<slug>", or the raw value when invalid
     valid: bool
+    #: The main note's one-line `description` frontmatter, or None.
+    description: str | None = None
 
     @property
     def folder(self) -> str:
@@ -330,11 +334,18 @@ class AreaIndex:
             if value is None:
                 continue
             valid = isinstance(value, str) and value.startswith(AREA_PREFIX) and bool(_SLUG.match(value[len(AREA_PREFIX):]))
-            out.append(_Declaration(path, value if isinstance(value, str) else repr(value), valid))
+            description = (frontmatter or {}).get("description")
+            description = description.strip().splitlines()[0][:AREA_DESCRIPTION_MAX] if (
+                isinstance(description, str) and description.strip()) else None
+            out.append(_Declaration(path, value if isinstance(value, str) else repr(value), valid, description))
         return cls(out)
 
     def known(self) -> list[str]:
         return sorted({d.tag for d in self._declarations if d.valid})
+
+    def described(self) -> list[tuple[str, str, str | None]]:
+        """`(tag, main note path, description)` for every valid declaration, by tag."""
+        return sorted((d.tag, d.path, d.description) for d in self._declarations if d.valid)
 
     def lookup(self, name: str) -> str:
         """`area/<slug>` for a slug, a tag (`#` optional) or a main note's name."""

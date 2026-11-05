@@ -7,10 +7,12 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     Date,
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     SmallInteger,
@@ -1504,4 +1506,495 @@ class ConcurrencyRun(Base):
         ),
         Index("ix_concurrency_runs_started_at", "started_at"),
         {"comment": _CONCURRENCY_RUNS_TABLE_MARKER},
+    )
+
+
+# ── The agent ledger (migration 032) ─────────────────────────────────────────
+#
+# Primary data: what agents write for each other, reached only through the
+# `ledger_*` tools. Nothing in the vault rebuilds it, so it is backed up, never
+# re-derived (only `ledger_embeddings` is derived). See
+# docs/architecture/agent-ledger.md.
+#
+# Every table carries `owner_key`, a stored generated `coalesce(user_id, 0)`,
+# and every foreign key between two ledger rows is composite over
+# `(…_id, owner_key)`: the database refuses a link between two owners' rows in
+# multi-user mode *and* in single-user mode, where `user_id` is NULL and a
+# composite key over it would go unchecked. `users.id` is referenced with no
+# action, so a user who still has a ledger cannot be deleted. The no-delete
+# and append-only triggers live only in the migration (metadata has no
+# triggers); the schema gate asserts them.
+#
+# The CHECK predicates below are kept textually identical to the migration's;
+# `alembic check` does not compare predicates, so
+# `tests/integration/test_ledger_pg.py` compares a `create_all` schema with the
+# migrated one constraint by constraint.
+
+#: Ref letters by kind; a ref is the letter and the kind's own number.
+LEDGER_KIND_LETTERS = {"quirk": "Q", "feedback": "F", "proposal": "P"}
+LEDGER_KINDS = tuple(LEDGER_KIND_LETTERS)
+#: Statuses every kind can take, and each kind's own.
+LEDGER_CLOSING_STATUSES = ("superseded", "retracted")
+LEDGER_KIND_STATUSES = {
+    "quirk": ("current", "stale"),
+    "feedback": ("to_triage", "open", "handled", "dismissed"),
+    "proposal": ("accepted", "adjusted", "rejected", "withdrawn"),
+}
+LEDGER_CERTAINTIES = ("tested", "seen_once", "inferred", "docs", "untested")
+LEDGER_FEEDBACK_SUBTYPES = ("unclear_instruction", "friction", "suggestion")
+LEDGER_ORIGINS = ("agent", "owner")
+LEDGER_TOPIC_KINDS = ("system", "surface")
+LEDGER_DIGEST_LAYOUTS = ("list", "matrix")
+
+_LEDGER_MARKERS = {
+    "ledger_ref_counters": "last ref number per owner and kind (032_agent_ledger)",
+    "ledger_entries": "agent ledger entries, primary data (032_agent_ledger)",
+    "ledger_entry_links": "see-also links between ledger entries (032_agent_ledger)",
+    "ledger_topics": "agent ledger topics (032_agent_ledger)",
+    "ledger_entry_topics": "ledger entry to topic links (032_agent_ledger)",
+    "ledger_digests": "agent ledger summary views (032_agent_ledger)",
+    "ledger_digest_columns": "matrix columns of a ledger summary view (032_agent_ledger)",
+    "ledger_digest_lines": "lines of a ledger summary view (032_agent_ledger)",
+    "ledger_digest_sources": "entries a summary-view line rests on (032_agent_ledger)",
+    "ledger_revisions": "append-only history of ledger changes (032_agent_ledger)",
+    "ledger_embeddings": "ledger entry vectors, derived (032_agent_ledger)",
+}
+
+_AREA_PREDICATE = "area_tag ~ '^area/[a-z0-9]+(-[a-z0-9]+)*$'"
+_SLUG_PREDICATE = "slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'"
+_NO_LINE_BREAK = "!~ '[\\r\\n]'"
+
+
+#: `sqlalchemy.text`, for class bodies that have a column named `text`.
+_sql_text = text
+
+
+def _ledger_user_id():
+    return mapped_column(Integer, nullable=True)
+
+
+def _ledger_owner_key():
+    return mapped_column(Integer, Computed("COALESCE(user_id, 0)", persisted=True), nullable=False)
+
+
+def _ledger_now():
+    return mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+def _ledger_fk(columns, table, name, ondelete=None):
+    """A composite `(…_id, owner_key)` key onto `table`'s `(id, owner_key)`."""
+    return ForeignKeyConstraint(
+        [columns, "owner_key"], [f"{table}.id", f"{table}.owner_key"], name=name, ondelete=ondelete
+    )
+
+
+class LedgerRefCounter(Base):
+    """The last number handed out per owner and kind, so a ref is never reused
+    even after the owner removes the newest entry by hand."""
+
+    __tablename__ = "ledger_ref_counters"
+
+    user_id: Mapped[int | None] = _ledger_user_id()
+    owner_key: Mapped[int] = mapped_column(
+        Integer, Computed("COALESCE(user_id, 0)", persisted=True), primary_key=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    last_number: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_ref_counters_user"),
+        CheckConstraint("kind IN ('quirk', 'feedback', 'proposal')", name="ck_ledger_ref_counters_kind"),
+        CheckConstraint("last_number >= 0", name="ck_ledger_ref_counters_number"),
+        {"comment": _LEDGER_MARKERS["ledger_ref_counters"]},
+    )
+
+
+class LedgerEntry(Base):
+    """One quirk, feedback or proposal. Never deleted; every version before the
+    current one is a `LedgerRevision` row."""
+
+    __tablename__ = "ledger_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = _ledger_user_id()
+    owner_key: Mapped[int] = _ledger_owner_key()
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: As shown to agents: `Q84`, `F1`. Imported refs keep their own spelling
+    #: (`Q01`); lookups go through `(kind, number)`.
+    ref: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    origin: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'agent'"))
+    title: Mapped[str] = mapped_column(String(150), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    area_tag: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    seen: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    certainty: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    certainty_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sources: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subtype: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    component: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    fix: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    proposed_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    owner_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    superseded_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    handled_account: Mapped[str | None] = mapped_column(Text, nullable=True)
+    handled_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    observed_on: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime.datetime] = _ledger_now()
+    updated_at: Mapped[datetime.datetime] = _ledger_now()
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    #: The credential's label, set by the server; `author` is the agent's own name.
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    author: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    #: SHA-256 of the text the entry is embedded from; `embedded_hash` is the
+    #: hash its stored vectors were made from (NULL: none yet).
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedded_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_entries_user"),
+        UniqueConstraint("id", "owner_key", name="uq_ledger_entries_id_owner"),
+        UniqueConstraint("owner_key", "kind", "number", name="uq_ledger_entries_owner_kind_number"),
+        _ledger_fk("superseded_by", "ledger_entries", "fk_ledger_entries_superseded_by"),
+        CheckConstraint("kind IN ('quirk', 'feedback', 'proposal')", name="ck_ledger_entries_kind"),
+        CheckConstraint("number >= 1", name="ck_ledger_entries_number"),
+        CheckConstraint(
+            "ref ~ '^[QFP][0-9]{1,6}$' "
+            "AND substr(ref, 1, 1) = CASE kind WHEN 'quirk' THEN 'Q' WHEN 'feedback' THEN 'F' ELSE 'P' END "
+            "AND CAST(substr(ref, 2) AS integer) = number",
+            name="ck_ledger_entries_ref",
+        ),
+        CheckConstraint(
+            "status IN ('superseded', 'retracted') "
+            "OR (kind = 'quirk' AND status IN ('current', 'stale')) "
+            "OR (kind = 'feedback' AND status IN ('to_triage', 'open', 'handled', 'dismissed')) "
+            "OR (kind = 'proposal' AND status IN ('accepted', 'adjusted', 'rejected', 'withdrawn'))",
+            name="ck_ledger_entries_status",
+        ),
+        CheckConstraint("origin IN ('agent', 'owner')", name="ck_ledger_entries_origin"),
+        CheckConstraint(
+            f"char_length(btrim(title)) >= 1 AND title {_NO_LINE_BREAK}", name="ck_ledger_entries_title"
+        ),
+        CheckConstraint("char_length(body) <= 16000", name="ck_ledger_entries_body"),
+        CheckConstraint(_AREA_PREDICATE, name="ck_ledger_entries_area"),
+        CheckConstraint(
+            "(kind = 'feedback') = (seen IS NOT NULL) "
+            "AND NOT (kind = 'feedback' AND origin = 'owner' AND seen IS NOT TRUE)",
+            name="ck_ledger_entries_seen",
+        ),
+        CheckConstraint(
+            "NOT (kind = 'feedback' AND status = 'to_triage' AND area_tag IS NOT NULL)",
+            name="ck_ledger_entries_triage",
+        ),
+        CheckConstraint(
+            "(kind = 'quirk') = (certainty IS NOT NULL) "
+            "AND (kind = 'quirk' OR (certainty_note IS NULL AND sources IS NULL))",
+            name="ck_ledger_entries_quirk_fields",
+        ),
+        CheckConstraint(
+            "certainty IN ('tested', 'seen_once', 'inferred', 'docs', 'untested')",
+            name="ck_ledger_entries_certainty",
+        ),
+        CheckConstraint(
+            "(kind = 'feedback') = (subtype IS NOT NULL) "
+            "AND (kind = 'feedback' OR (component IS NULL AND fix IS NULL))",
+            name="ck_ledger_entries_feedback_fields",
+        ),
+        CheckConstraint(
+            "subtype IN ('unclear_instruction', 'friction', 'suggestion')",
+            name="ck_ledger_entries_subtype",
+        ),
+        CheckConstraint(
+            "(kind = 'proposal') = (target IS NOT NULL AND proposed_text IS NOT NULL) "
+            "AND (kind = 'proposal' OR (final_text IS NULL AND changes IS NULL AND owner_reason IS NULL)) "
+            "AND (status NOT IN ('accepted', 'adjusted') OR final_text IS NOT NULL)",
+            name="ck_ledger_entries_proposal_fields",
+        ),
+        CheckConstraint(
+            "char_length(certainty_note) <= 2000 AND char_length(sources) <= 4000 "
+            "AND char_length(fix) <= 4000 AND char_length(proposed_text) <= 16000 "
+            "AND char_length(final_text) <= 16000 AND char_length(changes) <= 4000 "
+            "AND char_length(owner_reason) <= 4000 AND char_length(handled_account) <= 16000 "
+            "AND char_length(author) >= 1",
+            name="ck_ledger_entries_field_lengths",
+        ),
+        CheckConstraint(
+            "(status = 'superseded') = (superseded_by IS NOT NULL) AND superseded_by <> id",
+            name="ck_ledger_entries_superseded",
+        ),
+        CheckConstraint(
+            "(status = 'handled') = (handled_account IS NOT NULL) "
+            "AND (status = 'handled') = (handled_at IS NOT NULL) "
+            "AND char_length(btrim(handled_account)) >= 1",
+            name="ck_ledger_entries_handled",
+        ),
+        CheckConstraint("revision >= 1", name="ck_ledger_entries_revision"),
+        Index("ix_ledger_entries_owner_status", "owner_key", "status"),
+        Index("ix_ledger_entries_owner_updated", "owner_key", "updated_at"),
+        {"comment": _LEDGER_MARKERS["ledger_entries"]},
+    )
+
+
+class LedgerEntryLink(Base):
+    """A "see also" between two entries, stored once with the lower id first."""
+
+    __tablename__ = "ledger_entry_links"
+
+    user_id: Mapped[int | None] = _ledger_user_id()
+    owner_key: Mapped[int] = _ledger_owner_key()
+    entry_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    related_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime.datetime] = _ledger_now()
+
+    __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_entry_links_user"),
+        _ledger_fk("entry_id", "ledger_entries", "fk_ledger_entry_links_entry", "CASCADE"),
+        _ledger_fk("related_id", "ledger_entries", "fk_ledger_entry_links_related", "CASCADE"),
+        CheckConstraint("entry_id < related_id", name="ck_ledger_entry_links_order"),
+        Index("ix_ledger_entry_links_related", "related_id"),
+        {"comment": _LEDGER_MARKERS["ledger_entry_links"]},
+    )
+
+
+class LedgerTopic(Base):
+    """A label finer than an area: a part of the system, or a surface."""
+
+    __tablename__ = "ledger_topics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = _ledger_user_id()
+    owner_key: Mapped[int] = _ledger_owner_key()
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    description: Mapped[str] = mapped_column(String(300), nullable=False)
+    area_tag: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'active'"))
+    merged_into: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime.datetime] = _ledger_now()
+    updated_at: Mapped[datetime.datetime] = _ledger_now()
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+
+    __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_topics_user"),
+        UniqueConstraint("id", "owner_key", name="uq_ledger_topics_id_owner"),
+        UniqueConstraint("owner_key", "slug", name="uq_ledger_topics_owner_slug"),
+        _ledger_fk("merged_into", "ledger_topics", "fk_ledger_topics_merged_into"),
+        CheckConstraint(_SLUG_PREDICATE, name="ck_ledger_topics_slug"),
+        CheckConstraint("kind IN ('system', 'surface')", name="ck_ledger_topics_kind"),
+        CheckConstraint(
+            f"char_length(btrim(description)) >= 1 AND description {_NO_LINE_BREAK}",
+            name="ck_ledger_topics_description",
+        ),
+        CheckConstraint(_AREA_PREDICATE, name="ck_ledger_topics_area"),
+        CheckConstraint("status IN ('active', 'merged')", name="ck_ledger_topics_status"),
+        CheckConstraint(
+            "(status = 'merged') = (merged_into IS NOT NULL) AND merged_into <> id",
+            name="ck_ledger_topics_merged",
+        ),
+        CheckConstraint("revision >= 1", name="ck_ledger_topics_revision"),
+        {"comment": _LEDGER_MARKERS["ledger_topics"]},
+    )
+
+
+class LedgerEntryTopic(Base):
+    __tablename__ = "ledger_entry_topics"
+
+    user_id: Mapped[int | None] = _ledger_user_id()
+    owner_key: Mapped[int] = _ledger_owner_key()
+    entry_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    topic_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_entry_topics_user"),
+        _ledger_fk("entry_id", "ledger_entries", "fk_ledger_entry_topics_entry", "CASCADE"),
+        _ledger_fk("topic_id", "ledger_topics", "fk_ledger_entry_topics_topic"),
+        Index("ix_ledger_entry_topics_topic", "topic_id"),
+        {"comment": _LEDGER_MARKERS["ledger_entry_topics"]},
+    )
+
+
+class LedgerDigest(Base):
+    """A summary view: a short page agents read instead of all the entries."""
+
+    __tablename__ = "ledger_digests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = _ledger_user_id()
+    owner_key: Mapped[int] = _ledger_owner_key()
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(150), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    layout: Mapped[str] = mapped_column(String(8), nullable=False)
+    created_at: Mapped[datetime.datetime] = _ledger_now()
+    updated_at: Mapped[datetime.datetime] = _ledger_now()
+
+    __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_digests_user"),
+        UniqueConstraint("id", "owner_key", name="uq_ledger_digests_id_owner"),
+        UniqueConstraint("owner_key", "slug", name="uq_ledger_digests_owner_slug"),
+        CheckConstraint(_SLUG_PREDICATE, name="ck_ledger_digests_slug"),
+        CheckConstraint("layout IN ('list', 'matrix')", name="ck_ledger_digests_layout"),
+        CheckConstraint(
+            "char_length(btrim(title)) >= 1 AND char_length(btrim(description)) >= 1",
+            name="ck_ledger_digests_text",
+        ),
+        {"comment": _LEDGER_MARKERS["ledger_digests"]},
+    )
+
+
+class LedgerDigestColumn(Base):
+    """A matrix view's column; a line can only name a column its view has."""
+
+    __tablename__ = "ledger_digest_columns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = _ledger_user_id()
+    owner_key: Mapped[int] = _ledger_owner_key()
+    digest_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    label: Mapped[str] = mapped_column(String(100), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_digest_columns_user"),
+        _ledger_fk("digest_id", "ledger_digests", "fk_ledger_digest_columns_digest"),
+        UniqueConstraint("digest_id", "label", name="uq_ledger_digest_columns_digest_label"),
+        CheckConstraint("char_length(btrim(label)) >= 1", name="ck_ledger_digest_columns_label"),
+        {"comment": _LEDGER_MARKERS["ledger_digest_columns"]},
+    )
+
+
+class LedgerDigestLine(Base):
+    """One line of a summary view (a cell, for a matrix). Removing a line sets
+    `removed_at`; the row stays."""
+
+    __tablename__ = "ledger_digest_lines"
+
+    # `text` is a column here, so the class body names the SQL helper otherwise.
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = _ledger_user_id()
+    owner_key: Mapped[int] = _ledger_owner_key()
+    digest_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    row_label: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    column_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(String(2000), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default=_sql_text("1"))
+    needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=_sql_text("false"))
+    review_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    removed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime.datetime] = _ledger_now()
+    updated_at: Mapped[datetime.datetime] = _ledger_now()
+
+    __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_digest_lines_user"),
+        UniqueConstraint("id", "owner_key", name="uq_ledger_digest_lines_id_owner"),
+        _ledger_fk("digest_id", "ledger_digests", "fk_ledger_digest_lines_digest"),
+        ForeignKeyConstraint(
+            ["digest_id", "column_label"],
+            ["ledger_digest_columns.digest_id", "ledger_digest_columns.label"],
+            name="fk_ledger_digest_lines_column",
+        ),
+        CheckConstraint("char_length(btrim(text)) >= 1", name="ck_ledger_digest_lines_text"),
+        CheckConstraint(
+            "needs_review = (review_reason IS NOT NULL) AND char_length(review_reason) <= 2000",
+            name="ck_ledger_digest_lines_review",
+        ),
+        CheckConstraint("revision >= 1", name="ck_ledger_digest_lines_revision"),
+        Index("ix_ledger_digest_lines_digest", "digest_id"),
+        {"comment": _LEDGER_MARKERS["ledger_digest_lines"]},
+    )
+
+
+class LedgerDigestSource(Base):
+    __tablename__ = "ledger_digest_sources"
+
+    user_id: Mapped[int | None] = _ledger_user_id()
+    owner_key: Mapped[int] = _ledger_owner_key()
+    line_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    entry_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_digest_sources_user"),
+        _ledger_fk("line_id", "ledger_digest_lines", "fk_ledger_digest_sources_line"),
+        _ledger_fk("entry_id", "ledger_entries", "fk_ledger_digest_sources_entry", "CASCADE"),
+        Index("ix_ledger_digest_sources_entry", "entry_id"),
+        {"comment": _LEDGER_MARKERS["ledger_digest_sources"]},
+    )
+
+
+class LedgerRevision(Base):
+    """One past version of one ledger row, with who changed it and why.
+
+    Exactly one subject column is set. `before` holds the row's fields as they
+    were (NULL only for `action='create'`, which records why a topic or a view
+    was created). Append-only: a trigger refuses UPDATE and DELETE.
+    """
+
+    __tablename__ = "ledger_revisions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int | None] = _ledger_user_id()
+    owner_key: Mapped[int] = _ledger_owner_key()
+    entry_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    topic_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    digest_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    line_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: The subject's revision this row preserves (the version before the change).
+    revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    before: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime.datetime] = _ledger_now()
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    author: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_revisions_user"),
+        _ledger_fk("entry_id", "ledger_entries", "fk_ledger_revisions_entry", "CASCADE"),
+        _ledger_fk("topic_id", "ledger_topics", "fk_ledger_revisions_topic"),
+        _ledger_fk("digest_id", "ledger_digests", "fk_ledger_revisions_digest"),
+        _ledger_fk("line_id", "ledger_digest_lines", "fk_ledger_revisions_line"),
+        CheckConstraint(
+            "num_nonnulls(entry_id, topic_id, digest_id, line_id) = 1",
+            name="ck_ledger_revisions_one_subject",
+        ),
+        CheckConstraint(
+            "char_length(btrim(reason)) >= 1 AND char_length(reason) <= 2000",
+            name="ck_ledger_revisions_reason",
+        ),
+        CheckConstraint("(action = 'create') = (before IS NULL)", name="ck_ledger_revisions_before"),
+        Index("ix_ledger_revisions_entry", "entry_id"),
+        Index("ix_ledger_revisions_topic", "topic_id"),
+        Index("ix_ledger_revisions_digest", "digest_id"),
+        Index("ix_ledger_revisions_line", "line_id"),
+        {"comment": _LEDGER_MARKERS["ledger_revisions"]},
+    )
+
+
+class LedgerEmbedding(Base):
+    """An entry's chunk vectors: the one derived ledger table.
+
+    No vector index, by choice (agent-ledger.md): the ledger is a few thousand
+    chunks, and an exact scan is fast at that size and never misses a candidate.
+    """
+
+    __tablename__ = "ledger_embeddings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    entry_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(settings.embedding_dimensions), nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["entry_id"], ["ledger_entries.id"], name="fk_ledger_embeddings_entry", ondelete="CASCADE"
+        ),
+        Index("ix_ledger_embeddings_entry", "entry_id"),
+        {"comment": _LEDGER_MARKERS["ledger_embeddings"]},
     )
