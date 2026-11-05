@@ -37,7 +37,8 @@ it every area must be declared by an indexed main note, as the tools require.
       "digests": [{
         "slug": "claude-surfaces", "title": "…", "description": "…", "layout": "matrix",
         "columns": ["text", "voice", "claude-code"],
-        "lines": [{"row": "Images", "column": "voice", "text": "no", "sources": ["Q14"]}]
+        "lines": [{"row": "Images", "column": "voice", "text": "no", "sources": ["Q14"],
+                   "review_reason": "only when a line is flagged for review"}]
       }]
     }
 
@@ -243,7 +244,9 @@ async def run(args) -> dict:
                     user_id=uid, digest_id=digest.id, row_label=line_data.get("row"),
                     column_label=line_data.get("column") if layout == "matrix" else None,
                     position=line_data.get("position", j),
-                    text=ledger_views.one_line(line_data.get("text"), "text", ledger_views.LINE_TEXT_MAX))
+                    text=ledger_views.one_line(line_data.get("text"), "text", ledger_views.LINE_TEXT_MAX),
+                    needs_review=bool(line_data.get("review_reason")),
+                    review_reason=line_data.get("review_reason") or None)
                 session.add(line)
                 await session.flush()
                 for entry_id in sorted({resolve(r, lname).id for r in line_data.get("sources", [])}):

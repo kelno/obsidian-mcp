@@ -9,8 +9,10 @@ written. Like the import, it reads only the server's own configuration
 (`DATABASE_URL`), so it runs wherever that is set.
 
 `--format json` writes the shape `scripts/ledger_import.py` reads, so an
-export imports back as it was (refs, dates, statuses, topics, links, views);
-the history is not part of that shape. `--history` adds every past version
+export imports back with its refs, dates, statuses, topics, links, views and
+review flags. Not part of that shape: the history, removed view lines and
+merged topics (their entries carry the target topic). One read-only,
+repeatable-read transaction, so the export is one consistent snapshot. `--history` adds every past version
 to the Markdown.
 """
 from __future__ import annotations
@@ -21,7 +23,7 @@ import json
 import sys
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from src.database import async_session, engine
 from src.models import db
@@ -48,6 +50,10 @@ async def _owner(session, args) -> int | None:
 
 async def collect(args) -> dict:
     async with async_session() as session:
+        # One snapshot for every read below: under READ COMMITTED an entry
+        # added mid-export could be cited by a line whose source map was built
+        # before it.
+        await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
         uid = await _owner(session, args)
         okey = ledger.owner_key(uid)
         topics = (await session.execute(select(LedgerTopic).where(LedgerTopic.owner_key == okey)
@@ -108,7 +114,8 @@ def as_json(data: dict) -> str:
             "slug": d.slug, "title": d.title, "description": d.description, "layout": d.layout,
             "columns": v["columns"],
             "lines": [{k: val for k, val in {"row": l.row_label, "column": l.column_label, "position": l.position,
-                                              "text": l.text, "sources": v["sources"][l.id]}.items()
+                                              "text": l.text, "sources": v["sources"][l.id],
+                                              "review_reason": l.review_reason}.items()
                        if val is not None} for l in v["lines"]],
         })
     return json.dumps(out, ensure_ascii=False, indent=2)

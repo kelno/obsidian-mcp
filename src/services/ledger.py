@@ -264,13 +264,20 @@ async def topics_allowed(session: AsyncSession, uid: int | None) -> list[dict]:
 
 
 async def resolve_topics(session: AsyncSession, uid: int | None, slugs: list[str]) -> dict[str, int]:
-    """`{slug: id}` for active topics; refuses unknown or merged ones with the list."""
+    """`{slug: id}` for active topics; refuses unknown or merged ones with the list.
+
+    The rows are share-locked for the rest of the transaction: a merge takes
+    them for update, so a merge and a write naming the topic run one after the
+    other, and a write that waited reads the merged status and is refused
+    instead of linking an entry to a topic no search reaches any more.
+    """
     wanted = [s.strip().lower() for s in slugs]
     if not wanted:
         return {}
     rows = (await session.execute(
         select(LedgerTopic.id, LedgerTopic.slug, LedgerTopic.status, LedgerTopic.merged_into)
         .where(_owner(LedgerTopic, uid), LedgerTopic.slug.in_(wanted))
+        .order_by(LedgerTopic.id).with_for_update(read=True)
     )).all()
     found = {r.slug: r for r in rows}
     merged = [r for r in rows if r.status == "merged"]
@@ -336,7 +343,7 @@ def validate_details(kind: str, details: dict | None, *, for_add: bool) -> dict:
 
 # ── Reading rows ─────────────────────────────────────────────────────────────
 
-async def find_entries(session: AsyncSession, uid: int | None, refs: list[str], *, lock: bool = False):
+async def find_entries(session: AsyncSession, uid: int | None, refs: list[str], *, lock: bool | str = False):
     """`({ref_as_given: entry}, [not found])` for the caller's entries."""
     parsed = [(raw, *parse_ref(raw)) for raw in refs]
     if not parsed:
@@ -345,8 +352,14 @@ async def find_entries(session: AsyncSession, uid: int | None, refs: list[str], 
         _owner(LedgerEntry, uid),
         or_(*[and_(LedgerEntry.kind == kind, LedgerEntry.number == number) for _r, kind, number in parsed]),
     )
-    if lock:
-        stmt = stmt.with_for_update()
+    if lock == "share":
+        stmt = stmt.with_for_update(read=True)
+    elif lock:
+        # FOR NO KEY UPDATE: it does not conflict with the KEY SHARE lock every
+        # foreign-key insert takes on the row it cites, so citing an entry
+        # (a view line's source, a related link) never deadlocks with
+        # updating it.
+        stmt = stmt.with_for_update(key_share=True)
     rows = (await session.execute(stmt)).scalars().all()
     by_key = {(e.kind, e.number): e for e in rows}
     found, missing = {}, []
@@ -444,7 +457,7 @@ async def flag_lines(session: AsyncSession, uid: int | None, line_ids: list[int]
         .where(_owner(LedgerDigestLine, uid), LedgerDigestLine.id.in_(line_ids),
                LedgerDigestLine.removed_at.is_(None))
         .order_by(LedgerDigestLine.id)
-        .with_for_update(of=LedgerDigestLine)
+        .with_for_update(of=LedgerDigestLine, key_share=True)
     )).all()
     out = []
     for line, slug in lines:
@@ -793,7 +806,19 @@ def _append_paragraph(body: str, text_: str) -> str:
     return (body.rstrip() + "\n\n" if body.strip() else "") + f"{stamp}: {addition}"
 
 
-async def update_entry(
+async def update_entry(session: AsyncSession, uid: int | None, **kw) -> UpdateOutcome:
+    """Change one entry; see `_update_entry`.
+
+    Autoflush is off for the whole change, so the entry reaches the database
+    in one UPDATE with its revision already bumped: the history trigger
+    (migration 032) refuses at commit any change to an entry that did not go
+    up exactly one revision with the old version kept.
+    """
+    with session.no_autoflush:
+        return await _update_entry(session, uid, **kw)
+
+
+async def _update_entry(
     session: AsyncSession, uid: int | None, *, ref: str, expected_revision: int | None, reason: str | None,
     title=None, body=None, append=None, status=None, area=None, topics_add=None, topics_remove=None,
     details=None, superseded_by=None, handled_account=None, related=None, author=None, challenges=None,
@@ -839,8 +864,6 @@ async def update_entry(
     if append is not None:
         entry.body = check_body(_append_paragraph(entry.body, append))
         changed.append("body (appended)")
-    if author is not None:
-        entry.author = author
     if observed_on is not None:
         day = parse_day(observed_on, "observed_on")
         if day != entry.observed_on:
@@ -913,8 +936,7 @@ async def update_entry(
                     user_id=entry.user_id, entry_id=entry.id, topic_id=topic_id).on_conflict_do_nothing())
                 changed.append(f"topic +{slug}")
         if remove:
-            remove_ids = (await session.execute(select(LedgerTopic.id).where(
-                _owner(LedgerTopic, uid), LedgerTopic.slug.in_(remove)))).scalars().all()
+            remove_ids = list((await resolve_topics(session, uid, remove)).values())
             await session.execute(delete(LedgerEntryTopic).where(
                 LedgerEntryTopic.entry_id == entry.id, LedgerEntryTopic.topic_id.in_(remove_ids)))
             changed.extend(f"topic -{slug}" for slug in remove)
@@ -933,7 +955,8 @@ async def update_entry(
 
     challenged = await check_challenges(session, uid, challenges)
     if not changed and not challenged:
-        await session.rollback()
+        # No rollback here: it would expire `entry` before the message reads
+        # it. The caller's session closes, which rolls everything back.
         raise invalid(f"nothing to change: every value given is what {entry.ref} already holds. "
                       "Nothing was written.")
 
@@ -944,6 +967,8 @@ async def update_entry(
             user_id=entry.user_id, entry_id=entry.id, revision=entry.revision, action="update",
             reason=reason, before=before, created_by=who, author=author,
         ))
+        if author is not None:
+            entry.author = author
         entry.revision += 1
         entry.updated_at = func.now()
         entry.content_hash = content_hash(embed_text(entry))
@@ -963,6 +988,14 @@ async def _apply_status(session, uid, entry: LedgerEntry, status: str, supersede
     if status not in allowed:
         raise invalid(f"a {entry.kind} can be {', '.join(allowed)} (got {status!r}).",
                       allowed=[{"name": s} for s in allowed])
+    if status in db.LEDGER_CLOSING_STATUSES and entry.status not in db.LEDGER_CLOSING_STATUSES:
+        pointing = (await session.execute(select(LedgerEntry.ref).where(
+            LedgerEntry.superseded_by == entry.id).order_by(LedgerEntry.id))).scalars().all()
+        if pointing:
+            raise invalid(
+                f"{', '.join(pointing)} {'is' if len(pointing) == 1 else 'are'} superseded by {entry.ref}, so "
+                f"closing {entry.ref} would leave that content in no active entry. Point "
+                f"{'it' if len(pointing) == 1 else 'them'} to the entry that holds it first. Nothing was written.")
     if status == "to_triage" and entry.area_tag is not None:
         raise invalid("feedback with an area is open, not to_triage; clear the area (area=\"\") first.")
     if status == "open" and entry.kind == "feedback" and entry.area_tag is None:
@@ -970,13 +1003,21 @@ async def _apply_status(session, uid, entry: LedgerEntry, status: str, supersede
     if status == "superseded":
         if superseded_by is None:
             raise invalid("status superseded needs superseded_by: the ref of the entry that holds the content.")
-        others, missing = await find_entries(session, uid, [superseded_by])
+        # Share-locked, so the target cannot be closed while this points to it.
+        others, missing = await find_entries(session, uid, [superseded_by], lock="share")
         if missing:
             raise LedgerError("not_found", f"entry {superseded_by} not found. Nothing was written.")
         other = others[superseded_by]
         if other.id == entry.id:
             raise invalid("an entry cannot be superseded by itself.")
-        entry.superseded_by = other.id
+        if other.status in db.LEDGER_CLOSING_STATUSES:
+            raise invalid(
+                f"{other.ref} is itself {other.status}, so it cannot hold {entry.ref}'s content: point to the "
+                "entry that does (a chain or a loop of superseded entries would leave the content in none). "
+                "Nothing was written.")
+        if other.id != entry.superseded_by:
+            entry.superseded_by = other.id
+            changed.append("superseded_by")
     elif superseded_by is not None:
         raise invalid("superseded_by goes with status superseded.")
     else:
@@ -988,7 +1029,10 @@ async def _apply_status(session, uid, entry: LedgerEntry, status: str, supersede
                           "left to do.")
         if len(account) > BODY_MAX:
             raise invalid(f"handled_account is {len(account)} characters; at most {BODY_MAX}.")
-        entry.handled_account = account
+        if account != entry.handled_account:
+            if entry.status == "handled":
+                changed.append("handled_account")
+            entry.handled_account = account
         if entry.status != "handled":
             entry.handled_at = func.now()
     else:

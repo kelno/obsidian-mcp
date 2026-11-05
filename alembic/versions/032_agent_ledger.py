@@ -26,6 +26,10 @@ docs/architecture/agent-ledger.md.
   columns, the ref counters and the history, `UPDATE` on the history, and
   `TRUNCATE` on all of them. With the switch on, deleting an entry cascades to
   its history, links, topic links, line sources and vectors.
+- **No change without its history.** A deferred constraint trigger checks at
+  commit that every changed entry, topic or view line went up exactly one
+  revision and that `ledger_revisions` holds the version it replaced (an
+  entry's `seen` and search hashes excepted; the switch exempts too).
 - **Links to the vault are not foreign keys**: an entry's or topic's area is a
   checked `area/<slug>` string, so a reindex or prune can never reach the
   ledger.
@@ -81,8 +85,11 @@ PROTECTED = (
 #: Link tables: rows the tools remove (a topic taken off an entry, a source
 #: taken off a line), always with a history row saying so. Still no TRUNCATE.
 LINK_TABLES = ("ledger_entry_links", "ledger_entry_topics", "ledger_digest_sources")
+#: Tables whose every change must come with a history row (a revision bump).
+HISTORY_KEPT = ("ledger_entries", "ledger_topics", "ledger_digest_lines")
 
 SWITCH = "ledger.allow_delete"
+FUNCTIONS = ("ledger_refuse_change", "ledger_require_history")
 
 OWNER = "owner_key integer GENERATED ALWAYS AS (COALESCE(user_id, 0)) STORED NOT NULL"
 USER = "user_id integer NULL"
@@ -319,6 +326,10 @@ def _ddl(dim: int) -> list[str]:
             CONSTRAINT ck_ledger_digest_lines_revision CHECK (revision >= 1)
         )""",
         "CREATE INDEX ix_ledger_digest_lines_digest ON ledger_digest_lines (digest_id)",
+        # One live line per matrix cell: a second one would be hidden by the
+        # rendered table, which shows one line per cell.
+        "CREATE UNIQUE INDEX uq_ledger_digest_lines_live_cell ON ledger_digest_lines "
+        "(digest_id, row_label, column_label) WHERE removed_at IS NULL AND column_label IS NOT NULL",
         f"""
         CREATE TABLE ledger_digest_sources (
             {USER},
@@ -417,6 +428,46 @@ def _trigger_ddl() -> list[str]:
             f"CREATE TRIGGER trg_{table}_no_truncate BEFORE TRUNCATE ON {table} "
             "FOR EACH STATEMENT EXECUTE FUNCTION ledger_refuse_change()"
         )
+    # Every change to an entry, topic or view line must keep the version it
+    # replaces: the revision goes up by exactly one and `ledger_revisions`
+    # holds a row for the old one. Checked at commit (a deferred constraint
+    # trigger), so the order of the UPDATE and the history INSERT inside the
+    # transaction does not matter. Exempt: an entry's `seen` and its two
+    # search hashes, which overwrite no content; and a session with the switch.
+    statements.append(f"""
+        CREATE FUNCTION ledger_require_history() RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE
+            kept boolean;
+        BEGIN
+            IF COALESCE(current_setting('{SWITCH}', true), '') = 'on' THEN
+                RETURN NULL;
+            END IF;
+            IF (to_jsonb(OLD) - '{{seen,embedded_hash,content_hash}}'::text[])
+               = (to_jsonb(NEW) - '{{seen,embedded_hash,content_hash}}'::text[]) THEN
+                RETURN NULL;
+            END IF;
+            kept := CASE TG_TABLE_NAME
+                WHEN 'ledger_entries' THEN EXISTS (SELECT 1 FROM ledger_revisions r
+                    WHERE r.entry_id = NEW.id AND r.revision = OLD.revision)
+                WHEN 'ledger_topics' THEN EXISTS (SELECT 1 FROM ledger_revisions r
+                    WHERE r.topic_id = NEW.id AND r.revision = OLD.revision)
+                ELSE EXISTS (SELECT 1 FROM ledger_revisions r
+                    WHERE r.line_id = NEW.id AND r.revision = OLD.revision)
+            END;
+            IF NEW.revision <> OLD.revision + 1 OR NOT kept THEN
+                RAISE EXCEPTION 'agent ledger: a change to % id % keeps no history (revision % to %)',
+                    TG_TABLE_NAME, NEW.id, OLD.revision, NEW.revision
+                    USING ERRCODE = 'restrict_violation',
+                          HINT = 'Every change bumps the revision by one and records the old version in ledger_revisions.';
+            END IF;
+            RETURN NULL;
+        END
+        $$""")
+    for table in HISTORY_KEPT:
+        statements.append(
+            f"CREATE CONSTRAINT TRIGGER trg_{table}_keeps_history AFTER UPDATE ON {table} "
+            "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ledger_require_history()"
+        )
     return statements
 
 
@@ -450,14 +501,12 @@ def upgrade() -> None:
             "primary data, and rows this server did not write would be served as agents' "
             "records. Inspect them, move them aside by hand, then re-run. Nothing has been changed."
         )
-    function = bind.execute(
-        sa.text("SELECT to_regprocedure('public.ledger_refuse_change()')")
-    ).scalar()
-    if function is not None:
-        raise RuntimeError(
-            "032 found a function public.ledger_refuse_change() it did not create. Drop it by "
-            "hand, then re-run. Nothing has been changed."
-        )
+    for function in FUNCTIONS:
+        if bind.execute(sa.text("SELECT to_regprocedure(:f)"), {"f": f"public.{function}()"}).scalar():
+            raise RuntimeError(
+                f"032 found a function public.{function}() it did not create. Drop it by "
+                "hand, then re-run. Nothing has been changed."
+            )
 
     for statement in _ddl(int(settings.embedding_dimensions)):
         op.execute(statement)
@@ -503,5 +552,6 @@ def downgrade() -> None:
     for table in reversed(TABLES):
         if table in present:
             op.execute(f"DROP TABLE {table}")
-    op.execute("DROP FUNCTION IF EXISTS ledger_refuse_change()")
+    for function in FUNCTIONS:
+        op.execute(f"DROP FUNCTION IF EXISTS {function}()")
     op.execute("RESET search_path")

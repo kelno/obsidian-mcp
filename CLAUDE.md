@@ -391,9 +391,11 @@ update it in the same change.** What stays here is the short list:
   structure: per-kind columns and CHECKs, composite foreign keys over a
   generated `owner_key` (`coalesce(user_id, 0)`, so single-user mode is
   checked too), and triggers refusing DELETE (entries, topics, views, lines,
-  counters, history), UPDATE of the history and TRUNCATE — unless the
-  session sets `SET LOCAL ledger.allow_delete = 'on'`, the owner's way to
-  remove something for good from `psql`. No foreign key points into the
+  counters, history), UPDATE of the history and TRUNCATE, plus a deferred
+  trigger refusing at commit any change to an entry, topic or view line that
+  did not bump its revision and keep the old version — unless the session
+  sets `SET LOCAL ledger.allow_delete = 'on'`, the owner's way to remove
+  something for good from `psql`. No foreign key points into the
   index tables, so a reindex or prune never reaches the ledger; a user with
   a ledger cannot be deleted. Writes never wait for an embedding (background
   queue, then the embed stage's sweep within its budget); the reset and the

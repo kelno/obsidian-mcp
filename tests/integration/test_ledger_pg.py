@@ -147,7 +147,7 @@ async def _fetch(url, sql):
 async def _constraints(url):
     rows = await _fetch(url, """
         SELECT c.conrelid::regclass::text AS tbl, c.conname, pg_get_constraintdef(c.oid) AS def
-        FROM pg_constraint c WHERE c.conrelid::regclass::text LIKE 'ledger%'""")
+        FROM pg_constraint c WHERE c.conrelid::regclass::text LIKE 'ledger%' AND c.contype <> 't'""")
     return {(r["tbl"], r["conname"]): r["def"] for r in rows}
 
 
@@ -183,6 +183,8 @@ async def test_the_triggers_exist(migrated_url):
         assert f"trg_{table}_no_delete" in names
         assert f"trg_{table}_no_truncate" in names
     assert "trg_ledger_revisions_no_update" in names
+    for table in ("ledger_entries", "ledger_topics", "ledger_digest_lines"):
+        assert f"trg_{table}_keeps_history" in names
     for table in ("ledger_entry_links", "ledger_entry_topics", "ledger_digest_sources"):
         assert f"trg_{table}_no_truncate" in names
 
@@ -584,3 +586,127 @@ async def test_import_refuses_an_unknown_area_and_writes_nothing(sessionmaker, c
                                                    skip_area_check=False))
     assert (await tools.ledger_search_impl(status="any")).entries == []
     assert (await tools.ledger_topics_impl()).topics == []
+
+
+# ── Regressions from the adversarial review ─────────────────────────────────
+
+async def test_a_no_op_update_is_refused_not_crashed_and_pointers_count_as_changes(ctx):
+    q = await add_quirk("Same title")
+    same = await tools.ledger_update_impl(ref=q.ref, expected_revision=1, reason="r", title="Same title")
+    assert code(same) == "invalid_argument" and "nothing to change" in same.error
+    a, b = await add_quirk("Target A"), await add_quirk("Target B")
+    first = await tools.ledger_update_impl(ref=q.ref, expected_revision=1, reason="dup", status="superseded",
+                                           superseded_by=a.ref)
+    moved = await tools.ledger_update_impl(ref=q.ref, expected_revision=first.revision, reason="wrong target",
+                                           superseded_by=b.ref)
+    assert moved.error is None and moved.changed == ["superseded_by"]
+    f = await tools.ledger_add_impl("feedback", "F", area="home", details={"subtype": "friction"})
+    done = await tools.ledger_update_impl(ref=f.ref, expected_revision=1, reason="r", status="handled",
+                                          handled_account="first")
+    again = await tools.ledger_update_impl(ref=f.ref, expected_revision=done.revision, reason="clearer",
+                                           status="handled", handled_account="second")
+    assert again.changed == ["handled_account"]
+
+
+async def test_superseding_refuses_a_closed_target_and_closing_a_target(ctx):
+    a, b = await add_quirk("A"), await add_quirk("B")
+    await tools.ledger_update_impl(ref=b.ref, expected_revision=1, reason="dup", status="superseded",
+                                   superseded_by=a.ref)
+    loop = await tools.ledger_update_impl(ref=a.ref, expected_revision=1, reason="dup", status="superseded",
+                                          superseded_by=b.ref)
+    assert code(loop) == "invalid_argument" and f"{b.ref} is superseded by {a.ref}" in loop.error
+    close = await tools.ledger_update_impl(ref=a.ref, expected_revision=1, reason="wrong", status="retracted")
+    assert code(close) == "invalid_argument" and f"{b.ref} is superseded by {a.ref}" in close.error
+    c, d = await add_quirk("C"), await add_quirk("D")
+    await tools.ledger_update_impl(ref=c.ref, expected_revision=1, reason="mistake", status="retracted")
+    onto_closed = await tools.ledger_update_impl(ref=d.ref, expected_revision=1, reason="dup",
+                                                 status="superseded", superseded_by=c.ref)
+    assert code(onto_closed) == "invalid_argument" and "is itself retracted" in onto_closed.error
+
+
+async def test_the_database_refuses_a_change_without_history(sessionmaker, ctx):
+    q = await add_quirk("Kept")
+    for statement in ("UPDATE ledger_entries SET title = 'rewritten'",
+                      "UPDATE ledger_entries SET title = 'rewritten', revision = revision + 1"):
+        async with sessionmaker() as session:
+            await session.execute(text(statement))
+            with pytest.raises(DBAPIError, match="keeps no history"):
+                await session.commit()
+    async with sessionmaker() as session:
+        await session.execute(text("UPDATE ledger_entries SET embedded_hash = 'x'"))
+        await session.commit()
+        await session.execute(text("SET LOCAL ledger.allow_delete = 'on'"))
+        await session.execute(text("UPDATE ledger_entries SET title = 'by the owner'"))
+        await session.commit()
+    up = await tools.ledger_update_impl(ref=q.ref, expected_revision=1, reason="r", title="through the tool")
+    assert up.error is None and up.revision == 2
+
+
+async def test_a_matrix_cell_holds_one_live_line(sessionmaker, ctx):
+    q = await add_quirk("Q")
+    await tools.ledger_digest_edit_impl("m", "start", [
+        {"op": "create", "layout": "matrix", "title": "M", "description": "d", "columns": ["voice"]},
+        {"op": "add", "row": "Images", "column": "voice", "text": "no", "sources": [q.ref]},
+        {"op": "add", "row": "Browser", "column": "voice", "text": "yes"},
+    ])
+    lines = (await tools.ledger_digest_impl("m", with_ids=True)).lines
+    browser = next(l for l in lines if l["row"] == "Browser")
+    moved = await tools.ledger_digest_edit_impl("m", "r", [
+        {"op": "replace", "line": browser["line"], "expected_revision": browser["revision"], "row": "Images"}])
+    assert code(moved) == "already_exists"
+    typo = await tools.ledger_digest_edit_impl("m", "r", [
+        {"op": "replace", "line": browser["line"], "expected_revision": browser["revision"], "txt": "x"}])
+    assert code(typo) == "invalid_argument" and "txt is not a key of replace" in typo.error
+    empty = await tools.ledger_digest_edit_impl("m", "r", [
+        {"op": "replace", "line": browser["line"], "expected_revision": browser["revision"]}])
+    assert code(empty) == "invalid_argument"
+    async with sessionmaker() as session:
+        with pytest.raises(IntegrityError, match="uq_ledger_digest_lines_live_cell"):
+            await session.execute(text(
+                "UPDATE ledger_digest_lines SET row_label = 'Images', revision = revision + 1 WHERE id = :i"),
+                {"i": browser["line"]})
+
+
+async def test_a_long_view_is_cut_at_the_response_cap(ctx, monkeypatch):
+    monkeypatch.setattr(settings, "max_read_response_chars", 1000)
+    ops = [{"op": "create", "layout": "list", "title": "L", "description": "d"}]
+    ops += [{"op": "add", "text": f"line {i} " + "x" * 150} for i in range(20)]
+    assert (await tools.ledger_digest_edit_impl("long", "r", ops)).error is None
+    view = await tools.ledger_digest_impl("long", with_ids=True)
+    assert view.lines_not_shown and len(view.lines) == 20 - view.lines_not_shown
+    assert len(view.markdown) < 1000
+
+
+async def test_meaning_search_ranks_entries_not_chunks(sessionmaker, ctx):
+    long_body = "\n\n".join(f"paragraph {i} " + "word " * 450 for i in range(6))
+    assert len(long_body) < ledger.BODY_MAX
+    await tools.ledger_add_impl("proposal", "Long", body=long_body, status="rejected",
+                                details={"target": "t", "proposed_text": "p"})
+    for i in range(3):
+        await add_quirk(f"Short {i}")
+    await embed_all(sessionmaker)
+    result = await tools.ledger_search_impl(query="paragraph 3", mode="meaning", limit=4, kinds=None)
+    assert len(result.by_meaning) == 4
+    assert len({e.ref for e in result.by_meaning}) == 4
+
+
+async def test_entries_failing_at_the_provider_are_tried_last(sessionmaker, ctx, monkeypatch):
+    bad = [await add_quirk(f"Rejected {i}") for i in range(3)]
+    good = [await add_quirk(f"Fine {i}") for i in range(2)]
+    real = ledger_embed.get_embeddings_batch
+
+    async def picky(chunks):
+        if any(c.startswith("Rejected") for c in chunks):
+            raise ConnectionError("the provider rejects this one")
+        return await real(chunks)
+
+    monkeypatch.setattr(ledger_embed, "get_embeddings_batch", picky)
+    ledger_embed._failed_entries.clear()
+    for _ in range(2):
+        budget = indexer.EmbedBudget(provider_failure_limit=3)
+        await ledger_embed.sweep(None, budget, indexer.EmbedPassResult(), "", lambda: False)
+    async with sessionmaker() as session:
+        embedded = set((await session.execute(select(LedgerEntry.ref).where(
+            LedgerEntry.embedded_hash == LedgerEntry.content_hash))).scalars().all())
+    assert embedded == {g.ref for g in good}
+    assert not embedded & {b.ref for b in bad}

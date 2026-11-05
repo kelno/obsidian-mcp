@@ -132,9 +132,16 @@ def _topic_out(topic: LedgerTopic, merged_into_slug: str | None = None) -> dict:
     return {**_topic_snapshot(topic, merged_into_slug), "name": topic.slug, "revision": topic.revision}
 
 
-async def edit_topic(session: AsyncSession, uid: int | None, *, action: str, slug: str, reason: str,
-                     kind=None, description=None, area=None, into=None, expected_revision=None,
-                     author=None) -> TopicOutcome:
+async def edit_topic(session: AsyncSession, uid: int | None, **kw) -> TopicOutcome:
+    """Create, describe or merge a topic; autoflush off so each change is one
+    UPDATE with its revision bump (the history trigger checks it at commit)."""
+    with session.no_autoflush:
+        return await _edit_topic(session, uid, **kw)
+
+
+async def _edit_topic(session: AsyncSession, uid: int | None, *, action: str, slug: str, reason: str,
+                      kind=None, description=None, area=None, into=None, expected_revision=None,
+                      author=None) -> TopicOutcome:
     reason = ledger.clean_reason(reason)
     author = ledger.clean_author(author)
     who = ledger.created_by()
@@ -297,7 +304,14 @@ def _cell(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
-async def read_digest(session: AsyncSession, uid: int | None, slug: str, *, with_ids: bool) -> dict:
+async def read_digest(session: AsyncSession, uid: int | None, slug: str, *, with_ids: bool,
+                      cap: int | None = None) -> dict:
+    """The view as Markdown (and its lines, `with_ids`), within `cap` characters.
+
+    Past the cap, the remaining lines (rows, for a matrix) are left out and
+    counted in `lines_not_shown`: the answer stays bounded like `read_note`'s.
+    `cap=None` (the export) renders everything.
+    """
     digest = await _digest(session, uid, clean_slug(slug))
     if digest is None:
         raise LedgerError("not_found", f"summary view {slug} not found. Call ledger_digest without slug for the list.",
@@ -315,6 +329,18 @@ async def read_digest(session: AsyncSession, uid: int | None, slug: str, *, with
         mark = f" [line {line.id} r{line.revision}]" if with_ids else ""
         return mark + (f" ⚠ under review: {line.review_reason}" if line.needs_review else "")
 
+    # With ids, every line's text is in the answer twice (Markdown and list).
+    budget = None if cap is None else (cap // 2 if with_ids else cap) - sum(len(m) for m in md) - 500
+    used = 0
+    shown: list[LedgerDigestLine] = []
+
+    def fits(rendered: str) -> bool:
+        nonlocal used
+        if budget is not None and used + len(rendered) > budget and shown:
+            return False
+        used += len(rendered) + 1
+        return True
+
     if digest.layout == "matrix":
         rows: dict[str, dict[str, LedgerDigestLine]] = {}
         for line in lines:
@@ -326,23 +352,34 @@ async def read_digest(session: AsyncSession, uid: int | None, slug: str, *, with
             for column in columns:
                 line = cells.get(column)
                 out.append("" if line is None else _cell(f"{line.text} {_cite(sources.get(line.id, []))}{tag(line)}"))
-            md.append(f"| {_cell(row)} | " + " | ".join(out) + " |")
+            rendered = f"| {_cell(row)} | " + " | ".join(out) + " |"
+            if not fits(rendered):
+                break
+            md.append(rendered)
+            shown.extend(cells.values())
     else:
         for line in lines:
             lead = f"**{line.row_label}**: " if line.row_label else ""
-            md.append(f"- {lead}{line.text} {_cite(sources.get(line.id, []))}{tag(line)}")
+            rendered = f"- {lead}{line.text} {_cite(sources.get(line.id, []))}{tag(line)}"
+            if not fits(rendered):
+                break
+            md.append(rendered)
+            shown.append(line)
+    not_shown = len(lines) - len(shown)
+    if not_shown:
+        md += ["", f"{not_shown} more line(s) not shown, to keep this answer within the response cap."]
     if review:
         md += ["", f"{len(review)} line(s) under review: whoever changed the entry they cite checks each one "
                    "(ledger_digest_edit: replace or resolve)."]
     result = {"slug": digest.slug, "title": digest.title, "layout": digest.layout, "markdown": "\n".join(md),
-              "lines_under_review": len(review)}
+              "lines_under_review": len(review), "lines_not_shown": not_shown or None}
     if with_ids:
         result["columns"] = columns
         result["lines"] = [
             {"line": l.id, "revision": l.revision, "row": l.row_label, "column": l.column_label,
              "position": l.position, "text": l.text, "sources": [s["ref"] for s in sources.get(l.id, [])],
              "needs_review": l.needs_review, "review_reason": l.review_reason}
-            for l in lines
+            for l in shown
         ]
     return result
 
@@ -398,8 +435,37 @@ def _check_cell(digest: LedgerDigest, columns: list[str], row, column):
     return (one_line(row, "row", ROW_LABEL_MAX) if row is not None else None), None
 
 
-async def edit_digest(session: AsyncSession, uid: int | None, *, slug: str, reason: str, operations,
-                      author=None) -> DigestEditOutcome:
+#: The keys each operation accepts, besides `op`.
+OPERATION_KEYS = {
+    "create": {"layout", "title", "description", "columns"},
+    "describe": {"title", "description"},
+    "add_column": {"label"},
+    "add": {"row", "column", "text", "sources", "position"},
+    "replace": {"line", "expected_revision", "text", "sources", "row", "column", "position"},
+    "remove": {"line", "expected_revision"},
+    "resolve": {"line", "expected_revision"},
+}
+
+
+async def _check_cell_free(session, digest: LedgerDigest, row, column) -> None:
+    """A matrix cell holds one live line (a unique index enforces it too)."""
+    taken = (await session.execute(select(LedgerDigestLine.id).where(
+        LedgerDigestLine.digest_id == digest.id, LedgerDigestLine.removed_at.is_(None),
+        LedgerDigestLine.row_label == row, LedgerDigestLine.column_label == column))).first()
+    if taken is not None:
+        raise LedgerError("already_exists", f"cell ({row}, {column}) already holds line {taken[0]}; replace or "
+                          "remove that line instead.")
+
+
+async def edit_digest(session: AsyncSession, uid: int | None, **kw) -> DigestEditOutcome:
+    """Apply a view's operations, all or none. Autoflush off: each operation
+    flushes once, after its line's revision is bumped (the history trigger)."""
+    with session.no_autoflush:
+        return await _edit_digest(session, uid, **kw)
+
+
+async def _edit_digest(session: AsyncSession, uid: int | None, *, slug: str, reason: str, operations,
+                       author=None) -> DigestEditOutcome:
     reason = ledger.clean_reason(reason)
     author = ledger.clean_author(author)
     who = ledger.created_by()
@@ -417,6 +483,13 @@ async def edit_digest(session: AsyncSession, uid: int | None, *, slug: str, reas
         kind = op.get("op")
         where = f"operations[{index}] ({kind})"
         try:
+            # A misspelt key would otherwise be ignored: `txt` for `text` turns
+            # a replace into a silent resolve, `source` an unsourced line.
+            if kind in OPERATION_KEYS:
+                unknown = sorted(set(op) - OPERATION_KEYS[kind] - {"op"})
+                if unknown:
+                    raise invalid(f"{', '.join(unknown)} is not a key of {kind}; its keys: "
+                                  f"{', '.join(sorted(OPERATION_KEYS[kind]))}.")
             if kind == "create":
                 if digest is not None:
                     raise LedgerError("already_exists", f"summary view {slug} already exists.")
@@ -471,12 +544,7 @@ async def edit_digest(session: AsyncSession, uid: int | None, *, slug: str, reas
                 row, column = _check_cell(digest, columns, op.get("row"), op.get("column"))
                 text_ = one_line(op.get("text"), "text", LINE_TEXT_MAX)
                 if digest.layout == "matrix":
-                    taken = (await session.execute(select(LedgerDigestLine.id).where(
-                        LedgerDigestLine.digest_id == digest.id, LedgerDigestLine.removed_at.is_(None),
-                        LedgerDigestLine.row_label == row, LedgerDigestLine.column_label == column))).first()
-                    if taken is not None:
-                        raise LedgerError("already_exists", f"cell ({row}, {column}) already holds line {taken[0]}; "
-                                          "replace it instead.")
+                    await _check_cell_free(session, digest, row, column)
                 sources = await _source_ids(session, uid, op.get("sources"))
                 position = op.get("position")
                 if position is None:
@@ -500,11 +568,17 @@ async def edit_digest(session: AsyncSession, uid: int | None, *, slug: str, reas
                     .where(LedgerDigestSource.line_id == line.id))).all()]
                 before = ledger.line_snapshot(line, sorted(current, key=ledger._ref_sort_key))
                 if kind == "replace":
+                    if not any(op.get(k) is not None for k in ("text", "row", "column", "position", "sources")):
+                        raise invalid("replace needs at least one of text, row, column, position, sources; to "
+                                      "confirm a flagged line still holds, use resolve.")
                     if op.get("text") is not None:
                         line.text = one_line(op.get("text"), "text", LINE_TEXT_MAX)
                     if op.get("row") is not None or op.get("column") is not None:
-                        line.row_label, line.column_label = _check_cell(
-                            digest, columns, op.get("row", line.row_label), op.get("column", line.column_label))
+                        row, column = _check_cell(
+                            digest, columns, op.get("row") or line.row_label, op.get("column") or line.column_label)
+                        if digest.layout == "matrix" and (row, column) != (line.row_label, line.column_label):
+                            await _check_cell_free(session, digest, row, column)
+                        line.row_label, line.column_label = row, column
                     if op.get("position") is not None:
                         if not isinstance(op["position"], int) or isinstance(op["position"], bool):
                             raise invalid("position must be a whole number.")

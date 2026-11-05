@@ -1906,6 +1906,11 @@ class LedgerDigestLine(Base):
         ),
         CheckConstraint("revision >= 1", name="ck_ledger_digest_lines_revision"),
         Index("ix_ledger_digest_lines_digest", "digest_id"),
+        # One live line per matrix cell (the rendered table shows one).
+        Index(
+            "uq_ledger_digest_lines_live_cell", "digest_id", "row_label", "column_label", unique=True,
+            postgresql_where=_sql_text("removed_at IS NULL AND column_label IS NOT NULL"),
+        ),
         {"comment": _LEDGER_MARKERS["ledger_digest_lines"]},
     )
 

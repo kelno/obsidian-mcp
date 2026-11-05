@@ -8029,7 +8029,7 @@ async def set_task_status_impl(
 
 from zoneinfo import ZoneInfo  # noqa: E402
 
-from sqlalchemy.exc import IntegrityError as _LedgerIntegrityError  # noqa: E402
+from sqlalchemy.exc import DBAPIError as _LedgerDBAPIError, IntegrityError as _LedgerIntegrityError  # noqa: E402
 
 from src.mcp_server.ledger_result import (  # noqa: E402
     EntrySummary,
@@ -8078,6 +8078,35 @@ def _ledger_integrity(result_cls, exc: _LedgerIntegrityError):
     return _ledger_failed(result_cls, _body_refusal(
         f"The database refused this change ({name}); the ledger's structure does not allow it. Nothing was "
         "written.", "validation_failed"))
+
+
+#: Deadlock, serialization failure, lock not available: another call held
+#: the rows. Retryable; nothing was written (the transaction rolled back).
+_LEDGER_CONFLICT_SQLSTATES = frozenset({"40P01", "40001", "55P03"})
+
+
+def _ledger_sqlstate(exc: BaseException) -> str | None:
+    seen = 0
+    while exc is not None and seen < 4:
+        state = getattr(exc, "sqlstate", None) or getattr(exc, "pgcode", None)
+        if state:
+            return str(state)
+        exc = getattr(exc, "orig", None) or exc.__cause__
+        seen += 1
+    return None
+
+
+def _ledger_conflict(result_cls, exc: _LedgerDBAPIError):
+    """A call that met another one holding the same rows: refused, retryable.
+
+    Re-raised when it is anything else, so a real database fault still
+    surfaces as one.
+    """
+    if _ledger_sqlstate(exc) not in _LEDGER_CONFLICT_SQLSTATES:
+        raise exc
+    return _ledger_failed(result_cls, _body_refusal(
+        "Another call was changing the same ledger rows at the same moment, so this one was stopped. Nothing "
+        "was written. Read the entry again (its revision may have moved) and retry.", "concurrent_write"))
 
 
 def _ledger_day(value) -> str | None:
@@ -8194,7 +8223,7 @@ async def ledger_search_impl(
         result.not_embedded = meaning.not_embedded
         if meaning.not_embedded:
             result.notes = [f"{meaning.not_embedded} matching entr{'y has' if meaning.not_embedded == 1 else 'ies have'} "
-                            "no vector yet (new or just changed): the by_words list covers them."]
+                            "no vector yet (new or just changed): they can only turn up in by_words."]
     return result
 
 
@@ -8289,6 +8318,8 @@ async def ledger_add_impl(
         return _ledger_refused(LedgerWriteResult, exc)
     except _LedgerIntegrityError as exc:
         return _ledger_integrity(LedgerWriteResult, exc)
+    except _LedgerDBAPIError as exc:
+        return _ledger_conflict(LedgerWriteResult, exc)
     entry = added.entry
     _ledger_embed.enqueue(entry.id)
     notes = list(added.notes)
@@ -8362,6 +8393,8 @@ async def ledger_update_impl(
         return _ledger_refused(LedgerWriteResult, exc)
     except _LedgerIntegrityError as exc:
         return _ledger_integrity(LedgerWriteResult, exc)
+    except _LedgerDBAPIError as exc:
+        return _ledger_conflict(LedgerWriteResult, exc)
     entry = updated.entry
     if entry.embedded_hash != entry.content_hash:
         _ledger_embed.enqueue(entry.id)
@@ -8381,7 +8414,8 @@ async def ledger_digest_impl(slug: str | None = None, with_ids: bool = False) ->
         async with async_session() as session:
             if slug is None:
                 return LedgerDigestResult(views=await _ledger_views.list_digests(session, uid))
-            return LedgerDigestResult(**await _ledger_views.read_digest(session, uid, slug, with_ids=with_ids))
+            return LedgerDigestResult(**await _ledger_views.read_digest(
+                session, uid, slug, with_ids=with_ids, cap=int(settings.max_read_response_chars)))
     except _ledger.LedgerError as exc:
         return _ledger_refused(LedgerDigestResult, exc)
 
@@ -8403,6 +8437,8 @@ async def ledger_digest_edit_impl(
         return _ledger_refused(LedgerDigestEditResult, exc)
     except _LedgerIntegrityError as exc:
         return _ledger_integrity(LedgerDigestEditResult, exc)
+    except _LedgerDBAPIError as exc:
+        return _ledger_conflict(LedgerDigestEditResult, exc)
     notes = ["Tell the owner in your reply that you created this summary view, and what it is for."] if done.created else None
     return LedgerDigestEditResult(slug=done.slug, created=done.created, applied=done.applied, notes=notes)
 
@@ -8445,6 +8481,8 @@ async def ledger_topic_edit_impl(
         return _ledger_refused(LedgerTopicEditResult, exc)
     except _LedgerIntegrityError as exc:
         return _ledger_integrity(LedgerTopicEditResult, exc)
+    except _LedgerDBAPIError as exc:
+        return _ledger_conflict(LedgerTopicEditResult, exc)
     verb = {"create": "created", "describe": "redescribed", "merge": "merged"}[action]
     return LedgerTopicEditResult(topic=done.topic, moved=done.moved or None, notes=[
         f"Tell the owner in your reply that you {verb} topic {done.topic['name']}, so they can follow the structure."])

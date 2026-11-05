@@ -53,8 +53,6 @@ logger = logging.getLogger(__name__)
 
 #: Entries one sweep looks at per stage, at most; the budget usually stops it first.
 SWEEP_BATCH = 200
-#: Chunks one meaning search over-fetches per result, for the per-entry dedupe.
-MEANING_OVERFETCH = 5
 
 
 # ── Embedding one entry ──────────────────────────────────────────────────────
@@ -65,6 +63,9 @@ class ProviderFailed(RuntimeError):
     def __init__(self, chunks_submitted: int, cause: BaseException):
         super().__init__(f"{type(cause).__name__}: {cause}")
         self.chunks_submitted = chunks_submitted
+        #: The provider exception's class name, as `EmbedNoteFailure.exc_type`
+        #: carries it: an input-too-large refusal is not evidence of an outage.
+        self.exc_type = type(cause).__name__
 
 
 async def _generation_ok(session: AsyncSession) -> bool:
@@ -104,7 +105,7 @@ async def embed_entry(entry_id: int) -> EntryEmbedResult:
         if row.embedded_hash == row.content_hash:
             return EntryEmbedResult(skipped="current")
         text_ = ledger.embed_text(row)
-        expected = row.content_hash
+        expected = row_hash = row.content_hash
         await session.rollback()
     if ledger.content_hash(text_) != expected:
         # A row written by something other than the tools (a hand edit in
@@ -112,8 +113,9 @@ async def embed_entry(entry_id: int) -> EntryEmbedResult:
         # text, so the vector and the hash agree.
         expected = ledger.content_hash(text_)
         async with async_session() as session:
-            await session.execute(update(LedgerEntry).where(LedgerEntry.id == entry_id)
-                                  .values(content_hash=expected))
+            # Conditional, so a tool update committed meanwhile is not overwritten.
+            await session.execute(update(LedgerEntry).where(
+                LedgerEntry.id == entry_id, LedgerEntry.content_hash == row_hash).values(content_hash=expected))
             await session.commit()
     chunks = chunk_text(text_, chunk_size=settings.chunk_size, overlap=settings.chunk_overlap) or [text_]
     result = EntryEmbedResult(chunks_submitted=len(chunks))
@@ -218,6 +220,13 @@ async def wait_idle(timeout: float = 30.0) -> None:
 
 # ── The indexer sweep ────────────────────────────────────────────────────────
 
+#: Per scope, the `(entry id, content_hash)` pairs whose provider call failed
+#: in an earlier sweep. Tried last, as the notes' `_embed_failed_notes` are:
+#: otherwise a few entries the provider always rejects, being the newest,
+#: would trip the provider stop at the head of every sweep and nothing behind
+#: them would ever be embedded. In-process, pruned to the rows still selected.
+_failed_entries: dict[int | None, set[tuple[int, str]]] = {}
+
 async def sweep(user_id: int | None, budget, outcome, log_suffix: str, is_paused) -> int:
     """Embed this scope's entries whose vector is missing or outdated, within `budget`.
 
@@ -230,14 +239,19 @@ async def sweep(user_id: int | None, budget, outcome, log_suffix: str, is_paused
         return 0
     async with async_session() as session:
         rows = (await session.execute(
-            select(LedgerEntry.id, LedgerEntry.ref)
+            select(LedgerEntry.id, LedgerEntry.ref, LedgerEntry.content_hash)
             .where(LedgerEntry.owner_key == ledger.owner_key(user_id),
                    LedgerEntry.embedded_hash.is_distinct_from(LedgerEntry.content_hash))
             .order_by(LedgerEntry.updated_at.desc()).limit(SWEEP_BATCH)
         )).all()
         await session.rollback()
     if not rows:
+        _failed_entries.pop(user_id, None)
         return 0
+    failed = _failed_entries.setdefault(user_id, set())
+    failed &= {(r.id, r.content_hash) for r in rows}
+    rows = ([r for r in rows if (r.id, r.content_hash) not in failed]
+            + [r for r in rows if (r.id, r.content_hash) in failed])
     embedded = 0
     started = time.monotonic()
     for row in rows:
@@ -260,11 +274,14 @@ async def sweep(user_id: int | None, budget, outcome, log_suffix: str, is_paused
                 budget.record_provider_result(SimpleNamespace(
                     chunks_submitted=result.chunks_submitted, outcome=NoteEmbedOutcome.EMBEDDED, failure=None))
             embedded += int(result.embedded)
+            failed.discard((row.id, row.content_hash))
         except ProviderFailed as exc:
+            failed.add((row.id, row.content_hash))
             outcome.record_attempt()
             budget.debit(exc.chunks_submitted)
             budget.record_provider_result(SimpleNamespace(
-                chunks_submitted=exc.chunks_submitted, outcome=NoteEmbedOutcome.PROVIDER_FAILED, failure=None))
+                chunks_submitted=exc.chunks_submitted, outcome=NoteEmbedOutcome.PROVIDER_FAILED,
+                failure=SimpleNamespace(exc_type=exc.exc_type)))
             outcome.record_failure(RuntimeError(f"ledger entry {row.ref}: {exc}"))
             logger.warning("Embedding ledger entry %s failed%s: %s", row.ref, log_suffix, exc)
         except Exception as exc:  # noqa: BLE001 - a database fault: counted in the run row, like a note's
@@ -312,24 +329,22 @@ async def meaning_search(session: AsyncSession, uid: int | None, query: str, fil
         return MeaningResult([], not_embedded, error=(
             f"the embedding provider is unavailable ({type(exc).__name__}), so there is no meaning list this "
             "time; the words list is complete."))
+    # Best chunk per entry, ranked in SQL: an over-fetch of chunks deduped in
+    # Python let one long entry's many close chunks fill every slot.
     distance = LedgerEmbedding.embedding.cosine_distance(vector)
+    best = (
+        select(LedgerEmbedding.entry_id, func.min(distance).label("distance"))
+        .group_by(LedgerEmbedding.entry_id).subquery()
+    )
     rows = (await session.execute(
         select(LedgerEntry.id, LedgerEntry.ref, LedgerEntry.kind, LedgerEntry.status, LedgerEntry.area_tag,
                LedgerEntry.title, LedgerEntry.updated_at, LedgerEntry.observed_on, LedgerEntry.origin,
-               LedgerEntry.seen, LedgerEntry.revision, distance.label("distance"))
-        .join(LedgerEntry, LedgerEntry.id == LedgerEmbedding.entry_id)
+               LedgerEntry.seen, LedgerEntry.revision, best.c.distance)
+        .join(best, best.c.entry_id == LedgerEntry.id)
         .where(*clauses, LedgerEntry.embedded_hash == LedgerEntry.content_hash)
-        .order_by(distance, LedgerEntry.id).limit(limit * MEANING_OVERFETCH)
+        .order_by(best.c.distance, LedgerEntry.id).limit(limit)
     )).all()
-    seen_ids: set[int] = set()
-    hits = []
-    for row in rows:
-        if row.id in seen_ids:
-            continue
-        seen_ids.add(row.id)
-        hits.append({"row": row, "similarity": round(1.0 - float(row.distance), 4)})
-        if len(hits) >= limit:
-            break
+    hits = [{"row": row, "similarity": round(1.0 - float(row.distance), 4)} for row in rows]
     return MeaningResult(hits, not_embedded)
 
 

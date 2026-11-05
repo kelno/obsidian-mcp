@@ -127,6 +127,8 @@ class LedgerDigestResult(_LedgerResult):
     #: The view as Markdown (a table for a matrix), each line with its sources.
     markdown: str | None = None
     lines_under_review: int | None = None
+    #: Lines left out to keep the answer within the response cap.
+    lines_not_shown: int | None = None
     columns: list[str] | None = None
     #: With `with_ids`: each line's id and revision, to edit it.
     lines: list[dict] | None = None

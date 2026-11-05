@@ -197,3 +197,19 @@ def test_read_tools_are_marked_read_only_and_writes_not_destructive():
             assert tool.annotations.readOnlyHint is True, name
         else:
             assert tool.annotations.readOnlyHint is False and tool.annotations.destructiveHint is False, name
+
+
+def test_lock_conflicts_become_a_retryable_refusal_and_other_faults_are_raised():
+    from sqlalchemy.exc import DBAPIError
+
+    from src.mcp_server.ledger_result import LedgerWriteResult
+
+    class Orig(Exception):
+        def __init__(self, state):
+            self.sqlstate = state
+
+    deadlock = DBAPIError("UPDATE", {}, Orig("40P01"))
+    assert code(tools._ledger_conflict(LedgerWriteResult, deadlock)) == "concurrent_write"
+    other = DBAPIError("UPDATE", {}, Orig("XX000"))
+    with pytest.raises(DBAPIError):
+        tools._ledger_conflict(LedgerWriteResult, other)
