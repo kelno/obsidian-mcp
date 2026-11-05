@@ -252,6 +252,8 @@ markers: `related_source_not_found` never loaded a row at all, and
 `related_source_not_embedded` is a source with *no* vectors, which is a
 different fact with a different fix.
 
+That branch's message says which of three facts it is, from the row already loaded. A **stale** source is waiting for the embed pass: "has not been embedded yet … try again in a few minutes". A **certification-current** source with no vectors was certified that way on purpose and will stay so: matched by `EMBEDDING_EXCLUDE_PATTERNS` (the embed pass's own `fnmatch` over `file_path`, current settings), it is "excluded from search by meaning"; otherwise it chunked to nothing, "no text to embed". The marker stays `related_source_not_embedded` for all three. Before this split every case said "the indexer is still catching up", and with broad exclude patterns, where most of a vault can be excluded, that sent agents into retries and lag reports for notes that will never have vectors (fork, 2026-11-05). The pattern test can disagree with the row only under perf-L4 (a second process with other patterns, bounded by the backstop sweep), and then only in which permanent message it picks.
+
 ### The declared bound: this reports what the index has committed
 
 `stale` is derived from `notes_metadata`, so it reports a note as stale only

@@ -4,6 +4,7 @@ import binascii
 import copy
 import enum
 import errno
+import fnmatch
 import inspect
 import json
 import logging
@@ -637,10 +638,47 @@ _ANCHOR_LOST_AT_PUBLISH_MARKER = "vault_anchor_lost_at_publish"
 # Two values and not one, for the reason the classification rule gives: they
 # are different facts with different fixes. `related_source_not_found` means
 # the caller named a note that does not exist (or is not theirs);
-# `related_source_not_embedded` means the note exists and the embed pass has
-# not reached it, which resolves itself and is a fact about the indexer.
+# `related_source_not_embedded` means the note exists and has no vectors, a
+# fact about the indexer rather than the vault: either the embed pass has not
+# reached it (which resolves itself), or the pass certified it with none, by
+# an exclude pattern or for having no text to embed (which does not). The
+# message tells those apart; the marker does not need to.
 _RELATED_SOURCE_NOT_FOUND_MARKER = "related_source_not_found"
 _RELATED_SOURCE_NOT_EMBEDDED_MARKER = "related_source_not_embedded"
+
+
+def _not_embedded_message(path: str, file_path: str, stale: bool) -> str:
+    """`find_related`'s answer for a source with no vectors, by why it has none.
+
+    Only a *stale* source (`embedded_content_hash IS DISTINCT FROM
+    content_hash`) is waiting for the embed pass. A certification-current
+    source with no vectors was certified that way on purpose — matched by
+    `EMBEDDING_EXCLUDE_PATTERNS`, or chunked to nothing — and will stay so, so
+    "try again in a few minutes" sent agents into retries and lag reports for
+    notes that will never have vectors. The pattern test is the
+    embed pass's own (`fnmatch` over `file_path`, the current settings); the
+    exclusion sweep keeps certified rows in line with the current patterns,
+    so a current, non-matching row with no vectors is a zero-chunk note.
+    """
+    if stale:
+        return (
+            f"`{path}` has not been embedded yet — "
+            "the indexer is still catching up. Try again in a few minutes."
+        )
+    neighbours = (
+        "For its neighbours, use get_links, get_backlinks or get_neighborhood."
+    )
+    patterns = settings.embedding_exclude_patterns or []
+    if any(fnmatch.fnmatch(file_path, pat) for pat in patterns):
+        return (
+            f"`{path}` is excluded from search by meaning by the server's "
+            "settings (EMBEDDING_EXCLUDE_PATTERNS), so it has no embeddings and "
+            "will not get any. keyword_search still finds it. " + neighbours
+        )
+    return (
+        f"`{path}` has no embeddings: the indexer processed its current "
+        "content and found no text to embed. " + neighbours
+    )
 
 
 # ── The vector tools' declared degradations (#200, #202) ────────────────────
@@ -3802,14 +3840,14 @@ async def find_related_impl(path: str, limit: int = 10) -> str:
         )).scalars().all()
         timing.add_ms("db_ms", time.monotonic() - db_start)
         if not chunks:
-            # The other operational failure: the note is there, the embed pass
-            # has not reached it. A fact about the indexer, not about the
-            # vault's contents, so it carries its own marker and stays out of
-            # the zero-result view.
+            # The other operational failure: the note is there, with no
+            # vectors. A fact about the indexer, not about the vault's
+            # contents, so it carries its own marker and stays out of the
+            # zero-result view.
             timing.record_results(())
-            return (
-                _body_refusal(f"`{path}` has not been embedded yet — "
-                "the indexer is still catching up. Try again in a few minutes.", "related_source_not_embedded")
+            return _body_refusal(
+                _not_embedded_message(path, source.file_path, source_stale),
+                _RELATED_SOURCE_NOT_EMBEDDED_MARKER,
             )
 
         # The query vector: the mean of this note's own chunk vectors. NumPy is

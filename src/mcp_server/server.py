@@ -711,8 +711,10 @@ async def find_related(path: str, limit: int = 10) -> str:
     means every neighbour answers a question about content that note no longer
     has, and "no related notes" from a stale source means "nothing is near what
     this note used to say", not "this note has no neighbours". The next embed
-    pass repairs it. A source with no vectors at all is a different message
-    ("has not been embedded yet") with a different fix.
+    pass repairs it. A source with no vectors at all gets a different message,
+    which says why: "has not been embedded yet" (wait for the indexer), or
+    excluded from search by meaning, or no text to embed (both permanent: use
+    the link tools instead).
 
     **The bound on the staleness signal:** it reports what the index has
     committed, so an edit the indexer has not yet scanned is not marked.

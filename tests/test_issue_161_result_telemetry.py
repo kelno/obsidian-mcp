@@ -404,7 +404,9 @@ async def test_find_related_unembedded_source_is_marked_distinctly(
 
     out = await tools.find_related_impl("a.md")
 
-    assert "has not been embedded yet" in out
+    # Equal hashes and no vectors: certified empty, not a backlog (the
+    # message says which); the marker is the same either way.
+    assert "has no embeddings" in out
     params = captured.params_for("find_related")
     assert params["error"] == tools._RELATED_SOURCE_NOT_EMBEDDED_MARKER
     assert params["result_count"] == 0

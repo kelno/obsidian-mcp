@@ -147,8 +147,13 @@ The system SHALL expose an MCP tool `find_related(path, limit=10)` that returns 
 
 #### Scenario: Source note not yet embedded
 
-- **WHEN** the source note has no rows in `note_embeddings`
+- **WHEN** the source note has no rows in `note_embeddings` and its `embedded_content_hash` differs from its `content_hash`
 - **THEN** the system SHALL return a message indicating the note has not been embedded yet (rather than an empty list)
+
+#### Scenario: Source note certified with no embeddings
+
+- **WHEN** the source note has no rows in `note_embeddings` and its `embedded_content_hash` equals its `content_hash`
+- **THEN** the system SHALL return a message saying the note is excluded from search by meaning if its path matches `EMBEDDING_EXCLUDE_PATTERNS`, and otherwise that it has no text to embed, rather than one asking the caller to wait for the indexer
 
 #### Scenario: Source note not found
 

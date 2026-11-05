@@ -487,7 +487,8 @@ async def test_a_fresh_source_with_no_neighbours_stays_a_bare_zero_result(
 async def test_the_not_embedded_branch_is_unchanged(monkeypatch, captured):
     """A source with no vectors at all is a different fact with a different
     fix, and it keeps its own message and its own marker — it must not be
-    replaced by the stale-source statement even though its hashes differ."""
+    replaced by the stale-source statement even though its hashes differ.
+    Stale here, so it is genuinely waiting for the embed pass."""
     source = _Note(1, "Source.md", content_hash="h2", embedded_content_hash=None)
     monkeypatch.setattr(
         tools, "async_session", lambda: _FindRelatedSession(source, [])
@@ -502,6 +503,80 @@ async def test_the_not_embedded_branch_is_unchanged(monkeypatch, captured):
     assert captured.params_for("find_related")["error"] == (
         tools._RELATED_SOURCE_NOT_EMBEDDED_MARKER
     )
+
+
+@pytest.mark.asyncio
+async def test_an_excluded_source_says_so_instead_of_asking_for_a_retry(
+    monkeypatch, captured
+):
+    """A note matched by `EMBEDDING_EXCLUDE_PATTERNS` is certified with no
+    vectors and stays that way. "The indexer is still catching up" sent agents
+    into retries and lag reports for it, so it gets its own message — and keeps
+    the same marker, since it is still a source with no vectors."""
+    monkeypatch.setattr(
+        tools.settings, "embedding_exclude_patterns", ["*/_*", "_*"]
+    )
+    source = _Note(1, "people/_OLD/A.md")
+    monkeypatch.setattr(
+        tools, "async_session", lambda: _FindRelatedSession(source, [])
+    )
+
+    out = await tools.find_related_impl("people/_OLD/A.md", limit=5)
+
+    assert out.prose.startswith(
+        "`people/_OLD/A.md` is excluded from search by meaning"
+    )
+    assert "EMBEDDING_EXCLUDE_PATTERNS" in out.prose
+    assert "keyword_search" in out.prose
+    assert "catching up" not in out.prose
+    assert "Try again" not in out.prose
+    assert captured.params_for("find_related")["error"] == (
+        tools._RELATED_SOURCE_NOT_EMBEDDED_MARKER
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_certified_source_outside_the_patterns_has_no_text_to_embed(
+    monkeypatch, captured
+):
+    """Certification-current, no vectors, not excluded: the embed pass chunked
+    it to nothing. Not a backlog either."""
+    monkeypatch.setattr(
+        tools.settings, "embedding_exclude_patterns", ["*/_*", "_*"]
+    )
+    source = _Note(1, "people/Empty.md")
+    monkeypatch.setattr(
+        tools, "async_session", lambda: _FindRelatedSession(source, [])
+    )
+
+    out = await tools.find_related_impl("people/Empty.md", limit=5)
+
+    assert out.prose == (
+        "`people/Empty.md` has no embeddings: the indexer processed its "
+        "current content and found no text to embed. For its neighbours, use "
+        "get_links, get_backlinks or get_neighborhood."
+    )
+    assert captured.params_for("find_related")["error"] == (
+        tools._RELATED_SOURCE_NOT_EMBEDDED_MARKER
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_stale_excluded_source_is_still_waiting_for_the_pass(
+    monkeypatch, captured
+):
+    """Staleness wins: until the pass has seen the current content, the row's
+    certification says nothing about it — the pattern may since have stopped
+    matching after a move, and the pass decides, not this message."""
+    monkeypatch.setattr(tools.settings, "embedding_exclude_patterns", ["_*"])
+    source = _Note(1, "_A.md", content_hash="h2", embedded_content_hash=None)
+    monkeypatch.setattr(
+        tools, "async_session", lambda: _FindRelatedSession(source, [])
+    )
+
+    out = await tools.find_related_impl("_A.md", limit=5)
+
+    assert "has not been embedded yet" in out.prose
 
 
 @pytest.mark.asyncio

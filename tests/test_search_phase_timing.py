@@ -229,7 +229,7 @@ async def test_find_related_not_embedded_yet_still_reports_db_ms(monkeypatch, ca
 
     out = await tools.find_related_impl("a.md", limit=5)
 
-    assert "has not been embedded yet" in out
+    assert "has no embeddings" in out
     params = captured.params_for("find_related")
     assert isinstance(params["db_ms"], int) and params["db_ms"] > 0
     assert "embed_ms" not in params
