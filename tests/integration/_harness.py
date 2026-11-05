@@ -156,12 +156,85 @@ def run_alembic(
     return result
 
 
-def throwaway_database(prefix: str, dimensions: int, revision: str = "head"):
+# Migrated templates, one per (revision, dimensions), built at most once per
+# process and copied with CREATE DATABASE … TEMPLATE for each throwaway
+# database. A copy is the template's catalogue byte for byte, so a test gets
+# exactly the schema a fresh `alembic upgrade` produced earlier in the same run;
+# what it no longer gets is its *own* fresh run of the migrations. The tests
+# whose subject is the migration run itself say `fresh=True`, and
+# `OMCP_TEST_NO_DB_TEMPLATE=1` turns the cache off for the whole run.
+#
+# The names carry a per-process id, so pytest-xdist workers and two concurrent
+# runs against the same server never share or drop each other's templates.
+# `drop_templates` drops them at the end of the session (tests/conftest.py
+# calls it from `pytest_sessionfinish`, which every xdist worker runs; an
+# atexit hook left every worker's templates behind when tried). A killed
+# run leaves `tmpl_*` databases behind, which the throwaway server's removal
+# takes with it.
+_TEMPLATES: dict[tuple[str, int], str] = {}
+_PROCESS_ID = uuid.uuid4().hex[:12]
+_USE_TEMPLATES = os.environ.get("OMCP_TEST_NO_DB_TEMPLATE", "") not in ("1", "true")
+
+
+def drop_templates() -> None:
+    """Drop every template this process built. Best effort, like teardown."""
+    names = list(_TEMPLATES.values())
+    _TEMPLATES.clear()
+    for name in names:
+        try:
+            asyncio.run(
+                _run_maintenance(
+                    PGVECTOR_TEST_ADMIN_URL, f'DROP DATABASE IF EXISTS "{name}" (FORCE)'
+                )
+            )
+        except Exception as e:
+            print(f"warning: could not drop template database {name}: {e}")
+
+
+def _template_for(revision: str, dimensions: int) -> str:
+    """The name of a database migrated to `revision`, built on first use.
+
+    Nothing ever connects to it after the migration subprocess exits, which is
+    what CREATE DATABASE … TEMPLATE requires of its source.
+    """
+    key = (revision, dimensions)
+    name = _TEMPLATES.get(key)
+    if name is not None:
+        return name
+    name = f"tmpl_{_PROCESS_ID}_{revision}_{dimensions}"
+    try:
+        asyncio.run(
+            _run_maintenance(PGVECTOR_TEST_ADMIN_URL, f'CREATE DATABASE "{name}"')
+        )
+        run_alembic(
+            _with_database(PGVECTOR_TEST_ADMIN_URL, name),
+            "upgrade",
+            revision,
+            dimensions=dimensions,
+        )
+    except BaseException:
+        asyncio.run(
+            _run_maintenance(
+                PGVECTOR_TEST_ADMIN_URL, f'DROP DATABASE IF EXISTS "{name}" (FORCE)'
+            )
+        )
+        raise
+    _TEMPLATES[key] = name
+    return name
+
+
+def throwaway_database(
+    prefix: str, dimensions: int, revision: str = "head", *, fresh: bool = False
+):
     """Generator body for a module-scoped fixture: yields a migrated URL.
 
     `revision` is the alembic target — `head` for the usual "give me the
     current schema", or an explicit revision for tests that need to stand a
     database up at an older shape and migrate it forward themselves.
+
+    The database is a copy of a template migrated once per process (see
+    `_TEMPLATES`). `fresh=True` runs the migrations into this database itself,
+    for a test whose subject is that run.
     """
     admin_db = _admin_database_name(PGVECTOR_TEST_ADMIN_URL)
     if admin_db in FORBIDDEN_DB_NAMES:
@@ -172,16 +245,27 @@ def throwaway_database(prefix: str, dimensions: int, revision: str = "head"):
         )
 
     dbname = f"test_{prefix}_{uuid.uuid4().hex}"
+    from_template = _USE_TEMPLATES and not fresh
     try:
         # CREATE sits inside the try so the DROP below runs even if creation is
         # interrupted: the name is generated, `IF EXISTS` makes the drop a
         # no-op when it never got made, and leaving a stray database behind is
         # the one outcome this harness must not have.
-        asyncio.run(
-            _run_maintenance(PGVECTOR_TEST_ADMIN_URL, f'CREATE DATABASE "{dbname}"')
-        )
+        if from_template:
+            template = _template_for(revision, dimensions)
+            asyncio.run(
+                _run_maintenance(
+                    PGVECTOR_TEST_ADMIN_URL,
+                    f'CREATE DATABASE "{dbname}" TEMPLATE "{template}"',
+                )
+            )
+        else:
+            asyncio.run(
+                _run_maintenance(PGVECTOR_TEST_ADMIN_URL, f'CREATE DATABASE "{dbname}"')
+            )
         url = _with_database(PGVECTOR_TEST_ADMIN_URL, dbname)
-        run_alembic(url, "upgrade", revision, dimensions=dimensions)
+        if not from_template:
+            run_alembic(url, "upgrade", revision, dimensions=dimensions)
         yield url
     finally:
         # FORCE terminates any connection the test left behind, so a failing

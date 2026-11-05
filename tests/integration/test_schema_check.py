@@ -62,6 +62,10 @@ DIM = 64  # irrelevant here; keeps the migration cheap.
 # leaving the new migration unexercised.
 HEAD_REVISION = "032"
 
+# Every test builds and drops its own database, nothing is module-scoped:
+# pytest-xdist may share the tests out one by one (see tests/conftest.py).
+XDIST_PER_TEST = True
+
 CONSTRAINT = "ck_oauth_clients_auth_method_secret"
 MARKER = "created by 013_schema_reconciliation"
 
@@ -110,9 +114,13 @@ FUTURE = datetime.datetime(2099, 1, 1, tzinfo=datetime.timezone.utc)
 
 
 @contextlib.contextmanager
-def throwaway_db(prefix: str, revision: str = "head"):
-    """A throwaway database migrated to `revision`, dropped on exit."""
-    generator = _harness.throwaway_database(prefix, DIM, revision=revision)
+def throwaway_db(prefix: str, revision: str = "head", *, fresh: bool = False):
+    """A throwaway database migrated to `revision`, dropped on exit.
+
+    `fresh=True` migrates this database itself instead of copying the
+    harness's template, for a test whose subject is the migration run.
+    """
+    generator = _harness.throwaway_database(prefix, DIM, revision=revision, fresh=fresh)
     url = next(generator)
     try:
         yield url
@@ -346,7 +354,7 @@ def insert_null_rows(url: str):
 
 def test_fresh_database_is_clean_and_enforced():
     """(a) An empty database migrated to head needs no further operations."""
-    with throwaway_db("schema_fresh") as url:
+    with throwaway_db("schema_fresh", fresh=True) as url:
         assert alembic_version(url) == HEAD_REVISION
         # No marker: 010 created this constraint and 013 recognised it as
         # already correct. That distinction is what downgrade() reads.

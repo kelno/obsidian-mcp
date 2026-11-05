@@ -568,8 +568,10 @@ async def test_check_upload_scopes_the_lookup_to_the_calling_identity(
         "t" * 43,  # the raw token
         "pub-1",
         "",
-        "  " + PUB_ID,
-        PUB_ID + "=",
+        # Fixed ids: PUB_ID is random per process, and pytest-xdist refuses a
+        # run whose workers collect different test names.
+        pytest.param("  " + PUB_ID, id="padded-public-id"),
+        pytest.param(PUB_ID + "=", id="public-id-plus-equals"),
     ],
 )
 async def test_check_upload_refuses_an_off_shape_id_before_the_lookup(

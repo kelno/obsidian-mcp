@@ -376,6 +376,40 @@ def pytest_configure(config):
     )
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
+    """Share modules, not tests, among pytest-xdist workers.
+
+    Under `-n <workers> --dist loadgroup` (see "Running the test suite" in
+    FORK.md) every module is one xdist group: all its tests run on one worker,
+    in file order, as they do in a serial run, since module-scoped fixtures
+    (an integration module's database) and tests that rely on an earlier test
+    in the same module both assume it. A module whose tests are each
+    self-contained sets `XDIST_PER_TEST = True`, and its tests are shared out
+    one by one instead: that is how the long schema gate stops being the
+    run's critical path. Without xdist, or under another `--dist` mode, the
+    marks change nothing. `tryfirst` because xdist reads them in its own
+    implementation of this hook.
+    """
+    for item in items:
+        module = getattr(item, "module", None)
+        if module is None or getattr(module, "XDIST_PER_TEST", False):
+            continue
+        item.add_marker(pytest.mark.xdist_group(module.__name__))
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Drop the integration harness's template databases (one set per process).
+
+    The integration modules import the harness both as `_harness` and as
+    `tests.integration._harness`, two module objects with a cache each.
+    """
+    for name in ("_harness", "tests.integration._harness"):
+        harness = sys.modules.get(name)
+        if harness is not None and hasattr(harness, "drop_templates"):
+            harness.drop_templates()
+
+
 @pytest.fixture(autouse=True)
 def _embedding_plaintext_override(request):
     """Acknowledge the default plaintext `OLLAMA_URL` for every test (#185).

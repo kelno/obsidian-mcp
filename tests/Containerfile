@@ -1,0 +1,12 @@
+# The test runner image: Python 3.12, the dev requirements, and psql (which
+# docker/record-backup.sh calls). The repository is mounted at run time, not
+# copied in, so one image serves every checkout. See "Running the test suite"
+# in FORK.md for the run command.
+#
+#   podman build -t omcp-test -f tests/Containerfile .
+FROM python:3.12
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt requirements-dev.txt /tmp/req/
+RUN pip install --no-cache-dir -r /tmp/req/requirements-dev.txt

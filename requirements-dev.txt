@@ -4,6 +4,8 @@
 pytest==9.1.1
 pytest-asyncio==1.4.0
 respx==0.23.1
+# `pytest -n auto`: see "Running the test suite" in FORK.md.
+pytest-xdist==3.8.0
 
 # Host-side dependency audit (`make audit`). Lives here, not in
 # requirements.txt: it is never used at runtime and dragged requests/urllib3

@@ -40,32 +40,47 @@ settings instead of edited, so syncing never conflicts with them. Run the
 test suite locally, or through a pull request to upstream, before relying on
 a change.
 
-## Running the test suite from a Windows checkout
+## Running the test suite
 
-The suite takes about 22 minutes. Run it as CI does: Python 3.12 with a
-`pgvector/pgvector:pg16` server, `PGVECTOR_TEST_ADMIN_URL` and
-`TEST_DATABASE_URL` pointing at it, in a privileged Linux container (for
-`unshare -Urm`). Two differences from CI's Ubuntu runner make tests fail
-that have nothing to do with the code:
+A push to `main` builds and publishes the image without running the tests (the `image-no-tests` workflow, above), so the full local run is the only gate. Day to day, run the test files your change affects; run the full suite before every push.
 
-- **No `O_TMPFILE` on overlayfs.** The container's `/tmp` must be a tmpfs
-  (`--tmpfs /tmp`), or every no-clobber write refuses.
-- **No `psql`.** `record-backup.sh` calls it; install `postgresql-client` in
-  the container.
+### The full run
 
-The CRLF line endings that used to break the `docker/*.sh` scripts on a
-Windows checkout are fixed by `.gitattributes` (#342). A checkout made before
-it needs `rm docker/*.sh && git checkout -- docker/` once.
+Run it as CI does: Python 3.12 with a `pgvector/pgvector:pg16` server, `PGVECTOR_TEST_ADMIN_URL` and `TEST_DATABASE_URL` pointing at it, in a privileged Linux container (for `unshare -Urm`), with `/tmp` a tmpfs (overlayfs has no `O_TMPFILE`, so every no-clobber write would refuse) and `psql` installed (`record-backup.sh` calls it). `tests/Containerfile` builds that image. With Docker (Podman takes the same commands):
 
-For the offline suite only (everything outside `tests/integration/`, about
-5 minutes), a Python 3.12 venv in WSL is enough, with no container and no
-database: `pytest --ignore=tests/integration tests`.
+```bash
+docker build -t omcp-test -f tests/Containerfile .
+docker network create omcp-test
+docker run -d --name omcp-test-pg --network omcp-test -e POSTGRES_PASSWORD=test pgvector/pgvector:pg16 postgres -c max_connections=300
+docker run --rm --privileged --tmpfs /tmp --network omcp-test \
+  -e PGVECTOR_TEST_ADMIN_URL=postgresql+asyncpg://postgres:test@omcp-test-pg:5432/postgres \
+  -e TEST_DATABASE_URL=postgresql+asyncpg://postgres:test@omcp-test-pg:5432/postgres \
+  -v "<the checkout>:/repo:ro" omcp-test sh -c \
+  'mkdir /tmp/r && tar -C /repo --exclude=.git -cf - . | tar -C /tmp/r -xf - && cd /tmp/r && python -m pytest -q -n auto --dist loadgroup tests'
+```
 
-On Windows, call `wsl` from PowerShell, for example
-`wsl -e bash -lc "cd <the checkout's WSL path> && <the venv's python> -m pytest -q tests/test_task_tools.py"`,
-not from Git Bash. Git Bash expands `$variables` inside the quoted command
-before WSL sees it and rewrites `/mnt/...` paths to
-`C:/Program Files/Git/mnt/...`.
+Rebuild the image when `requirements*.txt` change. Afterwards, remove the Postgres container and the network, or keep them for the next run.
+
+Why each part is there:
+
+- **`-n auto --dist loadgroup`** (pytest-xdist): one worker per CPU. The hook in `tests/conftest.py` keeps each test module whole on one worker, in file order, because module-scoped fixtures and tests that rely on an earlier test in the same module assume that. A module whose tests are each self-contained sets `XDIST_PER_TEST = True` and is shared out test by test. `tests/integration/test_schema_check.py` does, or it alone would take minutes. All workers must collect the same test names, so a parametrize id can't come from a random value: give it `pytest.param(..., id=...)`.
+- **The copy into `/tmp`**: a checkout on a Windows drive reaches the container through a slow file bridge, and the integration tests start many `alembic` subprocesses, each importing the app again. Copying first saved about a fifth of the run.
+- **A network, not a shared pod or `localhost`**: the pgvector image trusts loopback connections without a password, so `test_wrong_password_prints_the_upgrade_hint_once` fails when the tests reach Postgres over loopback.
+- **`max_connections=300`**: each parallel worker holds its own connection pools, and the default of 100 leaves too little headroom.
+
+Measured on a 12-CPU Windows PC with Podman, 2026-11-05: about 3½ minutes for the full run (the offline suite alone, about 1½), against about 29 minutes run serially from the mounted checkout (offline 4½, integration 24½).
+
+### Integration databases come from templates
+
+Each integration module used to build its database by running every migration. `tests/integration/_harness.py` now migrates one template per revision and embedding width, once per process, and copies it (`CREATE DATABASE … TEMPLATE`) for each module. A copy has exactly the schema the migrations produced earlier in the same run, so the tests check the same schema; what they no longer do is each run the migrations themselves. The tests whose subject is that run still run it: the schema gate's fresh-database test (`fresh=True`), the stamp-back, upgrade and downgrade tests (they run `alembic` on their copy), and `test_nonsuperuser_migrations_pg.py` (it builds its own databases). `OMCP_TEST_NO_DB_TEMPLATE=1` turns the templates off for a whole run. The templates are dropped at the end of the session; a killed run leaves `tmpl_*` databases on the throwaway server.
+
+### Single files, and the offline suite without a container
+
+`python -m pytest -q tests/test_task_tools.py tests/integration/test_task_tools_pg.py` runs just those files. An integration file needs the database URLs above (in the container, or with any reachable server), or it skips itself. The offline suite (everything outside `tests/integration/`) needs no container and no database: a Python 3.12 venv with `requirements-dev.txt` is enough, `pytest -q -n auto --dist loadgroup --ignore=tests/integration tests`. In WSL, run it from a copy on WSL's own disk rather than from `/mnt/...`, for the same file-bridge reason (for example `rsync -a --delete --exclude .git <the checkout's WSL path>/ ~/omcp-tests/` before each run).
+
+On Windows, call `wsl` from PowerShell, for example `wsl -e bash -lc "cd <the copy> && <the venv's python> -m pytest -q tests/test_task_tools.py"`, not from Git Bash. Git Bash expands `$variables` inside the quoted command before WSL sees it, and rewrites `/mnt/...` paths to `C:/Program Files/Git/mnt/...`.
+
+The CRLF line endings that used to break the `docker/*.sh` scripts on a Windows checkout are fixed by `.gitattributes` (#342). A checkout made before that fix needs `rm docker/*.sh && git checkout -- docker/` once.
 
 ## Embedding on a slow CPU
 
