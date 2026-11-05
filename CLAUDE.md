@@ -79,7 +79,7 @@ user-facing documentation in `README.md`.
 
 Agents commit in this repo freely, without asking the owner first: branches, commits, rebases of unpushed work. This is an exception to the owner's general rule of leaving work uncommitted, so that a finished change lands as a reviewable commit.
 
-Agents never push. A push to `main` builds and publishes the image, which a deployment may follow automatically (see `FORK.md`), so pushing is the owner's decision, every time.
+Agents push freely, `main` included, but only to a remote whose push URL goes through the agents' GitHub identity, never to `upstream`. A push to `main` is a deploy: the image workflow builds and publishes the image straight away, without waiting for CI, and a deployment may follow it automatically (see `FORK.md`). So before pushing `main`, unless the owner says otherwise for that push, run the full test suite including `make test-integration`, plus `make test-schema` and `make db-check` when the change includes a migration (see Review and checks), and say in the report that it deployed.
 
 ## Review and checks
 
