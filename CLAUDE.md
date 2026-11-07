@@ -77,9 +77,9 @@ user-facing documentation in `README.md`.
 
 ## Git
 
-Agents commit in this repo freely, without asking the owner first: branches, commits, rebases of unpushed work. This is an exception to the owner's general rule of leaving work uncommitted, so that a finished change lands as a reviewable commit.
+This fork is an AI-managed repo: its owner, kelno, has their own AI agents maintain it for kelno's personal setup, under rules kept in kelno's private agent setup. Those rules don't apply to anyone else's agents.
 
-Agents push freely, `main` included, but only to a remote whose push URL goes through the agents' GitHub identity, never to `upstream`. A push to `main` is a deploy: the image workflow builds and publishes the image straight away, without waiting for CI, and a deployment may follow it automatically (see `FORK.md`). So before pushing `main`, unless the owner says otherwise for that push, run the full test suite including `make test-integration`, plus `make test-schema` and `make db-check` when the change includes a migration (see Review and checks), and say in the report that it deployed.
+A push to `main` is a deploy: the image workflow builds and publishes the image straight away, without waiting for CI, and a deployment may follow it automatically (see `FORK.md`). So `main` is pushed at the end of a working session or at a milestone, not after each commit, and before pushing it, unless the owner says otherwise for that push, run the full test suite including `make test-integration`, plus `make test-schema` and `make db-check` when the change includes a migration (see Review and checks). Say in the report that it deployed.
 
 ## Review and checks
 

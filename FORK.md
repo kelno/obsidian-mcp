@@ -43,7 +43,7 @@ a change.
 
 ## Running the test suite
 
-A push to `main` builds and publishes the image without running the tests (the `image-no-tests` workflow, above), so the full local run is the only gate. Day to day, run the test files your change affects; run the full suite before every push.
+A push to `main` builds and publishes the image without running the tests (the `image-no-tests` workflow, above), so the full local run is the only gate. Day to day, run the test files your change affects; run the full suite before every push to `main`.
 
 ### The full run
 
