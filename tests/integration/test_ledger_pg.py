@@ -21,7 +21,7 @@ Skipped unless `PGVECTOR_TEST_ADMIN_URL` is set — see `_harness.py`.
 """
 import asyncio
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 import pytest_asyncio
@@ -420,10 +420,12 @@ async def test_views_cite_entries_and_are_flagged_when_one_changes(ctx):
         {"op": "add", "row": "X", "column": "nope", "text": "y"}])
     assert code(bad_column) == "invalid_argument"
 
+    # A source's date is the later of its observed_on (TODAY, frozen above) and the day the database last changed it, which is the day of the run.
+    newest = max(TODAY, datetime.now(timezone.utc).date()).isoformat()
     plain = await tools.ledger_digest_impl("claude-surfaces")
-    assert "| Images | no (Q1; newest 2026-11-05) |  |" in plain.markdown and plain.lines is None
+    assert f"| Images | no (Q1; newest {newest}) |  |" in plain.markdown and plain.lines is None
     view = await tools.ledger_digest_impl("claude-surfaces", with_ids=True)
-    assert "no (Q1; newest 2026-11-05) [line" in view.markdown
+    assert f"no (Q1; newest {newest}) [line" in view.markdown
     line = next(l for l in view.lines if l["row"] == "Images")
 
     up = await tools.ledger_update_impl(ref=q1.ref, expected_revision=1, reason="images work now", status="stale")
@@ -437,7 +439,7 @@ async def test_views_cite_entries_and_are_flagged_when_one_changes(ctx):
         {"op": "replace", "line": line["line"], "expected_revision": line["revision"] + 1, "text": "yes"}])
     assert fixed.error is None
     view = await tools.ledger_digest_impl("claude-surfaces")
-    assert "| Images | yes (Q1 stale; newest 2026-11-05) |" in view.markdown and view.lines_under_review == 0
+    assert f"| Images | yes (Q1 stale; newest {newest}) |" in view.markdown and view.lines_under_review == 0
 
     listed = await tools.ledger_digest_impl()
     assert [v["slug"] for v in listed.views] == ["claude-surfaces"]
