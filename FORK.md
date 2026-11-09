@@ -69,7 +69,7 @@ Why each part is there:
 - **A network, not a shared pod or `localhost`**: the pgvector image trusts loopback connections without a password, so `test_wrong_password_prints_the_upgrade_hint_once` fails when the tests reach Postgres over loopback.
 - **`max_connections=300`**: each parallel worker holds its own connection pools, and the default of 100 leaves too little headroom.
 
-Measured on a 12-CPU Windows PC with Podman, 2026-11-05: about 3½ minutes for the full run (the offline suite alone, about 1½), against about 29 minutes run serially from the mounted checkout (offline 4½, integration 24½).
+Expected times are in "Expected run times" below.
 
 ### Integration databases come from templates
 
@@ -79,9 +79,26 @@ Each integration module used to build its database by running every migration. `
 
 `python -m pytest -q tests/test_task_tools.py tests/integration/test_task_tools_pg.py` runs just those files. An integration file needs the database URLs above (in the container, or with any reachable server), or it skips itself. The offline suite (everything outside `tests/integration/`) needs no container and no database: a Python 3.12 venv with `requirements-dev.txt` is enough, `pytest -q -n auto --dist loadgroup --ignore=tests/integration tests`. In WSL, run it from a copy on WSL's own disk rather than from `/mnt/...`, for the same file-bridge reason (for example `rsync -a --delete --exclude .git <the checkout's WSL path>/ ~/omcp-tests/` before each run).
 
-Outside the privileged container, three tests stall rather than fail fast, and they, not the file bridge, are what makes an offline run slow: `tests/test_nested_mount_publication.py::test_nested_mount_cases_pass_in_a_mount_namespace` hangs until a 600 s timeout under plain WSL (it needs `unshare -Urm`), and without a database `tests/test_issue_12_reindex_mutual_exclusion.py::test_reindex_background_blocks_on_held_lock` (about 2 minutes) and `tests/test_search_prewarm.py::test_prewarm_runs_once_per_tick_under_the_lock` wait on a connection and then fail. Deselect them (`--deselect <node id>`) in a run outside the container; the full run covers them. Measured 2026-11-09 on the same five files with the hanging test deselected: 11.7 s from a copy on WSL's disk, 16.0 s from `/mnt/d/...`; with it, about 10 minutes either way.
+Outside the privileged container, three tests stall rather than fail fast, and they, not the file bridge, are what makes an offline run slow: `tests/test_nested_mount_publication.py::test_nested_mount_cases_pass_in_a_mount_namespace` hangs until a 600 s timeout under plain WSL (it needs `unshare -Urm`), and without a database `tests/test_issue_12_reindex_mutual_exclusion.py::test_reindex_background_blocks_on_held_lock` (about 2 minutes) and `tests/test_search_prewarm.py::test_prewarm_runs_once_per_tick_under_the_lock` wait on a connection and then fail. Deselect them (`--deselect <node id>`) in a run outside the container; the full run covers them. With the hanging test left in, a run takes about 10 minutes wherever the files are (see "Expected run times").
 
 On Windows, call `wsl` from PowerShell, for example `wsl -e bash -lc "cd <the copy> && <the venv's python> -m pytest -q tests/test_task_tools.py"`, not from Git Bash. Git Bash expands `$variables` inside the quoted command before WSL sees it, and rewrites `/mnt/...` paths to `C:/Program Files/Git/mnt/...`.
+
+### Expected run times
+
+Measured on the owner's PC, so a slower or faster machine can be judged against them. The machine: AMD Ryzen 9 5900X (12 cores, 24 threads), 32 GB RAM, Windows 11 Pro; WSL 2 given 12 processors and no swap by `.wslconfig`, and its default memory (half the RAM, about 16 GB) for the 2026-11-09 runs after 21:35; an 8 GB memory cap set and later removed that day may have applied to the earlier runs, which is not known; the checkout on a SATA hard disk (`D:`), WSL's own disk and the Podman machine on an NVMe SSD (`C:`). So "WSL disk vs `/mnt/d`" below is also NVMe vs a spinning disk; on a machine whose checkout is on an SSD, expect the two columns closer.
+
+| Run | Where | Expected time | Measured |
+| --- | --- | --- | --- |
+| Full suite, offline + integration, `-n 4` (8,088 tests) | privileged Podman container, Postgres container | about 4 minutes (3 min 49 s) | 2026-11-09 |
+| Full suite, `-n auto` (12 workers) | same | about 3½ minutes, but it crashed the WSL VM twice on this PC; use `-n 4` | 2026-11-05 / 2026-11-09 |
+| Full suite, serial, from the mounted checkout | same, no `-n` | about 29 minutes (offline 4½, integration 24½) | 2026-11-05 |
+| Offline suite alone, `-n auto` | same | about 1½ minutes | 2026-11-05 |
+| 35 offline + 21 integration files around the indexer and `move_note` (1,489 tests), `-n 4` | same | about 26 s | 2026-11-09 |
+| 5 offline files (`test_vault_mutation_safety`, `test_asvs_link_grammar`, `test_issue_211_masked_splice`, `test_nested_mount_publication`, `test_issue_150_docstrings`; 194 tests), serial, hanging test deselected | plain WSL, copy on WSL's disk | about 12 s (11.7 s) | 2026-11-09 |
+| the same 5 files | plain WSL, from `/mnt/d/...` | about 16 s (16.0 s) | 2026-11-09 |
+| the same 5 files, hanging test left in | plain WSL, either place | about 10 minutes (one 600 s timeout) | 2026-11-09 |
+
+A run far above these on this machine usually means a test is waiting on something (a missing database, `unshare`), not that the machine is slow; `pytest --durations=5` names it.
 
 The CRLF line endings that used to break the `docker/*.sh` scripts on a Windows checkout are fixed by `.gitattributes` (#342). A checkout made before that fix needs `rm docker/*.sh && git checkout -- docker/` once.
 
