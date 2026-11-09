@@ -603,8 +603,14 @@ async def test_the_startup_pass_recovers_the_same_way(
     assert indexer.quarantined_paths(None) == ["Bad.md"]
     assert indexer_health._scopes[None].index_consecutive_failures == 0
     async with sessionmaker() as session:
+        # The index loop's startup row; the embed loop may have written its
+        # own startup row too (separate loops since 2026-11-09).
         run = (
-            await session.execute(select(IndexerRun.trigger, IndexerRun.error))
+            await session.execute(
+                select(IndexerRun.trigger, IndexerRun.error).where(
+                    IndexerRun.error.is_not(None)
+                )
+            )
         ).one()
     assert run.trigger == "startup"
     assert run.error == "quarantined 1 note(s): Bad.md"

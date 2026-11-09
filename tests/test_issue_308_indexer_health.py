@@ -68,8 +68,36 @@ def no_run_rows(monkeypatch):
     monkeypatch.setattr(indexer, "record_indexer_run", _run)
 
 
-def _loop_fixture(monkeypatch, *, multi_user, index, embed=None, ticks=1, calls=None):
-    """Drive `run_indexer_loop` for the startup pass plus `ticks` ticks."""
+def _two_loop_sleep(ticks):
+    """A fake `asyncio.sleep` for both loops (separate since 2026-11-09).
+
+    Each loop's sleeps are counted on its own, by task name. The embed loop
+    gets its immediate first tick (no sleep) plus `ticks`, then parks; the
+    index loop gets `ticks` ticks, waits for the embed loop to park, then
+    ends the run.
+    """
+    state = {"index-loop": 0, "embed-loop": 0, "parked": asyncio.Event()}
+
+    async def _sleep(*_a, **_k):
+        name = asyncio.current_task().get_name()
+        if name not in ("index-loop", "embed-loop"):
+            return
+        state[name] += 1
+        if name == "embed-loop":
+            if state[name] > ticks:
+                state["parked"].set()
+                await asyncio.get_running_loop().create_future()
+            return
+        if state[name] > ticks:
+            await state["parked"].wait()
+            raise asyncio.CancelledError
+
+    return _sleep
+
+
+def _loop_fixture(monkeypatch, *, multi_user, index, embed=None, ticks=1, calls=None, users=None):
+    """Drive `run_indexer_loop` for the startup pass plus `ticks` ticks of
+    each loop (the embed loop's immediate first tick is its startup stage)."""
     calls = calls if calls is not None else []
 
     async def _noop(*_a, **_k):
@@ -82,20 +110,14 @@ def _loop_fixture(monkeypatch, *, multi_user, index, embed=None, ticks=1, calls=
     async def _cleanup():
         calls.append(("cleanup", None))
 
-    sleeps = {"n": 0}
-
-    async def _sleep(*_a, **_k):
-        sleeps["n"] += 1
-        if sleeps["n"] > ticks:
-            raise asyncio.CancelledError
-
     async def _users():
         return [1, 2, 3]
 
     monkeypatch.setattr(indexer.settings, "multi_user_mode", multi_user)
     monkeypatch.setattr(indexer, "_is_paused", lambda: False)
     monkeypatch.setattr(indexer, "detect_root_overlaps", _noop)
-    monkeypatch.setattr(indexer, "_rotated_user_ids", _users)
+    monkeypatch.setattr(indexer, "_rotated_user_ids", users or _users)
+    monkeypatch.setattr(indexer, "_active_user_ids", users or _users)
     monkeypatch.setattr(indexer, "_advance_rotation_cursor", _noop)
     monkeypatch.setattr(indexer, "index_vault", index)
     monkeypatch.setattr(indexer, "embed_vault", _embed)
@@ -103,7 +125,7 @@ def _loop_fixture(monkeypatch, *, multi_user, index, embed=None, ticks=1, calls=
     monkeypatch.setattr(indexer, "prewarm_search_caches", _noop)
     monkeypatch.setattr(indexer, "cleanup_expired_tokens", _cleanup)
     monkeypatch.setattr(indexer, "flush_expired", _noop)
-    monkeypatch.setattr(indexer.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(indexer.asyncio, "sleep", _two_loop_sleep(ticks))
 
     try:
         asyncio.run(indexer.run_indexer_loop())
@@ -124,6 +146,8 @@ EXPECTED_KEYS = {
     "last_success_at",
     "index_stalled",
     "seconds_since_progress",
+    "embedding_stalled",
+    "seconds_since_embedding_progress",
 }
 
 
@@ -321,37 +345,19 @@ def test_user_enumeration_failure_is_counted(threshold, no_run_rows, monkeypatch
     async def _index(user_id=None, **_k):
         return (1, 0)
 
-    calls = []
-
     async def _users():
         if state["startup"]:
             state["startup"] = False
             return [1]
         raise RuntimeError("database is down")
 
-    _loop_fixture(monkeypatch, multi_user=True, index=_index, ticks=0)
-    monkeypatch.setattr(indexer, "_rotated_user_ids", _users)
-    sleeps = {"n": 0}
-
-    async def _sleep(*_a, **_k):
-        sleeps["n"] += 1
-        if sleeps["n"] > 3:
-            raise asyncio.CancelledError
-
-    async def _cleanup():
-        calls.append("cleanup")
-
-    monkeypatch.setattr(indexer.asyncio, "sleep", _sleep)
-    monkeypatch.setattr(indexer, "cleanup_expired_tokens", _cleanup)
     indexer_health.reset()
-    try:
-        asyncio.run(indexer.run_indexer_loop())
-    except asyncio.CancelledError:
-        pass
+    calls = _loop_fixture(monkeypatch, multi_user=True, index=_index, ticks=3, users=_users)
+    # Counted by the index loop's ticks only (the embed loop logs its own).
     assert indexer_health._enumeration_failures == 3
     assert _health()[1]["status"] == "degraded"
     # And the credential sweep still ran on every failing tick (D9).
-    assert calls == ["cleanup"] * 3
+    assert calls.count(("cleanup", None)) == 3
 
 
 # --- D9: single-user tick isolation ------------------------------------------
@@ -367,8 +373,9 @@ def test_single_user_index_failure_still_embeds_and_cleans_up(threshold, no_run_
         raise RuntimeError("index stage failed")
 
     calls = _loop_fixture(monkeypatch, multi_user=False, index=_index, ticks=1)
-    # Startup embed, then the failing tick's embed and cleanup.
-    assert calls == [("embed", None), ("embed", None), ("cleanup", None)]
+    # The embed loop's startup and one tick both embed; the failing index
+    # tick still cleans up. The loops interleave, so compare as a multiset.
+    assert sorted(calls) == [("cleanup", None), ("embed", None), ("embed", None)]
     assert indexer_health._scopes[None].index_consecutive_failures == 1
     assert indexer.last_index_run_ok is False
 
@@ -385,17 +392,12 @@ def test_cleanup_failure_is_housekeeping(no_run_rows, monkeypatch):
     async def _flush():
         flushed.append(1)
 
-    _loop_fixture(monkeypatch, multi_user=False, index=_index, ticks=0)
-    monkeypatch.setattr(indexer, "cleanup_expired_tokens", _boom)
+    _loop_fixture(monkeypatch, multi_user=False, index=_index, ticks=2)
+    # `_loop_fixture` installs its own cleanup and flush; run again with the
+    # failing cleanup and a counting flush.
     monkeypatch.setattr(indexer, "flush_expired", _flush)
-    sleeps = {"n": 0}
-
-    async def _sleep(*_a, **_k):
-        sleeps["n"] += 1
-        if sleeps["n"] > 2:
-            raise asyncio.CancelledError
-
-    monkeypatch.setattr(indexer.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(indexer, "cleanup_expired_tokens", _boom)
+    monkeypatch.setattr(indexer.asyncio, "sleep", _two_loop_sleep(2))
     try:
         asyncio.run(indexer.run_indexer_loop())
     except asyncio.CancelledError:

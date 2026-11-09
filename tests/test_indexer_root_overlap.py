@@ -291,7 +291,10 @@ async def test_e3_each_tick_publishes_before_the_pause_check(monkeypatch):
             raise asyncio.CancelledError
 
     def _paused():
-        order.append("paused-check")
+        # The index loop's check only: the embed loop checks the pause too
+        # (separate loops since 2026-11-09), and its order is not E3's.
+        if asyncio.current_task().get_name() != "embed-loop":
+            order.append("paused-check")
         return True
 
     monkeypatch.setattr(indexer, "detect_root_overlaps", _detect)

@@ -128,6 +128,12 @@ _last_progress_at: datetime | None = None
 _stall_alerted = False
 #: True while the loop sleeps between ticks; a sleep is never a stall.
 _idle = False
+#: The embed loop's own stall clock (since the stages got separate loops,
+#: 2026-11-09): a stuck embed stage no longer stops the index loop, so the
+#: index clock above cannot see it. Same rules, same threshold.
+_embed_progress_at: datetime | None = None
+_embed_stall_alerted = False
+_embed_idle = False
 
 
 def _threshold() -> int:
@@ -189,6 +195,49 @@ def record_loop_idle() -> None:
     global _idle
     record_loop_progress()
     _idle = True
+
+
+def record_embed_loop_progress() -> None:
+    """The embed loop reached a point that proves it is not stuck: a tick
+    started, an embed stage finished, or a tick was skipped by the pause."""
+    global _embed_progress_at, _embed_stall_alerted, _embed_idle
+    _embed_progress_at = _now()
+    _embed_stall_alerted = False
+    _embed_idle = False
+
+
+def record_embed_loop_idle() -> None:
+    """The embed loop is about to sleep until its next tick."""
+    global _embed_idle
+    record_embed_loop_progress()
+    _embed_idle = True
+
+
+def _embed_stalled(now: datetime) -> tuple[bool, int]:
+    """`_index_stalled`'s rule, on the embed loop's clock."""
+    global _embed_stall_alerted
+    since = _embed_progress_at or _process_started_at
+    seconds = max(0, int((now - since).total_seconds()))
+    limit = settings.indexer_stalled_after_seconds
+    stalled = (
+        bool(limit)
+        and not _embed_idle
+        and _task_running
+        and not _disabled
+        and seconds >= limit
+    )
+    if stalled and not _embed_stall_alerted:
+        _embed_stall_alerted = True
+        logger.critical(
+            "Embedding has made no progress for %ds (no embed stage or tick "
+            "finished; threshold INDEXER_STALLED_AFTER_SECONDS=%d): semantic "
+            "search is not being updated. An embed stage is running far longer "
+            "than it should — check the embedding server and the indexer's "
+            "progress lines",
+            seconds,
+            limit,
+        )
+    return stalled, seconds
 
 
 def _index_stalled(now: datetime) -> tuple[bool, int]:
@@ -365,6 +414,7 @@ def snapshot() -> dict:
     )
     quarantined = _quarantined_notes()
     stalled, since_progress = _index_stalled(_now())
+    embed_stalled, since_embed_progress = _embed_stalled(_now())
     successes = [s.last_success_at for s in states if s.last_success_at is not None]
     last_success = max(successes).isoformat() if successes else None
 
@@ -374,6 +424,7 @@ def snapshot() -> dict:
         or _enumeration_failures >= threshold
         or quarantined > 0
         or stalled
+        or embed_stalled
         or (not _task_running and not _disabled)
     )
     if degraded:
@@ -392,6 +443,8 @@ def snapshot() -> dict:
         "last_success_at": last_success,
         "index_stalled": stalled,
         "seconds_since_progress": since_progress,
+        "embedding_stalled": embed_stalled,
+        "seconds_since_embedding_progress": since_embed_progress,
     }
 
 
@@ -400,10 +453,14 @@ def reset() -> None:
     global _enumeration_failures, _enumeration_alerted, _task_running, _disabled
     global _quarantine_count_provider, _last_progress_at, _stall_alerted
     global _process_started_at, _idle
+    global _embed_progress_at, _embed_stall_alerted, _embed_idle
     _scopes.clear()
     _last_progress_at = None
     _stall_alerted = False
     _idle = False
+    _embed_progress_at = None
+    _embed_stall_alerted = False
+    _embed_idle = False
     _process_started_at = _now()
     _enumeration_failures = 0
     _enumeration_alerted = False

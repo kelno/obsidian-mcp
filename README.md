@@ -464,7 +464,8 @@ origin the mint tools refuse rather than emit a localhost link.
 - `/health` also carries an `indexer` object (`status`, `task_running`,
   `failing_scopes`, `embedding_failing_scopes`,
   `max_consecutive_failures`, `quarantined_notes`, `last_success_at`,
-  `index_stalled`, `seconds_since_progress`), and the top-level `status`
+  `index_stalled`, `seconds_since_progress`, `embedding_stalled`,
+  `seconds_since_embedding_progress`), and the top-level `status`
   becomes `"degraded"` when the indexer task has died, any index,
   embedding or enumeration failure counter — or a scope's run of
   incomplete re-derives — reaches `INDEXER_DEGRADED_AFTER_FAILURES`, a
@@ -1101,7 +1102,8 @@ to multi-user later resumes where you left off without re-bootstrapping
 | `DATABASE_SSL_KEY_FILE` | — | Client private key for `DATABASE_SSL_CERT_FILE`. Both or neither. |
 | `VAULT_PATH` | `/obsidian` | In-container vault mount |
 | `SECRET_KEY` | — | itsdangerous signer key |
-| `INDEX_INTERVAL_SECONDS` | `300` | Periodic reindex cadence |
+| `INDEX_INTERVAL_SECONDS` | `300` | The index loop's cadence: scan, keyword index, links, tasks |
+| `EMBED_INTERVAL_SECONDS` | `300` | The embedding loop's cadence (its own loop since 2026-11-09); a budget-stopped backlog re-ticks after `EMBED_BACKLOG_RETICK_SECONDS` instead |
 | `MOVE_INDEX_REFRESH_WAIT_SECONDS` | `30` | How long `move_note(rewrite_links=True)` waits for a running index stage before running its own pre-move index refresh. Past it the move is refused with `index_not_ready` and nothing is moved. |
 | `INDEXER_DEGRADED_AFTER_FAILURES` | `3` | Consecutive failures of any indexer counter (a scope's index passes, its embed passes, its incomplete re-derives, or the tick's own user enumeration) at which `/health` reports `degraded` and one CRITICAL "manual intervention required" line is logged. |
 | `INDEXER_STALLED_AFTER_SECONDS` | `1800` | Seconds with no index stage or tick finishing after which `/health` reports `index_stalled` and `degraded`, and one CRITICAL line is logged: a stage that is running far longer than it should, rather than one that fails. `0` disables. |

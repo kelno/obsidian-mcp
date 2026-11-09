@@ -363,16 +363,18 @@ update it in the same change.** What stays here is the short list:
   mount is not detected (L1) — see
   [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
 - **The embed stage cannot hold the index stage back** (fork, 2026-11-01).
-  The next index stage runs only after the embed stage returns, so an
-  unbounded embed stage freezes keyword search and the link graph (1h50 on
-  2026-11-01). The `EMBED_*_BUDGET_PER_USER` budget therefore applies to a
+  Until the stages got separate loops (2026-11-09) the next index stage ran
+  only after the embed stage returned, so an unbounded embed stage froze
+  keyword search and the link graph (1h50 on 2026-11-01); the budget still
+  bounds how long an embed stage holds `embed_pass_lock`, the pre-warm and a
+  panel reset. The `EMBED_*_BUDGET_PER_USER` budget therefore applies to a
   single scope too, and a budget stop re-ticks after
   `EMBED_BACKLOG_RETICK_SECONDS` (5) instead of the interval; the stage also
   stops after `EMBED_STOP_AFTER_PROVIDER_FAILURES` (3) notes in a row fail at
   the provider, and the loop then waits the ordinary interval. Do not restore
   the "only with more than one scope" clause. See
   [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
-- **The index stage and the embed stage have separate in-process locks** (fork, owner's decision, 2026-11-09): `index_pass_lock` and `embed_pass_lock`, order index → embed for a holder of both (the panel's resets). They may run side by side because `certify_embedded` is already safe against a concurrent writer; the shared clean-sweep record is guarded by `_sweep_epoch`. The loop is still sequential per tick. See [indexing and embeddings](docs/architecture/indexing-and-embeddings.md), "Two stage locks".
+- **The index stage and the embed stage have separate in-process locks** (fork, owner's decision, 2026-11-09): `index_pass_lock` and `embed_pass_lock`, order index → embed for a holder of both (the panel's resets). They may run side by side because `certify_embedded` is already safe against a concurrent writer; the shared clean-sweep record is guarded by `_sweep_epoch`. They run in **two loops**: `run_indexer_loop` (startup index pass, then the index stage every `INDEX_INTERVAL_SECONDS`) and `run_embed_loop` (its first tick at once, then every `EMBED_INTERVAL_SECONDS`, budget re-tick and pre-warm), supervised together so either ending ends the indexer task; an idle index tick writes no `indexer_runs` row; `/health` has a stall clock per loop. See [indexing and embeddings](docs/architecture/indexing-and-embeddings.md), "Two stage locks".
 - **`move_note(rewrite_links=True)` refreshes the index first, or refuses** (fork, owner's decision, 2026-11-09): it runs the index stage for the caller's scope (`indexer.refresh_index_for_move`) before reading `note_links`, and refuses with `index_not_ready`, nothing moved, if the lock is busy past `MOVE_INDEX_REFRESH_WAIT_SECONDS`, indexing is paused, or the pass could not see every note. A link written since the last pass was otherwise silently stranded. See [vault tools](docs/architecture/vault-tools.md).
 - Wikilink graph extracted from note bodies into `note_links`; resolved at index time with same-folder-first preference
 - **The agent ledger is primary data: backed up, never rebuilt from the

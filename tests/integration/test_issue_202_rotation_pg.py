@@ -249,11 +249,16 @@ async def test_a_manual_reindex_does_not_move_the_rotation(tenants, sessionmaker
 
 
 async def test_the_rotation_is_used_by_the_loop_and_only_the_loop(tenants):
-    loop = inspect.getsource(indexer.run_indexer_loop)
-    assert loop.count("_rotated_user_ids()") == 2, (
-        "the startup pass and the periodic tick both rotate"
-    )
-    assert "_active_user_ids()" not in loop
+    # Since the stages got separate loops (2026-11-09) the rotation is the
+    # startup pass's and the embed loop's: the budget that makes order matter
+    # is the embed stage's. The index loop takes users in id order.
+    startup = inspect.getsource(indexer.run_indexer_loop)
+    embed = inspect.getsource(indexer.run_embed_loop)
+    index = inspect.getsource(indexer._index_loop)
+    assert startup.count("_rotated_user_ids()") == 1
+    assert embed.count("_rotated_user_ids()") == 1
+    assert "_active_user_ids()" not in startup + embed
+    assert "_rotated_user_ids()" not in index
 
 
 # ══════════════════════════════════════════════════════════════════════════

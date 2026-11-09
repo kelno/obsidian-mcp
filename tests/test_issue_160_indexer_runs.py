@@ -251,6 +251,19 @@ def test_a_failing_write_never_fails_the_pass(monkeypatch):
 # --------------------------------------------------------------------------
 
 
+
+async def _end_after_startup(*_a, **_k):
+    """A fake `asyncio.sleep` that ends the run once the startup is done.
+
+    Since 2026-11-09 the startup is the index loop's startup pass plus the
+    embed loop's first tick, which runs without sleeping. So the embed loop's
+    first sleep ends the run, and the index loop's parks until it does.
+    """
+    if asyncio.current_task().get_name() == "embed-loop":
+        raise asyncio.CancelledError
+    await asyncio.get_running_loop().create_future()
+
+
 def test_the_startup_pass_records_a_startup_row(monkeypatch):
     log = _capture(monkeypatch)
     monkeypatch.setattr(indexer.settings, "multi_user_mode", False)
@@ -265,25 +278,24 @@ def test_the_startup_pass_records_a_startup_row(monkeypatch):
     async def _embed(*_a, **_k):
         return 12
 
-    async def _stop(*_a, **_k):
-        # Cancel while the loop is asleep, i.e. before any tick can record.
-        raise asyncio.CancelledError
-
     monkeypatch.setattr(indexer, "index_vault", _index)
     monkeypatch.setattr(indexer, "embed_vault", _embed)
     monkeypatch.setattr(indexer, "link_backfill_pass", _noop)
-    monkeypatch.setattr(indexer.asyncio, "sleep", _stop)
+    monkeypatch.setattr(indexer, "prewarm_search_caches", _noop)
+    monkeypatch.setattr(indexer.asyncio, "sleep", _end_after_startup)
 
     try:
         asyncio.run(indexer.run_indexer_loop())
     except asyncio.CancelledError:
         pass
 
+    # Since the stages got separate loops (2026-11-09): the index loop's
+    # startup row, then the embed loop's first tick, also under `startup`.
     rows = _inserts(log)
-    assert [r["trigger"] for r in rows] == ["startup"]
-    assert rows[0]["notes_scanned"] == 2577
-    assert rows[0]["notes_embedded"] == 12
-    assert rows[0]["user_id"] is None
+    assert [r["trigger"] for r in rows] == ["startup", "startup"]
+    assert (rows[0]["notes_scanned"], rows[0]["notes_embedded"]) == (2577, 0)
+    assert (rows[1]["notes_scanned"], rows[1]["notes_embedded"]) == (0, 12)
+    assert rows[0]["user_id"] is None and rows[1]["user_id"] is None
 
 
 def test_a_periodic_tick_records_a_scheduled_row(monkeypatch):
@@ -295,16 +307,20 @@ def test_a_periodic_tick_records_a_scheduled_row(monkeypatch):
     async def _noop(*_a, **_k):
         return None
 
+    indexed = {"n": 0}
+
     async def _index(*_a, **_k):
-        return (10, 0)
+        return (10, indexed["n"])
 
     ticks = {"n": 0}
 
     async def _tick_counter(*_a, **_k):
         ticks["n"] += 1
-        if ticks["n"] >= 1:
+        if ticks["n"] >= 2:
             raise asyncio.CancelledError
+        indexed["n"] = 3  # the second tick indexes something
 
+    monkeypatch.setattr(indexer.settings, "embed_interval_seconds", 3600)
     monkeypatch.setattr(indexer, "index_vault", _index)
     monkeypatch.setattr(indexer, "embed_vault", _noop)
     monkeypatch.setattr(indexer, "link_backfill_pass", _noop)
@@ -316,7 +332,13 @@ def test_a_periodic_tick_records_a_scheduled_row(monkeypatch):
     except asyncio.CancelledError:
         pass
 
-    assert [r["trigger"] for r in _inserts(log)] == ["startup", "scheduled"]
+    # The index loop's startup row, the embed loop's startup row, then one
+    # `scheduled` row: the first tick indexed nothing and wrote none
+    # (2026-11-09: an idle tick of a short interval would flood the history).
+    rows = _inserts(log)
+    assert sorted(r["trigger"] for r in rows) == ["scheduled", "startup", "startup"]
+    scheduled = [r for r in rows if r["trigger"] == "scheduled"]
+    assert scheduled[0]["notes_indexed"] == 3
 
 
 def test_the_panel_reindex_records_a_manual_row(monkeypatch):
@@ -820,16 +842,18 @@ def _startup_two_users(monkeypatch, *, backfill_fails_for=None):
         phases.append(("embed", user_id))
         return user_id
 
-    async def _stop(*_a, **_k):
-        # Cancel while the loop is asleep: the startup half is done, no tick
-        # has begun.
-        raise asyncio.CancelledError
+
+    async def _noop(*_a, **_k):
+        return None
 
     monkeypatch.setattr(indexer, "_active_user_ids", _users)
+    monkeypatch.setattr(indexer, "_rotated_user_ids", _users)
+    monkeypatch.setattr(indexer, "_advance_rotation_cursor", _noop)
+    monkeypatch.setattr(indexer, "prewarm_search_caches", _noop)
     monkeypatch.setattr(indexer, "index_vault", _index)
     monkeypatch.setattr(indexer, "link_backfill_pass", _backfill)
     monkeypatch.setattr(indexer, "embed_vault", _embed)
-    monkeypatch.setattr(indexer.asyncio, "sleep", _stop)
+    monkeypatch.setattr(indexer.asyncio, "sleep", _end_after_startup)
 
     try:
         asyncio.run(indexer.run_indexer_loop())
@@ -846,23 +870,27 @@ def test_multi_user_startup_records_one_row_per_user(monkeypatch):
     finish would describe the whole startup rather than that user's pass."""
     rows, phases = _startup_two_users(monkeypatch)
 
-    assert [r["trigger"] for r in rows] == ["startup", "startup"]
-    assert [r["user_id"] for r in rows] == [1, 2]
+    # Since 2026-11-09 the index loop writes one startup row per user for the
+    # index stage and backfill, and the embed loop's first tick one per user.
+    assert [r["trigger"] for r in rows] == ["startup"] * 4
+    assert [r["user_id"] for r in rows] == [1, 2, 1, 2]
     # Each row carries that user's own numbers, not the startup's total.
     assert [(r["notes_scanned"], r["notes_indexed"], r["notes_embedded"]) for r in rows] == [
-        (101, 1, 1), (102, 2, 2),
+        (101, 1, 0), (102, 2, 0), (0, 0, 1), (0, 0, 2),
     ]
     assert all(r["error"] is None for r in rows)
 
 
 def test_multi_user_startup_orders_the_phases_within_each_user(monkeypatch):
-    """The ordering that matters is per user and unchanged: the backfill reads
-    `notes_metadata`, and the embed pass reads the hashes the scan wrote."""
+    """The ordering that matters: the backfill reads `notes_metadata`, so it
+    follows the user's index stage, and the embed stage reads the hashes the
+    scan wrote, so the embed loop starts after every user's startup index."""
     _rows, phases = _startup_two_users(monkeypatch)
 
     assert phases == [
-        ("index", 1), ("backfill", 1), ("embed", 1),
-        ("index", 2), ("backfill", 2), ("embed", 2),
+        ("index", 1), ("backfill", 1),
+        ("index", 2), ("backfill", 2),
+        ("embed", 1), ("embed", 2),
     ]
 
 
@@ -874,15 +902,17 @@ def test_one_users_failed_backfill_does_not_abort_the_next_user(monkeypatch):
     rows, phases = _startup_two_users(monkeypatch, backfill_fails_for=1)
 
     assert phases == [
-        ("index", 1), ("backfill", 1), ("embed", 1),
-        ("index", 2), ("backfill", 2), ("embed", 2),
+        ("index", 1), ("backfill", 1),
+        ("index", 2), ("backfill", 2),
+        ("embed", 1), ("embed", 2),
     ], "user 1's failed backfill aborted the rest of the startup"
 
-    assert [r["user_id"] for r in rows] == [1, 2]
+    # The two index-loop startup rows, then the embed loop's (2026-11-09).
+    assert [r["user_id"] for r in rows] == [1, 2, 1, 2]
     # User 1's row names the failure, and user 1's *other* two stages still ran.
     assert "link backfill" in rows[0]["error"]
     assert "unreadable" in rows[0]["error"]
-    assert rows[0]["notes_embedded"] == 1
+    assert rows[2]["notes_embedded"] == 1
     # User 2's pass is untouched by it.
     assert rows[1]["error"] is None
-    assert (rows[1]["notes_scanned"], rows[1]["notes_embedded"]) == (102, 2)
+    assert (rows[1]["notes_scanned"], rows[3]["notes_embedded"]) == (102, 2)

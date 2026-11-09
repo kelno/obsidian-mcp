@@ -380,6 +380,11 @@ class Settings(BaseSettings):
     vault_path: str = "/obsidian"
     secret_key: str = "changeme"
     index_interval_seconds: int = Field(300, ge=1)
+    # The embed loop's own interval (since 2026-11-09 the index stage and the
+    # embed stage run in separate loops; `INDEX_INTERVAL_SECONDS` is the index
+    # loop's). A budget-stopped backlog re-ticks after
+    # `EMBED_BACKLOG_RETICK_SECONDS` instead.
+    embed_interval_seconds: int = Field(300, ge=1)
     # How long `move_note(rewrite_links=True)` waits for a running index pass
     # before its own pre-move index refresh, after which the move is refused
     # (nothing moved). See `indexer.refresh_index_for_move`.

@@ -7897,6 +7897,68 @@ def record_embed_outcome(
         _embed_backlog_left.add(user_id)
 
 
+async def _index_stage_once(user_id: int | None, trigger: str = "scheduled") -> bool:
+    """One index stage for one scope, as the index loop's tick runs it.
+
+    Since the stages got separate loops (2026-11-09) the index loop ticks
+    often, so a stage that changed nothing and reported nothing writes no
+    `indexer_runs` row (`PassStats.skipped`): a row per idle tick would evict
+    the 500-row history an operator reads. A stage that indexed a note,
+    reported anything, or raised still writes one. Returns False when the
+    stage raised.
+
+    The lock is taken **before** the run's clock starts, so the row's
+    duration is the stage's own work, not its wait behind another stage
+    (owner's report, 2026-11-09: rows of ~15 s of scan read 1–2 minutes).
+    The holder may take a pooled connection (the row's write); a waiter holds
+    none.
+    """
+    async with index_pass_lock:
+        async with record_indexer_run(trigger, user_id) as stats:
+            try:
+                index_result = await index_vault(user_id=user_id)
+                stats.record_index(index_result)
+            except Exception as e:
+                stats.record_error("index", e)
+                record_index_outcome(user_id, False)
+                logger.error(f"Index failed (user_id={user_id}): {e}")
+                return False
+            record_index_outcome(user_id, True, index_result)
+            # Idle: wrote no row and has nothing to report (the facts
+            # `PassStats.record_index` would put in `error`).
+            if (
+                index_result
+                and not index_result[1]
+                and not getattr(index_result, "quarantined", ())
+                and not getattr(index_result, "walk_failed", ())
+            ):
+                stats.skipped = True
+    return True
+
+
+async def _embed_stage_once(user_id: int | None, trigger: str = "scheduled") -> bool:
+    """One embed stage for one scope, as the embed loop's tick runs it.
+
+    Writes its own `indexer_runs` row (embedded count, failures), as the
+    combined pass did, its clock started after the lock is held (see
+    `_index_stage_once`). Its duration still includes waiting on the
+    embedding provider, which is the stage's own work. Returns False when
+    the stage raised.
+    """
+    async with embed_pass_lock:
+        async with record_indexer_run(trigger, user_id) as stats:
+            try:
+                embedded = await embed_vault(user_id=user_id)
+            except Exception as e:
+                stats.record_error("embed", e)
+                record_embed_outcome(user_id, raised=True)
+                logger.error(f"Embedding failed (user_id={user_id}): {e}")
+                return False
+            stats.record_embedded(embedded)
+            record_embed_outcome(user_id, embedded)
+    return True
+
+
 async def _index_pass_once(
     user_id: int | None, trigger: str = "scheduled", *, full_hash: bool = False
 ) -> bool:
@@ -8102,16 +8164,25 @@ async def index_scope_now(user_id: int | None, *, trigger: str = "manual") -> bo
 
 
 async def run_indexer_loop():
-    """Run indexer on startup and then periodically.
+    """Run the startup index pass, then the index loop; start the embed loop.
 
-    Multi-user mode iterates active users sequentially per pass (v1 simplicity;
-    parallelism can come later). Single-user mode runs one legacy pass with
-    `user_id=None`.
+    Two loops since 2026-11-09 (owner's decision): this one runs the **index
+    stage** every `INDEX_INTERVAL_SECONDS`, and `run_embed_loop`, which it
+    starts once the startup index pass is done, runs the **embed stage** every
+    `EMBED_INTERVAL_SECONDS` (sooner while a budget-stopped backlog is left).
+    Each stage takes its own lock (see `index_pass_lock`), so neither loop
+    waits for the other: keyword search, backlinks and `move_note`'s link
+    inventory keep up however long embedding takes.
 
-    Failure accounting lives in `indexer_health` (#308, D4): per scope from
-    every stage, plus a tick-level counter for work not attributable to a
-    scope (overlap detection, user enumeration, a tick that raised outside
-    every scope's stages). `/health` reads it.
+    The two loops run as child tasks under this one: if either ends, for any
+    reason, the other is cancelled and this task ends the same way (its
+    exception, or a cancellation), so the lifespan's done-callback marks the
+    indexer stopped and `/health` reports it; cancelling this task (lifespan
+    shutdown) cancels both.
+
+    Multi-user mode iterates active users sequentially per pass. Failure
+    accounting lives in `indexer_health` (#308, D4): per scope from every
+    stage, plus a tick-level counter for work not attributable to a scope.
     """
     # `/health` counts this process's quarantine (#308, D3). Also installed at
     # import; repeated here so the loop that maintains the registry always
@@ -8123,129 +8194,73 @@ async def run_indexer_loop():
     # by paths that are not the lifespan in tests and could be in future, and a
     # second detection here costs N bounded root observations.
     startup_overlap_ok = await detect_root_overlaps("startup") is not False
-    # Each stage takes its own lock (`index_pass_lock` / `embed_pass_lock`), so
-    # a panel reindex or a move's refresh is serialised per stage, not per
-    # startup.
+    # The startup pass is the index stage and the link backfill, per user;
+    # the embed loop's first tick, right after, is the startup embed stage.
     startup_ok = True
-    if settings.multi_user_mode:
-        # One `indexer_runs` row per user (#160), which is why the three
-        # stages are one per-user sequence rather than three loops over
-        # every user: a run row spanning two loops would have to be held
-        # open across them, and a pass's start and finish would then
-        # describe the whole startup rather than that user's pass.
-        #
-        # Per-user ordering — index, then link backfill, then embed — is
-        # unchanged and is the ordering that matters (the backfill reads
-        # `notes_metadata`, the embed pass reads the hashes the scan
-        # wrote). What changes is that one user's failed backfill no longer
-        # aborts the backfill of every user after them; it is now isolated
-        # exactly like the index and embed stages already were.
-        # Rotated, so a startup that a deploy truncated resumes where the
-        # previous one stopped rather than sending the tail of the order to
-        # the tail again — which is exactly the case an in-process cursor
-        # would reset in.
-        for uid in await _rotated_user_ids():
-            async with record_indexer_run("startup", uid) as stats:
-                try:
-                    async with index_pass_lock:
-                        index_result = await index_vault(user_id=uid)
-                    stats.record_index(index_result)
-                except Exception as e:
-                    startup_ok = False
-                    stats.record_error("index", e)
-                    record_index_outcome(uid, False)
-                    logger.error(f"Initial index failed (user_id={uid}): {e}")
-                else:
-                    record_index_outcome(uid, True, index_result)
-                try:
-                    # The backfill writes its own `backfill` row; the note
-                    # here is so an operator reading a startup row sees
-                    # that something in that startup failed.
-                    async with index_pass_lock:
-                        await link_backfill_pass(user_id=uid)
-                except Exception as e:
-                    startup_ok = False
-                    stats.record_error("link backfill", e)
-                    logger.error(f"Link backfill failed (user_id={uid}): {e}")
-                try:
-                    async with embed_pass_lock:
-                        embedded = await embed_vault(user_id=uid)
-                except Exception as e:
-                    startup_ok = False
-                    stats.record_error("embed", e)
-                    record_embed_outcome(uid, raised=True)
-                    logger.error(f"Initial embedding failed (user_id={uid}): {e}")
-                else:
-                    stats.record_embedded(embedded)
-                    record_embed_outcome(uid, embedded)
-            # After this user's whole sequence, success or failure, and
-            # **outside** the recorder's context so its own short session
-            # has closed first.
-            await _advance_rotation_cursor(uid)
-    else:
-        async with record_indexer_run("startup", None) as stats:
+    uids = await _rotated_user_ids() if settings.multi_user_mode else [None]
+    for uid in uids:
+        async with record_indexer_run("startup", uid) as stats:
             try:
                 async with index_pass_lock:
-                    index_result = await index_vault()
+                    index_result = await index_vault(user_id=uid)
                 stats.record_index(index_result)
             except Exception as e:
                 startup_ok = False
                 stats.record_error("index", e)
-                record_index_outcome(None, False)
-                logger.error(f"Initial index failed: {e}")
+                record_index_outcome(uid, False)
+                logger.error(f"Initial index failed (user_id={uid}): {e}")
             else:
-                record_index_outcome(None, True, index_result)
-
+                record_index_outcome(uid, True, index_result)
             try:
+                # The backfill writes its own `backfill` row; the note here is
+                # so an operator reading a startup row sees that something in
+                # that startup failed.
                 async with index_pass_lock:
-                    await link_backfill_pass()
+                    await link_backfill_pass(user_id=uid)
             except Exception as e:
                 startup_ok = False
                 stats.record_error("link backfill", e)
-                logger.error(f"Link backfill failed: {e}")
-
-            try:
-                async with embed_pass_lock:
-                    embedded = await embed_vault()
-            except Exception as e:
-                startup_ok = False
-                stats.record_error("embed", e)
-                record_embed_outcome(None, raised=True)
-                logger.error(f"Initial embedding failed: {e}")
-            else:
-                stats.record_embedded(embedded)
-                record_embed_outcome(None, embedded)
+                logger.error(f"Link backfill failed (user_id={uid}): {e}")
 
     indexer_health.record_enumeration(startup_overlap_ok)
-    # The startup pass counts as a run: it does the same work a tick does, and
-    # without it the dashboard would read "Never" for a whole interval after
-    # every restart.
+    # The startup pass counts as a run: without it the dashboard would read
+    # "Never" for a whole interval after every restart.
     _record_index_run(startup_ok)
 
+    index_task = asyncio.create_task(_index_loop(), name="index-loop")
+    embed_task = asyncio.create_task(run_embed_loop(), name="embed-loop")
+    tasks = {index_task, embed_task}
+    try:
+        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        # Our own cancellation (lifespan shutdown) lands here too.
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+    ended = done.pop()
+    if ended.cancelled():
+        raise asyncio.CancelledError
+    exc = ended.exception()
+    if exc is not None:
+        raise exc
+    raise RuntimeError(f"the {ended.get_name()} returned; it should run for ever")
+
+
+async def _index_loop() -> None:
+    """The index stage, every `INDEX_INTERVAL_SECONDS`."""
     logger.info(
         f"Periodic indexer loop armed (interval={settings.index_interval_seconds}s, "
         f"multi_user={settings.multi_user_mode})"
     )
     while True:
-        # A budget-stopped embed stage left work a healthy provider can do
-        # now, so the next tick comes promptly; its index stage runs first, so
-        # the scan, keyword index and link graph keep up while the backlog
-        # drains. Taken (and cleared) here so a stop from any call site counts
-        # once.
-        if take_embed_backlog_left():
-            delay = min(EMBED_BACKLOG_RETICK_SECONDS, settings.index_interval_seconds)
-            logger.info(
-                "Embedding backlog left by the embed budget; next indexer tick "
-                f"in {delay}s"
-            )
-        else:
-            delay = settings.index_interval_seconds
         # The sleep is the loop working as configured, whatever the interval:
         # the stall clock must not count it.
         indexer_health.record_loop_idle()
-        await asyncio.sleep(delay)
+        await asyncio.sleep(settings.index_interval_seconds)
         indexer_health.record_loop_progress()
-        logger.info("Periodic indexer tick")
+        logger.debug("Periodic indexer tick")
         # The whole tick body is guarded so the housekeeping below runs on
         # **every** path out of it — see the `finally`.
         try:
@@ -8269,17 +8284,15 @@ async def run_indexer_loop():
                 await record_quarantined_runs("scheduled")
                 continue
             try:
-                # No lock here: `_index_pass_once` takes `index_pass_lock` for
-                # each index stage and `embed_pass_lock` for each embed stage,
-                # so a move's pre-move refresh waits for at most one index
-                # stage, never for an embedding backlog.
                 tick_ok = True
                 if settings.multi_user_mode:
-                    # Re-fetch the user list every cycle so newly-added or
-                    # newly-deactivated users are picked up without a restart.
-                    # One user's failure does not abort the others, but it
-                    # does make the whole tick a failed run.
-                    uids = await _rotated_user_ids()
+                    # Re-fetched every cycle so newly-added or newly-deactivated
+                    # users are picked up without a restart. One user's failure
+                    # does not abort the others, but it does make the whole
+                    # tick a failed run. Plain id order: the rotation cursor
+                    # (#202) is the embed loop's, where the budget makes order
+                    # matter.
+                    uids = await _active_user_ids()
                     # A user no longer active must not hold `/health` at
                     # degraded with counts from their last passes.
                     indexer_health.retain_scopes(uids)
@@ -8288,28 +8301,11 @@ async def run_indexer_loop():
                     async with index_pass_lock:
                         retain_quarantine_scopes(uids)
                     for uid in uids:
-                        if not await _index_pass_once(uid):
+                        if not await _index_stage_once(uid):
                             tick_ok = False
-                        # Advanced whether the pass succeeded or failed: the
-                        # cursor records where the cycle got to, not whether it
-                        # went well, and a failing tenant that pinned it would
-                        # starve every tenant after them.
-                        await _advance_rotation_cursor(uid)
                 else:
-                    # Through `_index_pass_once`, like every tenant in
-                    # multi-user mode (#308 D9): a failed index stage is
-                    # recorded and the embed stage still runs over the rows
-                    # already committed. The per-stage outcome reaches
-                    # `indexer_health`, which replaces the old loop-local
-                    # `consecutive_failures`.
-                    if not await _index_pass_once(None):
+                    if not await _index_stage_once(None):
                         tick_ok = False
-                # Under `embed_pass_lock`: serialised against the embed stage
-                # and against reset-embeddings, which takes both locks. It
-                # never raises, and it delays the next tick by at most
-                # PREWARM_TIMEOUT_SECONDS.
-                async with embed_pass_lock:
-                    await prewarm_search_caches()
                 indexer_health.record_enumeration(overlap_ok)
                 # Heartbeat: the tick completed. Recorded whether or not the pass
                 # found anything to index — that is the whole point (#78) — but
@@ -8319,9 +8315,9 @@ async def run_indexer_loop():
                 _record_index_run(tick_ok)
             except Exception as e:
                 # Reached only by work no scope owns — user enumeration, a run
-                # row that could not be opened, the rotation cursor — so it is
-                # counted on the tick-level counter, which logs the CRITICAL
-                # line once when it reaches `INDEXER_DEGRADED_AFTER_FAILURES`.
+                # row that could not be opened — so it is counted on the
+                # tick-level counter, which logs the CRITICAL line once when it
+                # reaches `INDEXER_DEGRADED_AFTER_FAILURES`.
                 indexer_health.record_enumeration(False)
                 # A tick that raised still *ran*; the dashboard says so and marks
                 # it failed rather than showing a stale-looking success.
@@ -8364,3 +8360,61 @@ async def run_indexer_loop():
                 await flush_expired()
             except Exception as e:  # noqa: BLE001 - housekeeping, never fatal
                 logger.error(f"Refusal flush failed: {e}")
+
+
+async def run_embed_loop() -> None:
+    """The embed stage, every `EMBED_INTERVAL_SECONDS`, and the search pre-warm.
+
+    Its first tick runs at once: it is the startup embed stage. After a tick
+    whose embed stage stopped at its budget with work left, the next one
+    comes after `EMBED_BACKLOG_RETICK_SECONDS` (fork, 2026-11-01). Users are
+    taken in the persisted rotation order (#202), so a budget-limited stage
+    does not keep later tenants waiting. A paused indexer skips the tick.
+    """
+    logger.info(
+        f"Periodic embedding loop armed (interval={settings.embed_interval_seconds}s)"
+    )
+    trigger = "startup"
+    while True:
+        # The first tick is the startup embed stage: no sleep before it, and
+        # its run rows say `startup`, as the combined startup pass's did.
+        if trigger != "startup":
+            if take_embed_backlog_left():
+                delay = min(EMBED_BACKLOG_RETICK_SECONDS, settings.embed_interval_seconds)
+                logger.info(
+                    "Embedding backlog left by the embed budget; next embedding "
+                    f"tick in {delay}s"
+                )
+            else:
+                delay = settings.embed_interval_seconds
+            indexer_health.record_embed_loop_idle()
+            await asyncio.sleep(delay)
+        indexer_health.record_embed_loop_progress()
+        this_trigger, trigger = trigger, "scheduled"
+        if _is_paused():
+            logger.info("Embedding tick skipped (paused)")
+            continue
+        try:
+            if settings.multi_user_mode:
+                for uid in await _rotated_user_ids():
+                    await _embed_stage_once(uid, this_trigger)
+                    # Advanced whether the stage succeeded or failed: the
+                    # cursor records where the cycle got to, and a failing
+                    # tenant that pinned it would starve every tenant after.
+                    await _advance_rotation_cursor(uid)
+            else:
+                await _embed_stage_once(None, this_trigger)
+            # Under `embed_pass_lock`: serialised against the embed stage and
+            # against reset-embeddings, which takes both locks. It never
+            # raises, and it delays the next tick by at most
+            # PREWARM_TIMEOUT_SECONDS.
+            async with embed_pass_lock:
+                await prewarm_search_caches()
+        except Exception as e:
+            # Work no scope owns (user enumeration, the rotation cursor). Not
+            # counted on the tick-level counter: the index loop enumerates the
+            # same users every tick and counts a failure there, and two loops
+            # bumping and resetting one counter would make it meaningless.
+            # The per-scope stages record their own failures.
+            logger.error(f"Periodic embedding task failed: {e}")
+        indexer_health.record_embed_loop_progress()

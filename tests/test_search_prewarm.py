@@ -291,7 +291,7 @@ async def test_prewarm_runs_once_per_tick_under_the_lock(monkeypatch):
     monkeypatch.setattr(indexer, "embed_pass_lock", fresh_lock)
     monkeypatch.setattr(indexer, "index_pass_lock", asyncio.Lock())
     monkeypatch.setattr(indexer.settings, "multi_user_mode", False, raising=False)
-    monkeypatch.setattr(indexer.settings, "index_interval_seconds", 0, raising=False)
+    monkeypatch.setattr(indexer.settings, "embed_interval_seconds", 0, raising=False)
 
     calls = {"prewarm": 0, "locked": []}
 
@@ -311,7 +311,7 @@ async def test_prewarm_runs_once_per_tick_under_the_lock(monkeypatch):
 
     monkeypatch.setattr(indexer, "prewarm_search_caches", _prewarm)
 
-    task = asyncio.create_task(indexer.run_indexer_loop())
+    task = asyncio.create_task(indexer.run_embed_loop())
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=5)
 
@@ -325,7 +325,7 @@ async def test_prewarm_does_not_touch_the_failure_counter(monkeypatch, caplog):
     'manual intervention required' alarm in 25 minutes if the pre-warm counted."""
     monkeypatch.setattr(indexer, "index_pass_lock", asyncio.Lock())
     monkeypatch.setattr(indexer.settings, "multi_user_mode", False, raising=False)
-    monkeypatch.setattr(indexer.settings, "index_interval_seconds", 0, raising=False)
+    monkeypatch.setattr(indexer.settings, "embed_interval_seconds", 0, raising=False)
 
     async def _noop(*_a, **_k):
         return None
@@ -360,7 +360,7 @@ async def test_prewarm_does_not_touch_the_failure_counter(monkeypatch, caplog):
     monkeypatch.setattr(indexer, "prewarm_search_caches", _counting_prewarm)
 
     with caplog.at_level("ERROR"):
-        task = asyncio.create_task(indexer.run_indexer_loop())
+        task = asyncio.create_task(indexer.run_embed_loop())
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=5)
 

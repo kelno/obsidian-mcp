@@ -936,7 +936,7 @@ def test_the_flush_failure_is_swallowed_by_the_tick(monkeypatch):
     # the flush was attempted, it blew up, and the loop carried on.
     assert _drive_one_tick(monkeypatch, flush_raises=True) == 1
 
-    source = inspect.getsource(indexer.run_indexer_loop)
+    source = inspect.getsource(indexer._index_loop)
     guarded = source[source.index("await flush_expired()") :]
     assert "except Exception" in guarded[:400]
 

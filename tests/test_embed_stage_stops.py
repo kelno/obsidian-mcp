@@ -206,8 +206,8 @@ def test_a_budget_check_does_not_overwrite_a_provider_stop():
 
 
 def _drive_loop(monkeypatch, embed_result, *, ticks=2):
-    """Run the single-user loop for the startup pass and `ticks` ticks;
-    return the delays it slept for."""
+    """Run the single-user embed loop (its own loop since 2026-11-09) for its
+    immediate first tick and `ticks` more; return the delays it slept for."""
     delays = []
 
     async def _noop(*_a, **_k):
@@ -241,7 +241,7 @@ def _drive_loop(monkeypatch, embed_result, *, ticks=2):
         yield _Stats()
 
     monkeypatch.setattr(indexer.settings, "multi_user_mode", False)
-    monkeypatch.setattr(indexer.settings, "index_interval_seconds", 300)
+    monkeypatch.setattr(indexer.settings, "embed_interval_seconds", 300)
     monkeypatch.setattr(indexer, "record_indexer_run", _run)
     monkeypatch.setattr(indexer, "_is_paused", lambda: False)
     monkeypatch.setattr(indexer, "detect_root_overlaps", _noop)
@@ -254,7 +254,7 @@ def _drive_loop(monkeypatch, embed_result, *, ticks=2):
     monkeypatch.setattr(indexer.asyncio, "sleep", _sleep)
     indexer.take_embed_backlog_left()
     try:
-        asyncio.run(indexer.run_indexer_loop())
+        asyncio.run(indexer.run_embed_loop())
     except asyncio.CancelledError:
         pass
     return delays
@@ -308,7 +308,9 @@ def test_no_progress_for_the_threshold_is_a_stall(monkeypatch, caplog):
     assert snap["index_stalled"] is True
     assert snap["status"] == "degraded"
     assert snap["seconds_since_progress"] >= 1800
-    criticals = [r for r in caplog.records if "no progress" in r.getMessage()]
+    criticals = [
+        r for r in caplog.records if "Indexer has made no progress" in r.getMessage()
+    ]
     assert len(criticals) == 1, "the CRITICAL line must fire once per episode"
 
 
@@ -319,9 +321,35 @@ def test_progress_clears_the_stall_and_rearms_the_alert(monkeypatch, caplog):
         "a loop that never stamped is measured from process start"
     )
     indexer_health.record_loop_progress()
+    # The embed loop has its own clock (2026-11-09); stamp it too, or it is
+    # the one reporting the stall now.
+    indexer_health.record_embed_loop_progress()
     assert indexer_health.snapshot()["index_stalled"] is False
     assert indexer_health.snapshot()["status"] == "ok"
     assert indexer_health._stall_alerted is False
+
+
+def test_a_stuck_embed_loop_is_its_own_stall(monkeypatch, caplog):
+    """Since the stages got separate loops, a stuck embed stage no longer
+    stops the index loop's clock; the embed loop's own clock reports it."""
+    monkeypatch.setattr(indexer_health.settings, "indexer_stalled_after_seconds", 60)
+    indexer_health.record_loop_progress()
+    indexer_health.record_embed_loop_progress()
+    _age_progress(monkeypatch, 61)
+    indexer_health.record_loop_progress()  # the index loop keeps ticking
+    with caplog.at_level(logging.CRITICAL, logger="src.services.indexer_health"):
+        snap = indexer_health.snapshot()
+    assert snap["index_stalled"] is False
+    assert snap["embedding_stalled"] is True
+    assert snap["status"] == "degraded"
+    assert any("Embedding has made no progress" in r.getMessage() for r in caplog.records)
+
+
+def test_a_sleeping_embed_loop_is_not_a_stall(monkeypatch):
+    monkeypatch.setattr(indexer_health.settings, "indexer_stalled_after_seconds", 60)
+    indexer_health.record_embed_loop_idle()
+    _age_progress(monkeypatch, 10**6)
+    assert indexer_health.snapshot()["embedding_stalled"] is False
 
 
 def test_a_tick_end_counts_as_progress(monkeypatch):

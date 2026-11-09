@@ -881,8 +881,9 @@ async def health():
     in-process state (`src/services/indexer_health.py`): `status`
     (`ok` | `degraded` | `disabled`), `task_running`, `failing_scopes`,
     `embedding_failing_scopes`, `max_consecutive_failures`,
-    `quarantined_notes`, `last_success_at`, `index_stalled` and
-    `seconds_since_progress`. When it is `degraded` — the indexer task is
+    `quarantined_notes`, `last_success_at`, `index_stalled`,
+    `seconds_since_progress`, `embedding_stalled` and
+    `seconds_since_embedding_progress`. When it is `degraded` — the indexer task is
     dead, any index / embedding / incomplete-re-derive / enumeration counter
     has reached `INDEXER_DEGRADED_AFTER_FAILURES`, a note is quarantined, or
     no index stage or tick has finished for `INDEXER_STALLED_AFTER_SECONDS` —
