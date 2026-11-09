@@ -77,9 +77,9 @@ user-facing documentation in `README.md`.
 
 ## Git
 
-This fork is an AI-managed repo: its owner, kelno, has their own AI agents maintain it for kelno's personal setup, under rules kept in kelno's private agent setup. Those rules don't apply to anyone else's agents.
+This fork is an AI-managed repo: its owner, kelno, has their own AI agents maintain it for kelno's personal setup, under rules kept in kelno's private agent setup. Those rules don't apply to anyone else's agents. Much of this file came with the upstream project. Where its process rules (checks, reviews, caution) are stricter than the AI-managed rules, the AI-managed rules win, and such a line can be cut. Its technical decisions ("Key decisions", `docs/architecture/`) still hold.
 
-A push to `main` is a deploy: the image workflow builds and publishes the image straight away, without waiting for CI, and a deployment may follow it automatically (see `FORK.md`). So `main` is pushed at the end of a working session or at a milestone, not after each commit, and before pushing it, unless the owner says otherwise for that push, run the full test suite including `make test-integration`, plus `make test-schema` and `make db-check` when the change includes a migration (see Review and checks). Say in the report that it deployed.
+The AI-managed rules above set the pace here. Anything on `main` may be deployed at any time (see `FORK.md`), so push `main` when a piece of work is ready to deploy, never just to save it; work in progress stays on a branch. Before that push, the full checks must have passed once for the piece of work: the full suite including `make test-integration`, plus `make test-schema` and `make db-check` for a migration. A fix after them, even right before the push, needs only the tests for what changed (for a tool description or the guide, the test files that name it), not another full run. The report says what changed since the full run.
 
 ## Review and checks
 
@@ -97,12 +97,7 @@ A push to `main` is a deploy: the image workflow builds and publishes the image 
 | Deploy | merge to `main` → CI → `image` workflow → Flux (homelab k3s); `make deploy` for a compose host |
 
 **`tests/integration/` skips itself without a database.** Those modules are
-guarded on `PGVECTOR_TEST_ADMIN_URL`, so a local `pytest tests` reports green
-having executed none of them. CI's `tests` job sets it against a
-`pgvector/pgvector:pg16` service, so they do run on every push — but any local
-claim that "the suite passes" is a claim about the offline subset unless
-`make test-integration` ran, which stands up the throwaway container and sets
-the URL. It shares `SCHEMA_TEST_CONTAINER` / `SCHEMA_TEST_PORT` with
+guarded on `PGVECTOR_TEST_ADMIN_URL`, so a local `pytest tests` reports green having executed none of them. Nothing runs them on a push in this fork (see `FORK.md`): a claim that "the suite passes" is about the offline subset unless `make test-integration`, or the container run in `FORK.md`, ran them. It shares `SCHEMA_TEST_CONTAINER` / `SCHEMA_TEST_PORT` with
 `test-schema`, so do not run the two concurrently.
 
 **`alembic check` must be clean** — "No new upgrade operations detected." Run
@@ -117,17 +112,10 @@ a person, and the vault is the owner's single source of truth for every
 project. The expensive failures are **destructive writes** (an edit or append
 that clobbers a note — this has actually happened) and **silently wrong search
 results**, which an agent will act on without a human ever seeing the query.
-Any change to the write tools, section addressing, or the chunking/embedding
-path gets a mandatory adversarial review before it is merged: a separate pass
-(another agent or session, not the author) that tries to break it on plausible
-input, triaged under the review budget above.
+A piece of work that changes the write tools, section addressing, or the chunking/embedding path gets one adversarial review before its push to `main`: a separate agent, run in the background alongside the full checks, that tries to break it on plausible input. Its findings are triaged under the review budget above; fixing them needs no second review.
 
 **End-to-end check, not a browser pass**, for MCP-side changes — the consumer
-is an agent. Exercise the affected MCP tools against the live server, and say
-in the report which tools were actually called. Changes to panel, auth or
-consent templates (or `panel.js`) do get a browser pass: the panel sits behind
-SSO, so the owner walks the affected controls by hand with devtools open and
-zero CSP violations is part of the bar (see the `panel-csp` change, tasks §6).
+is an agent. Once the change is deployed, call the affected MCP tools against the live server, and say in the report which tools were called, or that the check waits for the deploy. A change to `panel.js`, or to the scripts, styles or `data-*` controls of the panel, auth or consent templates, gets a browser pass: the panel sits behind SSO, so the owner opens the affected page with devtools open, and zero CSP violations is the bar (see the `panel-csp` change, tasks §6). Text-only template changes don't need one.
 
 ## Key decisions
 
