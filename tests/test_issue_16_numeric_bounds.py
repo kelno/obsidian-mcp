@@ -12,6 +12,11 @@ from src.config import Settings
 
 
 def _make(**overrides):
+    # The conftest's controlled environment is in force only while the
+    # settings singleton is imported; a test building `Settings()` itself
+    # must name the one field without a usable default, or it passes only
+    # after another test on the same worker happened to export one.
+    overrides.setdefault("secret_key", "test")
     return Settings(_env_file=None, **overrides)
 
 

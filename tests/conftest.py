@@ -206,6 +206,41 @@ def _scrub_transport_ambient_env() -> None:
 
 _scrub_transport_ambient_env()
 
+
+def _refuse_the_offline_database() -> None:
+    """Refuse a connection to `CONTROLLED_TEST_ENV`'s database at once.
+
+    That database never exists: offline tests that reach it by accident (a
+    stage's run row, an overlap check) rely on the connection being refused,
+    which on Linux takes a millisecond. Under WSL's mirrored networking a
+    connect to a closed IPv4 loopback port is not refused but left unanswered,
+    so each such call waited out asyncpg's 60 s connect timeout, and a run
+    outside the test container stalled for minutes. Only that exact address is
+    refused; the integration suites connect to `TEST_DATABASE_URL` untouched.
+    """
+    try:
+        import asyncpg
+    except ImportError:
+        return
+    real_connect = asyncpg.connect
+    if getattr(real_connect, "_omcp_offline_refusal", False):
+        return
+
+    async def connect(*args, **kwargs):
+        dsn = args[0] if args else kwargs.get("dsn")
+        if dsn is None and kwargs.get("host") in ("localhost", "127.0.0.1", "::1") \
+                and kwargs.get("database") == "test" and kwargs.get("user") == "test":
+            raise ConnectionRefusedError(
+                111, "Connect call failed: the offline test database never exists"
+            )
+        return await real_connect(*args, **kwargs)
+
+    connect._omcp_offline_refusal = True
+    asyncpg.connect = connect
+
+
+_refuse_the_offline_database()
+
 # Escape hatch for the import-isolated subprocess suites
 # (`tests/_transport_body_limit_cases.py`), which deliberately choose
 # import-time settings — MAX_FILE_WRITE_BYTES, MCP_SANDBOX_MODE, VAULT_PATH —
