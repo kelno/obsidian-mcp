@@ -1634,7 +1634,8 @@ class LedgerEntry(Base):
     sources: Mapped[str | None] = mapped_column(Text, nullable=True)
     subtype: Mapped[str | None] = mapped_column(String(32), nullable=True)
     component: Mapped[str | None] = mapped_column(String(300), nullable=True)
-    fix: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Column `fix` (032): the name a stamp-back rerun of 032 checks; agents see `leads`.
+    leads: Mapped[str | None] = mapped_column("fix", Text, nullable=True)
     target: Mapped[str | None] = mapped_column(String(500), nullable=True)
     proposed_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     final_text: Mapped[str | None] = mapped_column(Text, nullable=True)

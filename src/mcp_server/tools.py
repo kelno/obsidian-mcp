@@ -7494,6 +7494,7 @@ from src.mcp_server.task_result import (  # noqa: E402
     TaskWriteResult,
 )
 from src.services import task_format as _tf, task_index as _task_index, task_ops as _task_ops  # noqa: E402
+from src.services import ledger_tasks as _ledger_tasks  # noqa: E402
 from src.services import task_query as _tq  # noqa: E402
 from src.services.task_scan import split_lines as _task_split_lines  # noqa: E402
 from src.services.task_settings import TasksSettingsError, read_settings as _read_task_settings  # noqa: E402
@@ -7806,9 +7807,38 @@ async def _read_task_note(tool: str, target, path: str, expected_hash: str | Non
     return None, existing, text_
 
 
-async def _task_written(uid, target, line_number, previous, written, new_text, today, **extra):
-    """The success result, after re-indexing the note's task rows."""
+async def _task_ledger_refs(uid, line_text: str, task_settings, registry) -> tuple[list[dict], list[str]]:
+    """The ledger citations in a line a task tool just wrote (see `ledger_tasks`).
+
+    Read after the write and its re-index, so the citing tasks' state includes
+    this one. A failure here does not undo the write: it is said in a note.
+    """
+    if not line_text:
+        return [], []
+    try:
+        async with async_session() as session:
+            return await _ledger_tasks.refs_on_line(
+                session, uid, line_text,
+                lambda line, path: _task_ops.parse_line(line, path, task_settings, registry))
+    except Exception as exc:  # noqa: BLE001 — the write already happened; say so, don't fail it
+        logger.warning("Reading the ledger citations of a written task failed: %s: %s", type(exc).__name__, exc)
+        return [], [f"The task was written, but its ledger citations could not be checked ({type(exc).__name__})."]
+
+
+async def _task_written(uid, target, line_number, previous, written, new_text, today, *, task_settings=None,
+                        registry=None, **extra):
+    """The success result, after re-indexing the note's task rows.
+
+    With `task_settings` and `registry`, also the ledger entries the written
+    line cites (the removed line's, when `🏁 delete` removed it).
+    """
     indexed, note = await _task_index.reindex_note_tasks_now(uid, target.rel, new_text)
+    refs, notes = ([], [])
+    if task_settings is not None and registry is not None:
+        refs, notes = await _task_ledger_refs(uid, written or previous or "", task_settings, registry)
+    if refs or notes:
+        extra = {**extra, "ledger_refs": [{k: v for k, v in r.items() if v is not None} for r in refs] or None,
+                 "notes": notes or None}
     return TaskWriteResult(
         path=target.rel,
         ref=f"{target.rel}:{line_number}",
@@ -7917,6 +7947,7 @@ async def create_task_impl(
         if err := await _publish_task_text(uid, target, path, new_text, existing):
             return _task_failed(TaskWriteResult, err)
         return await _task_written(uid, target, number, None, new_line, new_text, today,
+                                   task_settings=task_settings, registry=registry,
                                    changed=True, created_note=True if existing is None else None)
 
 
@@ -8001,7 +8032,8 @@ async def edit_task_impl(
             return _task_refused(exc)
         if err := await _publish_task_text(uid, target, path, new_text, existing):
             return _task_failed(TaskWriteResult, err)
-        return await _task_written(uid, target, line, expected_line, new_line, new_text, today, changed=True)
+        return await _task_written(uid, target, line, expected_line, new_line, new_text, today,
+                                   task_settings=task_settings, registry=registry, changed=True)
 
 
 @_tracked(
@@ -8052,6 +8084,7 @@ async def set_task_status_impl(
             return _task_failed(TaskWriteResult, err)
         return await _task_written(
             uid, target, line, expected_line, "\n".join(new_lines), new_text, today,
+            task_settings=task_settings, registry=registry,
             changed=True, removed=True if not result else None,
         )
 
@@ -8163,6 +8196,24 @@ def _ledger_summary(row, **extra) -> EntrySummary:
     )
 
 
+#: `ledger_search(tasks=…)`: the task states (see `ledger_tasks.task_state`).
+LEDGER_TASK_STATES = ("open", "done", "cancelled")
+
+
+async def _ledger_task_links(session, uid):
+    """`(links, None)`: the vault tasks citing feedback, by number; `(None, why)` when they can't be read.
+
+    Statuses are read with the owner's Tasks plugin settings, as `list_tasks`
+    reads them, from the task index.
+    """
+    try:
+        task_settings, registry, _today = await _task_context(uid)
+    except _task_ops.TaskOpError as exc:
+        return None, f"The vault tasks citing these entries could not be read: {exc}"
+    rows = await _ledger_tasks.citing_rows(session, uid)
+    return _ledger_tasks.link(rows, lambda line, path: _task_ops.parse_line(line, path, task_settings, registry)), None
+
+
 def _ledger_flagged(flagged) -> list[FlaggedLine] | None:
     return [FlaggedLine(line=f.line_id, view=f.digest, text=f.text, reason=f.reason) for f in flagged] or None
 
@@ -8177,7 +8228,7 @@ def _ledger_summary_columns():
 
 @_tracked(
     "ledger_search",
-    ["query", "mode", "kinds", "area", "topics", "status", "origin", "unseen", "since", "limit"],
+    ["query", "mode", "kinds", "area", "topics", "status", "origin", "unseen", "since", "tasks", "limit"],
     refusal_result=_ledger_gate(LedgerSearchResult),
     arg_char_caps={"query": MAX_SEARCH_QUERY_CHARS},
 )
@@ -8191,6 +8242,7 @@ async def ledger_search_impl(
     origin: str | None = None,
     unseen: bool = False,
     since: str | None = None,
+    tasks: str | None = None,
     limit: int = _ledger.SEARCH_DEFAULT_LIMIT,
 ) -> LedgerSearchResult:
     from sqlalchemy import func, select
@@ -8204,6 +8256,9 @@ async def ledger_search_impl(
     if mode not in LEDGER_SEARCH_MODES:
         return _ledger_refused(LedgerSearchResult, _ledger.invalid(
             f"mode is both, words or meaning (got {mode!r}).", allowed=[{"name": m} for m in LEDGER_SEARCH_MODES]))
+    if tasks is not None and tasks not in LEDGER_TASK_STATES:
+        return _ledger_refused(LedgerSearchResult, _ledger.invalid(
+            f"tasks is open, done or cancelled (got {tasks!r}).", allowed=[{"name": t} for t in LEDGER_TASK_STATES]))
     query = (query or "").strip() or None
     async with async_session() as session:
         try:
@@ -8212,17 +8267,30 @@ async def ledger_search_impl(
                 unseen=unseen, since=since)
         except _ledger.LedgerError as exc:
             return _ledger_refused(LedgerSearchResult, exc)
+        links, links_note = await _ledger_task_links(session, uid)
+        task_states = _ledger_tasks.states(links) if links is not None else {}
+        if tasks is not None:
+            if links is None:
+                return _ledger_failed(LedgerSearchResult, _body_refusal(
+                    f"{links_note}. The tasks filter needs them. Nothing was listed.", "task_settings_invalid"))
+            filters.feedback_numbers = tuple(sorted(n for n, s in task_states.items() if s == tasks))
         described = {"status": status, "kinds": kinds, "area": filters.area or ("none" if filters.no_area else None),
-                     "topics": topics, "origin": origin, "unseen": unseen or None, "since": since}
+                     "topics": topics, "origin": origin, "unseen": unseen or None, "since": since, "tasks": tasks}
         described = {k: v for k, v in described.items() if v is not None}
+        notes = [links_note] if links_note else []
+
+        def summary(row, **extra):
+            state = task_states.get(int(row.ref[1:])) if row.kind == "feedback" else None
+            return _ledger_summary(row, tasks=state, **extra)
+
         clauses = filters.where(uid)
         if query is None:
             rows = (await session.execute(
                 select(*_ledger_summary_columns()).where(*clauses)
                 .order_by(LedgerEntry.updated_at.desc(), LedgerEntry.id.desc()).limit(limit + 1)
             )).all()
-            return LedgerSearchResult(entries=[_ledger_summary(r) for r in rows[:limit]],
-                                      truncated=len(rows) > limit, filters=described)
+            return LedgerSearchResult(entries=[summary(r) for r in rows[:limit]],
+                                      truncated=len(rows) > limit, filters=described, notes=notes or None)
 
         words: list = []
         if mode in ("both", "words"):
@@ -8250,18 +8318,19 @@ async def ledger_search_impl(
     both = mode == "both"
     result = LedgerSearchResult(filters=described)
     if mode in ("both", "words"):
-        result.by_words = [_ledger_summary(r, in_both_lists=(r.id in by_meaning_ids) if both else None)
+        result.by_words = [summary(r, in_both_lists=(r.id in by_meaning_ids) if both else None)
                            for r in words[:limit]]
         result.truncated = len(words) > limit
     if meaning is not None:
-        result.by_meaning = [_ledger_summary(h["row"], similarity=h["similarity"],
-                                             in_both_lists=(h["row"].id in by_words_ids) if both else None)
+        result.by_meaning = [summary(h["row"], similarity=h["similarity"],
+                                     in_both_lists=(h["row"].id in by_words_ids) if both else None)
                              for h in meaning.hits]
         result.meaning_unavailable = meaning.error
         result.not_embedded = meaning.not_embedded
         if meaning.not_embedded:
-            result.notes = [f"{meaning.not_embedded} matching entr{'y has' if meaning.not_embedded == 1 else 'ies have'} "
-                            "no vector yet (new or just changed): they can only turn up in by_words."]
+            notes.append(f"{meaning.not_embedded} matching entr{'y has' if meaning.not_embedded == 1 else 'ies have'} "
+                            "no vector yet (new or just changed): they can only turn up in by_words.")
+    result.notes = notes or None
     return result
 
 
@@ -8281,11 +8350,15 @@ async def ledger_get_impl(refs: list[str], history: bool = False) -> LedgerGetRe
             cited = await _ledger.lines_for_entries(session, ids) if ids else {}
             sup = await _ledger.superseding_refs(session, [e.superseded_by for e in entries])
             past = await _ledger.history(session, ids) if (history and ids) else {}
+            links, links_note = ({}, None)
+            if any(e.kind == "feedback" for e in entries):
+                links, links_note = await _ledger_task_links(session, uid)
     except _ledger.LedgerError as exc:
         return _ledger_refused(LedgerGetResult, exc)
     cap = int(settings.max_read_response_chars)
-    out, not_returned, used, notes = [], [], 0, []
+    out, not_returned, used, notes = [], [], 0, ([links_note] if links_note else [])
     for entry in entries:
+        citing = (links or {}).get(entry.number, []) if entry.kind == "feedback" else []
         item = LedgerEntryFull(
             ref=entry.ref, kind=entry.kind, status=entry.status, revision=entry.revision, title=entry.title,
             body=entry.body, origin=entry.origin, observed_on=entry.observed_on.isoformat(),
@@ -8295,6 +8368,8 @@ async def ledger_get_impl(refs: list[str], history: bool = False) -> LedgerGetRe
             superseded_by=sup.get(entry.superseded_by), handled_account=entry.handled_account,
             handled_at=entry.handled_at.isoformat() if entry.handled_at else None, author=entry.author,
             cited_by=cited.get(entry.id) or None, embedded=entry.embedded_hash == entry.content_hash,
+            tasks=[t.as_dict() for t in citing] or None,
+            tasks_state=_ledger_tasks.task_state(t.status_type for t in citing),
         )
         size = _ledger.json_size(item.model_dump())
         if out and used + size > cap:

@@ -66,7 +66,7 @@ LIST_ARG_MAX = 20
 #: Per-kind fields, the ones a kind must have, and their caps (characters).
 KIND_FIELDS: dict[str, dict[str, int]] = {
     "quirk": {"certainty": 16, "certainty_note": 2000, "sources": 4000},
-    "feedback": {"subtype": 32, "component": 300, "fix": 4000},
+    "feedback": {"subtype": 32, "component": 300, "leads": 4000},
     "proposal": {
         "target": 500, "proposed_text": 16000, "final_text": 16000, "changes": 4000, "owner_reason": 4000,
     },
@@ -214,7 +214,7 @@ def created_by() -> str:
 def embed_text(entry) -> str:
     """The text an entry is searched and embedded by: its title, body and own fields."""
     parts = [entry.title, entry.body]
-    for name in ("component", "fix", "certainty_note", "target", "proposed_text", "final_text", "changes"):
+    for name in ("component", "leads", "certainty_note", "target", "proposed_text", "final_text", "changes"):
         value = getattr(entry, name, None)
         if value:
             parts.append(value)
@@ -552,7 +552,7 @@ def search_document():
     stored vector would go stale silently when `FTS_CONFIGS` changes.
     """
     doc = func.concat_ws(
-        " ", LedgerEntry.ref, LedgerEntry.title, LedgerEntry.body, LedgerEntry.component, LedgerEntry.fix,
+        " ", LedgerEntry.ref, LedgerEntry.title, LedgerEntry.body, LedgerEntry.component, LedgerEntry.leads,
         LedgerEntry.certainty_note, LedgerEntry.sources, LedgerEntry.target, LedgerEntry.proposed_text,
         LedgerEntry.final_text, LedgerEntry.changes, LedgerEntry.owner_reason, LedgerEntry.handled_account,
     )
@@ -587,6 +587,8 @@ class Filters:
     origin: str | None = None
     unseen: bool = False
     since: date | None = None
+    #: The `tasks` filter: only feedback with these numbers (see ledger_tasks).
+    feedback_numbers: tuple[int, ...] | None = None
 
     def where(self, uid: int | None) -> list:
         clauses = [_owner(LedgerEntry, uid), LedgerEntry.status.in_(self.statuses)]
@@ -605,6 +607,8 @@ class Filters:
             clauses.append(and_(LedgerEntry.kind == "feedback", LedgerEntry.seen.is_(False)))
         if self.since is not None:
             clauses.append(LedgerEntry.updated_at >= day_start_utc(self.since))
+        if self.feedback_numbers is not None:
+            clauses.append(and_(LedgerEntry.kind == "feedback", LedgerEntry.number.in_(self.feedback_numbers)))
         return clauses
 
 

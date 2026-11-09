@@ -43,6 +43,9 @@ class EntrySummary(_OmitNone):
     similarity: float | None = None
     #: True when the other list of the same search also holds this entry.
     in_both_lists: bool | None = None
+    #: Feedback cited by vault tasks (`ledger F12`): open (one is not done or
+    #: cancelled), done (all closed, one done) or cancelled (all cancelled).
+    tasks: str | None = None
 
 
 class LedgerSearchResult(_LedgerResult):
@@ -83,6 +86,10 @@ class LedgerEntryFull(_OmitNone):
     author: str | None = None
     #: Summary-view lines that cite this entry.
     cited_by: list[dict] | None = None
+    #: Feedback: the vault tasks citing it (`ledger F12`), each with its
+    #: `ref` (path:line), `status` type and `text`, and their overall state.
+    tasks: list[dict] | None = None
+    tasks_state: str | None = None
     #: Every past version, oldest first, with who, when and why.
     history: list[dict] | None = None
     #: Whether its vector is current (else it is found by words only).

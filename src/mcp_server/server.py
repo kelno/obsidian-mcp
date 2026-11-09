@@ -1544,7 +1544,8 @@ async def create_task(
             it. Do not put dates or priority emojis in it: use the arguments.
             Leave out the global filter (e.g. `#task`): the tool puts it in
             front, once, and drops any whole-word copy given here, even
-            mid-sentence.
+            mid-sentence. To link the task to agent-ledger feedback, cite it
+            in the text as `ledger F12`; the result lists the entries linked.
         path: the note to add it to; default the tasks inbox
             (`Tasks inbox.md` unless configured). Only the inbox is created
             when missing.
@@ -1591,7 +1592,9 @@ async def edit_task(
     Postpone a task by setting `scheduled` (⏳). Only that line changes; it
     is written back in the plugin's field order, as the plugin itself does on
     any edit. Status changes go through `set_task_status`. Recurring tasks
-    (🔁) are refused for now: edit them in Obsidian.
+    (🔁) are refused for now: edit them in Obsidian. If the line cites
+    agent-ledger feedback (`ledger F12`), the result lists those entries with
+    their status.
 
     Refused, writing nothing, when the note changed since `expected_hash`
     (`stale_precondition`), when line `line` is not `expected_line`
@@ -1633,7 +1636,9 @@ async def set_task_status(
     change (`executeToggleTaskDoneCommand` does the same with the next status).
     Adds or removes the done (✅) and cancelled (❌) dates as the owner's Tasks
     settings say, with today's date in the owner's time zone. A task with
-    `🏁 delete` is removed when it is done (`removed: true`).
+    `🏁 delete` is removed when it is done (`removed: true`). If the line
+    cites agent-ledger feedback (`ledger F12`), the result lists those entries
+    with their status.
 
     **Recurring tasks (🔁) are refused** (`recurring_task`): ticking one must
     also create its next occurrence, which these tools do not do yet. Tick it
@@ -1677,6 +1682,7 @@ async def ledger_search(
     origin: str | None = None,
     unseen: bool = False,
     since: str | None = None,
+    tasks: str | None = None,
     limit: int = 20,
 ) -> LedgerSearchResult:
     """Find agent-ledger entries: quirks, feedback and proposals agents log.
@@ -1693,7 +1699,8 @@ async def ledger_search(
     or one of them with `mode`. When the embedding provider is down the
     meaning list says so and the words list still answers. Without `query`:
     the filtered list, most recently changed first. One line per entry, no
-    body: read entries with `ledger_get`.
+    body: read entries with `ledger_get`. A feedback line says whether vault
+    tasks cite it, and whether they are all done or cancelled (`tasks`).
 
     Args:
         query: words, or a ref such as Q14.
@@ -1707,11 +1714,14 @@ async def ledger_search(
         unseen: only feedback the owner has not heard of yet: what to
             bring to the owner (then mark it seen with `ledger_update`).
         since: YYYY-MM-DD; changed on or after that day.
+        tasks: feedback by the state of the vault tasks citing it: open (one
+            is not done or cancelled), done (all closed, one done) or
+            cancelled (all cancelled).
         limit: 1-100 per list (default 20).
     """
     return await ledger_search_impl(
         query=query, mode=mode, kinds=kinds, area=area, topics=topics, status=status, origin=origin,
-        unseen=unseen, since=since, limit=limit,
+        unseen=unseen, since=since, tasks=tasks, limit=limit,
     )
 
 
@@ -1723,7 +1733,9 @@ async def ledger_get(refs: list[str], history: bool = False) -> LedgerGetResult:
     and Q01 are the same entry). Each entry comes with its
     `revision` (give it to `ledger_update` as `expected_revision`), its own
     fields, topics, related refs and the summary-view lines that cite it.
-    `history=true` adds every past version, with who changed it, when and why.
+    Feedback also lists the vault tasks citing it (`ledger F12` in the task's
+    text), with their status. `history=true` adds every past version, with
+    who changed it, when and why.
 
     Args:
         refs: entry refs.
@@ -1770,7 +1782,9 @@ async def ledger_add(
             inferred (a deduction or a guess), docs (from documentation, not
             tried) or untested; certainty_note, sources.
             feedback: subtype (unclear_instruction, friction, suggestion;
-            required), component (file, tool or surface involved), fix.
+            required), component (file, tool or surface involved), leads
+            (ideas for fixing it, not a decision: what the owner decides to
+            do becomes a vault task citing `ledger F12`).
             proposal: target (where the instruction lives; required),
             proposed_text (the first version; required), final_text (what
             went in), changes (summary of what changed), owner_reason (only

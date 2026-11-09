@@ -50,7 +50,8 @@ also finds that entry as `Q1`.
     }
 
 `kind` is taken from the ref's letter. `details` holds the kind's own fields
-(see `ledger_add`). `seen` is for feedback only (default: true for origin
+(see `ledger_add`); feedback's `fix`, the name `leads` had before, is read
+as `leads`. `seen` is for feedback only (default: true for origin
 owner, false otherwise). Dates are ISO; `created_at`/`updated_at` default to
 now, `observed_on` to `created_at`'s day. `scripts/ledger_export.py --format
 json` writes this same shape.
@@ -162,7 +163,11 @@ async def run(args) -> dict:
             kind, number = ledger.parse_ref(e.get("ref"))
             if (kind, number) in entries:
                 raise ImportError_(f"{name}: ref given twice")
-            fields = ledger.validate_details(kind, e.get("details"), for_add=True)
+            details = e.get("details")
+            if kind == "feedback" and isinstance(details, dict) and "fix" in details and "leads" not in details:
+                # Files exported before the rename call feedback's `leads` `fix`.
+                details = {("leads" if k == "fix" else k): v for k, v in details.items()}
+            fields = ledger.validate_details(kind, details, for_add=True)
             status = e.get("status")
             if status not in db.LEDGER_KIND_STATUSES[kind] + db.LEDGER_CLOSING_STATUSES:
                 raise ImportError_(f"{name}: status {status!r} is not one a {kind} can have")

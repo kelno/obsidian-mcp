@@ -729,3 +729,78 @@ async def test_entries_failing_at_the_provider_are_tried_last(sessionmaker, ctx,
             LedgerEntry.embedded_hash == LedgerEntry.content_hash))).scalars().all())
     assert embedded == {g.ref for g in good}
     assert not embedded & {b.ref for b in bad}
+
+
+# ── Task links (ledger_tasks) ───────────────────────────────────────────────
+
+async def _task_note(sessionmaker, root, rel="t.md", body="# T\n"):
+    """A note on disk and in the index, for the task tools to write into."""
+    (root / rel).write_text(body, encoding="utf-8")
+    async with sessionmaker() as session:
+        await session.execute(text(
+            "INSERT INTO notes_metadata (user_id, file_path, title, tags, frontmatter, content_hash) "
+            "VALUES (NULL, :p, 't', '{}', '{}', 'h')"), {"p": rel})
+        await session.commit()
+
+
+async def test_feedback_leads_replace_fix(ctx):
+    added = await tools.ledger_add_impl("feedback", "Leads", area="home",
+                                        details={"subtype": "friction", "leads": "maybe X"})
+    assert added.error is None, added.error
+    got = (await tools.ledger_get_impl([added.ref])).entries[0]
+    assert got.details["leads"] == "maybe X"
+    old_name = await tools.ledger_add_impl("feedback", "Old", area="home",
+                                           details={"subtype": "friction", "fix": "x"})
+    assert code(old_name) == "invalid_argument" and "leads" in str(old_name.allowed)
+
+
+async def test_a_task_citing_feedback_is_linked_both_ways(sessionmaker, ctx):
+    await _task_note(sessionmaker, ctx)
+    entry = await tools.ledger_add_impl("feedback", "Bridge loops", area="home", details={"subtype": "friction"})
+    other = await tools.ledger_add_impl("feedback", "Other thing", area="home", details={"subtype": "friction"})
+
+    created = await tools.create_task_impl(f"Fix the loop (Ledger {entry.ref.replace('F', 'F0')})", path="t.md")
+    assert created.error is None, created.error
+    assert created.ledger_refs == [{"ref": entry.ref, "title": "Bridge loops", "status": "open", "tasks": "open"}]
+    got = (await tools.ledger_get_impl([entry.ref])).entries[0]
+    assert got.tasks_state == "open" and got.tasks == [
+        {"ref": f"t.md:{created.line}", "status": "TODO", "text": created.text}]
+    listed = await tools.ledger_search_impl(kinds=["feedback"])
+    assert {e.ref: e.tasks for e in listed.entries} == {entry.ref: "open", other.ref: None}
+    assert (await tools.ledger_search_impl(tasks="done")).entries == []
+
+    done = await tools.set_task_status_impl("t.md", created.line, created.text, created.content_hash, status="done")
+    assert done.error is None, done.error
+    assert done.ledger_refs == [{"ref": entry.ref, "title": "Bridge loops", "status": "open", "tasks": "done"}]
+    assert [e.ref for e in (await tools.ledger_search_impl(tasks="done")).entries] == [entry.ref]
+    by_query = await tools.ledger_search_impl(query="loops", mode="words", tasks="done")
+    assert [e.tasks for e in by_query.by_words] == ["done"]
+
+    # A second task citing it, still open: the entry is open again.
+    second = await tools.create_task_impl(f"Check it holds (ledger {entry.ref})", path="t.md")
+    assert second.ledger_refs[0]["tasks"] == "open"
+    assert (await tools.ledger_search_impl(tasks="done")).entries == []
+
+    # Only cancelled tasks: the decision was dropped.
+    dropped = await tools.create_task_impl(f"Do it (ledger {other.ref})", path="t.md")
+    cancelled = await tools.set_task_status_impl("t.md", dropped.line, dropped.text, dropped.content_hash,
+                                                 status="cancelled")
+    assert cancelled.ledger_refs[0]["tasks"] == "cancelled"
+    assert [e.ref for e in (await tools.ledger_search_impl(tasks="cancelled")).entries] == [other.ref]
+
+    bad = await tools.ledger_search_impl(tasks="closed")
+    assert code(bad) == "invalid_argument"
+
+
+async def test_task_tools_point_out_a_bare_ref_and_an_unknown_one(sessionmaker, ctx):
+    await _task_note(sessionmaker, ctx, "u.md")
+    entry = await tools.ledger_add_impl("feedback", "Named", area="home", details={"subtype": "friction"})
+    bare = await tools.create_task_impl(f"See {entry.ref} later, F5 key", path="u.md")
+    assert bare.ledger_refs is None
+    assert bare.notes and f"mentions {entry.ref} without `ledger`" in bare.notes[0] and len(bare.notes) == 1
+    unknown = await tools.create_task_impl("Do (ledger F999)", path="u.md")
+    assert unknown.ledger_refs == [{"ref": "F999", "status": "unknown"}]
+    edited = await tools.edit_task_impl("u.md", bare.line, bare.text, unknown.content_hash,
+                                        description=f"See it later (ledger {entry.ref})")
+    assert edited.error is None, edited.error
+    assert edited.ledger_refs[0]["ref"] == entry.ref and edited.notes is None

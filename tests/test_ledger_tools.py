@@ -101,7 +101,7 @@ def test_titles_and_reasons():
 
 
 def test_the_embedded_text_covers_the_kinds_fields():
-    entry = db.LedgerEntry(title="T", body="B", kind="feedback", component="C", fix="F")
+    entry = db.LedgerEntry(title="T", body="B", kind="feedback", component="C", leads="F")
     assert ledger.embed_text(entry) == "T\n\nB\n\nC\n\nF"
 
 

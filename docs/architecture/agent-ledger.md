@@ -26,6 +26,7 @@ Set by the owner (the design was reviewed with them on 2026-11-05); they outweig
 | `src/services/ledger.py` | Refs, validation, areas and topics as arguments, add, update, seen, get helpers, search filters and the words document, review flags, view hints. |
 | `src/services/ledger_views.py` | Topics (list, create, describe, merge) and summary views (list, render, edit). |
 | `src/services/ledger_embed.py` | Embedding one entry, the background queue, the indexer sweep, the meaning search, the reset. |
+| `src/services/ledger_tasks.py` | Task links: the `ledger F12` citation, the citing tasks read from `note_tasks`, the task state. |
 | `src/mcp_server/tools.py` (end), `server.py`, `ledger_result.py` | The eight tools and their structured results. |
 | `scripts/ledger_import.py`, `scripts/ledger_export.py` | JSON import; Markdown or JSON export. |
 
@@ -35,7 +36,7 @@ All in the connector's database, apart from the index tables. Each carries `user
 
 | Table | One row per | Notes |
 | --- | --- | --- |
-| `ledger_entries` | entry | `kind`, `number`, `ref`, `status`, `origin`, `title`, `body`, `area_tag`, `seen`; the kinds' own columns (quirk: `certainty`, `certainty_note`, `sources`; feedback: `subtype`, `component`, `fix`; proposal: `target`, `proposed_text`, `final_text`, `changes`, `owner_reason`); `superseded_by`, `handled_account`, `handled_at`, `observed_on`, `created_at`, `updated_at`, `revision`, `created_by`, `author`, `content_hash`, `embedded_hash`. |
+| `ledger_entries` | entry | `kind`, `number`, `ref`, `status`, `origin`, `title`, `body`, `area_tag`, `seen`; the kinds' own columns (quirk: `certainty`, `certainty_note`, `sources`; feedback: `subtype`, `component`, `fix` (the field `leads`: see "Task links"); proposal: `target`, `proposed_text`, `final_text`, `changes`, `owner_reason`); `superseded_by`, `handled_account`, `handled_at`, `observed_on`, `created_at`, `updated_at`, `revision`, `created_by`, `author`, `content_hash`, `embedded_hash`. |
 | `ledger_ref_counters` | owner and kind | The last number handed out, so a ref is never reused. |
 | `ledger_entry_links` | "see also" pair | Stored once, lower id first (`ck_ledger_entry_links_order`). |
 | `ledger_topics` | topic | `slug`, `kind` (system, surface), `description`, `area_tag`, `status` (active, merged), `merged_into`, `revision`. |
@@ -78,7 +79,7 @@ What stays in code: the area check (areas live in the vault), the expected revis
 - **Superseding.** The target must be live (not itself superseded or retracted), and an entry that other entries are superseded by cannot be closed until they point elsewhere: no chain or loop can leave content in no active entry. Re-pointing a superseded entry is an ordinary change.
 - **Update.** `ref`, `expected_revision`, `reason` are required (`stale_revision` with `current_revision` otherwise). The row is locked; `before` is a snapshot of every changeable field plus topics and related refs; the revision goes up by one; `content_hash` is recomputed. `append` adds `YYYY-MM-DD: text` as a new paragraph (the owner's local date, `TASKS_TIMEZONE`). Setting an area on `to_triage` feedback moves it to `open` (and clearing it, back), said in `notes`. Leaving `handled` clears the account; leaving `superseded` clears the pointer. An update that changes nothing is refused rather than recorded.
 - **Seen.** `ledger_update(refs=[…], seen=true)` (up to 100) or a single `ref` with only `seen=true`: no reason, no revision bump, no history row — it can overwrite nothing. Non-feedback refs are listed as `not_feedback`, unknown ones as `not_found`.
-- **Get.** Up to 20 refs; each with its fields, topics, related refs (both directions), the view lines citing it, and with `history=true` every past version. The answer is kept within `MAX_READ_RESPONSE_CHARS`: later entries go to `not_returned`, the oldest history of an entry is left out with a note.
+- **Get.** Up to 20 refs; each with its fields, topics, related refs (both directions), the view lines citing it, feedback's citing tasks (`tasks`, `tasks_state`: see "Task links"), and with `history=true` every past version. The answer is kept within `MAX_READ_RESPONSE_CHARS`: later entries go to `not_returned`, the oldest history of an entry is left out with a note.
 
 ## Search
 
@@ -87,7 +88,8 @@ What stays in code: the area check (areas live in the vault), the expected revis
 - **By words**: an exact ref match first (any status), then `to_tsvector(cfg, ref ‖ title ‖ body ‖ the kind's fields)` OR-ed over every `FTS_CONFIGS` entry, ranked by `ts_rank_cd`. **Computed at query time**, not stored (choice 3).
 - **By meaning**: the query embedded with a timeout of `LEDGER_QUERY_EMBED_TIMEOUT_SECONDS` (20 s, under the ~30 s client drop), then exact cosine distance over `ledger_embeddings`, **ranked per entry in SQL** (its best chunk, `min(distance) GROUP BY entry_id`), joined to entries whose `embedded_hash = content_hash`. Ranking chunks and deduping afterwards let one long entry's many close chunks fill every slot. An outdated vector is never read; `not_embedded` counts the filtered entries without a current one, **in the same statement as the hits**: the background queue can commit a vector while the search waits on the provider for the query's, and a count read before that call once reported as unembedded an entry the meaning list held (found in the first live check). A provider failure or timeout fills `meaning_unavailable` and leaves the words list whole.
 - Each list says when the other holds the same entry (`in_both_lists`). There is no merged ranking.
-- Filters: kinds, area (or `none`), topics (all of them; a merged topic's name finds what moved to its target), status, origin, `unseen`, `since` (changed on or after the owner's local day).
+- Filters: kinds, area (or `none`), topics (all of them; a merged topic's name finds what moved to its target), status, origin, `unseen`, `since` (changed on or after the owner's local day), `tasks` (feedback by its task state, "Task links"; applied in SQL as a list of feedback numbers, so it reaches both lists).
+- Each feedback line carries its task state (`tasks`) when a task cites it.
 - **`status="active"`** (the default) is quirks `current`, feedback `open` / `to_triage`, and **every proposal outcome**; `closed` is `stale`, `handled`, `dismissed`, `superseded`, `retracted` (choice 4).
 
 ## Vectors
@@ -107,6 +109,17 @@ What stays in code: the area check (areas live in the vault), the expected revis
 - **Reading** a view is kept within `MAX_READ_RESPONSE_CHARS` (half of it with `with_ids`, where each line appears twice): the remaining lines, or rows of a matrix, are counted in `lines_not_shown`.
 - **View hints.** A topic with at least `LEDGER_VIEW_HINT_MIN_QUIRKS` (15) current quirks, more than half of them cited by no live line, is named in `ledger_add`'s answer (for a quirk with that topic) and in `ledger_topics`.
 - **Topics**: create (usable at once), describe, merge. A merge moves the entry–topic rows to the target and marks the source merged; the history row lists the entries that moved. The entries' own revisions do not change (choice 5). A merged topic is refused as an argument with the name of its target, and still works as a search filter.
+
+## Task links
+
+Feedback holds a problem and its `leads` (ideas for fixing it); what the owner decides to do becomes a vault task whose text cites the entry as **`ledger F12`**. That citation is the only link anyone writes: the server derives the other direction from the task index whenever a tool needs it (`src/services/ledger_tasks.py`). Owner's design (2026-11-09, proposal logged in the ledger): a hand-written back-link on the entry, and a rule that whoever completes the task closes the entry, both drifted (tasks ticked by hand in Obsidian never reach an agent), and `fix` read as a decision, so agents could not tell decided entries from open ideas.
+
+- **The citation.** `ledger F<n>`, case-insensitive, whole words, leading zeros ignored, one citation per entry (`ledger F9, F10` links F9 only). Only feedback refs count. Matched in PostgreSQL (`line ~* 'ledger\s+f[0-9]'`) to read only candidate lines, then exactly in Python.
+- **Decided** means a task that is not cancelled cites the entry. **Task state** over the citing tasks, with statuses read as `list_tasks` reads them (the owner's Tasks settings, the global filter: a line the plugin would not read as a task does not count): `open` (one is not done or cancelled), `done` (all closed, one done), `cancelled` (all cancelled: undecided again). `NON_TASK` lines are ignored.
+- **Where it shows.** `ledger_get`: `tasks` (each citing task's `path:line`, status type, text) and `tasks_state`. `ledger_search`: `tasks` on each feedback line, and the `tasks` filter. `create_task`, `edit_task`, `set_task_status`: `ledger_refs`, each cited entry with its title, status and task state, read after the write's immediate re-index so it includes the line just written (for a `🏁 delete` removal, the removed line's citations); a cited ref with no entry is `status: unknown`; a bare `F12` naming an existing feedback entry gets a note saying it links nothing. Reading the citations after a task write never fails the write: a failure there is a note.
+- **`leads` is stored in the column `fix`.** The field was named `fix` until the owner's design above; tools, results, exports and new history versions say `leads`, older history versions keep `fix`. The column was not renamed because 032's stamp-back rerun adopts the ledger only when the catalog matches its own shape exactly: a renamed column would make every earlier migration's stamp-back rerun refuse at 032 (tried, and the schema gate's 22 rerun tests failed). The model maps the attribute to the column (`mapped_column("fix", …)`); the CHECKs name the column.
+- **Nothing is stored.** No column, no foreign key into the index tables (requirement 2): a reindex or prune can change what the tools show, never the ledger.
+- **What agents do with it** is in the connector's guide (ledger section): create the task with the citation once the owner decides; close an open entry whose tasks are all done as `handled`; an entry whose tasks were all cancelled stays open, undecided.
 
 ## Rate control and the write budget
 
@@ -144,6 +157,9 @@ Recorded so they are never mistaken for the owner's rules; each can be changed.
 | L7 | The owner's switch can also rewrite the history (`UPDATE` with the switch on). | It is the documented way to remove a sensitive detail for good, and only a direct database session can set it. |
 | L8 | Topic edits take an optional `expected_revision`, and a view's own title and description none: the last write wins there. | The history keeps the previous version with its reason; these are rare, low-stakes changes (choice 7). Found by the adversarial review, declined. |
 | L9 | `make reset-embeddings` and the panel's reset hold every entry's row lock and an exclusive lock on `ledger_embeddings` until they commit, so ledger writes and meaning searches wait for them (up to the statement timeout). | A reset is a rare maintenance step taken with the indexer paused. Found by the adversarial review, declined. |
+| L10 | Task links read the task index, which lags behind hand edits in Obsidian until the next index pass. | The task tools re-index their note at once; a pass is minutes away. Checking every citing line on disk would read many notes per ledger call. |
+| L11 | A task with `🏁 delete` disappears when done, and its citation with it: the entry reads as undecided again. A deleted note or task line breaks the link the same way, silently. | Only the citation links; `set_task_status` reports the removed line's citations, which covers an agent ticking it. Avoid `🏁 delete` on a task citing an entry. |
+| L12 | A citation in a form other than `ledger F12` (a bare `F12`, `ledger #F12`) links nothing. | One fixed form keeps matching exact; the task tools point out a bare ref that names an existing entry, and echo every link they find. |
 
 ## Adversarial review (2026-11-05)
 

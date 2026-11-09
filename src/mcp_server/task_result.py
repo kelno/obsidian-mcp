@@ -97,4 +97,10 @@ class TaskWriteResult(_OmitNone):
     indexed: bool | None = None
     index_note: str | None = None
     today: str | None = None
+    #: Agent-ledger feedback the line cites (`ledger F12`): each entry's ref,
+    #: title, status, and `tasks`, the state of every task citing it now
+    #: (open, done or cancelled). `status: unknown` for a ref with no entry.
+    ledger_refs: list[dict] | None = None
+    #: Plain-language remarks, such as a bare `F12` that links nothing.
+    notes: list[str] | None = None
     error: str | None = None

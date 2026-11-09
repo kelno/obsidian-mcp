@@ -458,7 +458,12 @@ Recurring tasks are read, never changed. Read
 `ledger_topic_edit`: what agents log for each other, in the `ledger_*`
 tables (migration 032), never in the vault. Every change names the revision
 it read and a reason, and keeps the previous version; nothing is deleted.
-Search returns two separate lists, by words and by meaning. The four
+Search returns two separate lists, by words and by meaning. A vault task
+citing `ledger F12` is the only link between feedback and the work decided
+on it: the ledger and task tools derive the other direction from
+`note_tasks` at read time (`src/services/ledger_tasks.py`), nothing stored;
+feedback's ideas live in `leads` (stored in the column `fix`, which a
+032 stamp-back rerun requires). The four
 writers draw on the write budget (`write_class`) though they change no
 vault byte. Structured results (`src/mcp_server/ledger_result.py`), services
 in `src/services/ledger*.py`, import and export in `scripts/ledger_*.py`.
