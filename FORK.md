@@ -57,14 +57,14 @@ docker run --rm --privileged --tmpfs /tmp --network omcp-test \
   -e PGVECTOR_TEST_ADMIN_URL=postgresql+asyncpg://postgres:test@omcp-test-pg:5432/postgres \
   -e TEST_DATABASE_URL=postgresql+asyncpg://postgres:test@omcp-test-pg:5432/postgres \
   -v "<the checkout>:/repo:ro" omcp-test sh -c \
-  'mkdir /tmp/r && tar -C /repo --exclude=.git -cf - . | tar -C /tmp/r -xf - && cd /tmp/r && python -m pytest -q -n auto --dist loadgroup tests'
+  'mkdir /tmp/r && tar -C /repo --exclude=.git -cf - . | tar -C /tmp/r -xf - && cd /tmp/r && python -m pytest -q -n 4 --dist loadgroup tests'
 ```
 
 Rebuild the image when `requirements*.txt` change. Afterwards, remove the Postgres container and the network, or keep them for the next run.
 
 Why each part is there:
 
-- **`-n auto --dist loadgroup`** (pytest-xdist): one worker per CPU. The hook in `tests/conftest.py` keeps each test module whole on one worker, in file order, because module-scoped fixtures and tests that rely on an earlier test in the same module assume that. A module whose tests are each self-contained sets `XDIST_PER_TEST = True` and is shared out test by test. `tests/integration/test_schema_check.py` does, or it alone would take minutes. All workers must collect the same test names, so a parametrize id can't come from a random value: give it `pytest.param(..., id=...)`.
+- **`-n 4 --dist loadgroup`** (pytest-xdist): four workers. `-n auto` (one per CPU, 12 on the owner's PC) is about as fast but crashed the WSL VM twice on 2026-11-09. The hook in `tests/conftest.py` keeps each test module whole on one worker, in file order, because module-scoped fixtures and tests that rely on an earlier test in the same module assume that. A module whose tests are each self-contained sets `XDIST_PER_TEST = True` and is shared out test by test. `tests/integration/test_schema_check.py` does, or it alone would take minutes. All workers must collect the same test names, so a parametrize id can't come from a random value: give it `pytest.param(..., id=...)`.
 - **The copy into `/tmp`**: a checkout on a Windows drive reaches the container through a slow file bridge, and the integration tests start many `alembic` subprocesses, each importing the app again. Copying first saved about a fifth of the run.
 - **A network, not a shared pod or `localhost`**: the pgvector image trusts loopback connections without a password, so `test_wrong_password_prints_the_upgrade_hint_once` fails when the tests reach Postgres over loopback.
 - **`max_connections=300`**: each parallel worker holds its own connection pools, and the default of 100 leaves too little headroom.
@@ -77,7 +77,7 @@ Each integration module used to build its database by running every migration. `
 
 ### Single files, and the offline suite without a container
 
-`python -m pytest -q tests/test_task_tools.py tests/integration/test_task_tools_pg.py` runs just those files. An integration file needs the database URLs above (in the container, or with any reachable server), or it skips itself. The offline suite (everything outside `tests/integration/`) needs no container and no database: a Python 3.12 venv with `requirements-dev.txt` is enough, `pytest -q -n auto --dist loadgroup --ignore=tests/integration tests`. In WSL, run it from a copy on WSL's own disk rather than from `/mnt/...`, for the same file-bridge reason (for example `rsync -a --delete --exclude .git <the checkout's WSL path>/ ~/omcp-tests/` before each run).
+`python -m pytest -q tests/test_task_tools.py tests/integration/test_task_tools_pg.py` runs just those files. An integration file needs the database URLs above (in the container, or with any reachable server), or it skips itself. The offline suite (everything outside `tests/integration/`) needs no container and no database: a Python 3.12 venv with `requirements-dev.txt` is enough, `pytest -q -n 4 --dist loadgroup --ignore=tests/integration tests`; to run all of `tests` without a database, set `OMCP_ALLOW_SKIP_TRANSFER_INTEGRATION=1` so the transfer suite skips instead of erroring. Use `-n 4` rather than `-n auto`, as in the container (12 workers crashed the WSL VM on the owner's PC). To add pytest-xdist to an existing venv, `pip install --no-deps pytest-xdist execnet`: with its dependencies it also pulls the newest pytest, which broke 126 tests on 2026-11-09. In WSL, run it from a copy on WSL's own disk rather than from `/mnt/...`, for the same file-bridge reason (for example `rsync -a --delete --exclude .git <the checkout's WSL path>/ ~/omcp-tests/` before each run).
 
 Outside the privileged container nothing should stall any more. Offline tests that reach the database by accident (a stage's run row, an overlap check) rely on the connection being refused, which on Linux takes a millisecond; under WSL's mirrored networking a connect to a closed port on `127.0.0.1` is left unanswered instead, so each such call waited out asyncpg's 60 s connect timeout, and a nested-mount test's subprocess stalled until its own 600 s timeout. `tests/conftest.py` now refuses connections to the offline test database (`test:test@localhost/test`, which never exists) at once, wherever the suite runs (2026-11-09). Without a database, `tests/integration/test_transfer_pg.py` errors on purpose rather than skipping (75 errors); set `OMCP_ALLOW_SKIP_TRANSFER_INTEGRATION=1` to opt out. If a test does stall, `pytest -o faulthandler_timeout=20` names where it hangs.
 
@@ -97,6 +97,7 @@ Measured on the owner's PC, so a slower or faster machine can be judged against 
 | 5 offline files (`test_vault_mutation_safety`, `test_asvs_link_grammar`, `test_issue_211_masked_splice`, `test_nested_mount_publication`, `test_issue_150_docstrings`; 194 tests), serial | plain WSL, copy on WSL's disk | about 12 s (11.7 s) | 2026-11-09 |
 | the same 5 files | plain WSL, from `/mnt/d/...` | about 16 s (16.0 s) | 2026-11-09 |
 | the same 5 files, before the offline-database fix (2026-11-09) | plain WSL, either place | about 10 minutes (one 600 s timeout) | 2026-11-09 |
+| Whole suite without a database, `-n 4`, `OMCP_ALLOW_SKIP_TRANSFER_INTEGRATION=1` (7,152 passed, 998 skipped) | plain WSL, copy on WSL's disk | about 1 minute (58 s) | 2026-11-09 |
 | Whole suite without a database, serial (8,150 tests: 7,152 passed, 923 skipped, the 75 transfer errors above) | plain WSL, copy on WSL's disk | about 3¼ minutes (3 min 14 s) | 2026-11-09 |
 
 A run far above these on this machine usually means a test is waiting on something (a database, a subprocess), not that the machine is slow; `pytest --durations=5` names it.
