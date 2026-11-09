@@ -26,6 +26,8 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import yaml
+
 from src.config import settings
 from src.services.vault import parse_frontmatter_diagnose
 
@@ -76,6 +78,12 @@ def _stamp_text(text: str, field: str, value: str) -> str:
     if not diagnosis.valid:
         if diagnosis.defect is not None:
             return text  # a broken block: never stamp over it
+        if text.startswith(("﻿", "---")):
+            # A byte-order mark, or a first line that opens with `---` without
+            # being a fence this parser accepts (`--- `, `---x`): another
+            # reader (Obsidian strips a BOM) may see a block there, which a
+            # prepended one would push into the body.
+            return text
         nl = _newline_of(text)
         candidate = f"---{nl}{field}: {value}{nl}---{nl}{text}"
         return candidate if _same_plus_stamp(candidate, {}, text, field, value) else text
@@ -92,14 +100,21 @@ def _stamp_text(text: str, field: str, value: str) -> str:
     rest = block[start + len(yaml_text):]
 
     lines = yaml_text.splitlines(keepends=True)
-    key = re.compile(re.escape(field) + r"[^\S\r\n]*:(?:[^\S\r\n]|$)")
+    # The key at column 0, then `:` and a space, a tab or the line's end
+    # (`\r` counts: an empty value on a CRLF note is `field:\r\n`).
+    key = re.compile(re.escape(field) + r"[^\S\r\n]*:(?=[^\S\r\n]|[\r\n]|$)")
     new_line = f"{field}: {value}{nl}"
     for i, line in enumerate(lines):
         if key.match(line):
             end = i + 1
             # The value's continuation lines (a block scalar, a nested list):
-            # indented ones directly below it.
-            while end < len(lines) and lines[end][:1] in (" ", "\t"):
+            # indented ones directly below it, up to an indented comment,
+            # which is kept.
+            while (
+                end < len(lines)
+                and lines[end][:1] in (" ", "\t")
+                and not lines[end].lstrip().startswith("#")
+            ):
                 end += 1
             lines[i:end] = [new_line]
             break
@@ -118,9 +133,25 @@ def _same_plus_stamp(candidate: str, old_fm: dict, old_body: str, field: str, va
     fm, body, diagnosis = parse_frontmatter_diagnose(candidate)
     if not diagnosis.valid or body != old_body or not _is_value(fm.get(field, _MISSING), value):
         return False
+    if _top_level_key_count(diagnosis.yaml_text, field) != 1:
+        # PyYAML keeps the last of duplicate keys silently; Obsidian refuses
+        # the whole block. A quoted spelling of the key, or a form the line
+        # match missed, would otherwise pass as "set" with a duplicate.
+        return False
     rest_new = {k: v for k, v in fm.items() if k != field}
     rest_old = {k: v for k, v in old_fm.items() if k != field}
     return rest_new == rest_old
+
+
+def _top_level_key_count(yaml_text: str, field: str) -> int:
+    """How many keys of the block's top-level mapping read as `field`."""
+    try:
+        node = yaml.compose(yaml_text, Loader=yaml.SafeLoader)
+    except (yaml.YAMLError, ValueError, RecursionError):
+        return -1
+    if not isinstance(node, yaml.MappingNode):
+        return -1
+    return sum(1 for key, _ in node.value if isinstance(key, yaml.ScalarNode) and key.value == field)
 
 
 def _is_value(parsed, value: str) -> bool:

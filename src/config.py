@@ -1260,6 +1260,13 @@ class Settings(BaseSettings):
                 "LAST_AI_EDIT_FIELD must be a plain property name "
                 "(letters, digits, '_', '-', '.'; starting with a letter or '_')"
             )
+        if v is not None:
+            import yaml
+
+            # `true`, `yes`, `null` and the like pass the pattern but load as
+            # a bool or None, so the stamp would never find its own key.
+            if yaml.safe_load(f"{v}: 1") != {v: 1}:
+                raise ValueError(f"LAST_AI_EDIT_FIELD={v!r} is not read by YAML as a string key")
         return v
 
     @field_validator("oauth_known_redirect_hosts", mode="before")

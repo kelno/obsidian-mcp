@@ -112,6 +112,32 @@ def test_a_crlf_note_stays_crlf(on):
     assert stamp(note) == f"---\r\ntitle: T\r\nlast_ai_edit: {STAMP}\r\n---\r\nbody\r\n"
 
 
+def test_an_empty_value_on_a_crlf_or_cr_note_is_replaced_not_duplicated(on):
+    """Review finding 1: `field:` then `\r` was not read as the key, and a
+    second key was appended."""
+    note = "---\r\ntitle: a\r\nlast_ai_edit:\r\ntags: [x]\r\n---\r\n"
+    assert stamp(note) == f"---\r\ntitle: a\r\nlast_ai_edit: {STAMP}\r\ntags: [x]\r\n---\r\n"
+    note = "---\rlast_ai_edit:\r  - x\rkeep: 1\r---\r"
+    assert stamp(note) == f"---\rlast_ai_edit: {STAMP}\rkeep: 1\r---\r"
+
+
+@pytest.mark.parametrize("key", ['"last_ai_edit"', "'last_ai_edit'"])
+def test_a_quoted_key_is_left_alone_rather_than_duplicated(on, key):
+    note = f"---\n{key}: old\n---\nbody\n"
+    assert stamp(note) == note
+
+
+@pytest.mark.parametrize("note", ["\ufeff---\ntitle: a\n---\nbody\n", "--- \ntitle: a\n---\nbody\n", "---x\nbody\n"])
+def test_no_block_is_prepended_where_another_reader_may_see_one(on, note):
+    """Review finding 3: a BOM note, or a first line opening with `---`."""
+    assert stamp(note) == note
+
+
+def test_an_indented_comment_under_the_property_is_kept(on):
+    note = "---\nlast_ai_edit: x\n  # keep me\ntitle: T\n---\n"
+    assert stamp(note) == f"---\nlast_ai_edit: {STAMP}\n  # keep me\ntitle: T\n---\n"
+
+
 def test_a_key_that_only_starts_like_the_property_is_not_it(on):
     note = "---\nlast_ai_edit_by: me\n---\n"
     assert stamp(note) == f"---\nlast_ai_edit_by: me\nlast_ai_edit: {STAMP}\n---\n"
@@ -147,7 +173,7 @@ def test_the_exclude_list_takes_csv_or_json():
     assert _settings(last_ai_edit_exclude='["/_/*"]').last_ai_edit_exclude == ["_/*"]
 
 
-@pytest.mark.parametrize("bad", ["a b", "a:b", "#x", "-x", "'q'"])
+@pytest.mark.parametrize("bad", ["a b", "a:b", "#x", "-x", "'q'", "true", "yes", "null", "Off"])
 def test_the_property_name_must_be_plain(bad):
     with pytest.raises(ValueError):
         _settings(last_ai_edit_field=bad)
@@ -286,3 +312,21 @@ def test_move_note_carries_the_hint_and_moves_nothing_in_the_archive(archive, mo
     assert "counterpart Archive/Reference/Servers/" in str(result)
     assert (archive / "Archive" / "Reference" / "Servers" / "old.md").read_text() == "old\n"
     assert not (archive / "Archive" / "Reference" / "Hosts").exists()
+
+
+def test_set_frontmatter_removing_the_last_key_leaves_no_block(vault):
+    """Review finding 5: the result says the block is gone, so no stamp
+    brings one back."""
+    (vault / "n.md").write_text("---\na: 1\n---\nbody\n")
+    asyncio.run(tools.set_frontmatter_impl("n.md", {}, remove=["a"]))
+    assert read(vault, "n.md") == "body\n"
+
+
+def test_a_root_error_after_the_move_is_no_hint(archive, monkeypatch):
+    """Review finding 6: `_vault_root` raises RuntimeError for an unassigned
+    or quarantined root; the move has stood, so that is just no hint."""
+    def boom(_uid):
+        raise RuntimeError("quarantined")
+
+    monkeypatch.setattr(tools, "_vault_root", boom)
+    assert hint("Reference/Servers/a.md", "Elsewhere/a.md") is None

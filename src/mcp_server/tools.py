@@ -5010,7 +5010,7 @@ def _archive_counterpart_hint(uid: int | None, from_rel: str, to_rel: str) -> st
     counterpart = f"{archive}/{src_dir}"
     try:
         st = os.lstat(_vault_root(uid) / counterpart)
-    except (OSError, ValueError):
+    except Exception:  # an unassigned or quarantined root, too: the move stood
         return None
     if not stat.S_ISDIR(st.st_mode):
         return None
@@ -6252,8 +6252,11 @@ async def set_frontmatter_impl(
         if new_raw == raw:
             return f"No changes for {path}"
         # The agent-edit stamp, on the serialized result (a line edit of the
-        # block just written, so it cannot reorder what the caller set).
-        new_raw = ai_edit_stamp.stamp(new_raw, target.rel)
+        # block just written, so it cannot reorder what the caller set). Not
+        # when the caller removed the last key: the result says the block is
+        # gone, and a stamp would bring one back.
+        if fm:
+            new_raw = ai_edit_stamp.stamp(new_raw, target.rel)
 
         # Bound the result before writing (see `edit_note_impl`). A remove-only
         # call can only shrink the note, but the check is uniform.
