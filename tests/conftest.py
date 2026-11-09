@@ -40,6 +40,10 @@ SETTINGS_ENV_KEYS = (
     "VAULT_PATH",
     "SECRET_KEY",
     "INDEX_INTERVAL_SECONDS",
+    # The embed loop's own interval (separate loops, 2026-11-09).
+    "EMBED_INTERVAL_SECONDS",
+    # How long a rewrite move waits for the index lock (2026-11-09).
+    "MOVE_INDEX_REFRESH_WAIT_SECONDS",
     "INDEXER_DEGRADED_AFTER_FAILURES",
     "INDEXER_QUARANTINE_RETRIES_PER_TICK",
     # Stall detection and the embed stage's provider stop (fork).
