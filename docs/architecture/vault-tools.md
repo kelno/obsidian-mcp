@@ -345,11 +345,22 @@ So before reading `note_links`, `_refresh_index_before_move` runs `indexer.refre
 - the lock is not free within `MOVE_INDEX_REFRESH_WAIT_SECONDS` (30 s);
 - indexing is paused by a panel action (checked before and again under the lock);
 - the pass raises;
-- the pass could not see every note: a folder it could not list (`walk_failed`), a note it could not read (`read_failed`, new on `IndexPassResult`), or a quarantined note. Any of them could hold a link the move would strand. These persist until fixed, and the refusal names up to ten of them.
+- the pass could not see every note: a folder it could not list (`walk_failed`) or a quarantined note (its row is deleted while quarantined, so its links are unknown). Both persist until fixed, both are on `/health`, and the refusal names up to ten of them.
 
-A note that is *not indexable* (a name the index cannot hold, or content that is not UTF-8) does not refuse: no link is ever extracted from it, so it was never a rewrite source, and refusing on it would block every rewrite move for as long as such a file exists. Declared, not hidden.
+Two kinds of note do **not** refuse, by decision (adversarial review, 2026-11-09):
+
+- a note the pass could not **read** (`read_failed`, now on `IndexPassResult`): a dangling symlink, EACCES, EIO. Its row, if any, keeps the links last extracted, so a note that linked here is still found as a source and phase 1 then reports it unreadable; with no row it was never a source, and the move could not rewrite it anyway. Refusing on it blocked every rewrite move for as long as one such file existed, with no fix an agent can make (the note tools refuse symlinked leaves).
+- a note that is *not indexable* (a name the index cannot hold, or content that is not UTF-8): no link is ever extracted from it. A non-UTF-8 note that links here keeps its stale link while the move reports success; that predates this change, and the rewriter could not decode it either. Declared, not hidden.
+
+`expected_hash` is checked twice: before the refresh (so a stale move costs no pass) and again after it, because the refresh can take tens of seconds and the first check binds the bytes as they were before it.
+
+The refresh records nothing in `indexer_health`: those counters describe the loop, and a refresh feeding them reset the stall clock (hiding a loop frozen in an embed stage), raised false stalls when `INDEX_INTERVAL_SECONDS` ≥ `INDEXER_STALLED_AFTER_SECONDS`, and reset the loop's failure counter from outside. A failed refresh is logged and refused.
 
 `_acquire_within` is not `asyncio.wait_for(lock.acquire())`: that form can drop an acquire that completes just as the deadline or a cancellation lands, leaving the lock held with no owner, and every later index pass would wait for ever. The acquire is its own task, and an abandoned one that won the lock gives it back.
+
+**Residual (L2): only the lock wait is bounded, not the pass.** A pass that must re-read much of the vault (a re-derive after a grammar change, a provenance discard) runs inside the tool call, holding `_MOVE_REWRITE_LOCK`; a client may time out first. Cancellation is safe (the scan stops before its root descriptor closes; the lock is released in `finally`). Rare, and accepted.
+
+**Residual (L3): the startup link backfill.** Startup takes `index_pass_lock` separately for its index stage and its link backfill, so a refresh can run between them; if `note_links` still needed the one-time backfill (after a migration that empties it), that move would find no backlinks. A one-time window, accepted.
 
 **Residual (L1): an edit landing during the move itself.** The refresh closes the window between passes, not the move's own duration: a link written to another note after the refresh read it and before the move's inventory query is still missed. The window is now the length of one move (milliseconds to seconds), not an index interval. Closing it entirely would mean scanning every note's text under the move lock, which the stall analysis above rules out.
 

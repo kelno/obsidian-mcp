@@ -4854,9 +4854,10 @@ async def _refresh_index_before_move(uid: int | None) -> str | None:
             f"Move aborted: {e}. With rewrite_links=True the move first brings "
             "the link index up to date, so that every note linking here is "
             "found; without that, links written recently would be left "
-            "pointing at the old path. Nothing was moved, rewritten or "
-            "reindexed. Retry in a minute, or move with rewrite_links=False "
-            "and update the links yourself.",
+            "pointing at the old path. Nothing was moved or rewritten (the "
+            "index itself may have been brought partly up to date). Retry in "
+            "a minute, or move with rewrite_links=False and update the links "
+            "yourself.",
             "index_not_ready",
         )
     return None
@@ -5052,6 +5053,23 @@ async def _move_note_locked(
             # scope now, or the move is refused here, before anything moved.
             if err := await _refresh_index_before_move(uid):
                 return err
+            # The precondition again: the refresh can take tens of seconds
+            # (its lock wait, then the pass), and the check above binds the
+            # bytes as they were before it (review, 2026-11-09).
+            if expected_hash is not None:
+                _, note_cap_bytes = _note_precondition_cap()
+                try:
+                    incumbent, over_cap = _read_incumbent(
+                        src_target, from_path, note_cap_bytes
+                    )
+                except OSError as e:
+                    return _body_refusal(f"Failed to read {from_path}: {e}", "io_failure")
+                if incumbent is None and not over_cap:
+                    return _body_refusal(f"Source note not found: {from_path}", "not_found")
+                if err := _move_precondition_error(
+                    from_path, incumbent, expected_hash, over_cap=over_cap
+                ):
+                    return err
             async with async_session() as session:
                 rows_stmt = select(NoteMetadata.file_path, NoteMetadata.id).where(
                     _note_owner_predicate(uid)

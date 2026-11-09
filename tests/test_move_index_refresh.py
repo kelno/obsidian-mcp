@@ -21,7 +21,11 @@ def index_lock(monkeypatch):
     lock = asyncio.Lock()
     monkeypatch.setattr(indexer, "index_pass_lock", lock)
     monkeypatch.setattr(indexer, "_is_paused", lambda: False)
-    monkeypatch.setattr(indexer, "record_index_outcome", lambda *a, **k: None)
+
+    def must_not_record(*a, **k):
+        raise AssertionError("the refresh fed the loop's health counters")
+
+    monkeypatch.setattr(indexer, "record_index_outcome", must_not_record)
     return lock
 
 
@@ -68,7 +72,6 @@ async def test_a_clean_pass_is_returned(index_lock, monkeypatch):
 @pytest.mark.parametrize(
     ("field", "expected"),
     [
-        ("read_failed", "a.md (could not be read)"),
         ("walk_failed", "dir/ (folder could not be listed)"),
         ("quarantined", "a.md (quarantined by the indexer)"),
     ],
@@ -248,3 +251,64 @@ async def test_the_panel_lock_takes_both_stage_locks_index_first(monkeypatch):
     async with routes._pass_lock_without_a_connection(Session()):
         assert index_spy.locked() and embed_spy.locked()
     assert order == ["index", "embed"]
+
+
+async def test_an_unreadable_note_does_not_refuse(index_lock, monkeypatch):
+    """A dangling symlink or an EIO note would otherwise block every rewrite
+    move for good; its row keeps its links, so it is still found as a source."""
+    result = indexer.IndexPassResult(3, 1, read_failed=("broken.md",))
+    monkeypatch.setattr(indexer, "index_vault", _pass_returning(result))
+    assert await indexer.refresh_index_for_move(None, wait_seconds=1) is result
+
+
+async def test_a_cancelled_caller_is_not_turned_into_a_timeout():
+    """A cancellation that arrives while the acquire is being abandoned (the
+    timeout path) is re-raised, not swallowed into a "busy" refusal."""
+    lock = asyncio.Lock()
+    await lock.acquire()
+
+    async def abandon_while_cancelled():
+        acquire = asyncio.ensure_future(lock.acquire())
+        await asyncio.sleep(0)
+        # Delivered at the abandon's own await, deterministically.
+        asyncio.current_task().cancel()
+        await indexer._abandon_acquire(lock, acquire)
+
+    task = asyncio.ensure_future(abandon_while_cancelled())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    lock.release()
+    assert not lock.locked()
+
+
+async def test_the_hash_precondition_is_checked_again_after_the_refresh(monkeypatch, tmp_path):
+    """The refresh can take tens of seconds; an edit landing during it must
+    refuse a move bound to the earlier bytes."""
+    import hashlib
+
+    from src.mcp_server.auth import current_permission
+
+    monkeypatch.setattr(tools.settings, "vault_path", str(tmp_path))
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(tools, "_log_usage", noop)
+    source = tmp_path / "Foo.md"
+    source.write_bytes(b"before" + bytes([10]))
+    bound = "sha256:" + hashlib.sha256(b"before" + bytes([10])).hexdigest()
+
+    async def edit_during_refresh(uid):
+        source.write_bytes(b"edited during the refresh" + bytes([10]))
+        return None
+
+    monkeypatch.setattr(tools, "_refresh_index_before_move", edit_during_refresh)
+    token = current_permission.set("readwrite")
+    try:
+        result = await tools.move_note_impl(
+            "Foo.md", "Bar.md", rewrite_links=True, expected_hash=bound
+        )
+    finally:
+        current_permission.reset(token)
+    assert "stale_precondition" in result, result
+    assert source.exists() and not (tmp_path / "Bar.md").exists()

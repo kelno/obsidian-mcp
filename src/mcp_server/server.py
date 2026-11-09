@@ -767,10 +767,11 @@ async def move_note(
 
     Before that, the move brings the link index up to date (an index pass
     over your notes, re-reading only the ones that changed), so links written
-    moments ago are found too. If it cannot — another index pass busy for over 30 s,
-    indexing paused, or a note or folder the index cannot read (named in the
-    refusal) — the move is refused with `index_not_ready` and nothing changes:
-    retry shortly, fix the named note, or move with `rewrite_links=False`.
+    moments ago are found too. If it cannot — another index pass busy past
+    the wait limit, indexing paused, or a folder the index cannot list or a
+    note it set aside (named in the refusal) — the move is refused with
+    `index_not_ready` and nothing is moved or rewritten: retry shortly, fix
+    the named note, or move with `rewrite_links=False`.
 
     The rewrites are planned before anything changes: if one would push a
     source note past the 10 MiB note limit the whole move is refused, naming

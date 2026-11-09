@@ -105,14 +105,19 @@ async def test_a_note_created_since_the_last_pass_can_be_moved_with_its_backlink
     assert (vault / "Linker.md").read_text(encoding="utf-8") == "see [[Fresh2]]\n"
 
 
-async def test_an_unreadable_note_refuses_the_move_and_moves_nothing(vault, monkeypatch):
+async def test_a_note_the_refresh_cannot_read_still_counts_as_a_backlink(vault, monkeypatch):
+    """A note the refresh fails to read does not refuse the move (a dangling
+    symlink would otherwise block every rewrite move for good): its row keeps
+    the links an earlier pass extracted, so it is still found and rewritten."""
     (vault / "Foo.md").write_text("body\n", encoding="utf-8")
-    (vault / "Broken.md").write_text("see [[Foo]]\n", encoding="utf-8")
+    (vault / "Flaky.md").write_text("see [[Foo]]\n", encoding="utf-8")
+    await indexer.index_vault(user_id=None)
+    (vault / "Flaky.md").write_text("see [[Foo]] again\n", encoding="utf-8")
 
     real_read = indexer._read_and_hash
 
     def failing_read(parent_fd, name, rel):
-        if rel == "Broken.md":
+        if rel == "Flaky.md":
             raise OSError(5, "Input/output error")
         return real_read(parent_fd, name, rel)
 
@@ -120,10 +125,9 @@ async def test_an_unreadable_note_refuses_the_move_and_moves_nothing(vault, monk
 
     result = await tools.move_note_impl("Foo.md", "Bar.md", rewrite_links=True)
 
-    assert "Move aborted" in result and "Broken.md (could not be read)" in result, result
-    assert '"index_not_ready"' in result or "index_not_ready" in result
-    assert (vault / "Foo.md").exists() and not (vault / "Bar.md").exists()
-    assert (vault / "Broken.md").read_text(encoding="utf-8") == "see [[Foo]]\n"
+    assert "Move aborted" not in result, result
+    assert (vault / "Bar.md").exists()
+    assert (vault / "Flaky.md").read_text(encoding="utf-8") == "see [[Bar]] again\n"
 
 
 async def test_a_move_without_rewrite_runs_no_refresh(vault, monkeypatch):

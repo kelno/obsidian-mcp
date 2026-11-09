@@ -149,7 +149,7 @@ EMBED_PROGRESS_LOG_SECONDS = 60
 #: How long the loop waits before the next tick when an embed stage stopped at
 #: its budget with work left. Short, because the work left is work a healthy
 #: provider can do now; not zero, so the tick's housekeeping and a waiting
-#: panel action are not starved. `index_pass_lock` is FIFO, so a panel
+#: panel action are not starved. The stage locks are FIFO, so a panel
 #: Reindex already queued still goes first.
 EMBED_BACKLOG_RETICK_SECONDS = 5
 
@@ -441,9 +441,9 @@ async def _write_indexer_run(
 ) -> None:
     """Insert one run row and prune to the newest `MAX_INDEXER_RUNS`.
 
-    **Session discipline.** This is only ever called by the *holder* of
-    `index_pass_lock`, never by something waiting for it, and it opens and
-    closes its own short-lived session inside that call. That is the same rule
+    **Session discipline.** This is never called by something waiting for a
+    stage lock (since the stage locks split it runs holding none), and it
+    opens and closes its own short-lived session inside that call. That is the same rule
     the panel's destructive actions follow from the other side
     (`_pass_lock_without_a_connection` in `src/control_panel/routes.py`): a
     waiter that keeps a pooled connection while blocking on the lock deadlocks
@@ -3044,7 +3044,7 @@ async def _index_vault_pinned(
     snapshot = {row.file_path: SnapshotRow.of(row) for row in snapshot_rows}
 
     # ── The walk, off the loop and outside any transaction (D8, D9) ───────
-    # C7: `index_pass_lock` (held by every caller) covers the walk too, so no
+    # C7: `index_pass_lock` (held around every index stage) covers the walk too, so no
     # two passes of this process interleave. C8: the quarantine refusal ran in
     # `index_vault` before the root was even resolved.
     # Under a re-derive the shortcut is decided per row (#311, D4): a row
@@ -4202,6 +4202,12 @@ async def _index_vault_attempt(
     # #311, D8: a committed re-derive that changed a row forgets the clean
     # exclusion sweep; one that changed nothing keeps it.
     if re_derive and (to_upsert or moved_new_paths or deleted_paths):
+        clear_sweep_state(user_id)
+    # A backstop cleared the record at its start (`index_vault`); since the
+    # stage locks split, an embed stage may have swept against the old rows
+    # and recorded itself clean before this commit. Clear again now the rows
+    # are committed (review, 2026-11-09).
+    if backstop:
         clear_sweep_state(user_id)
 
     # The backstop's clock advances only on a full-hash pass that committed
@@ -7580,7 +7586,7 @@ async def _rotated_user_ids() -> list[int]:
 async def _advance_rotation_cursor(user_id: int) -> None:
     """Record that this user's per-user sequence has finished.
 
-    **Its own short session, opened by the holder of `index_pass_lock` after
+    **Its own short session, opened by the loop (holding no stage lock) after
     the wrapped body's session has closed** — `_write_indexer_run`'s discipline,
     so one task never holds two pooled connections while another waits for the
     lock.
@@ -7605,8 +7611,8 @@ async def _advance_rotation_cursor(user_id: int) -> None:
 
 
 # One wall-clock bound for the whole pre-warm. It runs while holding
-# `index_pass_lock`, so an unbounded hang would block the panel's reindex and
-# reset-embeddings actions indefinitely.
+# `embed_pass_lock`, so an unbounded hang would block the embed stages and the
+# panel's reset-embeddings actions indefinitely.
 PREWARM_TIMEOUT_SECONDS = 15.0
 
 # The index the search path actually uses, from its one definition (#283).
@@ -7933,13 +7939,22 @@ async def _acquire_within(lock: asyncio.Lock, timeout: float) -> bool:
 
 async def _abandon_acquire(lock: asyncio.Lock, acquire: "asyncio.Future") -> None:
     acquire.cancel()
+    won = False
     try:
         await asyncio.shield(acquire)
+        won = True
     except asyncio.CancelledError:
-        return
+        # Either the acquire's own cancellation, or the caller's arriving
+        # while it settled: the caller's is re-raised below, not swallowed.
+        if acquire.done() and not acquire.cancelled() and acquire.exception() is None:
+            won = True
     except Exception:
-        return
-    lock.release()
+        pass
+    if won:
+        lock.release()
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError
 
 
 class MoveRefreshRefused(RuntimeError):
@@ -7963,12 +7978,11 @@ async def refresh_index_for_move(user_id: int | None, *, wait_seconds: float):
     (`allow_backstop=False`), so its cost is the stat walk plus what changed.
 
     Waits at most `wait_seconds` for the pass lock, then refuses. Refuses too
-    when indexing is paused, when the pass raises, and when it could not see
-    every note: a directory it could not list, a note it could not read, or a
-    quarantined note — each could hide a link the move would then strand.
-    Raises `MoveRefreshRefused`; returns the pass result otherwise. Records
-    the outcome in `indexer_health` like any other index stage; it writes no
-    `indexer_runs` row (that table's trigger set is closed).
+    when indexing is paused, when the pass raises, and when a folder could not
+    be listed or a note is quarantined — each could hide a link the move would
+    then strand. Raises `MoveRefreshRefused`; returns the pass result
+    otherwise. Records nothing in `indexer_health` (it describes the loop) and
+    writes no `indexer_runs` row (that table's trigger set is closed).
     """
     if _is_paused():
         raise MoveRefreshRefused(
@@ -7991,17 +8005,24 @@ async def refresh_index_for_move(user_id: int | None, *, wait_seconds: float):
         try:
             result = await index_vault(user_id=user_id, allow_backstop=False)
         except Exception as e:
-            record_index_outcome(user_id, False)
+            # Logged only: `indexer_health` describes the loop, and a refresh
+            # feeding it would reset the stall clock and the loop's failure
+            # counters from outside the loop (review, 2026-11-09).
             logger.error(f"Pre-move index refresh failed (user_id={user_id}): {e}")
             raise MoveRefreshRefused(
                 f"the index pass failed ({type(e).__name__})"
             ) from e
-        record_index_outcome(user_id, True, result)
     finally:
         index_pass_lock.release()
+    # A note the pass could not READ does not refuse: its row (if any) keeps
+    # the links last extracted, so it is still found as a source when it
+    # linked here, and phase 1 then reports it unreadable; with no row it was
+    # never a source, and the move could not rewrite it anyway. Refusing on it
+    # blocked every rewrite move for as long as one dangling symlink existed
+    # (review, 2026-11-09). An unlisted folder and a quarantined note do
+    # refuse: their notes' links are unknown, and both are on `/health`.
     unseen = [
         *(f"{p}/ (folder could not be listed)" for p in result.walk_failed),
-        *(f"{p} (could not be read)" for p in result.read_failed),
         *(f"{p} (quarantined by the indexer)" for p in result.quarantined),
     ]
     if unseen:
