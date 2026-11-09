@@ -379,7 +379,9 @@ class Settings(BaseSettings):
     ollama_request_timeout_seconds: float = Field(30.0, gt=0, le=3600)
     vault_path: str = "/obsidian"
     secret_key: str = "changeme"
-    index_interval_seconds: int = Field(300, ge=1)
+    # 120 s (owner's decision, 2026-11-09): with the stat shortcut a scan of
+    # ~6,000 notes takes ~4 s, so the index loop is ~3 % busy.
+    index_interval_seconds: int = Field(120, ge=1)
     # The embed loop's own interval (since 2026-11-09 the index stage and the
     # embed stage run in separate loops; `INDEX_INTERVAL_SECONDS` is the index
     # loop's). A budget-stopped backlog re-ticks after
@@ -453,7 +455,7 @@ class Settings(BaseSettings):
     # and logs once per user per pass. The operator-visible signal for a tenant
     # permanently over budget is the dashboard's pending count.
     embed_chunk_budget_per_user: int = Field(5000, ge=0)
-    # 300 s matches one `INDEX_INTERVAL_SECONDS`.
+    # 300 s matches one `EMBED_INTERVAL_SECONDS`.
     embed_time_budget_seconds_per_user: int = Field(300, ge=0)
     # Notes in a row that fail at the embedding provider before the embed
     # stage stops for this pass (at a note boundary). Every further note would

@@ -11,6 +11,7 @@ actually leaving 500 rows, the trigger CHECK, the FK) is
 import asyncio
 
 import pytest
+from tests.conftest import INDEXER_LOOP_STOPPED, run_indexer_loop_until_stopped
 
 import src.services.indexer as indexer
 from src.services.embeddings import (
@@ -284,10 +285,7 @@ def test_the_startup_pass_records_a_startup_row(monkeypatch):
     monkeypatch.setattr(indexer, "prewarm_search_caches", _noop)
     monkeypatch.setattr(indexer.asyncio, "sleep", _end_after_startup)
 
-    try:
-        asyncio.run(indexer.run_indexer_loop())
-    except asyncio.CancelledError:
-        pass
+    run_indexer_loop_until_stopped()
 
     # Since the stages got separate loops (2026-11-09): the index loop's
     # startup row, then the embed loop's first tick, also under `startup`.
@@ -327,10 +325,7 @@ def test_a_periodic_tick_records_a_scheduled_row(monkeypatch):
     monkeypatch.setattr(indexer, "prewarm_search_caches", _noop)
     monkeypatch.setattr(indexer, "cleanup_expired_tokens", _tick_counter)
 
-    try:
-        asyncio.run(indexer.run_indexer_loop())
-    except asyncio.CancelledError:
-        pass
+    run_indexer_loop_until_stopped()
 
     # The index loop's startup row, the embed loop's startup row, then one
     # `scheduled` row: the first tick indexed nothing and wrote none
@@ -339,6 +334,29 @@ def test_a_periodic_tick_records_a_scheduled_row(monkeypatch):
     assert sorted(r["trigger"] for r in rows) == ["scheduled", "startup", "startup"]
     scheduled = [r for r in rows if r["trigger"] == "scheduled"]
     assert scheduled[0]["notes_indexed"] == 3
+
+
+@pytest.mark.parametrize(
+    "facts, idle",
+    [
+        ({}, True),
+        ({"read_failed": ("A.md",)}, False),
+        ({"rederive_pending": 2}, False),
+        ({"walk_failed": ("Sub",)}, False),
+        ({"quarantined": ("Bad.md",)}, False),
+    ],
+)
+def test_only_a_tick_with_nothing_to_report_writes_no_row(monkeypatch, facts, idle):
+    """An index tick that indexed nothing writes a row anyway when it could
+    not read a note or left a re-derive incomplete (review of 3a3a0b3)."""
+    log = _capture(monkeypatch)
+
+    async def _index(*_a, **_k):
+        return indexer.IndexPassResult(10, 0, **facts)
+
+    monkeypatch.setattr(indexer, "index_vault", _index)
+    assert asyncio.run(indexer._index_stage_once(None)) is True
+    assert (_inserts(log) == []) is idle
 
 
 def test_the_panel_reindex_records_a_manual_row(monkeypatch):
@@ -855,10 +873,7 @@ def _startup_two_users(monkeypatch, *, backfill_fails_for=None):
     monkeypatch.setattr(indexer, "embed_vault", _embed)
     monkeypatch.setattr(indexer.asyncio, "sleep", _end_after_startup)
 
-    try:
-        asyncio.run(indexer.run_indexer_loop())
-    except asyncio.CancelledError:
-        pass
+    run_indexer_loop_until_stopped()
 
     return _inserts(log), phases
 

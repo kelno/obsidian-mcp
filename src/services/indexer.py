@@ -7237,7 +7237,7 @@ async def cleanup_expired_tokens():
     The token half used to read ``expires_at < cutoff OR revoked``, and that
     second disjunct carried **no age condition at all** despite this
     docstring's "older than 7 days" — every revoked token was deleted on the
-    next pass, i.e. within `INDEX_INTERVAL_SECONDS` (5 minutes by default).
+    next pass, i.e. within `INDEX_INTERVAL_SECONDS` (then 5 minutes by default).
 
     That is wrong now that the panel lists revoked tokens as a grant's
     revocation history (issue #64). Filtering revoked rows *out of the page*
@@ -7414,7 +7414,7 @@ async def cleanup_expired_tokens():
 #: target: the batch is what keeps the `FOR UPDATE` lock set — and the sweep's
 #: transaction — small on a table that has been accumulating registrations
 #: since before anything collected them. The remainder is collected by the
-#: next tick, five minutes later. A module constant rather than a setting
+#: next index tick, an `INDEX_INTERVAL_SECONDS` later. A module constant rather than a setting
 #: because no operator has a reason to tune it; the *age* is the knob.
 OAUTH_CLIENT_EXPIRY_BATCH = 200
 
@@ -7594,7 +7594,8 @@ async def _read_rotation_cursor() -> int | None:
 async def _rotated_user_ids() -> list[int]:
     """`_active_user_ids()` rotated to begin after the persisted cursor.
 
-    Used by `run_indexer_loop` only — the startup pass and the periodic tick.
+    Used by `run_indexer_loop`'s startup pass and by `run_embed_loop`, whose
+    budget is what makes the order matter; the index loop takes id order.
     `_reindex_background` and the keyword rebuild keep the unrotated list: an
     operator-triggered reindex is not the starvation vector, and letting a
     panel click move the periodic pass's rotation would make the schedule a
@@ -7931,6 +7932,8 @@ async def _index_stage_once(user_id: int | None, trigger: str = "scheduled") -> 
                 and not index_result[1]
                 and not getattr(index_result, "quarantined", ())
                 and not getattr(index_result, "walk_failed", ())
+                and not getattr(index_result, "read_failed", ())
+                and not getattr(index_result, "rederive_pending", 0)
             ):
                 stats.skipped = True
     return True
@@ -8176,9 +8179,9 @@ async def run_indexer_loop():
 
     The two loops run as child tasks under this one: if either ends, for any
     reason, the other is cancelled and this task ends the same way (its
-    exception, or a cancellation), so the lifespan's done-callback marks the
-    indexer stopped and `/health` reports it; cancelling this task (lifespan
-    shutdown) cancels both.
+    exception; a child cancelled by anything but this task is a death too), so
+    the lifespan's done-callback marks the indexer stopped and `/health`
+    reports it; cancelling this task (lifespan shutdown) cancels both.
 
     Multi-user mode iterates active users sequentially per pass. Failure
     accounting lives in `indexer_health` (#308, D4): per scope from every
@@ -8188,6 +8191,9 @@ async def run_indexer_loop():
     # import; repeated here so the loop that maintains the registry always
     # reports it.
     indexer_health.set_quarantine_count_provider(quarantine_count)
+    # The embed loop starts only after the startup pass; until then its clock
+    # must not run (a long startup is the index clock's to report).
+    indexer_health.record_embed_loop_idle()
     # E2 — the startup pass. Before `index_pass_lock`, so the check does not
     # queue behind the pass it gates. The lifespan (E1) has normally published
     # one already; this is not redundant, because `run_indexer_loop` is started
@@ -8241,7 +8247,11 @@ async def run_indexer_loop():
                 await task
     ended = done.pop()
     if ended.cancelled():
-        raise asyncio.CancelledError
+        # Only reachable when this task was not cancelled (a cancelled parent
+        # leaves `asyncio.wait` by raising): a child cancelled by something
+        # else is a death, and must not read as a lifespan shutdown, which
+        # the done-callback would not report.
+        raise RuntimeError(f"the {ended.get_name()} was cancelled unexpectedly")
     exc = ended.exception()
     if exc is not None:
         raise exc
@@ -8398,6 +8408,9 @@ async def run_embed_loop() -> None:
             if settings.multi_user_mode:
                 for uid in await _rotated_user_ids():
                     await _embed_stage_once(uid, this_trigger)
+                    # A finished stage is progress: a tick over many users,
+                    # each with its own budget, may outlast the threshold.
+                    indexer_health.record_embed_loop_progress()
                     # Advanced whether the stage succeeded or failed: the
                     # cursor records where the cycle got to, and a failing
                     # tenant that pinned it would starve every tenant after.

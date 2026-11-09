@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 
 import pytest
+from tests.conftest import INDEXER_LOOP_STOPPED, run_indexer_loop_until_stopped
 
 import src.main as main
 import src.services.indexer as indexer
@@ -300,7 +301,7 @@ async def test_e3_each_tick_publishes_before_the_pause_check(monkeypatch):
     monkeypatch.setattr(indexer, "detect_root_overlaps", _detect)
     monkeypatch.setattr(indexer, "_is_paused", _paused)
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(RuntimeError, match=INDEXER_LOOP_STOPPED):
         await asyncio.wait_for(indexer.run_indexer_loop(), timeout=5)
 
     assert order[:3] == ["detect:startup", "detect:periodic", "paused-check"]
@@ -342,7 +343,7 @@ async def test_e3_a_paused_iteration_still_records_the_quarantine(
     monkeypatch.setattr(indexer, "record_quarantined_runs", _record)
 
     with caplog.at_level("ERROR"):
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(RuntimeError, match=INDEXER_LOOP_STOPPED):
             await asyncio.wait_for(indexer.run_indexer_loop(), timeout=5)
 
     errors = _run_row_errors(log)

@@ -4830,7 +4830,7 @@ async def _stale_extraction_error(session, uid) -> str | None:
         "has no row yet, and rewriting would silently leave it pointing at the "
         f"old path (first note still pending: {stale[0].file_path}). Nothing was "
         "moved, rewritten or reindexed. The re-derivation runs automatically "
-        "on the indexer's next pass (within about five minutes); retry after "
+        "on the indexer's next pass (within about two minutes); retry after "
         "that, or move now with rewrite_links=False and update the links "
         "yourself.", "index_not_ready")
     )

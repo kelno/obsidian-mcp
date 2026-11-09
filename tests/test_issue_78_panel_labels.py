@@ -18,6 +18,7 @@
    spellings.
 """
 import asyncio
+from tests.conftest import INDEXER_LOOP_STOPPED, run_indexer_loop_until_stopped
 import inspect
 import os
 from datetime import datetime, timedelta, timezone
@@ -99,11 +100,7 @@ def test_the_periodic_tick_records_a_run_even_when_nothing_changed(monkeypatch):
     # Ends the loop after one full tick.
     monkeypatch.setattr(indexer, "cleanup_expired_tokens", _tick_counter)
 
-    with_cancel = indexer.run_indexer_loop()
-    try:
-        asyncio.run(with_cancel)
-    except asyncio.CancelledError:
-        pass
+    run_indexer_loop_until_stopped()
 
     assert indexer.last_index_run_at is not None
     assert indexer.last_index_run_ok is True
@@ -136,10 +133,7 @@ def test_a_failing_tick_is_recorded_as_a_failed_run(monkeypatch):
     monkeypatch.setattr(indexer, "prewarm_search_caches", _noop)
     monkeypatch.setattr(indexer, "cleanup_expired_tokens", _noop)
 
-    try:
-        asyncio.run(indexer.run_indexer_loop())
-    except asyncio.CancelledError:
-        pass
+    run_indexer_loop_until_stopped()
 
     assert indexer.last_index_run_at is not None
     assert indexer.last_index_run_ok is False
@@ -193,10 +187,7 @@ def test_multi_user_tick_with_a_failing_user_is_not_a_healthy_run(monkeypatch):
 
     monkeypatch.setattr(indexer.asyncio, "sleep", _sleep)
 
-    try:
-        asyncio.run(indexer.run_indexer_loop())
-    except asyncio.CancelledError:
-        pass
+    run_indexer_loop_until_stopped()
 
     assert seen == [1, 2, 3], "one user's failure must not abort the others"
     assert indexer.last_index_run_ok is False, (
@@ -243,10 +234,7 @@ def test_startup_pass_records_a_run(monkeypatch):
     # Cancel while the loop is asleep, i.e. before any tick can record.
     monkeypatch.setattr(indexer.asyncio, "sleep", _stop)
 
-    try:
-        asyncio.run(indexer.run_indexer_loop())
-    except asyncio.CancelledError:
-        pass
+    run_indexer_loop_until_stopped()
 
     assert indexer.last_index_run_at is not None
     assert indexer.last_index_run_ok is True

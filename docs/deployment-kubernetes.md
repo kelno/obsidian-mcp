@@ -259,7 +259,8 @@ List-valued settings: `TRUSTED_PROXY_IPS`, `FTS_CONFIGS` and
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `INDEX_INTERVAL_SECONDS` | `300` | Periodic index pass. |
+| `INDEX_INTERVAL_SECONDS` | `120` | Periodic index pass (scan, keyword index, links, tasks). |
+| `EMBED_INTERVAL_SECONDS` | `300` | Periodic embedding pass, its own loop. |
 | `INDEX_STAT_SHORTCUT` | `true` | Skip unchanged files by `(size, mtime, ctime, inode)`. **Set `false` for NFS, SMB or FAT vault volumes, or a FUSE one without stable inodes** (gocryptfs keeps them; each pass's `Found …` log line shows whether a mount does). |
 | `INDEX_FULL_HASH_INTERVAL_HOURS` | `24` | Backstop full-hash pass. One also runs at startup and on panel Reindex. |
 | `INDEXER_DEGRADED_AFTER_FAILURES` | `3` | Consecutive failed index, embedding or re-derive passes before `/health` reports `degraded`. |

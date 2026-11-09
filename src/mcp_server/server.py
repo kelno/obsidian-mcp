@@ -269,7 +269,7 @@ async def list_notes(
 
     Results come from the index, so a note that exists on disk but has not yet been
     picked up by the indexer will not appear (lag is bounded by the index interval,
-    typically up to 5 minutes).
+    typically up to 2 minutes).
 
     Args:
         folder: Vault-relative folder path (e.g. "Cards/", "Projects/"). Empty for vault root.
@@ -860,7 +860,7 @@ async def delete_note(
     single non-replacing rename, so an existing trash entry is never
     overwritten and two deletes in the same second land on distinct names. The
     indexer skips dot-prefixed directories, so search and embeddings drop the
-    note automatically on the next reindex pass (≤ 5 minutes). Soft-deleted
+    note automatically on the next reindex pass (≤ 2 minutes by default). Soft-deleted
     files accumulate in `.trash/` — emptying that directory is the user's
     responsibility.
 

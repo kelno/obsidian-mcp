@@ -17,7 +17,7 @@ def _make(**overrides):
 
 def test_defaults_still_valid():
     s = _make()
-    assert s.index_interval_seconds == 300
+    assert s.index_interval_seconds == 120
     assert s.embedding_dimensions == 1024
     assert s.chunk_size == 512
     assert s.chunk_overlap == 0

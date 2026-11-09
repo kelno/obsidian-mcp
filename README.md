@@ -1102,7 +1102,7 @@ to multi-user later resumes where you left off without re-bootstrapping
 | `DATABASE_SSL_KEY_FILE` | — | Client private key for `DATABASE_SSL_CERT_FILE`. Both or neither. |
 | `VAULT_PATH` | `/obsidian` | In-container vault mount |
 | `SECRET_KEY` | — | itsdangerous signer key |
-| `INDEX_INTERVAL_SECONDS` | `300` | The index loop's cadence: scan, keyword index, links, tasks |
+| `INDEX_INTERVAL_SECONDS` | `120` | The index loop's cadence: scan, keyword index, links, tasks |
 | `EMBED_INTERVAL_SECONDS` | `300` | The embedding loop's cadence (its own loop since 2026-11-09); a budget-stopped backlog re-ticks after `EMBED_BACKLOG_RETICK_SECONDS` instead |
 | `MOVE_INDEX_REFRESH_WAIT_SECONDS` | `30` | How long `move_note(rewrite_links=True)` waits for a running index stage before running its own pre-move index refresh. Past it the move is refused with `index_not_ready` and nothing is moved. |
 | `INDEXER_DEGRADED_AFTER_FAILURES` | `3` | Consecutive failures of any indexer counter (a scope's index passes, its embed passes, its incomplete re-derives, or the tick's own user enumeration) at which `/health` reports `degraded` and one CRITICAL "manual intervention required" line is logged. |
@@ -1619,8 +1619,9 @@ note_embeddings (note_id, chunk_index, chunk_text, embedding[N])
 set embedded_content_hash = content_hash
 ```
 
-The indexer runs on startup and every `INDEX_INTERVAL_SECONDS` (5
-minutes by default). Hashes are content-only, so the change detector
+The indexer runs on startup, then the index loop every
+`INDEX_INTERVAL_SECONDS` (2 minutes by default) and the embedding loop every
+`EMBED_INTERVAL_SECONDS` (5 minutes). Hashes are content-only, so the change detector
 ignores mtime jitter. Stale embeddings are caught by the
 `embedded_content_hash != content_hash` mismatch.
 

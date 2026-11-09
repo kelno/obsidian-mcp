@@ -186,7 +186,7 @@ ways at once:
 
 - **The edit window.** A note edited a minute ago is stale by construction until
   the next pass commits its new hash, so a filter would hide every note edited in
-  the last five minutes from every search.
+  the last few minutes from every search.
 - **The outage.** During a provider outage the whole vault is stale, so the
   filter empties the result set entirely — turning a degraded answer into no
   answer, at exactly the moment an operator has not yet noticed.

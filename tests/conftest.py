@@ -330,6 +330,28 @@ def unpublished_vault_root_snapshot():
     vault_overlap.reset_snapshot_state()
 
 
+# Tests that drive `run_indexer_loop` stop it from a fake `asyncio.sleep`
+# raising `CancelledError` inside a child loop. The supervisor reports a child
+# cancelled by anything but itself as a death (review of the loop split,
+# 2026-11-09), so that stop arrives as this RuntimeError.
+INDEXER_LOOP_STOPPED = "was cancelled unexpectedly"
+
+
+def run_indexer_loop_until_stopped() -> None:
+    """`asyncio.run(run_indexer_loop())` until a test's fake sleep stops it."""
+    import asyncio
+
+    from src.services import indexer
+
+    try:
+        asyncio.run(indexer.run_indexer_loop())
+    except asyncio.CancelledError:
+        pass
+    except RuntimeError as e:
+        if INDEXER_LOOP_STOPPED not in str(e):
+            raise
+
+
 @pytest.fixture(autouse=True)
 def _reset_indexer_health():
     """Start every test with clean indexer failure accounting (#308, D4).

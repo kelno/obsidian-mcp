@@ -9,12 +9,14 @@ multi-user mode failures were not even counted. These tests pin the registry
 from __future__ import annotations
 
 import asyncio
+import sys
 import contextlib
 import json
 import logging
 
 import httpx
 import pytest
+from tests.conftest import INDEXER_LOOP_STOPPED, run_indexer_loop_until_stopped
 
 from src.services import indexer, indexer_health
 from src.services.indexer import EmbedPassResult
@@ -127,10 +129,7 @@ def _loop_fixture(monkeypatch, *, multi_user, index, embed=None, ticks=1, calls=
     monkeypatch.setattr(indexer, "flush_expired", _noop)
     monkeypatch.setattr(indexer.asyncio, "sleep", _two_loop_sleep(ticks))
 
-    try:
-        asyncio.run(indexer.run_indexer_loop())
-    except asyncio.CancelledError:
-        pass
+    run_indexer_loop_until_stopped()
     return calls
 
 
@@ -398,10 +397,7 @@ def test_cleanup_failure_is_housekeeping(no_run_rows, monkeypatch):
     monkeypatch.setattr(indexer, "flush_expired", _flush)
     monkeypatch.setattr(indexer, "cleanup_expired_tokens", _boom)
     monkeypatch.setattr(indexer.asyncio, "sleep", _two_loop_sleep(2))
-    try:
-        asyncio.run(indexer.run_indexer_loop())
-    except asyncio.CancelledError:
-        pass
+    run_indexer_loop_until_stopped()
     assert flushed == [1, 1], "a cleanup failure stopped the refusal flush"
     assert indexer.last_index_run_ok is True
 
@@ -457,6 +453,77 @@ def test_an_unexpected_return_is_recorded_dead():
 
     _on_indexer_done(_finished_task(_returns))
     assert indexer_health.snapshot()["task_running"] is False
+
+
+def test_a_child_loop_cancelled_from_outside_is_recorded_dead(no_run_rows, monkeypatch):
+    """A loop cancelled by anything but the parent (a leaked cancel scope) is
+    a death, not a lifespan shutdown the done-callback would ignore."""
+    from src.main import _on_indexer_done
+
+    async def _cancelled():
+        raise asyncio.CancelledError
+
+    async def _forever():
+        await asyncio.Event().wait()
+
+    async def _index(user_id=None, **_k):
+        return None
+
+    monkeypatch.setattr(indexer, "_index_loop", _cancelled)
+    monkeypatch.setattr(indexer, "run_embed_loop", _forever)
+    # Unlike the other loop tests, this one wants the RuntimeError itself.
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "run_indexer_loop_until_stopped",
+        lambda: asyncio.run(indexer.run_indexer_loop()),
+    )
+    with pytest.raises(RuntimeError, match="cancelled unexpectedly") as raised:
+        _loop_fixture(monkeypatch, multi_user=False, index=_index)
+
+    async def _dies():
+        raise raised.value
+
+    _on_indexer_done(_finished_task(_dies))
+    assert indexer_health.snapshot()["task_running"] is False
+
+
+def test_the_embed_clock_does_not_run_during_the_startup_pass(no_run_rows, monkeypatch):
+    seen = []
+
+    async def _index(user_id=None, **_k):
+        seen.append(indexer_health._embed_idle)
+
+    async def _stop():
+        raise RuntimeError("stop after startup")
+
+    monkeypatch.setattr(indexer, "_index_loop", _stop)
+    with pytest.raises(RuntimeError, match="stop after startup"):
+        _loop_fixture(monkeypatch, multi_user=False, index=_index)
+    assert seen == [True]
+
+
+def test_each_users_embed_stage_is_progress(no_run_rows, monkeypatch):
+    """One embed tick over many users, each with its own budget, may outlast
+    the stall threshold: every finished stage stamps the embed clock."""
+    calls = []
+
+    async def _index(user_id=None, **_k):
+        return None
+
+    real = indexer_health.record_embed_loop_progress
+
+    def _progress():
+        calls.append(("progress", None))
+        real()
+
+    monkeypatch.setattr(indexer_health, "record_embed_loop_progress", _progress)
+    _loop_fixture(monkeypatch, multi_user=True, index=_index, ticks=0, calls=calls)
+    first_tick = calls[calls.index(("embed", 1)):calls.index(("embed", 3)) + 2]
+    assert first_tick == [
+        ("embed", 1), ("progress", None),
+        ("embed", 2), ("progress", None),
+        ("embed", 3), ("progress", None),
+    ]
 
 
 def test_sandbox_lifespan_marks_the_indexer_disabled(monkeypatch):

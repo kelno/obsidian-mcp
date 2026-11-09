@@ -31,6 +31,7 @@ import textwrap
 from types import SimpleNamespace
 
 import pytest
+from tests.conftest import INDEXER_LOOP_STOPPED, run_indexer_loop_until_stopped
 
 import src.mcp_server.auth as mcp_auth
 import src.mcp_server.tools as tools
@@ -899,10 +900,7 @@ def _drive_one_tick(monkeypatch, *, paused=False, index_raises=False, flush_rais
     monkeypatch.setattr(indexer, "flush_expired", _flush_counter)
     monkeypatch.setattr(indexer.asyncio, "sleep", _sleep)
 
-    try:
-        asyncio.run(indexer.run_indexer_loop())
-    except asyncio.CancelledError:
-        pass
+    run_indexer_loop_until_stopped()
     return calls["flush"]
 
 
