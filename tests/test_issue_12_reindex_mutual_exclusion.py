@@ -19,8 +19,9 @@ blocks until the lock is released — i.e. it does NOT run a concurrent
 `index_vault`. It also asserts two concurrent `_reindex_background` calls never
 overlap.
 
-Fully offline: no DB, no network, no embedding provider. `index_vault` and
-`embed_vault` are replaced with fakes before anything runs.
+Fully offline: no DB, no network, no embedding provider. `index_vault`,
+`embed_vault`, the overlap check and the run record are replaced with fakes
+before anything runs.
 """
 
 import asyncio
@@ -41,6 +42,37 @@ os.chdir(tempfile.gettempdir())
 
 import src.services.indexer as indexer  # noqa: E402
 import src.control_panel.routes as routes  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_database(monkeypatch):
+    """`_reindex_background` also runs the vault-root overlap check and writes
+    a run row, both through the database. These tests are about the lock: a
+    connection attempt inside `wait_for(..., timeout=2)` made them fail
+    whenever it was slow (minutes under WSL, intermittently under load)."""
+    import contextlib
+
+    class _Stats:
+        skipped = False
+
+        def record_index(self, *_a, **_k):
+            pass
+
+        def record_embedded(self, *_a, **_k):
+            pass
+
+        def record_error(self, *_a, **_k):
+            pass
+
+    @contextlib.asynccontextmanager
+    async def _run(_trigger, _uid):
+        yield _Stats()
+
+    async def _detect(_where):
+        return None
+
+    monkeypatch.setattr(indexer, "record_indexer_run", _run)
+    monkeypatch.setattr(indexer, "detect_root_overlaps", _detect)
 
 
 def test_index_pass_lock_exists():

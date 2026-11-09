@@ -3184,7 +3184,7 @@ async def _reindex_background(full_hash: bool = False):
     #
     # Each pass records an `indexer_runs` row under the `manual` trigger
     # (#160), so the history distinguishes "the operator pressed Reindex Now"
-    # from a five-minute tick — which is the first thing anyone asks when a
+    # from a scheduled tick — which is the first thing anyone asks when a
     # pass in the history took ten times as long as its neighbours.
     from src.services.indexer import (
         index_vault, embed_vault, _active_user_ids, detect_root_overlaps,
