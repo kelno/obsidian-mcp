@@ -4568,7 +4568,9 @@ def _rewrite_links_in_text(
     """Rewrite any wikilink/embed/markdown-link in `content` whose pre-move
     resolution would have pointed at `from_rel`, so it now refers to `to_rel`.
 
-    Preserves alias (`|...`) and anchor (`#...`) parts. For wikilinks, a bare
+    Preserves alias (`|...`) and anchor (`#...`) parts, except that an alias
+    or markdown link text that is exactly the old note name becomes the new
+    one (`_renamed_display`). For wikilinks, a bare
     target stays bare (uses the new stem), while a path-style target is
     rewritten to the full new path-style form (preserving any trailing `.md`).
     Markdown links always get the new full path. Code blocks are skipped.
@@ -4632,6 +4634,30 @@ def _rewrite_links_in_text(
         """
         return content[start:start + len(masked_slice)] == masked_slice
 
+    from_stem = PurePosixPath(from_rel).stem
+
+    def _renamed_display(display: str) -> str:
+        """A link's display text, renamed with the note when it IS the name.
+
+        Display text that is exactly the old note name (the stem, compared
+        case-sensitively, surrounding whitespace ignored and kept) follows the
+        rename; anything else — a custom label, a differently cased name, the
+        full old path, `Foo > Heading` — is the author's own text and stays
+        byte for byte. `display` comes from `content` (`_kept`), never from
+        the mask.
+        """
+        core = display.strip()
+        if core != from_stem or core == to_stem:
+            return display
+        # A new name that cannot stand literally in display text (a backtick
+        # opens code, brackets and a backslash end or escape the link) would
+        # turn a working link into a broken one: keep the text as written.
+        if any(ch in to_stem for ch in "`[]\\%"):
+            return display
+        lead = display[: len(display) - len(display.lstrip())]
+        trail = display[len(display.rstrip()):]
+        return lead + to_stem + trail
+
     for m in _WIKILINK_REWRITE_RE.finditer(masked):
         target_raw = m.group("target")
         if not _unmasked_target(m.start("target"), target_raw):
@@ -4649,6 +4675,11 @@ def _rewrite_links_in_text(
             new_target = to_stem
         embed_prefix = "!" if m.group("embed") else ""
         rest = _kept(m.start("rest"), m.group("rest") or "")
+        # The anchor class excludes `|`, so the first `|` in `rest` opens the
+        # alias.
+        anchor, bar, alias = rest.partition("|")
+        if bar:
+            rest = anchor + bar + _renamed_display(alias)
         rewrites.append((m.start(), m.end(), f"{embed_prefix}[[{new_target}{rest}]]"))
 
     for link in scan_md_links(masked, **MDLINK_REWRITE_FLAGS):
@@ -4661,7 +4692,7 @@ def _rewrite_links_in_text(
         if resolve_target(target_for_resolve, source_path, pre_move_index) != from_id:
             continue
         anchor = _kept(link.anchor_start, link.anchor)
-        text = _kept(link.text_start, link.text)
+        text = _renamed_display(_kept(link.text_start, link.text))
         # Resolve against the original source location, but generate the new
         # href relative to where that source lives after the move. These differ
         # for a moved note rewriting its own Markdown self-link.

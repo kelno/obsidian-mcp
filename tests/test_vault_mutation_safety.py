@@ -234,7 +234,77 @@ def test_moved_note_markdown_self_link_is_relative_to_new_folder():
         output_source_path="new/deeper/renamed.md",
     )
     assert count == 1
-    assert rewritten == "Self: [target](renamed.md#section)"
+    # The link text was the old name, so it follows the rename.
+    assert rewritten == "Self: [renamed](renamed.md#section)"
+
+
+_FOO_INDEX = {
+    "paths": {"Old/Path/Foo.md": 7, "Other.md": 8},
+    "stems": {"Foo": [("Old/Path/Foo.md", 7)], "Other": [("Other.md", 8)]},
+}
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        # The brief's two examples.
+        ("[[Old/Path/Foo|Foo]]", "[[New/Bar|Bar]]"),
+        ("[[Old/Path/Foo|my label]]", "[[New/Bar|my label]]"),
+        # Bare target, anchors, block refs, embeds, `.md` targets.
+        ("[[Foo|Foo]]", "[[Bar|Bar]]"),
+        ("[[Foo#Heading|Foo]]", "[[Bar#Heading|Bar]]"),
+        ("[[Foo#^block1|Foo]]", "[[Bar#^block1|Bar]]"),
+        ("![[Foo|Foo]]", "![[Bar|Bar]]"),
+        ("[[Old/Path/Foo.md|Foo]]", "[[New/Bar.md|Bar]]"),
+        # Whitespace around the name is kept.
+        ("[[Foo| Foo ]]", "[[Bar| Bar ]]"),
+        # Not exactly the old name: left as written.
+        ("[[Foo|foo]]", "[[Bar|foo]]"),
+        ("[[Foo|Foo note]]", "[[Bar|Foo note]]"),
+        ("[[Foo|Old/Path/Foo]]", "[[Bar|Old/Path/Foo]]"),
+        ("[[Foo#Heading|Foo > Heading]]", "[[Bar#Heading|Foo > Heading]]"),
+        ("[[Foo|]]", "[[Bar|]]"),
+        # Markdown link text takes the same rule.
+        ("[Foo](Old/Path/Foo.md)", "[Bar](New/Bar.md)"),
+        ("[see Foo](Old/Path/Foo.md#x)", "[see Foo](New/Bar.md#x)"),
+    ],
+)
+def test_display_text_that_is_the_old_name_follows_the_rename(before, after):
+    rewritten, count = tools._rewrite_links_in_text(
+        before, "Old/Path/Foo.md", "New/Bar.md", "src.md", _FOO_INDEX
+    )
+    assert count == 1
+    assert rewritten == after
+
+
+def test_display_text_rename_leaves_other_links_and_code_alone():
+    content = "[[Other|Foo]] `[[Foo|Foo]]` [[Foo|Foo]]"
+    rewritten, count = tools._rewrite_links_in_text(
+        content, "Old/Path/Foo.md", "New/Bar.md", "src.md", _FOO_INDEX
+    )
+    assert count == 1
+    assert rewritten == "[[Other|Foo]] `[[Foo|Foo]]` [[Bar|Bar]]"
+
+
+@pytest.mark.parametrize("new_name", ["a`b", "a]b", "a[b", "a%b"])
+def test_display_text_kept_when_the_new_name_would_break_the_link(new_name):
+    rewritten, count = tools._rewrite_links_in_text(
+        "[[Foo|Foo]] [Foo](Old/Path/Foo.md)",
+        "Old/Path/Foo.md",
+        f"New/{new_name}.md",
+        "src.md",
+        _FOO_INDEX,
+    )
+    assert count == 2
+    assert rewritten == f"[[{new_name}|Foo]] [Foo](New/{new_name}.md)"
+
+
+def test_display_text_unchanged_when_the_name_is_unchanged():
+    rewritten, count = tools._rewrite_links_in_text(
+        "[[Old/Path/Foo|Foo]]", "Old/Path/Foo.md", "New/Foo.md", "src.md", _FOO_INDEX
+    )
+    assert count == 1
+    assert rewritten == "[[New/Foo|Foo]]"
 
 
 def test_move_rewrite_failure_warning_reports_partial_success():

@@ -846,6 +846,20 @@ recognizers *see* is unchanged. Anything later added to the replacement — a
 new alias form, a title, a display component — takes its bytes from `content`
 too, never from `masked`.
 
+**Display text that is the old name follows the rename** (owner's request,
+2026-11-09). `_renamed_display` applies to a wikilink's alias and a markdown
+link's text, both taken from `content`: when the text, stripped, is exactly
+the old note's stem, it becomes the new stem, with the surrounding whitespace
+kept. Exact means case-sensitive — `[[Foo|foo]]` stays — and only the stem:
+an alias holding the full old path, Obsidian's `Foo > Heading` form, or any
+other label is the author's own text and stays byte for byte. Anchors and
+embeds take the same rule (the alias is compared on its own, after the
+`#anchor`). A new name containing `` ` ``, `[`, `]`, `\` or `%` keeps the old
+display text: written literally there it opens inline code or a comment, or
+ends or escapes the link, so a working link would come back broken and be
+counted as rewritten (adversarial review). A table-escaped `[[Foo\|Foo]]` was never a rewrite candidate (its
+target ends in `\`) and still is not.
+
 **And a candidate whose deciding span carries masked bytes is skipped.** The
 same bug has a second half, on the read side of the same loop: *which* links
 get rewritten was still decided from the masked wikilink target and markdown

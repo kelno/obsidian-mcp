@@ -755,7 +755,9 @@ async def move_note(
 
     With `rewrite_links=True`, also opens every source note that linked to this
     note and rewrites the link in place: `[[Old]]` → `[[New]]`,
-    `[[Old|alias]]` → `[[New|alias]]`, `[[Old#anchor]]` → `[[New#anchor]]`,
+    `[[Old|alias]]` → `[[New|alias]]` (but `[[Old|Old]]` → `[[New|New]]`: an
+    alias or markdown link text that is exactly the old name, case included,
+    follows the rename), `[[Old#anchor]]` → `[[New#anchor]]`,
     `![[Old]]` → `![[New]]`, path-style `[[folder/Old]]` → `[[new/folder/New]]`,
     and markdown links `[text](Old.md)` → `[text](<new path>)`, whose href is
     written relative to the linking note's own folder (anchors preserved).
