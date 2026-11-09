@@ -1,5 +1,6 @@
 import ipaddress
 import logging
+import re
 import resource
 import sys
 from typing import Annotated, Any, Literal
@@ -588,6 +589,22 @@ class Settings(BaseSettings):
     # The Tasks plugin's settings file inside the vault, read (never written)
     # on every task tool call.
     tasks_plugin_settings_path: str = ".obsidian/plugins/obsidian-tasks-plugin/data.json"
+
+    # ── Agent-edit stamp and archive hint (fork) ─────────────────────────────
+    #
+    # When set, every tool that writes a note's text (create_note, edit_note,
+    # set_frontmatter, move_note's link rewrites, the task writers) sets this
+    # frontmatter property to the write's date, time and UTC offset in
+    # `TASKS_TIMEZONE`, e.g. `2026-11-10T00:45:12+01:00`. Unset: nothing is
+    # stamped. See "The agent-edit stamp" in docs/architecture/vault-tools.md.
+    last_ai_edit_field: str | None = None
+    # Vault-relative glob patterns (fnmatch, `*` crosses `/`) of notes never
+    # stamped. JSON list or comma-separated.
+    last_ai_edit_exclude: Annotated[list[str], NoDecode] = []
+    # The vault's archive folder, which mirrors the tree outside it. When set,
+    # `move_note` says so when the folder a note leaves has a counterpart under
+    # it; it never moves archive content. Unset: no hint.
+    archive_folder: str | None = None
 
     # ── Agent ledger (fork) ──────────────────────────────────────────────────
     # A topic holding at least this many current quirks, more than half of
@@ -1205,6 +1222,45 @@ class Settings(BaseSettings):
         if not out:
             raise ValueError("FTS_CONFIGS must contain at least one config name")
         return out
+
+    @field_validator("last_ai_edit_exclude", mode="before")
+    @classmethod
+    def _parse_last_ai_edit_exclude(cls, v):
+        """A JSON list, a comma-separated string, or a list of glob patterns;
+        each stripped (and a leading `/` dropped: paths are vault-relative),
+        empties dropped. Case is kept: vault paths are case-sensitive."""
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("["):
+                import json
+
+                v = json.loads(s)
+            else:
+                v = s.split(",")
+        if not isinstance(v, (list, tuple)):
+            raise ValueError("LAST_AI_EDIT_EXCLUDE must be a list of glob patterns")
+        return [p for p in (str(i).strip().lstrip("/") for i in v) if p]
+
+    @field_validator("last_ai_edit_field", "archive_folder", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, v):
+        """An empty value (`LAST_AI_EDIT_FIELD=`) means unset, not a property
+        or folder named ''."""
+        if isinstance(v, str):
+            v = v.strip().strip("/") if v.strip() else None
+        return v
+
+    @field_validator("last_ai_edit_field")
+    @classmethod
+    def _plain_property_name(cls, v):
+        """A plain YAML key the stamp can write and find on its own line: no
+        colon, quote, `#`, leading `-` or whitespace inside."""
+        if v is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", v):
+            raise ValueError(
+                "LAST_AI_EDIT_FIELD must be a plain property name "
+                "(letters, digits, '_', '-', '.'; starting with a letter or '_')"
+            )
+        return v
 
     @field_validator("oauth_known_redirect_hosts", mode="before")
     @classmethod

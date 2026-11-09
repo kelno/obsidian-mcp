@@ -44,6 +44,10 @@ SETTINGS_ENV_KEYS = (
     "EMBED_INTERVAL_SECONDS",
     # How long a rewrite move waits for the index lock (2026-11-09).
     "MOVE_INDEX_REFRESH_WAIT_SECONDS",
+    # The agent-edit stamp and the archive hint (2026-11-10).
+    "LAST_AI_EDIT_FIELD",
+    "LAST_AI_EDIT_EXCLUDE",
+    "ARCHIVE_FOLDER",
     "INDEXER_DEGRADED_AFTER_FAILURES",
     "INDEXER_QUARANTINE_RETRIES_PER_TICK",
     # Stall detection and the embed stage's provider stop (fork).

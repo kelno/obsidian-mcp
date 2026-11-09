@@ -72,7 +72,7 @@ from src.services.quotas import admit as _admit_quota, quota_refusal_message
 from src.services.search import full_text_search
 from src.services.usage_params import render_usage_params
 from src.services.usage_stats import OVER_QUOTA_PARAM
-from src.services import page_text, transfer, vault_fs
+from src.services import ai_edit_stamp, page_text, transfer, vault_fs
 from src.services.vault import (
     MAX_PATH_CHARS,
     VAULT_ROOT_NOT_READY_ERROR,
@@ -2548,7 +2548,27 @@ async def get_vault_guide_impl() -> str:
         vault_section = _NO_CLAUDE_MD_MESSAGE
     except ValueError as e:
         vault_section = f"# Vault-Specific Conventions\n\n{e}"
-    return f"{_VAULT_GUIDE_PRIMER}\n\n---\n\n{vault_section}"
+    return f"{_VAULT_GUIDE_PRIMER}{_agent_edit_stamp_guide()}\n\n---\n\n{vault_section}"
+
+
+def _agent_edit_stamp_guide() -> str:
+    """The guide's line on the agent-edit stamp, when it is configured."""
+    field = settings.last_ai_edit_field
+    if not field:
+        return ""
+    excluded = settings.last_ai_edit_exclude
+    except_clause = (
+        " (except notes matching " + ", ".join(f"`{p}`" for p in excluded) + ")"
+        if excluded else ""
+    )
+    return (
+        "\n\n## The agent-edit stamp (this server)\n\n"
+        f"Every tool that writes a note's text sets its `{field}` property to the "
+        "write's date, time and UTC offset"
+        f"{except_clause}, so a reader can tell an agent's last edit from a "
+        f"person's. Don't set `{field}` yourself through this connector; it is "
+        "overwritten on the write."
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -3347,6 +3367,9 @@ async def create_note_impl(
     except ValueError as e:
         return _body_refusal(str(e), "validation_failed")
     with target:
+        # The agent-edit stamp, before the size check: the cap binds what is
+        # written.
+        content = ai_edit_stamp.stamp(content, target.rel)
         if err := _note_size_error(content):
             return err
         # #88, immediately before the publication and after every refusal that
@@ -4356,6 +4379,12 @@ async def edit_note_impl(
                 )
                 new_content = block + separator + content
 
+        # The agent-edit stamp, on a write that changes something (a no-op
+        # stays a no-op), before the size cap and the diff so both see the
+        # bytes that would be written.
+        if new_content != existing:
+            new_content = ai_edit_stamp.stamp(new_content, target.rel)
+
         # Bound the *result*, before the diff and before the atomic write, so an
         # over-cap edit is refused by the tool in every mode (including dry_run)
         # and nothing is written. Must stay ahead of the `expected=` write below,
@@ -4954,6 +4983,45 @@ async def _move_rewrite_gate(rewrite_links: bool):
         yield
 
 
+def _archive_counterpart_hint(uid: int | None, from_rel: str, to_rel: str) -> str | None:
+    """A note for `move_note`'s result when the folder the note left has a
+    counterpart under `ARCHIVE_FOLDER`, or None.
+
+    The archive mirrors the tree outside it, so when a folder is renamed, moved
+    or split, its counterpart should follow. This server only says so: it never
+    moves archive content. Silent when the setting is unset, when the note
+    stays in its folder or sits at the root, and when either end of the move is
+    inside the archive (that is archiving, not restructuring). Read-only and
+    best-effort: any error is no hint.
+    """
+    archive = settings.archive_folder
+    if not archive:
+        return None
+    src_dir = posixpath.dirname(from_rel)
+    dst_dir = posixpath.dirname(to_rel)
+    if not src_dir or src_dir == dst_dir:
+        return None
+
+    def inside_archive(rel_dir: str) -> bool:
+        return rel_dir == archive or rel_dir.startswith(archive + "/")
+
+    if inside_archive(src_dir) or inside_archive(dst_dir):
+        return None
+    counterpart = f"{archive}/{src_dir}"
+    try:
+        st = os.lstat(_vault_root(uid) / counterpart)
+    except (OSError, ValueError):
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    return (
+        f"note: the folder this note left, {src_dir}/, has a counterpart "
+        f"{counterpart}/, and the archive mirrors the tree: if {src_dir}/ was "
+        f"renamed, moved or split, move or rename {counterpart}/ to match, or "
+        f"ask the user. Nothing under {archive}/ was changed."
+    )
+
+
 async def _move_note_locked(
     from_path: str,
     to_path: str,
@@ -5344,6 +5412,11 @@ async def _move_note_locked(
                 if n == 0:
                     drop(read_target)
                     continue
+                # The agent-edit stamp, here so the size cap and the memory
+                # bound below see the bytes that will be written. Keyed on the
+                # path the note is written at (the destination, for the moved
+                # note's own rewrite).
+                new_content = ai_edit_stamp.stamp(new_content, out_path)
                 # A rewrite can only grow a note (the new path is usually longer
                 # than the old one), so it is a note write like any other and gets
                 # the same cap — enforced here, where refusing costs nothing. The
@@ -5779,6 +5852,8 @@ async def _move_note_locked(
             parts.append(f"content_hash: {content_hash_for_bytes(published)}")
         else:
             parts.append(_hash_unavailable_clause(to_rel))
+        if hint := _archive_counterpart_hint(uid, from_rel, to_rel):
+            parts.append(hint)
         message = " — ".join(parts) if len(parts) > 1 else parts[0]
         if db_failed or failed_rewrite_sources or stopped:
             return _body_refusal(
@@ -6176,6 +6251,9 @@ async def set_frontmatter_impl(
         new_raw = serialize_frontmatter(fm, body)
         if new_raw == raw:
             return f"No changes for {path}"
+        # The agent-edit stamp, on the serialized result (a line edit of the
+        # block just written, so it cannot reorder what the caller set).
+        new_raw = ai_edit_stamp.stamp(new_raw, target.rel)
 
         # Bound the result before writing (see `edit_note_impl`). A remove-only
         # call can only shrink the note, but the check is uniform.
@@ -7844,7 +7922,25 @@ def _task_write_parameters(tool: str, expected_hash: str | None, path: str):
     return None
 
 
+def _line_count(text: str) -> int:
+    return text.count("\n") + text.count("\r") - text.count("\r\n")
+
+
 async def _publish_task_text(uid, target, path: str, new_text: str, existing: bytes | None):
+    """Publish `new_text`, stamped, over `existing` (no-clobber create when it
+    is None). Returns `(err, published_text, line_shift)`.
+
+    The agent-edit stamp lives in the frontmatter, above every task line, so
+    the lines it adds (3 for a new block, 1 for a new property) move every task
+    line by the same `line_shift`; the caller reports its line moved by that.
+    """
+    stamped = ai_edit_stamp.stamp(new_text, target.rel)
+    shift = _line_count(stamped) - _line_count(new_text)
+    err = await _publish_task_text_unstamped(uid, target, path, stamped, existing)
+    return err, stamped, shift
+
+
+async def _publish_task_text_unstamped(uid, target, path: str, new_text: str, existing: bytes | None):
     """Publish `new_text` over `existing` (no-clobber create when it is None)."""
     if err := _note_size_error(new_text):
         return err
@@ -8035,9 +8131,10 @@ async def create_task_impl(
                 _task_ops.verify_other_lines(old_text, new_text, number, 1, path)
         except _task_ops.TaskOpError as exc:
             return _task_refused(exc)
-        if err := await _publish_task_text(uid, target, path, new_text, existing):
+        err, new_text, shift = await _publish_task_text(uid, target, path, new_text, existing)
+        if err:
             return _task_failed(TaskWriteResult, err)
-        return await _task_written(uid, target, number, None, new_line, new_text, today,
+        return await _task_written(uid, target, number + shift, None, new_line, new_text, today,
                                    task_settings=task_settings, registry=registry,
                                    changed=True, created_note=True if existing is None else None)
 
@@ -8121,9 +8218,10 @@ async def edit_task_impl(
             _task_ops.verify_other_lines(located.text, new_text, line, 0, path)
         except _task_ops.TaskOpError as exc:
             return _task_refused(exc)
-        if err := await _publish_task_text(uid, target, path, new_text, existing):
+        err, new_text, shift = await _publish_task_text(uid, target, path, new_text, existing)
+        if err:
             return _task_failed(TaskWriteResult, err)
-        return await _task_written(uid, target, line, expected_line, new_line, new_text, today,
+        return await _task_written(uid, target, line + shift, expected_line, new_line, new_text, today,
                                    task_settings=task_settings, registry=registry, changed=True)
 
 
@@ -8171,10 +8269,11 @@ async def set_task_status_impl(
             _task_ops.verify_other_lines(located.text, new_text, line, 0 if result else -1, path)
         except _task_ops.TaskOpError as exc:
             return _task_refused(exc)
-        if err := await _publish_task_text(uid, target, path, new_text, existing):
+        err, new_text, shift = await _publish_task_text(uid, target, path, new_text, existing)
+        if err:
             return _task_failed(TaskWriteResult, err)
         return await _task_written(
-            uid, target, line, expected_line, "\n".join(new_lines), new_text, today,
+            uid, target, line + shift, expected_line, "\n".join(new_lines), new_text, today,
             task_settings=task_settings, registry=registry,
             changed=True, removed=True if not result else None,
         )

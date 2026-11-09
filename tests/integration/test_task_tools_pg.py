@@ -204,3 +204,19 @@ async def test_list_tasks_only_reads_the_callers_rows(sessionmaker, vault, monke
     result = await tools.list_tasks_impl()
     assert [t.text for t in result.tasks] == ["- [ ] mine"]
     assert result.stale is None
+
+
+async def test_with_the_agent_edit_stamp_the_reported_line_is_where_the_task_now_is(sessionmaker, vault, monkeypatch):
+    """The stamp adds a three-line block above a note without properties; the
+    written task's `ref` and `line` follow it, and the very next status change
+    through that line succeeds (fork, 2026-11-10)."""
+    monkeypatch.setattr(tools.settings, "last_ai_edit_field", "last_ai_edit")
+    write(vault, "plain.md", "- [ ] first\n")
+    await indexer.index_vault(user_id=None)
+    listed = (await tools.list_tasks_impl(path="plain.md")).tasks[0]
+    done = await tools.set_task_status_impl(listed.path, listed.line, listed.text, listed.content_hash, status="done")
+    assert done.ref == "plain.md:4" and done.line == 4, done
+    on_disk = (vault / "plain.md").read_text(encoding="utf-8").splitlines()
+    assert on_disk[0] == "---" and on_disk[1].startswith("last_ai_edit: ") and on_disk[3] == done.text
+    again = await tools.set_task_status_impl(done.path, done.line, done.text, done.content_hash, status="todo")
+    assert again.line == 4 and again.error is None, again

@@ -1134,6 +1134,9 @@ to multi-user later resumes where you left off without re-bootstrapping
 | `FETCH_PAGE_MAX_BYTES` | `4194304` | Largest page `fetch_page` downloads before converting it |
 | `TASKS_INBOX_PATH` | `Tasks inbox.md` | Note `create_task` writes to when none is named; the only note it creates when missing |
 | `TASKS_TIMEZONE` | `Europe/Brussels` | The owner's time zone: every "today" the task tools use. An unknown zone stops the server at startup. |
+| `LAST_AI_EDIT_FIELD` | unset | A frontmatter property every note write sets to the write's date, time and offset (e.g. `last_ai_edit`); unset stamps nothing |
+| `LAST_AI_EDIT_EXCLUDE` | empty | Comma-separated globs of vault paths never stamped (e.g. `_/*,CLAUDE.md`) |
+| `ARCHIVE_FOLDER` | unset | A folder mirroring the tree (e.g. `Archive`); `move_note` says when the folder a note left has a counterpart there |
 | `TASKS_PLUGIN_SETTINGS_PATH` | `.obsidian/plugins/obsidian-tasks-plugin/data.json` | The Tasks plugin's settings file in the vault, read on every task call |
 | `VAULT_ALLOW_NAMED_STAGING_FALLBACK` | `false` | Accept named staging on filesystems without `O_TMPFILE`. One flag, both write paths. See [System requirements](#system-requirements). |
 | `WRITE_PRECONDITION_REQUIRED` | `false` | Require `expected_hash` on supported destructive calls. Creation is exempt; enable after clients adopt read hashes. |
