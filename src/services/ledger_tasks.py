@@ -33,11 +33,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.models.db import LedgerEntry, NoteMetadata, NoteTask
 
 #: `ledger F12`: the citation that links a task to a feedback entry.
-CITATION_RE = re.compile(r"(?<!\w)ledger\s+F0*([0-9]{1,6})(?!\w)", re.IGNORECASE)
+CITATION_RE = re.compile(r"(?<!\w)ledger[ \t]+F0*([0-9]{1,6})(?!\w)", re.IGNORECASE)
 #: A bare `F12` (capital F, a whole word): looks like a ref but links nothing.
 _BARE_RE = re.compile(r"(?<![\w#/])F0*([0-9]{1,6})(?!\w)")
-#: The same test in PostgreSQL, to read only the task lines that may cite.
-_SQL_CITATION = r"ledger\s+f[0-9]"
+#: The lines PostgreSQL hands over for exact matching: any holding the word.
+#: A plain substring, so it can never leave out a line `CITATION_RE` matches
+#: (a regex there would follow the database's locale, Python's does not).
+_SQL_PREFILTER = "%ledger%"
 
 #: Status types that close a task. NON_TASK lines are not tasks and are ignored.
 _CLOSED = ("DONE", "CANCELLED")
@@ -86,7 +88,7 @@ async def citing_rows(session: AsyncSession, uid: int | None) -> list:
     return (await session.execute(
         select(NoteMetadata.file_path, NoteTask.line_number, NoteTask.line)
         .join(NoteMetadata, NoteMetadata.id == NoteTask.note_id)
-        .where(owner, NoteTask.kind == "task", NoteTask.line.op("~*")(_SQL_CITATION))
+        .where(owner, NoteTask.kind == "task", NoteTask.line.ilike(_SQL_PREFILTER))
         .order_by(NoteMetadata.file_path, NoteTask.line_number)
     )).all()
 
@@ -134,22 +136,42 @@ async def feedback_entries(session: AsyncSession, uid: int | None, numbers: Iter
     return {e.number: e for e in rows}
 
 
+@dataclass(frozen=True)
+class _Row:
+    file_path: str
+    line_number: int
+    line: str
+
+
+def rows_of_note(path: str, scanned_lines) -> list[_Row]:
+    """`citing_rows`-shaped rows for one note's scan (`task_scan.scan_note(...).lines`)."""
+    return [_Row(path, s.line_number, s.text) for s in scanned_lines if s.kind == "task"]
+
+
 async def refs_on_line(session: AsyncSession, uid: int | None, text: str,
-                       parse: Callable[[str, str], object]) -> tuple[list[dict], list[str]]:
+                       parse: Callable[[str, str], object], *, note_path: str,
+                       note_rows: list) -> tuple[list[dict], list[str]]:
     """What a task tool reports about the ledger citations in the line it wrote.
 
     `([{ref, title, status, tasks}], notes)`: each cited entry with its own
-    status and the state of all the tasks citing it now (the note was just
-    re-indexed); a cited number with no entry is reported as `unknown`; a
-    bare `F<n>` naming an existing feedback entry gets a note saying it links
-    nothing.
+    status and the state of all the tasks citing it now; a cited number with
+    no entry is reported as `unknown`; a bare `F<n>` naming an existing
+    feedback entry gets a note saying it links nothing.
+
+    The note just written is read from `note_rows` (its text as published,
+    scanned), never from the index: the immediate re-index does not run while
+    an index pass holds the lock, nor for a note not yet indexed, and a state
+    read from stale rows could say "done" beside the open task just created.
     """
     cited = cited_numbers(text)
     bare = [n for n in bare_numbers(text) if n not in cited]
     if not cited and not bare:
         return [], []
     entries = await feedback_entries(session, uid, cited + bare)
-    task_states = states(link(await citing_rows(session, uid), parse)) if cited else {}
+    task_states = {}
+    if cited:
+        rows = [r for r in await citing_rows(session, uid) if r.file_path != note_path] + list(note_rows)
+        task_states = states(link(rows, parse))
     refs = []
     for number in cited:
         entry = entries.get(number)

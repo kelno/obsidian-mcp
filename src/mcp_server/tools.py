@@ -7807,21 +7807,28 @@ async def _read_task_note(tool: str, target, path: str, expected_hash: str | Non
     return None, existing, text_
 
 
-async def _task_ledger_refs(uid, line_text: str, task_settings, registry) -> tuple[list[dict], list[str]]:
+async def _task_ledger_refs(uid, line_text: str, note_path: str, note_text: str, task_settings,
+                            registry) -> tuple[list[dict], list[str]]:
     """The ledger citations in a line a task tool just wrote (see `ledger_tasks`).
 
-    Read after the write and its re-index, so the citing tasks' state includes
-    this one. A failure here does not undo the write: it is said in a note.
+    The written note counts as published (`note_text`, scanned here), the
+    other notes as indexed, so the citing tasks' state includes this write
+    even when the immediate re-index could not run. A failure here does not
+    undo the write: it is said in a note.
     """
-    if not line_text:
+    if not _ledger_tasks.cited_numbers(line_text) and not _ledger_tasks.bare_numbers(line_text):
         return [], []
     try:
+        from src.services.task_scan import scan_note
+
+        normalised = note_text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
+        scanned = await asyncio.to_thread(lambda: scan_note(normalised).lines)
         async with async_session() as session:
             return await _ledger_tasks.refs_on_line(
                 session, uid, line_text,
-                lambda line, path: _task_ops.parse_line(line, path, task_settings, registry))
-    except Exception as exc:  # noqa: BLE001 — the write already happened; say so, don't fail it
-        logger.warning("Reading the ledger citations of a written task failed: %s: %s", type(exc).__name__, exc)
+                lambda line, path: _task_ops.parse_line(line, path, task_settings, registry),
+                note_path=note_path, note_rows=_ledger_tasks.rows_of_note(note_path, scanned))
+    except Exception as exc:  # noqa: BLE001 — the write already happened; the note says so, the write stands
         return [], [f"The task was written, but its ledger citations could not be checked ({type(exc).__name__})."]
 
 
@@ -7835,7 +7842,8 @@ async def _task_written(uid, target, line_number, previous, written, new_text, t
     indexed, note = await _task_index.reindex_note_tasks_now(uid, target.rel, new_text)
     refs, notes = ([], [])
     if task_settings is not None and registry is not None:
-        refs, notes = await _task_ledger_refs(uid, written or previous or "", task_settings, registry)
+        refs, notes = await _task_ledger_refs(uid, written or previous or "", target.rel, new_text,
+                                              task_settings, registry)
     if refs or notes:
         extra = {**extra, "ledger_refs": [{k: v for k, v in r.items() if v is not None} for r in refs] or None,
                  "notes": notes or None}
@@ -8210,6 +8218,8 @@ async def _ledger_task_links(session, uid):
         task_settings, registry, _today = await _task_context(uid)
     except _task_ops.TaskOpError as exc:
         return None, f"The vault tasks citing these entries could not be read: {exc}"
+    except Exception as exc:  # noqa: BLE001 — a vault read error must not break a ledger read; the note says it
+        return None, f"The vault tasks citing these entries could not be read ({type(exc).__name__})"
     rows = await _ledger_tasks.citing_rows(session, uid)
     return _ledger_tasks.link(rows, lambda line, path: _task_ops.parse_line(line, path, task_settings, registry)), None
 

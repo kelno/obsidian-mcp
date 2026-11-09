@@ -83,7 +83,7 @@ def test_details_are_the_kinds_own_fields_only():
 
 
 def test_every_kind_field_is_a_model_column_and_the_statuses_agree():
-    columns = set(db.LedgerEntry.__table__.columns.keys())
+    columns = set(db.LedgerEntry.__mapper__.column_attrs.keys())  # attribute names (`leads` maps to column `fix`)
     for fields in ledger.KIND_FIELDS.values():
         assert set(fields) <= columns
     every = set(db.LEDGER_CLOSING_STATUSES).union(*db.LEDGER_KIND_STATUSES.values())

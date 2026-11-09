@@ -792,6 +792,19 @@ async def test_a_task_citing_feedback_is_linked_both_ways(sessionmaker, ctx):
     assert code(bad) == "invalid_argument"
 
 
+async def test_a_task_in_a_note_the_index_lacks_still_counts(sessionmaker, ctx):
+    """The adversarial review's case: an open task added where the immediate
+    re-index cannot run (a new inbox, not yet indexed) beside a done one must
+    not report the entry as done."""
+    await _task_note(sessionmaker, ctx)
+    entry = await tools.ledger_add_impl("feedback", "Half done", area="home", details={"subtype": "friction"})
+    first = await tools.create_task_impl(f"Part one (ledger {entry.ref})", path="t.md")
+    await tools.set_task_status_impl("t.md", first.line, first.text, first.content_hash, status="done")
+    second = await tools.create_task_impl(f"Part two (ledger {entry.ref})")  # the inbox, created now
+    assert second.error is None and second.created_note is True and second.indexed is False, second
+    assert second.ledger_refs[0]["tasks"] == "open"
+
+
 async def test_task_tools_point_out_a_bare_ref_and_an_unknown_one(sessionmaker, ctx):
     await _task_note(sessionmaker, ctx, "u.md")
     entry = await tools.ledger_add_impl("feedback", "Named", area="home", details={"subtype": "friction"})

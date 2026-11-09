@@ -16,6 +16,8 @@ from src.services import ledger_tasks as lt
     ("(ledger F9) then (ledger F10)", [9, 10]),
     ("ledger F9, F10", [9]),                 # one citation per entry
     ("ledger   F12", [12]),
+    ("ledger\tF12", [12]),
+    ("ledger\xa0F12", []),                  # ASCII spaces only: the SQL side can't promise more
     ("ledgers F12", []),                     # whole words only
     ("theledger F12", []),
     ("ledger F12x", []),
