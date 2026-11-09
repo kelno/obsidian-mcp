@@ -314,7 +314,9 @@ update it in the same change.** What stays here is the short list:
   `INDEX_FULL_HASH_INTERVAL_HOURS` (24) and on panel Reindex, and the scope
   stays due until one commits with no read failure — so an edit that keeps all
   four stat fields is found within that interval (perf-L3).
-  `INDEX_STAT_SHORTCUT=false` for network/FUSE/FAT vault mounts.
+  `INDEX_STAT_SHORTCUT=false` for network/FAT vault mounts and FUSE ones
+  without stable inodes; gocryptfs measured fine (2026-11-09), and a wrong
+  `false` costs a full read of the vault every pass.
 - **Indexer failure is counted and reaches `/health`; HTTP stays 200** (#308).
   `src/services/indexer_health.py` holds per-scope consecutive index/embed
   failures and incomplete re-derives, a tick-level enumeration counter and

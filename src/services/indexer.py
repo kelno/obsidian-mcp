@@ -2324,6 +2324,13 @@ class ScanResult:
     not_indexable: dict[str, str] = field(default_factory=dict)
     reads: int = 0
     shortcut: int = 0
+    #: Why each file was read in full rather than skipped by its stat, and how
+    #: many reads left a stat too recent (or in the future) to record, for the
+    #: pass's "Found ..." log line. Added 2026-11-09: a server re-read 6,071
+    #: of 6,071 notes on every pass and nothing in the log said which rule
+    #: forced it.
+    read_reasons: dict[str, int] = field(default_factory=dict)
+    stat_not_recorded: int = 0
 
 
 class ScanCancelled(RuntimeError):
@@ -2411,13 +2418,17 @@ def _scan_vault(
                 result.not_indexable[rel] = reason
                 continue
             row = snapshot.get(rel)
-            if (
-                not force_read
-                and row is not None
-                and row.stat is not None
-                and row.extraction_version == CURRENT_EXTRACTION_VERSION
-                and (not re_derive or _row_is_current(facts, rel, row))
-            ):
+            if force_read:
+                why = "forced"
+            elif row is None:
+                why = "new"
+            elif row.stat is None:
+                why = "no stored stat"
+            elif row.extraction_version != CURRENT_EXTRACTION_VERSION:
+                why = "parser version"
+            elif re_derive and not _row_is_current(facts, rel, row):
+                why = "re-derive"
+            else:
                 try:
                     current = _stat_tuple(_stat_follow(found.parent_fd, found.name))
                 except OSError:
@@ -2432,6 +2443,18 @@ def _scan_vault(
                         read=False,
                     )
                     continue
+                if current is None:
+                    why = "stat failed"
+                else:
+                    differ = [
+                        name
+                        for name, a, b in zip(
+                            ("size", "mtime", "ctime", "inode"), current, row.stat
+                        )
+                        if a != b
+                    ]
+                    why = "changed " + "+".join(differ)
+            result.read_reasons[why] = result.read_reasons.get(why, 0) + 1
             try:
                 raw, h, st, recorded = _read_and_hash(found.parent_fd, found.name, rel)
             except UnicodeDecodeError:
@@ -2451,6 +2474,8 @@ def _scan_vault(
                 result.read_failures.append((rel, entry))
                 continue
             result.reads += 1
+            if recorded is None:
+                result.stat_not_recorded += 1
             result.files[rel] = ScannedFile(
                 rel=rel,
                 name=found.name,
@@ -3066,9 +3091,22 @@ async def _index_vault_pinned(
     # locked row at or beneath it is not derived under this root — decided
     # in the attempt, against the locked rows.
     seen = scan.seen
+    reasons = ", ".join(
+        f"{why} {count}" for why, count in sorted(scan.read_reasons.items())
+    )
     logger.info(
         f"Found {len(seen)} markdown files{log_suffix}: {scan.reads} read, "
         f"{scan.shortcut} unchanged by stat"
+        + (f"; read because: {reasons}" if reasons else "")
+        + (
+            f"; {scan.stat_not_recorded} stat(s) too recent or in the future "
+            "to record"
+            if scan.stat_not_recorded
+            else ""
+        )
+        + ("; full-hash pass" if backstop else "")
+        + ("; stat shortcut off (INDEX_STAT_SHORTCUT=false)"
+           if not settings.index_stat_shortcut else "")
     )
 
     # ── An indeterminate root (#309, D3) ──────────────────────────────────

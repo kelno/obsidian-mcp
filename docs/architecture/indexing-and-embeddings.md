@@ -571,7 +571,7 @@ complete list known.
 | 3 | Restore with preserved mtime (`rsync -a`, `cp -p`, `tar x`, restic/borg) | Yes | **Not a hole**: userspace cannot set ctime (`utimensat` sets it to now), and these tools usually create a new inode |
 | 4 | btrfs/zstd: transparent compression, CoW, reflinks, dedupe, defrag | This host | **Not a hole**: `st_size` is logical; CoW and dedupe change extents, not content; a content write moves mtime/ctime as anywhere. Inodes are per-subvolume, but comparison is per path |
 | 5 | Subvolume/snapshot rollback or replacement — of the root, or of a child subvolume inside it | Possible | **Partially covered.** Provenance re-derive runs only for multi-user scopes and observes only the pinned root. Otherwise btrfs snapshots preserve inode *and* ctime, so a restored file presents the `(ino, ctime_ns)` of the state it was snapshotted in, which matches a row only if the row was recorded from those same bytes. The residual (one content state reached twice with identical fields, or a colliding inode from another subvolume at the same path) falls to the backstop |
-| 6 | Network / FUSE: attribute caching (NFS `actimeo`, CIFS, FUSE `attr_timeout`), synthetic inodes, server clock skew defeating the racy rule | Not on this host | `INDEX_STAT_SHORTCUT=false` for such mounts; backstop |
+| 6 | Network / FUSE: attribute caching (NFS `actimeo`, CIFS, FUSE `attr_timeout`), synthetic inodes, server clock skew defeating the racy rule | Not on this host | `INDEX_STAT_SHORTCUT=false` for such mounts; backstop. Not every FUSE mount needs it: gocryptfs 2.5.1 mounted `-allow_other -acl` was measured on 2026-11-09 (6,076 notes) keeping size, mtime, ctime and inode stable across passes and a remount, and reporting edits made through the mount, including a same-size in-place one; with the shortcut off, one deployment re-read every note every pass (13 s). Each pass's `Found …` log line now counts why each file was read, so a mount can be checked rather than assumed |
 | 7 | FAT/exFAT: 2 s mtime granularity, no true ctime, synthesised inodes | Not on this host | The 2 s window; `INDEX_STAT_SHORTCUT=false` recommended; backstop |
 | 8 | Clock set backwards so a later same-size write reproduces an earlier `(mtime_ns, ctime_ns)` | Needs root and a ns coincidence | Backstop |
 | 9 | Offline modification (disk image edited, fsck/debugfs) while the server is down | Operator action | The first pass after process start is a full-hash pass |
@@ -650,8 +650,9 @@ Labelled `perf-L*` as in the change's design, so distinct from the #200–#206 `
   which makes keyword search current at once and makes `semantic_search` mark
   the note `stale: true` (#200). **Semantic convergence** then follows the
   ordinary backlog under the existing budgets, provider availability and
-  pause flag, and can take further passes. Network, FUSE and FAT mounts should
-  set `INDEX_STAT_SHORTCUT=false`.
+  pause flag, and can take further passes. Network and FAT mounts, and FUSE
+  mounts without stable inodes, should set `INDEX_STAT_SHORTCUT=false` (not
+  gocryptfs: see row 6).
 - **perf-L4 — exclusion sweep skipped between backstops.** A second process running
   with different `EMBEDDING_EXCLUDE_PATTERNS` (a deploy overlap, a one-off
   container) could certify rows that disagree with this process's patterns

@@ -260,7 +260,7 @@ List-valued settings: `TRUSTED_PROXY_IPS`, `FTS_CONFIGS` and
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `INDEX_INTERVAL_SECONDS` | `300` | Periodic index pass. |
-| `INDEX_STAT_SHORTCUT` | `true` | Skip unchanged files by `(size, mtime, ctime, inode)`. **Set `false` for NFS, SMB, FUSE or FAT vault volumes.** |
+| `INDEX_STAT_SHORTCUT` | `true` | Skip unchanged files by `(size, mtime, ctime, inode)`. **Set `false` for NFS, SMB or FAT vault volumes, or a FUSE one without stable inodes** (gocryptfs keeps them; each pass's `Found …` log line shows whether a mount does). |
 | `INDEX_FULL_HASH_INTERVAL_HOURS` | `24` | Backstop full-hash pass. One also runs at startup and on panel Reindex. |
 | `INDEXER_DEGRADED_AFTER_FAILURES` | `3` | Consecutive failed index, embedding or re-derive passes before `/health` reports `degraded`. |
 | `INDEXER_STALLED_AFTER_SECONDS` | `1800` | Seconds without an index stage or tick finishing before `/health` reports `index_stalled` (degraded). `0` disables. |
@@ -355,8 +355,9 @@ consequence would be cross-tenant read, overwrite and delete (see
 **Filesystem.** It must be case-sensitive and support hard links and
 `renameat2(RENAME_NOREPLACE)`. ext4 and xfs, the usual block-storage
 filesystems, do. `O_TMPFILE` is preferred. On filesystems without it (some
-NFS servers) set `VAULT_ALLOW_NAMED_STAGING_FALLBACK=true`. On NFS, SMB, FUSE
-or FAT, also set `INDEX_STAT_SHORTCUT=false`.
+NFS servers) set `VAULT_ALLOW_NAMED_STAGING_FALLBACK=true`. On NFS, SMB or FAT,
+or a FUSE filesystem without stable inodes, also set `INDEX_STAT_SHORTCUT=false`
+(gocryptfs keeps them stable: leave it on there).
 
 **Ownership without `fsGroup`.** The app pod never sets `fsGroup` (see
 [constraints](#constraints-the-manifests-encode)), so the volume must already
