@@ -734,20 +734,7 @@ belongs here is the form's semantics, which changed by owner decision:
 
 ## Destructive actions take the index pass lock
 
-- **Because the pre-warm holds `index_pass_lock`, the panel's destructive
-  actions take it too.** `reset_embeddings` and `trigger_reembed` take
-  `_pause_indexer()` — a **depth counter** whose first holder sets
-  `indexer_paused` and whose last one clears it, because a bare
-  `indexer_paused = False` in each handler's `finally` had the first of two
-  overlapping actions unpause the indexer underneath the second, and the
-  progress endpoint then reported "not paused" about a pause still in force
-  (#130) — then `await session.close()` on the request's own session
-  **before** waiting for the lock — a waiter that keeps its pooled connection
-  deadlocks against a lock holder that needs one — and only then open a fresh
-  session inside the lock (`_pass_lock_without_a_connection`). `trigger_reembed`
-  also NULLs `notes_metadata.embedded_content_hash` in the same transaction as
-  the `DELETE`: `embed_vault` selects on hash mismatch, so deleting vectors
-  alone meant the reindex it spawns re-embedded nothing.
+- **Because the pre-warm holds a pass lock, the panel's destructive actions take the pass locks too** — both of them, `index_pass_lock` then `embed_pass_lock`, since the stage locks split on 2026-11-09 (the pre-warm now holds `embed_pass_lock`; see indexing-and-embeddings.md, "Two stage locks"). `reset_embeddings` and `trigger_reembed` take `_pause_indexer()` — a **depth counter** whose first holder sets `indexer_paused` and whose last one clears it, because a bare `indexer_paused = False` in each handler's `finally` had the first of two overlapping actions unpause the indexer underneath the second, and the progress endpoint then reported "not paused" about a pause still in force (#130) — then `await session.close()` on the request's own session **before** waiting for the lock — a waiter that keeps its pooled connection deadlocks against a lock holder that needs one — and only then open a fresh session inside the lock (`_pass_lock_without_a_connection`). `trigger_reembed` also NULLs `notes_metadata.embedded_content_hash` in the same transaction as the `DELETE`: `embed_vault` selects on hash mismatch, so deleting vectors alone meant the reindex it spawns re-embedded nothing.
 
 - **They also take the generation lock, and it is a different lock doing a
   different job** (#206). `acquire_generation_lock(fresh)` is the **first

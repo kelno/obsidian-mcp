@@ -336,6 +336,25 @@ incumbent, and leaves the final compare-to-rename race unchanged.
 
 **The reported hash is always the bytes the call actually published**, never the bytes it intended to publish. An intended-but-unpublished hash would hand the agent a token that binds nothing and make its next guarded write fail against bytes that were never written.
 
+### `move_note(rewrite_links=True)` brings the link index up to date first (fork, 2026-11-09)
+
+The notes a rewrite move opens come from `note_links`, which only an index pass writes. Until 2026-11-09 a link written since the last pass (up to `INDEX_INTERVAL_SECONDS`, 300 s, ago; longer behind a slow pass) had no row, so the move left it at the old path and reported success — found live, with "rewrote 0 link(s)" and no warning. The owner's rule: a move that sometimes silently does not finish is unacceptable; refuse rather than leave the links inconsistent.
+
+So before reading `note_links`, `_refresh_index_before_move` runs `indexer.refresh_index_for_move` for the caller's scope: the **index stage only** (stat walk, re-reading changed notes, their links, tasks and keyword vectors), never the embed stage and never the daily full-hash backstop (`allow_backstop=False`; a due backstop stays due for the next tick). It takes `index_pass_lock`, which since the same day no longer covers the embed stage (indexing-and-embeddings.md, "Two stage locks"), so it waits at most for one running index stage. The move is **refused, before anything is touched**, with code `index_not_ready` when:
+
+- the lock is not free within `MOVE_INDEX_REFRESH_WAIT_SECONDS` (30 s);
+- indexing is paused by a panel action (checked before and again under the lock);
+- the pass raises;
+- the pass could not see every note: a folder it could not list (`walk_failed`), a note it could not read (`read_failed`, new on `IndexPassResult`), or a quarantined note. Any of them could hold a link the move would strand. These persist until fixed, and the refusal names up to ten of them.
+
+A note that is *not indexable* (a name the index cannot hold, or content that is not UTF-8) does not refuse: no link is ever extracted from it, so it was never a rewrite source, and refusing on it would block every rewrite move for as long as such a file exists. Declared, not hidden.
+
+`_acquire_within` is not `asyncio.wait_for(lock.acquire())`: that form can drop an acquire that completes just as the deadline or a cancellation lands, leaving the lock held with no owner, and every later index pass would wait for ever. The acquire is its own task, and an abandoned one that won the lock gives it back.
+
+**Residual (L1): an edit landing during the move itself.** The refresh closes the window between passes, not the move's own duration: a link written to another note after the refresh read it and before the move's inventory query is still missed. The window is now the length of one move (milliseconds to seconds), not an index interval. Closing it entirely would mean scanning every note's text under the move lock, which the stall analysis above rules out.
+
+The pre-#150 transition-window guard (`_stale_extraction_error`) stays, after the refresh: a refresh that completed has re-derived any stale row, so it now fires only in the narrow case the refresh could not cover.
+
 ### `move_note`'s post-rename partial-success contract
 
 A `rewrite_links=True` move publishes **twice** — the `renameat2`, then the moved note's own body rewrite — and the second can fail after the first has committed.

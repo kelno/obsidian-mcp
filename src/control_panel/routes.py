@@ -2830,12 +2830,18 @@ async def _pass_lock_without_a_connection(session: AsyncSession):
 
     The wait is bounded by the current index pass, not by the pre-warm's 15 s
     timeout; the danger-zone page already warns the action can take a while.
+
+    **Both stage locks, index first** (the indexer's lock order): since
+    2026-11-09 the index stage and the embed stage (with the pre-warm) each
+    have their own lock and may run side by side, and a reset must exclude
+    both, as the single lock did.
     """
-    from src.services.indexer import index_pass_lock
+    from src.services.indexer import embed_pass_lock, index_pass_lock
 
     await session.close()
     async with index_pass_lock:
-        yield
+        async with embed_pass_lock:
+            yield
 
 
 async def _record_embedding_fingerprint(
@@ -3169,10 +3175,12 @@ async def _reindex_background(full_hash: bool = False):
     # multi-user-mode case fans out to every active user; in single-user
     # mode it stays a single legacy pass with user_id=None.
     #
-    # Acquire `index_pass_lock` for the whole pass: without it this task can
-    # run index_vault/embed_vault concurrently with the periodic loop over the
-    # same scope, racing on move-detection, deleted-path removal, and per-note
-    # embedding delete+insert.
+    # Each stage under its own lock (`index_pass_lock`, `embed_pass_lock`),
+    # taken around that stage only, as the periodic tick does: without them
+    # this task's index stage could race the loop's on move-detection and
+    # deleted-path removal, and its embed stage the loop's on per-note
+    # embedding delete+insert. An index stage beside an embed stage is safe
+    # (see `index_pass_lock` in the indexer).
     #
     # Each pass records an `indexer_runs` row under the `manual` trigger
     # (#160), so the history distinguishes "the operator pressed Reindex Now"
@@ -3180,8 +3188,8 @@ async def _reindex_background(full_hash: bool = False):
     # pass in the history took ten times as long as its neighbours.
     from src.services.indexer import (
         index_vault, embed_vault, _active_user_ids, detect_root_overlaps,
-        index_pass_lock, record_indexer_run, record_index_outcome,
-        record_embed_outcome,
+        index_pass_lock, embed_pass_lock, record_indexer_run,
+        record_index_outcome, record_embed_outcome,
     )
     # E4 — **before `index_pass_lock` is taken.** Reindex Now, re-embed and
     # reset embeddings all land in this function, and it is a separate entry
@@ -3194,78 +3202,81 @@ async def _reindex_background(full_hash: bool = False):
     # The per-user skip is in the shared pass helpers, so the loops below
     # inherit it without knowing about it.
     await detect_root_overlaps("panel on-demand")
-    async with index_pass_lock:
-        if settings.multi_user_mode:
-            for uid in await _active_user_ids():
-                async with record_indexer_run("manual", uid) as stats:
-                    try:
+    if settings.multi_user_mode:
+        for uid in await _active_user_ids():
+            async with record_indexer_run("manual", uid) as stats:
+                try:
+                    async with index_pass_lock:
                         index_result = await index_vault(
                             user_id=uid, full_hash=full_hash
                         )
-                        stats.record_index(index_result)
-                    except Exception as e:
-                        stats.record_error("index", e)
-                        # #308 D4: the panel is an entrypoint like any other;
-                        # its outcome feeds the same `/health` counters.
-                        record_index_outcome(uid, False)
-                        security_events.emit(
-                            "panel_ondemand_index_failed",
-                            level=logging.ERROR,
-                            subject=security_events.subject_for(user_id=uid),
-                            user_id=uid,
-                            error_type=type(e).__name__,
-                        )
-                    else:
-                        record_index_outcome(uid, True, index_result)
-                    try:
-                        embedded = await embed_vault(user_id=uid)
-                    except Exception as e:
-                        stats.record_error("embed", e)
-                        record_embed_outcome(uid, raised=True)
-                        security_events.emit(
-                            "panel_ondemand_embed_failed",
-                            level=logging.ERROR,
-                            subject=security_events.subject_for(user_id=uid),
-                            user_id=uid,
-                            error_type=type(e).__name__,
-                        )
-                    else:
-                        stats.record_embedded(embedded)
-                        record_embed_outcome(uid, embedded)
-        else:
-            async with record_indexer_run("manual", None) as stats:
-                # Each stage on its own, as the loop's tick does (#308 D9,
-                # #309 D3): an index stage that raised — an indeterminate
-                # empty root, say — must not stop the embed stage over the
-                # rows already committed. Both outcomes are written to the
-                # run row and reach the `/health` counters (#308 D4).
-                try:
-                    index_result = await index_vault(full_hash=full_hash)
                     stats.record_index(index_result)
                 except Exception as e:
                     stats.record_error("index", e)
-                    record_index_outcome(None, False)
+                    # #308 D4: the panel is an entrypoint like any other;
+                    # its outcome feeds the same `/health` counters.
+                    record_index_outcome(uid, False)
                     security_events.emit(
                         "panel_ondemand_index_failed",
                         level=logging.ERROR,
-                        subject=security_events.subject_for(user_id=None),
-                        user_id=None,
+                        subject=security_events.subject_for(user_id=uid),
+                        user_id=uid,
                         error_type=type(e).__name__,
                     )
                 else:
-                    record_index_outcome(None, True, index_result)
+                    record_index_outcome(uid, True, index_result)
                 try:
-                    embedded = await embed_vault()
+                    async with embed_pass_lock:
+                        embedded = await embed_vault(user_id=uid)
                 except Exception as e:
                     stats.record_error("embed", e)
-                    record_embed_outcome(None, raised=True)
+                    record_embed_outcome(uid, raised=True)
                     security_events.emit(
                         "panel_ondemand_embed_failed",
                         level=logging.ERROR,
-                        subject=security_events.subject_for(user_id=None),
-                        user_id=None,
+                        subject=security_events.subject_for(user_id=uid),
+                        user_id=uid,
                         error_type=type(e).__name__,
                     )
                 else:
                     stats.record_embedded(embedded)
-                    record_embed_outcome(None, embedded)
+                    record_embed_outcome(uid, embedded)
+    else:
+        async with record_indexer_run("manual", None) as stats:
+            # Each stage on its own, as the loop's tick does (#308 D9,
+            # #309 D3): an index stage that raised — an indeterminate
+            # empty root, say — must not stop the embed stage over the
+            # rows already committed. Both outcomes are written to the
+            # run row and reach the `/health` counters (#308 D4).
+            try:
+                async with index_pass_lock:
+                    index_result = await index_vault(full_hash=full_hash)
+                stats.record_index(index_result)
+            except Exception as e:
+                stats.record_error("index", e)
+                record_index_outcome(None, False)
+                security_events.emit(
+                    "panel_ondemand_index_failed",
+                    level=logging.ERROR,
+                    subject=security_events.subject_for(user_id=None),
+                    user_id=None,
+                    error_type=type(e).__name__,
+                )
+            else:
+                record_index_outcome(None, True, index_result)
+            try:
+                async with embed_pass_lock:
+                    embedded = await embed_vault()
+            except Exception as e:
+                stats.record_error("embed", e)
+                record_embed_outcome(None, raised=True)
+                security_events.emit(
+                    "panel_ondemand_embed_failed",
+                    level=logging.ERROR,
+                    subject=security_events.subject_for(user_id=None),
+                    user_id=None,
+                    error_type=type(e).__name__,
+                )
+            else:
+                stats.record_embedded(embedded)
+                record_embed_outcome(None, embedded)

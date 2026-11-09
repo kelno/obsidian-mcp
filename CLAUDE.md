@@ -370,6 +370,8 @@ update it in the same change.** What stays here is the short list:
   the provider, and the loop then waits the ordinary interval. Do not restore
   the "only with more than one scope" clause. See
   [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
+- **The index stage and the embed stage have separate in-process locks** (fork, owner's decision, 2026-11-09): `index_pass_lock` and `embed_pass_lock`, order index → embed for a holder of both (the panel's resets). They may run side by side because `certify_embedded` is already safe against a concurrent writer; the shared clean-sweep record is guarded by `_sweep_epoch`. The loop is still sequential per tick. See [indexing and embeddings](docs/architecture/indexing-and-embeddings.md), "Two stage locks".
+- **`move_note(rewrite_links=True)` refreshes the index first, or refuses** (fork, owner's decision, 2026-11-09): it runs the index stage for the caller's scope (`indexer.refresh_index_for_move`) before reading `note_links`, and refuses with `index_not_ready`, nothing moved, if the lock is busy past `MOVE_INDEX_REFRESH_WAIT_SECONDS`, indexing is paused, or the pass could not see every note. A link written since the last pass was otherwise silently stranded. See [vault tools](docs/architecture/vault-tools.md).
 - Wikilink graph extracted from note bodies into `note_links`; resolved at index time with same-folder-first preference
 - **The agent ledger is primary data: backed up, never rebuilt from the
   vault** (fork, owner's design, migration 032). The `ledger_*` tables hold

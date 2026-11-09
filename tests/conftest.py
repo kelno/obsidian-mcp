@@ -479,6 +479,31 @@ def _no_ledger_sweep_offline(request):
 
 
 @pytest.fixture(autouse=True)
+def _no_pre_move_refresh_offline(request):
+    """Offline tests do not run `move_note`'s pre-move index refresh.
+
+    It is a real index pass over the database, which offline tests do not
+    have; they stand in for the inventory with fake sessions instead. The
+    refresh is exercised on real Postgres by the integration tests, and its
+    refusals offline by tests that patch `indexer.refresh_index_for_move`
+    themselves (they set `_real_pre_move_refresh` on the module to opt out).
+    """
+    if "integration" in request.node.path.parts or getattr(
+        request.module, "_real_pre_move_refresh", False
+    ):
+        yield
+        return
+    from src.mcp_server import tools
+
+    async def _fresh(_uid):
+        return None
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(tools, "_refresh_index_before_move", _fresh)
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_concurrency_controller():
     """Give each test its own explicit process-controller boundary (#261).
 

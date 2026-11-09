@@ -4836,6 +4836,32 @@ async def _stale_extraction_error(session, uid) -> str | None:
     )
 
 
+async def _refresh_index_before_move(uid: int | None) -> str | None:
+    """Run the pre-move index refresh; a refusal string if it cannot finish.
+
+    A seam of its own so offline tests, which have no database, can stand in
+    for the pass (`tests/conftest.py`); the pass itself is
+    `indexer.refresh_index_for_move`.
+    """
+    from src.services import indexer
+
+    try:
+        await indexer.refresh_index_for_move(
+            uid, wait_seconds=settings.move_index_refresh_wait_seconds
+        )
+    except indexer.MoveRefreshRefused as e:
+        return _body_refusal(
+            f"Move aborted: {e}. With rewrite_links=True the move first brings "
+            "the link index up to date, so that every note linking here is "
+            "found; without that, links written recently would be left "
+            "pointing at the old path. Nothing was moved, rewritten or "
+            "reindexed. Retry in a minute, or move with rewrite_links=False "
+            "and update the links yourself.",
+            "index_not_ready",
+        )
+    return None
+
+
 def _ensure_move_source_in_index(index: dict, from_rel: str) -> None:
     """Make stale/missing metadata unable to suppress moved-note self rewrites."""
     if from_rel in index["paths"]:
@@ -5018,6 +5044,14 @@ async def _move_note_locked(
         pre_move_index: dict | None = None
         rewrite_sources: list[str] = [from_rel] if rewrite_links else []
         if rewrite_links:
+            # The inventory below is `note_links`, which only an index pass
+            # writes. Without this refresh, a link written since the last
+            # pass (up to `INDEX_INTERVAL_SECONDS` ago, longer behind a slow
+            # pass) had no row, so the move left it at the old path and
+            # reported success. The refresh runs the index stage for this
+            # scope now, or the move is refused here, before anything moved.
+            if err := await _refresh_index_before_move(uid):
+                return err
             async with async_session() as session:
                 rows_stmt = select(NoteMetadata.file_path, NoteMetadata.id).where(
                     _note_owner_predicate(uid)

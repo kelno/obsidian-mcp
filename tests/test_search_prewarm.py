@@ -282,9 +282,14 @@ async def test_cancellation_propagates(monkeypatch, stage):
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_prewarm_runs_once_per_tick_under_the_lock(monkeypatch):
-    """The lock is what makes the probe safe against a concurrent reset."""
+    """The lock is what makes the probe safe against a concurrent reset.
+
+    Since the index and embed stages got separate locks (2026-11-09), the
+    pre-warm holds `embed_pass_lock`, which the panel's resets also take.
+    """
     fresh_lock = asyncio.Lock()
-    monkeypatch.setattr(indexer, "index_pass_lock", fresh_lock)
+    monkeypatch.setattr(indexer, "embed_pass_lock", fresh_lock)
+    monkeypatch.setattr(indexer, "index_pass_lock", asyncio.Lock())
     monkeypatch.setattr(indexer.settings, "multi_user_mode", False, raising=False)
     monkeypatch.setattr(indexer.settings, "index_interval_seconds", 0, raising=False)
 
@@ -311,7 +316,7 @@ async def test_prewarm_runs_once_per_tick_under_the_lock(monkeypatch):
         await asyncio.wait_for(task, timeout=5)
 
     assert calls["prewarm"] == 2
-    assert calls["locked"] == [True, True], "pre-warm must hold the pass lock"
+    assert calls["locked"] == [True, True], "pre-warm must hold the embed lock"
 
 
 @pytest.mark.asyncio

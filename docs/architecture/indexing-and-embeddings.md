@@ -506,8 +506,7 @@ walk → the locked transaction. The constraints, and how each is kept:
   runs first in its own committed session and decides `re_derive` before the
   walk; `_assert_fts_generation_current` still runs immediately after the
   lock. Unchanged.
-- **C7 — `index_pass_lock` covers the whole pass**, walk included, so no two
-  passes in one process interleave. Unchanged.
+- **C7 — `index_pass_lock` covers the whole index stage**, walk included, so no two index stages in one process interleave. Since 2026-11-09 it no longer covers the embed stage, which has `embed_pass_lock` (see "Two stage locks" below).
 - **C8 — the quarantine snapshot is consulted before the pass**
   (`_refuse_quarantined_pass`). Unchanged.
 
@@ -1731,11 +1730,7 @@ Accepted limitations (review findings declined, owner's review budget):
   exclusion sweep has no progress line.
 - **The re-tick note is global.** In multi-user mode one tenant's budget stop
   re-ticks every tenant; each tenant's stage still carries its own streak.
-- **One note can still hold `index_pass_lock` for a long time** (L4 above):
-  `MAX_CHUNKS_PER_NOTE` ÷ batch size × the per-request timeout. The 8.3 h
-  figure assumes batch 1 at 30 s; a slow-CPU sizing (batch 2, 120 s) gives
-  about 17 h of failing calls, or hours of successful ones. The stall signal
-  below reports it.
+- **One note can still hold `embed_pass_lock` for a long time** (L4 above; it was `index_pass_lock` until the stage locks split on 2026-11-09, which is what used to freeze index stages and `move_note` behind it): `MAX_CHUNKS_PER_NOTE` ÷ batch size × the per-request timeout. The 8.3 h figure assumes batch 1 at 30 s; a slow-CPU sizing (batch 2, 120 s) gives about 17 h of failing calls, or hours of successful ones. The stall signal below reports it.
 
 ### `/health` reports a stalled loop, not only a failing one (fork, 2026-11-01)
 
@@ -1763,6 +1758,21 @@ the time budget and one note, well under 30 minutes (the sleep is not
 counted). The
 residual case is one note whose provider calls alone exceed the threshold
 (the L4 arithmetic above); that is reported as a stall, which is what it is.
+
+## Two stage locks (fork, 2026-11-09)
+
+Until 2026-11-09 one in-process lock, `index_pass_lock`, covered a whole tick: the index stage, the embed stage and the search pre-warm. The embed stage can run for its whole budget (300 s by default, longer behind one slow note), so anything that needed the index stage — the panel's Reindex now, and `move_note`'s pre-move refresh (vault-tools.md) — waited behind the embedding backlog. Now there are two, by owner decision:
+
+- `index_pass_lock`: index stages (`index_vault`, `link_backfill_pass`) and the edits to the quarantine map outside them.
+- `embed_pass_lock`: embed stages (`embed_vault`) and `prewarm_search_caches`.
+
+**An index stage and an embed stage may run side by side.** This is safe because the embed stage's writes were already built for a concurrent writer in another process: `certify_embedded` stamps by `id AND file_path AND content_hash` (the hash it embedded), under the generation lock and a row lock, before the vector delete/insert. A row an index stage updated, moved or deleted meanwhile makes the certification match nothing, the vectors are discarded, and the note is embedded as it then stands by a later pass (`StaleCertification`, logged, not counted as a failure). An index stage that deletes a row the embed stage holds locked waits for that one note's transaction. Chunk-vector reuse is re-verified under the generation lock (#281). The embed stage's own wait for the generation lock is the engine's 60 s `statement_timeout`; the index stage holds it for its mutation phase (seconds since #278), and a note whose wait ran out is retried next pass.
+
+**The one in-process fact both stages touch is the clean-sweep record** (`_swept`, D13). A clear made by an index stage (backstop, re-derive) while a sweep is running used to be overwritten when that sweep recorded itself clean, losing the forced sweep. `_sweep_epoch` is bumped by every `clear_sweep_state` and a sweep records itself clean only if it did not move since the sweep began; coarse (any clear voids every running sweep's record), costing at most one extra sweep.
+
+**Lock order: `index_pass_lock`, then `embed_pass_lock`**, for a holder of both: the panel's destructive actions (`_pass_lock_without_a_connection`), which must exclude both stages as the single lock did. No path takes them the other way. The periodic tick, the startup pass, `_index_pass_once`, `index_scope_now` and the panel's `_reindex_background` take each stage's lock around that stage only and hold neither while waiting for the other; their callers hold neither. The loop is still sequential (one tick runs its index stage, then its embed stage), so this change alone does not let the index stage run more often — separate schedules are a follow-up.
+
+**What a waiter may hold.** The rule `_pass_lock_without_a_connection` states holds for both locks: never wait for one while holding a pooled connection. `move_note` has none open when it waits (the quota gate's transaction commits before a tool body runs).
 
 ## The settings fingerprints (#206, migration 023)
 

@@ -93,6 +93,12 @@ async def vault(sessionmaker, monkeypatch, tmp_path):
         return None
 
     monkeypatch.setattr(tools, "_log_usage", noop)
+    # The pre-move index refresh is an ordinary index pass: it would re-derive
+    # the hand-seeded rows below (stats, keyword vectors) before the
+    # cross-mount refusal, which is a pass catching up, not the refused move
+    # writing. This module's claim is about the move alone; the refresh has
+    # its own tests (`test_move_index_refresh_pg.py`).
+    monkeypatch.setattr(tools, "_refresh_index_before_move", noop)
     permission = current_permission.set("readwrite")
     vault_fs.reset_filesystem_probe_cache()
     try:

@@ -1102,6 +1102,7 @@ to multi-user later resumes where you left off without re-bootstrapping
 | `VAULT_PATH` | `/obsidian` | In-container vault mount |
 | `SECRET_KEY` | — | itsdangerous signer key |
 | `INDEX_INTERVAL_SECONDS` | `300` | Periodic reindex cadence |
+| `MOVE_INDEX_REFRESH_WAIT_SECONDS` | `30` | How long `move_note(rewrite_links=True)` waits for a running index stage before running its own pre-move index refresh. Past it the move is refused with `index_not_ready` and nothing is moved. |
 | `INDEXER_DEGRADED_AFTER_FAILURES` | `3` | Consecutive failures of any indexer counter (a scope's index passes, its embed passes, its incomplete re-derives, or the tick's own user enumeration) at which `/health` reports `degraded` and one CRITICAL "manual intervention required" line is logged. |
 | `INDEXER_STALLED_AFTER_SECONDS` | `1800` | Seconds with no index stage or tick finishing after which `/health` reports `index_stalled` and `degraded`, and one CRITICAL line is logged: a stage that is running far longer than it should, rather than one that fails. `0` disables. |
 | `EMBED_STOP_AFTER_PROVIDER_FAILURES` | `3` | Notes in a row that fail at the embedding provider before the embed stage stops for this pass, so a provider outage does not hold the next index stage (keyword search, backlinks) back. A note refused as too large does not count. `0` disables. |

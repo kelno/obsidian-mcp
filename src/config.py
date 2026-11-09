@@ -380,6 +380,10 @@ class Settings(BaseSettings):
     vault_path: str = "/obsidian"
     secret_key: str = "changeme"
     index_interval_seconds: int = Field(300, ge=1)
+    # How long `move_note(rewrite_links=True)` waits for a running index pass
+    # before its own pre-move index refresh, after which the move is refused
+    # (nothing moved). See `indexer.refresh_index_for_move`.
+    move_index_refresh_wait_seconds: float = Field(30.0, gt=0, le=600)
     # Consecutive failures of any indexer counter (a scope's index passes, its
     # embed passes, its incomplete re-derives, or the tick's own user
     # enumeration) at which `/health` reports `degraded` and the CRITICAL
