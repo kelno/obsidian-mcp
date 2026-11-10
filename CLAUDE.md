@@ -77,7 +77,7 @@ user-facing documentation in `README.md`.
 
 ## Git
 
-This fork is an AI-managed repo: its owner, kelno, has their own AI agents maintain it for kelno's personal setup, under rules kept in kelno's private agent setup. Those rules don't apply to anyone else's agents. Much of this file came with the upstream project. Where its process rules (checks, reviews, caution) are stricter than the AI-managed rules, the AI-managed rules win, and such a line can be cut. Its technical decisions ("Key decisions", `docs/architecture/`) still hold.
+This fork is an AI-managed repo: its owner, kelno, has their own AI agents maintain it for kelno's personal setup, under rules kept in kelno's private agent setup, including checks for interface changes. Those rules don't apply to anyone else's agents. Much of this file came with the upstream project. Where its process rules (checks, reviews, caution) are stricter than the AI-managed rules, the AI-managed rules win, and such a line can be cut. Its technical decisions ("Key decisions", `docs/architecture/`) still hold.
 
 The AI-managed rules above set the pace here. Anything on `main` may be deployed at any time (see `FORK.md`), so push `main` when a piece of work is ready to deploy, never just to save it; work in progress stays on a branch. Before that push, the full checks must have passed once for the piece of work: the full suite including `make test-integration`, plus `make test-schema` and `make db-check` for a migration. A fix after them, even right before the push, needs only the tests for what changed (for a tool description or the guide, the test files that name it), not another full run. The report says what changed since the full run.
 
