@@ -817,3 +817,103 @@ async def test_task_tools_point_out_a_bare_ref_and_an_unknown_one(sessionmaker, 
                                         description=f"See it later (ledger {entry.ref})")
     assert edited.error is None, edited.error
     assert edited.ledger_refs[0]["ref"] == entry.ref and edited.notes is None
+
+
+# ── Everything an agent needs, up front (ledger F34) ─────────────────────────
+
+async def test_one_add_refusal_names_every_problem_and_writes_nothing(ctx):
+    """Tonight's case: the title's limit, the missing subtype and an unknown
+    topic were three refusals in a row; now they are one."""
+    result = await tools.ledger_add_impl("feedback", "x" * 151, area="nowhere", topics=["no-such-topic"],
+                                         details={"component": "c"}, related=["F404"])
+    assert code(result) == "invalid_argument"
+    fields = [p["field"] for p in result.problems]
+    assert fields == ["title", "details.subtype", "area", "topics", "related"], fields
+    by_field = {p["field"]: p for p in result.problems}
+    assert {a["name"] for a in by_field["details.subtype"]["allowed"]} == {
+        "unclear_instruction", "friction", "suggestion"}
+    assert {a["name"] for a in by_field["area"]["allowed"]} == {"area/agent-personnel", "area/home"}
+    assert by_field["related"]["code"] == "not_found"
+    assert "5 problems" in result.error
+    assert (await tools.ledger_search_impl()).entries == []
+
+
+async def test_a_wrong_kind_skips_the_checks_that_depend_on_it(ctx):
+    result = await tools.ledger_add_impl("bug", "fine", details={"certainty": "tested"})
+    assert code(result) == "invalid_argument" and result.problems is None
+    assert "kind must be one of" in result.error
+
+
+async def test_a_value_outside_the_published_enum_still_reaches_the_ledgers_refusal(ctx):
+    """The enums describe; the server decides: through the registered tool a
+    wrong value gets the ledger's own refusal, not a generic validation error."""
+    from src.mcp_server.server import mcp
+
+    _, structured = await mcp.call_tool("ledger_add", {
+        "kind": "quirk", "title": "x", "details": {"certainty": "sure"}})
+    assert "details.certainty must be one of" in structured["error"]
+
+
+async def test_an_entry_without_topics_is_nudged_with_names_and_suggestions(ctx):
+    await tools.ledger_topic_edit_impl("create", "voice-bridge", "needed", kind="system", description="Bridge")
+    first = await add_quirk("Relay loses the thread on long answers", area="agent-personnel",
+                            topics=["voice-bridge"])
+    assert first.areas_and_topics is None and not any("no topics" in n for n in first.notes or [])
+    second = await add_quirk("Relay loses the thread again")
+    assert second.areas_and_topics == {"areas": "agent-personnel, home", "topics": "voice-bridge"}
+    assert second.similar[0]["topics"] == ["voice-bridge"] and second.similar[0]["area"] == "area/agent-personnel"
+    nudge = next(n for n in second.notes if "has no topics" in n)
+    assert "if none fits, nothing to do" in nudge
+    assert "Similar entries carry: voice-bridge." in nudge
+    assert f'ref="{second.ref}", expected_revision=1' in nudge
+    assert any("has no area" in n for n in second.notes)
+
+
+async def test_search_results_carry_the_area_and_topic_names(ctx):
+    await tools.ledger_topic_edit_impl("create", "voice", "needed", kind="surface", description="Voice")
+    for result in (await tools.ledger_search_impl(), await tools.ledger_search_impl(query="anything")):
+        assert result.areas_and_topics == {"areas": "agent-personnel, home", "topics": "voice"}
+
+
+async def test_words_fall_back_to_any_word_when_no_entry_holds_them_all(ctx):
+    """The agent test's case: "Homepie brightness preset" found nothing,
+    though an entry about brightness existed."""
+    await add_quirk("Node-RED light flow ignores brightness below 5%", area="home")
+    result = await tools.ledger_search_impl(query="Homepie brightness preset", mode="words")
+    assert [e.ref for e in result.by_words] == ["Q1"]
+    assert any("No entry holds every word" in n for n in result.notes)
+    exact = await tools.ledger_search_impl(query="light brightness", mode="words")
+    assert [e.ref for e in exact.by_words] == ["Q1"] and not any("every word" in n for n in exact.notes or [])
+
+
+async def test_an_add_with_nothing_similar_says_so(ctx):
+    result = await add_quirk("Zebra unicorn telescope", area="home")
+    assert result.similar is None
+    assert any("No active entry shares words" in n for n in result.notes)
+
+
+async def test_one_update_refusal_names_every_problem_and_changes_nothing(ctx):
+    q = await add_quirk("Original title")
+    result = await tools.ledger_update_impl(
+        ref=q.ref, expected_revision=1, reason="r", title="y" * 151, topics_add=["nope"],
+        details={"certainty": "sure"}, append="kept?")
+    assert code(result) == "invalid_argument"
+    assert [p["field"] for p in result.problems] == ["title", "details.certainty", "topics_add"]
+    got = (await tools.ledger_get_impl([q.ref])).entries[0]
+    assert (got.revision, got.title, got.body) == (1, "Original title", "")
+
+
+async def test_update_still_refuses_a_stale_revision_alone(ctx):
+    q = await add_quirk("Stale one")
+    result = await tools.ledger_update_impl(ref=q.ref, expected_revision=3, title="z" * 151)
+    assert code(result) == "stale_revision" and result.current_revision == 1 and result.problems is None
+
+
+async def test_the_guide_lists_the_ledgers_rules_topics_and_areas(ctx):
+    await tools.ledger_topic_edit_impl("create", "voice", "needed", kind="surface", description="Voice mode")
+    guide = await tools.get_vault_guide_impl()
+    section = guide.split("## Logging to the agent ledger (this server)", 1)[1].split("\n---\n", 1)[0]
+    assert "- `voice`: Voice mode" in section
+    assert "Areas: agent-personnel, home." in section
+    assert "seen_once" in section and "unclear_instruction" in section and "150 characters" in section
+

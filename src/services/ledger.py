@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from functools import reduce
@@ -102,15 +103,74 @@ class LedgerError(Exception):
     """
 
     def __init__(self, code: str, message: str, *, allowed: list | None = None,
-                 current_revision: int | None = None):
+                 current_revision: int | None = None, problems: list[dict] | None = None):
         super().__init__(message)
         self.code = code
         self.allowed = allowed
         self.current_revision = current_revision
+        #: When a call had more than one problem: each one, as
+        #: `{field, code, message, allowed?}`, so one refusal names them all.
+        self.problems = problems
 
 
 def invalid(message: str, **kw) -> LedgerError:
     return LedgerError("invalid_argument", message, **kw)
+
+
+_NOTHING_WRITTEN = re.compile(r"\s*Nothing was written\.\s*\Z")
+
+
+class Problems:
+    """The refusals one write call collects, so a single answer names them all.
+
+    Tonight's lesson (ledger F34): an agent refused for its title, then for a
+    missing field, then for a wrong value learns one rule per call. Every
+    check that does not depend on another failing runs; `raise_if_any` then
+    refuses once. One problem is refused exactly as before; several become
+    one `invalid_argument` (or their shared code) with a `problems` list.
+    """
+
+    def __init__(self) -> None:
+        self.items: list[tuple[str, LedgerError]] = []
+
+    @contextmanager
+    def check(self, field_name: str):
+        try:
+            yield
+        except LedgerError as exc:
+            self.add(field_name, exc)
+
+    def add(self, field_name: str, exc: LedgerError) -> None:
+        if exc.problems:
+            for p in exc.problems:
+                inner = LedgerError(p["code"], p["message"], allowed=p.get("allowed"))
+                self.items.append((p["field"], inner))
+        else:
+            # A nested collector's single problem keeps its own, finer field.
+            self.items.append((getattr(exc, "field", None) or field_name, exc))
+
+    def failed(self, *field_names: str) -> bool:
+        return any(name in field_names for name, _ in self.items)
+
+    def raise_if_any(self) -> None:
+        if not self.items:
+            return
+        if len(self.items) == 1:
+            name, exc = self.items[0]
+            exc.field = name
+            raise exc
+        listed = []
+        for name, exc in self.items:
+            entry = {"field": name, "code": exc.code, "message": _NOTHING_WRITTEN.sub("", str(exc))}
+            if exc.allowed:
+                entry["allowed"] = exc.allowed
+            listed.append(entry)
+        codes = {p["code"] for p in listed}
+        code = codes.pop() if len(codes) == 1 else "invalid_argument"
+        message = (f"{len(listed)} problems; nothing was written. "
+                   + " ".join(f"({i}) {p['field']}: {p['message']}" for i, p in enumerate(listed, 1))
+                   + " Each is also in `problems`, with the allowed values where there is a list.")
+        raise LedgerError(code, message, problems=listed)
 
 
 # ── Small pure helpers ───────────────────────────────────────────────────────
@@ -308,36 +368,45 @@ def validate_details(kind: str, details: dict | None, *, for_add: bool) -> dict:
     if not isinstance(details, dict):
         raise invalid("details must be an object of the kind's own fields.")
     allowed = KIND_FIELDS[kind]
+    problems = Problems()
     unknown = sorted(set(details) - set(allowed))
     if unknown:
-        raise invalid(
-            f"{', '.join(unknown)} is not a field of a {kind}. A {kind}'s fields: {', '.join(allowed)}. "
-            "Nothing was written.",
+        problems.add("details", invalid(
+            f"{', '.join(unknown)} is not a field of a {kind}. A {kind}'s fields: {', '.join(allowed)} "
+            f"(required: {', '.join(REQUIRED_FIELDS[kind])}). Nothing was written.",
             allowed=[{"name": k} for k in allowed],
-        )
+        ))
     out = {}
     for name, value in details.items():
-        if value is None:
-            if name in REQUIRED_FIELDS[kind]:
-                raise invalid(f"{name} is required for a {kind} and cannot be cleared.")
-            out[name] = None
+        if name not in allowed:
             continue
-        if not isinstance(value, str):
-            raise invalid(f"details.{name} must be text.")
-        value = value.strip()
-        if name in ENUM_FIELDS:
-            if value not in ENUM_FIELDS[name]:
-                raise invalid(f"details.{name} must be one of {', '.join(ENUM_FIELDS[name])} (got {value!r}).",
-                              allowed=[{"name": v} for v in ENUM_FIELDS[name]])
-        elif not value:
-            raise invalid(f"details.{name} is empty; leave it out instead.")
-        if len(value) > allowed[name]:
-            raise invalid(f"details.{name} is {len(value)} characters; at most {allowed[name]}.")
-        out[name] = value
+        with problems.check(f"details.{name}"):
+            if value is None:
+                if name in REQUIRED_FIELDS[kind]:
+                    raise invalid(f"{name} is required for a {kind} and cannot be cleared.")
+                out[name] = None
+                continue
+            if not isinstance(value, str):
+                raise invalid(f"details.{name} must be text.")
+            value = value.strip()
+            if name in ENUM_FIELDS:
+                if value not in ENUM_FIELDS[name]:
+                    raise invalid(f"details.{name} must be one of {', '.join(ENUM_FIELDS[name])} (got {value!r}).",
+                                  allowed=[{"name": v} for v in ENUM_FIELDS[name]])
+            elif not value:
+                raise invalid(f"details.{name} is empty; leave it out instead.")
+            if len(value) > allowed[name]:
+                raise invalid(f"details.{name} is {len(value)} characters; at most {allowed[name]}.")
+            out[name] = value
     if for_add:
-        missing = [n for n in REQUIRED_FIELDS[kind] if not out.get(n)]
-        if missing:
-            raise invalid(f"a {kind} needs details.{' and details.'.join(missing)}. Nothing was written.")
+        for name in REQUIRED_FIELDS[kind]:
+            if name not in details:
+                values = ENUM_FIELDS.get(name)
+                problems.add(f"details.{name}", invalid(
+                    f"a {kind} needs details.{name}"
+                    + (f": one of {', '.join(values)}." if values else ".") + " Nothing was written.",
+                    allowed=[{"name": v} for v in values] if values else None))
+    problems.raise_if_any()
     return out
 
 
@@ -676,6 +745,8 @@ class AddOutcome:
     flagged: list[Flagged]
     hints: list[dict]
     notes: list[str]
+    #: Set when the entry got no area or no topics: `names()`, for the nudge.
+    names: dict | None = None
 
 
 async def _next_number(session: AsyncSession, uid: int | None, kind: str) -> int:
@@ -699,48 +770,77 @@ async def add_entry(
     topics=None, details=None, related=None, origin: str = "agent", observed_on: str | None = None,
     seen: bool | None = None, status: str | None = None, author: str | None = None, challenges=None,
 ) -> AddOutcome:
-    if kind not in db.LEDGER_KINDS:
-        raise invalid(f"kind must be one of {', '.join(db.LEDGER_KINDS)} (got {kind!r}).",
-                      allowed=[{"name": k} for k in db.LEDGER_KINDS])
-    title = clean_title(title)
-    body = check_body(body or "")
-    author = clean_author(author)
-    if origin not in db.LEDGER_ORIGINS:
-        raise invalid("origin must be agent or owner.")
-    fields = validate_details(kind, details, for_add=True)
+    # Every independent check runs and one refusal names every problem
+    # (`Problems`); a check that depends on a failed one is skipped.
+    problems = Problems()
+    with problems.check("kind"):
+        if kind not in db.LEDGER_KINDS:
+            raise invalid(f"kind must be one of {', '.join(db.LEDGER_KINDS)} (got {kind!r}).",
+                          allowed=[{"name": k} for k in db.LEDGER_KINDS])
+    with problems.check("title"):
+        title = clean_title(title)
+    with problems.check("body"):
+        body = check_body(body or "")
+    with problems.check("author"):
+        author = clean_author(author)
+    with problems.check("origin"):
+        if origin not in db.LEDGER_ORIGINS:
+            raise invalid("origin must be agent or owner.", allowed=[{"name": o} for o in db.LEDGER_ORIGINS])
+    kind_ok = not problems.failed("kind")
+    fields: dict = {}
+    if kind_ok:
+        with problems.check("details"):
+            fields = validate_details(kind, details, for_add=True)
     notes: list[str] = []
 
-    area_tag = resolve_area(await area_index(session, uid), area) if area else None
-    if status is None:
-        status = {"quirk": "current", "feedback": "open" if area_tag else "to_triage"}.get(kind)
-        if status is None:
-            raise invalid("a proposal needs status: its outcome, accepted, adjusted, rejected or withdrawn.",
-                          allowed=[{"name": s} for s in ADD_STATUSES["proposal"]])
-    if status not in ADD_STATUSES[kind]:
-        raise invalid(
-            f"a new {kind} can be {', '.join(ADD_STATUSES[kind])} (got {status!r}). Closing an entry is an "
-            "update with a reason.", allowed=[{"name": s} for s in ADD_STATUSES[kind]])
-    if kind == "feedback":
-        if status == "open" and area_tag is None:
-            raise invalid("open feedback needs an area; feedback with no area is to_triage.")
-        if status == "to_triage" and area_tag is not None:
-            raise invalid("feedback with an area is open, not to_triage.")
-        if seen is None:
-            seen = origin == "owner"
-        if origin == "owner" and not seen:
-            raise invalid("feedback from the owner is seen from the start (seen cannot be false).")
-    elif seen is not None:
-        raise invalid("only feedback has seen.")
-    if status in ("accepted", "adjusted") and not fields.get("final_text"):
-        raise invalid(f"an {status} proposal needs details.final_text: the version that went in.")
+    area_tag = None
+    with problems.check("area"):
+        area_tag = resolve_area(await area_index(session, uid), area) if area else None
+    if kind_ok and not problems.failed("area", "origin"):
+        with problems.check("status"):
+            if status is None:
+                status = {"quirk": "current", "feedback": "open" if area_tag else "to_triage"}.get(kind)
+                if status is None:
+                    raise invalid("a proposal needs status: its outcome, accepted, adjusted, rejected or withdrawn.",
+                                  allowed=[{"name": s} for s in ADD_STATUSES["proposal"]])
+            if status not in ADD_STATUSES[kind]:
+                raise invalid(
+                    f"a new {kind} can be {', '.join(ADD_STATUSES[kind])} (got {status!r}). Closing an entry is an "
+                    "update with a reason.", allowed=[{"name": s} for s in ADD_STATUSES[kind]])
+            if kind == "feedback":
+                if status == "open" and area_tag is None:
+                    raise invalid("open feedback needs an area; feedback with no area is to_triage.")
+                if status == "to_triage" and area_tag is not None:
+                    raise invalid("feedback with an area is open, not to_triage.")
+        with problems.check("seen"):
+            if kind == "feedback":
+                if seen is None:
+                    seen = origin == "owner"
+                if origin == "owner" and not seen:
+                    raise invalid("feedback from the owner is seen from the start (seen cannot be false).")
+            elif seen is not None:
+                raise invalid("only feedback has seen.")
+        if not problems.failed("status", "details"):
+            with problems.check("details.final_text"):
+                if status in ("accepted", "adjusted") and not fields.get("final_text"):
+                    raise invalid(f"an {status} proposal needs details.final_text: the version that went in.")
 
-    topic_ids = await resolve_topics(session, uid, bounded_list(topics, "topics"))
-    related_entries, missing = await find_entries(session, uid, bounded_list(related, "related"))
-    if missing:
-        raise LedgerError("not_found", f"related entr{'y' if len(missing) == 1 else 'ies'} {', '.join(missing)} "
-                          "not found. Nothing was written.")
-    challenged = await check_challenges(session, uid, challenges)
-    day = parse_day(observed_on, "observed_on") if observed_on else today()
+    topic_ids: dict[str, int] = {}
+    with problems.check("topics"):
+        topic_ids = await resolve_topics(session, uid, bounded_list(topics, "topics"))
+    related_entries: dict = {}
+    with problems.check("related"):
+        related_entries, missing = await find_entries(session, uid, bounded_list(related, "related"))
+        if missing:
+            raise LedgerError("not_found", f"related entr{'y' if len(missing) == 1 else 'ies'} "
+                              f"{', '.join(missing)} not found. Nothing was written.")
+    challenged: list[int] = []
+    with problems.check("challenges"):
+        challenged = await check_challenges(session, uid, challenges)
+    day = None
+    with problems.check("observed_on"):
+        day = parse_day(observed_on, "observed_on") if observed_on else today()
+    problems.raise_if_any()
 
     number = await _next_number(session, uid, kind)
     entry = LedgerEntry(
@@ -763,11 +863,12 @@ async def add_entry(
     await session.flush()
     similar = await similar_entries(session, uid, entry)
     hints = await view_hints(session, uid, sorted(set(topic_ids.values()))) if kind == "quirk" else []
+    vocabulary = await names(session, uid) if area_tag is None or not topic_ids else None
     await session.commit()
     return AddOutcome(
         entry=entry, topics=sorted(topic_ids), related=sorted({e.ref for e in related_entries.values()},
                                                               key=_ref_sort_key),
-        similar=similar, flagged=flagged, hints=hints, notes=notes,
+        similar=similar, flagged=flagged, hints=hints, notes=notes, names=vocabulary,
     )
 
 
@@ -781,12 +882,36 @@ async def similar_entries(session: AsyncSession, uid: int | None, entry: LedgerE
     doc = search_document()
     rank = func.ts_rank_cd(doc, query)
     rows = (await session.execute(
-        select(LedgerEntry.ref, LedgerEntry.kind, LedgerEntry.status, LedgerEntry.title, rank.label("rank"))
+        select(LedgerEntry.id, LedgerEntry.ref, LedgerEntry.kind, LedgerEntry.status, LedgerEntry.title,
+               LedgerEntry.area_tag, rank.label("rank"))
         .where(_owner(LedgerEntry, uid), LedgerEntry.id != entry.id, LedgerEntry.status.in_(ACTIVE_STATUSES),
                doc.op("@@")(query))
         .order_by(rank.desc(), LedgerEntry.id).limit(SIMILAR_MAX)
     )).all()
-    return [{"ref": r.ref, "kind": r.kind, "status": r.status, "title": r.title} for r in rows]
+    topics = await entry_topics(session, [r.id for r in rows]) if rows else {}
+    out = []
+    for r in rows:
+        item = {"ref": r.ref, "kind": r.kind, "status": r.status, "title": r.title}
+        if r.area_tag:
+            item["area"] = r.area_tag
+        if topics.get(r.id):
+            item["topics"] = topics[r.id]
+        out.append(item)
+    return out
+
+
+async def names(session: AsyncSession, uid: int | None) -> dict[str, str]:
+    """The area and topic names an entry can carry, one comma-separated line each.
+
+    Put where agents already are (`ledger_search`, a `ledger_add` that set
+    none) so an entry gets them without a separate `ledger_topics` call
+    (ledger F34): names only, descriptions stay in `ledger_topics` and the
+    guide. Areas without their `area/` prefix, which every tool accepts.
+    """
+    index = await area_index(session, uid)
+    areas = [tag.removeprefix(task_query.AREA_PREFIX) for tag, _path, _desc in index.described()]
+    topics = [t["name"] for t in await topics_allowed(session, uid)]
+    return {"areas": ", ".join(areas) or "none declared", "topics": ", ".join(topics) or "none yet"}
 
 
 # ── Update ───────────────────────────────────────────────────────────────────
@@ -828,24 +953,33 @@ async def _update_entry(
     details=None, superseded_by=None, handled_account=None, related=None, author=None, challenges=None,
     seen=None, observed_on=None, origin=None,
 ) -> UpdateOutcome:
-    if expected_revision is None:
-        raise invalid("expected_revision is required: the revision you read (ledger_get or ledger_search). "
-                      "A change based on an outdated version is refused.")
-    reason = clean_reason(reason)
-    author = clean_author(author)
+    problems = Problems()
+    with problems.check("expected_revision"):
+        if expected_revision is None:
+            raise invalid("expected_revision is required: the revision you read (ledger_get or ledger_search). "
+                          "A change based on an outdated version is refused.")
+    with problems.check("reason"):
+        reason = clean_reason(reason)
+    with problems.check("author"):
+        author = clean_author(author)
     found, missing = await find_entries(session, uid, [ref], lock=True)
     if missing:
         raise LedgerError("not_found", f"entry {ref} not found. Nothing was written.")
     entry = found[ref]
-    if entry.revision != expected_revision:
+    if expected_revision is not None and entry.revision != expected_revision:
         raise LedgerError(
             "stale_revision",
             f"{entry.ref} is at revision {entry.revision}, not {expected_revision}: it changed since you read "
             "it. Read it again (ledger_get, history=true shows what changed), then decide. Nothing was written.",
             current_revision=entry.revision,
         )
-    if body is not None and append is not None:
-        raise invalid("give body (replace it) or append (add a dated paragraph), not both.")
+    # From here every independent check runs and one refusal names every
+    # problem (`Problems`). The entry may be half-changed when one fails;
+    # nothing is flushed (autoflush is off) and the caller's session closes
+    # without a commit, so none of it lands.
+    with problems.check("body"):
+        if body is not None and append is not None:
+            raise invalid("give body (replace it) or append (add a dated paragraph), not both.")
 
     ids = [entry.id]
     topics_before = (await entry_topics(session, ids))[entry.id]
@@ -856,108 +990,127 @@ async def _update_entry(
     notes: list[str] = []
 
     if title is not None:
-        new = clean_title(title)
-        if new != entry.title:
-            entry.title = new
-            changed.append("title")
-    if body is not None:
-        new = check_body(body)
-        if new != entry.body:
-            entry.body = new
-            changed.append("body")
-    if append is not None:
-        entry.body = check_body(_append_paragraph(entry.body, append))
-        changed.append("body (appended)")
+        with problems.check("title"):
+            new = clean_title(title)
+            if new != entry.title:
+                entry.title = new
+                changed.append("title")
+    if body is not None and append is None:
+        with problems.check("body"):
+            new = check_body(body)
+            if new != entry.body:
+                entry.body = new
+                changed.append("body")
+    if append is not None and body is None:
+        with problems.check("append"):
+            entry.body = check_body(_append_paragraph(entry.body, append))
+            changed.append("body (appended)")
     if observed_on is not None:
-        day = parse_day(observed_on, "observed_on")
-        if day != entry.observed_on:
-            entry.observed_on = day
-            changed.append("observed_on")
+        with problems.check("observed_on"):
+            day = parse_day(observed_on, "observed_on")
+            if day != entry.observed_on:
+                entry.observed_on = day
+                changed.append("observed_on")
     if origin is not None:
-        if origin not in db.LEDGER_ORIGINS:
-            raise invalid("origin must be agent or owner.")
-        if origin != entry.origin:
-            entry.origin = origin
-            changed.append("origin")
-            if entry.kind == "feedback" and origin == "owner":
-                entry.seen = True
+        with problems.check("origin"):
+            if origin not in db.LEDGER_ORIGINS:
+                raise invalid("origin must be agent or owner.", allowed=[{"name": o} for o in db.LEDGER_ORIGINS])
+            if origin != entry.origin:
+                entry.origin = origin
+                changed.append("origin")
+                if entry.kind == "feedback" and origin == "owner":
+                    entry.seen = True
     if details is not None:
-        for name, value in validate_details(entry.kind, details, for_add=False).items():
-            if getattr(entry, name) != value:
-                setattr(entry, name, value)
-                changed.append(name)
+        with problems.check("details"):
+            for name, value in validate_details(entry.kind, details, for_add=False).items():
+                if getattr(entry, name) != value:
+                    setattr(entry, name, value)
+                    changed.append(name)
     if area is not None:
-        new_area = None if area.strip() in ("", "none") else resolve_area(await area_index(session, uid), area)
-        if new_area != entry.area_tag:
-            entry.area_tag = new_area
-            changed.append("area")
-            if entry.kind == "feedback" and status is None:
-                if new_area and entry.status == "to_triage":
-                    entry.status = "open"
-                    changed.append("status")
-                    notes.append(f"{entry.ref} now has an area, so it moved from to_triage to open.")
-                elif new_area is None and entry.status == "open":
-                    entry.status = "to_triage"
-                    changed.append("status")
-                    notes.append(f"{entry.ref} has no area any more, so it moved from open to to_triage.")
+        with problems.check("area"):
+            new_area = None if area.strip() in ("", "none") else resolve_area(await area_index(session, uid), area)
+            if new_area != entry.area_tag:
+                entry.area_tag = new_area
+                changed.append("area")
+                if entry.kind == "feedback" and status is None:
+                    if new_area and entry.status == "to_triage":
+                        entry.status = "open"
+                        changed.append("status")
+                        notes.append(f"{entry.ref} now has an area, so it moved from to_triage to open.")
+                    elif new_area is None and entry.status == "open":
+                        entry.status = "to_triage"
+                        changed.append("status")
+                        notes.append(f"{entry.ref} has no area any more, so it moved from open to to_triage.")
     if seen is not None:
-        if entry.kind != "feedback":
-            raise invalid("only feedback has seen.")
-        if entry.seen != bool(seen):
-            if entry.origin == "owner" and not seen:
-                raise invalid("feedback from the owner is always seen.")
-            entry.seen = bool(seen)
-            changed.append("seen")
+        with problems.check("seen"):
+            if entry.kind != "feedback":
+                raise invalid("only feedback has seen.")
+            if entry.seen != bool(seen):
+                if entry.origin == "owner" and not seen:
+                    raise invalid("feedback from the owner is always seen.")
+                entry.seen = bool(seen)
+                changed.append("seen")
 
-    if superseded_by is not None and status not in (None, "superseded"):
-        raise invalid("superseded_by goes with status superseded.")
-    if status is not None:
-        await _apply_status(session, uid, entry, status, superseded_by, handled_account, changed)
-    elif handled_account is not None:
-        if entry.status != "handled":
-            raise invalid("handled_account goes with status handled.")
-        new = handled_account.strip()
-        if not new or len(new) > BODY_MAX:
-            raise invalid(f"handled_account must be 1 to {BODY_MAX} characters.")
-        if new != entry.handled_account:
-            entry.handled_account = new
-            changed.append("handled_account")
-    elif superseded_by is not None:
-        await _apply_status(session, uid, entry, "superseded", superseded_by, None, changed)
-    if entry.kind == "proposal" and entry.status in ("accepted", "adjusted") and not entry.final_text:
-        raise invalid(f"an {entry.status} proposal needs details.final_text: the version that went in.")
+    # The status rules read the area, the origin and the details: skipped when one of those failed.
+    if not problems.failed("area", "origin") and not any(n.startswith("details") for n, _ in problems.items):
+        with problems.check("status"):
+            if superseded_by is not None and status not in (None, "superseded"):
+                raise invalid("superseded_by goes with status superseded.")
+            if status is not None:
+                await _apply_status(session, uid, entry, status, superseded_by, handled_account, changed)
+            elif handled_account is not None:
+                if entry.status != "handled":
+                    raise invalid("handled_account goes with status handled.")
+                new = handled_account.strip()
+                if not new or len(new) > BODY_MAX:
+                    raise invalid(f"handled_account must be 1 to {BODY_MAX} characters.")
+                if new != entry.handled_account:
+                    entry.handled_account = new
+                    changed.append("handled_account")
+            elif superseded_by is not None:
+                await _apply_status(session, uid, entry, "superseded", superseded_by, None, changed)
+        if not problems.failed("status"):
+            with problems.check("details.final_text"):
+                if entry.kind == "proposal" and entry.status in ("accepted", "adjusted") and not entry.final_text:
+                    raise invalid(f"an {entry.status} proposal needs details.final_text: the version that went in.")
 
     if topics_add or topics_remove:
-        add_ids = await resolve_topics(session, uid, bounded_list(topics_add, "topics_add"))
-        remove = [t.strip().lower() for t in bounded_list(topics_remove, "topics_remove")]
-        not_on = [t for t in remove if t not in topics_before]
-        if not_on:
-            raise invalid(f"{entry.ref} has no topic {', '.join(not_on)} to remove (it has: "
-                          f"{', '.join(topics_before) or 'none'}).")
-        for slug, topic_id in add_ids.items():
-            if slug not in topics_before:
-                await session.execute(pg_insert(LedgerEntryTopic).values(
-                    user_id=entry.user_id, entry_id=entry.id, topic_id=topic_id).on_conflict_do_nothing())
-                changed.append(f"topic +{slug}")
-        if remove:
-            remove_ids = list((await resolve_topics(session, uid, remove)).values())
-            await session.execute(delete(LedgerEntryTopic).where(
-                LedgerEntryTopic.entry_id == entry.id, LedgerEntryTopic.topic_id.in_(remove_ids)))
-            changed.extend(f"topic -{slug}" for slug in remove)
+        with problems.check("topics_add"):
+            add_ids = await resolve_topics(session, uid, bounded_list(topics_add, "topics_add"))
+            for slug, topic_id in add_ids.items():
+                if slug not in topics_before:
+                    await session.execute(pg_insert(LedgerEntryTopic).values(
+                        user_id=entry.user_id, entry_id=entry.id, topic_id=topic_id).on_conflict_do_nothing())
+                    changed.append(f"topic +{slug}")
+        with problems.check("topics_remove"):
+            remove = [t.strip().lower() for t in bounded_list(topics_remove, "topics_remove")]
+            not_on = [t for t in remove if t not in topics_before]
+            if not_on:
+                raise invalid(f"{entry.ref} has no topic {', '.join(not_on)} to remove (it has: "
+                              f"{', '.join(topics_before) or 'none'}).")
+            if remove:
+                remove_ids = list((await resolve_topics(session, uid, remove)).values())
+                await session.execute(delete(LedgerEntryTopic).where(
+                    LedgerEntryTopic.entry_id == entry.id, LedgerEntryTopic.topic_id.in_(remove_ids)))
+                changed.extend(f"topic -{slug}" for slug in remove)
     if related is not None:
-        others, missing = await find_entries(session, uid, bounded_list(related, "related"))
-        if missing:
-            raise LedgerError("not_found", f"related entr{'y' if len(missing) == 1 else 'ies'} "
-                              f"{', '.join(missing)} not found. Nothing was written.")
-        for other in {e.id: e for e in others.values()}.values():
-            if other.id == entry.id or other.ref in related_before:
-                continue
-            low, high = sorted((entry.id, other.id))
-            await session.execute(pg_insert(LedgerEntryLink).values(
-                user_id=entry.user_id, entry_id=low, related_id=high).on_conflict_do_nothing())
-            changed.append(f"related +{other.ref}")
+        with problems.check("related"):
+            others, missing = await find_entries(session, uid, bounded_list(related, "related"))
+            if missing:
+                raise LedgerError("not_found", f"related entr{'y' if len(missing) == 1 else 'ies'} "
+                                  f"{', '.join(missing)} not found. Nothing was written.")
+            for other in {e.id: e for e in others.values()}.values():
+                if other.id == entry.id or other.ref in related_before:
+                    continue
+                low, high = sorted((entry.id, other.id))
+                await session.execute(pg_insert(LedgerEntryLink).values(
+                    user_id=entry.user_id, entry_id=low, related_id=high).on_conflict_do_nothing())
+                changed.append(f"related +{other.ref}")
 
-    challenged = await check_challenges(session, uid, challenges)
+    challenged: list[int] = []
+    with problems.check("challenges"):
+        challenged = await check_challenges(session, uid, challenges)
+    problems.raise_if_any()
     if not changed and not challenged:
         # No rollback here: it would expire `entry` before the message reads
         # it. The caller's session closes, which rolls everything back.

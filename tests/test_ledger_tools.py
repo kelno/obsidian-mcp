@@ -213,3 +213,95 @@ def test_lock_conflicts_become_a_retryable_refusal_and_other_faults_are_raised()
     other = DBAPIError("UPDATE", {}, Orig("XX000"))
     with pytest.raises(DBAPIError):
         tools._ledger_conflict(LedgerWriteResult, other)
+
+
+# ── Everything an agent needs, up front (ledger F34) ─────────────────────────
+
+def test_details_name_every_problem_in_one_refusal():
+    """An unknown field, a missing required one and a wrong value come back
+    together, each with its field and, where there is a list, the values."""
+    with pytest.raises(ledger.LedgerError) as exc:
+        ledger.validate_details("quirk", {"subtype": "friction", "sources": ""}, for_add=True)
+    problems = {p["field"]: p for p in exc.value.problems}
+    assert set(problems) == {"details", "details.sources", "details.certainty"}
+    assert {a["name"] for a in problems["details.certainty"]["allowed"]} == set(db.LEDGER_CERTAINTIES)
+    assert "3 problems" in str(exc.value) and "Nothing was written" not in str(exc.value).split(". ", 1)[1]
+
+
+def test_a_missing_required_field_names_its_values():
+    with pytest.raises(ledger.LedgerError) as exc:
+        ledger.validate_details("feedback", {}, for_add=True)
+    assert exc.value.problems is None  # one problem: refused exactly as before
+    assert "unclear_instruction, friction, suggestion" in str(exc.value)
+    assert {a["name"] for a in exc.value.allowed} == set(db.LEDGER_FEEDBACK_SUBTYPES)
+
+
+def test_problems_pass_one_through_and_combine_several():
+    one = ledger.Problems()
+    with one.check("title"):
+        raise ledger.invalid("bad title.", allowed=[{"name": "x"}])
+    with pytest.raises(ledger.LedgerError) as exc:
+        one.raise_if_any()
+    assert str(exc.value) == "bad title." and exc.value.problems is None and exc.value.allowed == [{"name": "x"}]
+
+    many = ledger.Problems()
+    with many.check("title"):
+        raise ledger.invalid("bad title. Nothing was written.")
+    with many.check("related"):
+        raise ledger.LedgerError("not_found", "no F9.")
+    with pytest.raises(ledger.LedgerError) as exc:
+        many.raise_if_any()
+    assert exc.value.code == "invalid_argument"
+    assert [p["field"] for p in exc.value.problems] == ["title", "related"]
+    assert exc.value.problems[0]["message"] == "bad title."
+    assert str(exc.value).startswith("2 problems; nothing was written. (1) title: bad title. (2) related: no F9.")
+    ledger.Problems().raise_if_any()  # nothing collected: no refusal
+
+
+def test_a_refusal_carries_its_problems_into_the_result():
+    exc = ledger.LedgerError("invalid_argument", "2 problems", problems=[{"field": "a", "code": "c", "message": "m"}])
+    result = tools._ledger_refused(tools.LedgerWriteResult, exc)
+    assert result.problems == [{"field": "a", "code": "c", "message": "m"}]
+
+
+def test_add_and_update_publish_each_rule_in_the_parameter_list():
+    """Clients show the parameter list more reliably than the docstring:
+    every parameter is described, and the values are enums."""
+    registered = _registered()
+    for param, schema in registered["ledger_search"].parameters["properties"].items():
+        assert schema.get("description"), ("ledger_search", param)
+    for name in ("ledger_add", "ledger_update"):
+        props = registered[name].parameters["properties"]
+        for param, schema in props.items():
+            assert schema.get("description"), (name, param)
+        details = props["details"]["properties"]
+        assert set(details) == {f for fields in ledger.KIND_FIELDS.values() for f in fields}
+        assert [v for v in details["certainty"]["enum"] if v] == list(db.LEDGER_CERTAINTIES)
+        assert [v for v in details["subtype"]["enum"] if v] == list(db.LEDGER_FEEDBACK_SUBTYPES)
+        assert "required" in details["certainty"]["description"]
+        assert props["title"]["maxLength"] == ledger.TITLE_MAX
+    add = registered["ledger_add"].parameters["properties"]
+    assert add["kind"]["enum"] == list(db.LEDGER_KINDS)
+    assert registered["ledger_add"].parameters["required"] == ["kind", "title"]
+    assert registered["ledger_update"].parameters["properties"]["details"]["properties"]["certainty"]["type"] == [
+        "string", "null"]
+
+
+async def test_the_guide_still_answers_without_the_database(ctx, monkeypatch):
+    assert await tools._ledger_guide(None) == ""
+
+
+
+async def test_a_kind_field_beside_details_is_refused_with_where_it_goes(ctx):
+    """The agent test's case: `subtype` passed at the top level got pydantic's
+    bare unknown-argument error."""
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    from src.mcp_server.server import mcp
+
+    with pytest.raises(ToolError, match="subtype goes inside details"):
+        await mcp.call_tool("ledger_add", {"kind": "feedback", "title": "t", "subtype": "friction"})
+    with pytest.raises(ToolError, match="certainty, sources go inside details"):
+        await mcp.call_tool("ledger_update", {"ref": "Q1", "certainty": "tested", "sources": "x"})
+    with pytest.raises(ToolError, match="Extra inputs"):
+        await mcp.call_tool("ledger_add", {"kind": "quirk", "title": "t", "colour": "red"})

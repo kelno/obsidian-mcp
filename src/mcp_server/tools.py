@@ -2548,7 +2548,43 @@ async def get_vault_guide_impl() -> str:
         vault_section = _NO_CLAUDE_MD_MESSAGE
     except ValueError as e:
         vault_section = f"# Vault-Specific Conventions\n\n{e}"
-    return f"{_VAULT_GUIDE_PRIMER}{_agent_edit_stamp_guide()}\n\n---\n\n{vault_section}"
+    ledger_section = await _ledger_guide(uid)
+    return f"{_VAULT_GUIDE_PRIMER}{_agent_edit_stamp_guide()}{ledger_section}\n\n---\n\n{vault_section}"
+
+
+async def _ledger_guide(uid) -> str:
+    """The guide's section on logging to the agent ledger, with the live names.
+
+    Agents skip a separate `ledger_topics` call (ledger F34), so the guide
+    every agent reads first carries what an entry needs: each kind's required
+    field and the topic and area names. Best-effort: without the database the
+    guide still answers, without this section.
+    """
+    try:
+        async with async_session() as session:
+            topics = await _ledger.topics_allowed(session, uid)
+            vocabulary = await _ledger.names(session, uid)
+    except Exception:  # noqa: BLE001 - the guide must not fail for its ledger section
+        # debug, not warning: a caller drives this path (the D18 permit rule),
+        # and a database outage is reported by /health and every ledger tool.
+        logger.debug("get_vault_guide: the ledger section is left out (database unavailable)", exc_info=True)
+        return ""
+    certainty = ", ".join(_ledger.ENUM_FIELDS["certainty"])
+    subtype = ", ".join(_ledger.ENUM_FIELDS["subtype"])
+    topic_lines = "\n".join(
+        f"- `{t['name']}`: {t['description']}" if t["description"] else f"- `{t['name']}`" for t in topics
+    ) or "- none yet"
+    return (
+        "\n\n## Logging to the agent ledger (this server)\n\n"
+        "Search first (`ledger_search`): the same thing seen again is an `append` to the existing entry, "
+        "not a new one. Give every new entry (`ledger_add`) an area and the topics that fit (none when none "
+        "does): searches by area or topic miss an entry without them. Each kind has a required field in "
+        f"`details`: a quirk `certainty` ({certainty}); feedback `subtype` ({subtype}); a proposal `target` "
+        "and `proposed_text`, plus `status`. Titles are one line of at most "
+        f"{_ledger.TITLE_MAX} characters. Areas go with or without the `area/` prefix.\n\n"
+        f"Topics:\n{topic_lines}\n\n"
+        f"Areas: {vocabulary['areas']}. Their descriptions are in `ledger_topics`."
+    )
 
 
 def _agent_edit_stamp_guide() -> str:
@@ -8331,7 +8367,8 @@ def _ledger_failed(result_cls, outcome: BodyOutcome, **extra):
 
 def _ledger_refused(result_cls, exc: "_ledger.LedgerError"):
     return _ledger_failed(
-        result_cls, _body_refusal(str(exc), exc.code), allowed=exc.allowed, current_revision=exc.current_revision
+        result_cls, _body_refusal(str(exc), exc.code), allowed=exc.allowed, current_revision=exc.current_revision,
+        problems=exc.problems,
     )
 
 
@@ -8463,6 +8500,7 @@ async def ledger_search_impl(
         except _ledger.LedgerError as exc:
             return _ledger_refused(LedgerSearchResult, exc)
         links, links_note = await _ledger_task_links(session, uid)
+        vocabulary = await _ledger.names(session, uid)
         task_states = _ledger_tasks.states(links) if links is not None else {}
         if tasks is not None:
             if links is None:
@@ -8485,7 +8523,8 @@ async def ledger_search_impl(
                 .order_by(LedgerEntry.updated_at.desc(), LedgerEntry.id.desc()).limit(limit + 1)
             )).all()
             return LedgerSearchResult(entries=[summary(r) for r in rows[:limit]],
-                                      truncated=len(rows) > limit, filters=described, notes=notes or None)
+                                      truncated=len(rows) > limit, filters=described, notes=notes or None,
+                                      areas_and_topics=vocabulary)
 
         words: list = []
         if mode in ("both", "words"):
@@ -8497,13 +8536,25 @@ async def ledger_search_impl(
                     LedgerEntry.number == number))).first()
             except _ledger.LedgerError:
                 pass
-            tsquery = _ledger.tsquery_for(query)
             doc = _ledger.search_document()
-            rank = func.ts_rank_cd(doc, tsquery)
-            ranked = (await session.execute(
-                select(*_ledger_summary_columns(), rank.label("rank")).where(*clauses, doc.op("@@")(tsquery))
-                .order_by(rank.desc(), LedgerEntry.id).limit(limit + 1)
-            )).all()
+
+            async def by_words_query(any_word: bool):
+                tsquery = _ledger.tsquery_for(query, any_word=any_word)
+                rank = func.ts_rank_cd(doc, tsquery)
+                return (await session.execute(
+                    select(*_ledger_summary_columns(), rank.label("rank")).where(*clauses, doc.op("@@")(tsquery))
+                    .order_by(rank.desc(), LedgerEntry.id).limit(limit + 1)
+                )).all()
+
+            ranked = await by_words_query(any_word=False)
+            if not ranked and exact is None and len(re.findall(r"\w{3,}", query)) > 1:
+                # An agent checking for a duplicate writes several words; an
+                # entry holding all of them is a strong sign, one sharing some
+                # is still worth seeing (ledger F34's agent test).
+                ranked = await by_words_query(any_word=True)
+                if ranked:
+                    notes.append("No entry holds every word of the query; by_words lists entries sharing any of "
+                                 "them, best first: a weaker sign of a duplicate.")
             words = ([exact] if exact is not None else []) + [r for r in ranked if exact is None or r.id != exact.id]
         meaning = None
         if mode in ("both", "meaning"):
@@ -8511,7 +8562,7 @@ async def ledger_search_impl(
     by_words_ids = {r.id for r in words[:limit]}
     by_meaning_ids = {h["row"].id for h in meaning.hits} if meaning else set()
     both = mode == "both"
-    result = LedgerSearchResult(filters=described)
+    result = LedgerSearchResult(filters=described, areas_and_topics=vocabulary)
     if mode in ("both", "words"):
         result.by_words = [summary(r, in_both_lists=(r.id in by_meaning_ids) if both else None)
                            for r in words[:limit]]
@@ -8523,8 +8574,9 @@ async def ledger_search_impl(
         result.meaning_unavailable = meaning.error
         result.not_embedded = meaning.not_embedded
         if meaning.not_embedded:
-            notes.append(f"{meaning.not_embedded} matching entr{'y has' if meaning.not_embedded == 1 else 'ies have'} "
-                            "no vector yet (new or just changed): they can only turn up in by_words.")
+            notes.append(f"{meaning.not_embedded} entr{'y' if meaning.not_embedded == 1 else 'ies'} within the "
+                         f"filters {'has' if meaning.not_embedded == 1 else 'have'} no vector yet (new or just "
+                         "changed): they can only turn up in by_words.")
     result.notes = notes or None
     return result
 
@@ -8633,12 +8685,29 @@ async def ledger_add_impl(
     notes = list(added.notes)
     if entry.status == "to_triage":
         notes.append(f"{entry.ref} has no area, so it is to_triage until one is set (ledger_update area=…).")
+    elif entry.area_tag is None:
+        notes.append(f"{entry.ref} has no area: set one if it concerns an area (ledger_update area=…).")
+    if not added.similar:
+        notes.append("No active entry shares words with the title: no duplicate found by words.")
+    if not added.topics:
+        counts: dict[str, int] = {}
+        for item in added.similar:
+            for slug in item.get("topics", ()):
+                counts[slug] = counts.get(slug, 0) + 1
+        suggested = sorted(counts, key=lambda s: (-counts[s], s))[:4]
+        notes.append(
+            f"{entry.ref} has no topics. "
+            + (f"Similar entries carry: {', '.join(suggested)}. " if suggested else "")
+            + "If one in areas_and_topics fits, add it now: "
+            f"ledger_update(ref=\"{entry.ref}\", expected_revision={entry.revision}, reason=\"add topics\", "
+            "topics_add=[…]); if none fits, nothing to do.")
     if added.flagged:
         notes.append("Check each flagged summary-view line now: replace it, or resolve it if it still holds "
                      "(ledger_digest_edit).")
     return LedgerWriteResult(
         ref=entry.ref, revision=entry.revision, status=entry.status, similar=added.similar or None,
         flagged_lines=_ledger_flagged(added.flagged), view_hints=added.hints or None, notes=notes or None,
+        areas_and_topics=added.names,
     )
 
 

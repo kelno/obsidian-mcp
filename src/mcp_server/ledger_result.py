@@ -4,7 +4,8 @@ Structured, like the task tools', because an agent chains these calls: a
 search hands back each entry's `ref` and `revision`, which an update must be
 given back, and a refusal names the valid values (`allowed`) or the entry's
 current revision so the next call can be right. Every outcome rides on
-`_body_outcome`; an error result carries `error` and those two fields only.
+`_body_outcome`; an error result carries `error` and those fields only
+(`allowed`, `current_revision`, `problems`).
 """
 
 from __future__ import annotations
@@ -23,6 +24,9 @@ class _LedgerResult(_OmitNone):
     allowed: list[dict] | None = None
     #: On `stale_revision`: the revision the entry (or line, or topic) is at now.
     current_revision: int | None = None
+    #: On a refusal with more than one problem: each one, as `{field, code,
+    #: message, allowed?}`, so the next call can fix them all at once.
+    problems: list[dict] | None = None
     #: Plain-language remarks the caller should read (a status that moved, a hint).
     notes: list[str] | None = None
 
@@ -61,6 +65,9 @@ class LedgerSearchResult(_LedgerResult):
     not_embedded: int | None = None
     truncated: bool | None = None
     filters: dict | None = None
+    #: The area and topic names an entry can carry, for the entry you may be
+    #: about to log (descriptions: `ledger_topics`).
+    areas_and_topics: dict | None = None
 
 
 class LedgerEntryFull(_OmitNone):
@@ -123,6 +130,8 @@ class LedgerWriteResult(_LedgerResult):
     view_hints: list[dict] | None = None
     #: Bulk seen: what was marked, already seen, not feedback, not found.
     seen: dict | None = None
+    #: `ledger_add` with no area or no topics: the names it could have had.
+    areas_and_topics: dict | None = None
 
 
 class LedgerDigestResult(_LedgerResult):

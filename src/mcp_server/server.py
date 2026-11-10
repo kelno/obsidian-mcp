@@ -3,7 +3,9 @@ from urllib.parse import urlparse
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
-from pydantic import ConfigDict
+from typing import Annotated
+
+from pydantic import ConfigDict, Field, model_validator
 
 from src.config import settings
 from src.mcp_server.fetch_result import FetchPageResult
@@ -18,6 +20,7 @@ from src.mcp_server.ledger_result import (
 )
 from src.mcp_server.read_result import ReadNoteResult
 from src.mcp_server.task_result import TaskListResult, TaskWriteResult
+from src.services import ledger as _ledger_rules
 from src.mcp_server.tools import (
     check_upload_impl,
     create_note_impl,
@@ -1681,19 +1684,40 @@ _LEDGER_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idemp
                                 openWorldHint=False)
 
 
+_S_QUERY = Field(description="Words, or a ref such as Q14. by_words lists entries holding every word; when none "
+                             "does, entries sharing any of them, best first (a note says so). by_meaning is "
+                             "separate and weaker.")
+_S_MODE = Field(description="both (default), words or meaning.", json_schema_extra={"enum": ["both", "words", "meaning"]})
+_S_KINDS = Field(description="Any of quirk, feedback, proposal.")
+_S_AREA = Field(description="An area, with or without the `area/` prefix, or its main note's name; \"none\" for "
+                            "entries without one.")
+_S_TOPICS = Field(description="Topic names; an entry must have them all. With an area, the surest duplicate check "
+                              "when the meaning list is unavailable.")
+_S_STATUS = Field(description="active (default: current quirks, open and to_triage feedback, every proposal), "
+                              "closed, any, one status, or a list.")
+_S_ORIGIN = Field(description="agent or owner.", json_schema_extra={"enum": ["agent", "owner"]})
+_S_UNSEEN = Field(description="Only feedback the owner has not heard of yet: what to bring to the owner (then mark "
+                              "it seen with ledger_update).")
+_S_SINCE = Field(description="YYYY-MM-DD: changed on or after that day.")
+_S_TASKS = Field(description="Feedback by the state of the vault tasks citing it: open (one is not done or "
+                             "cancelled), done (all closed, one done) or cancelled (all cancelled).",
+                 json_schema_extra={"enum": ["open", "done", "cancelled"]})
+_S_LIMIT = Field(description="1-100 per list (default 20).")
+
+
 @mcp.tool(annotations=_LEDGER_READ)
 async def ledger_search(
-    query: str | None = None,
-    mode: str = "both",
-    kinds: list[str] | None = None,
-    area: str | None = None,
-    topics: list[str] | None = None,
-    status: str | list[str] = "active",
-    origin: str | None = None,
-    unseen: bool = False,
-    since: str | None = None,
-    tasks: str | None = None,
-    limit: int = 20,
+    query: Annotated[str | None, _S_QUERY] = None,
+    mode: Annotated[str, _S_MODE] = "both",
+    kinds: Annotated[list[str] | None, _S_KINDS] = None,
+    area: Annotated[str | None, _S_AREA] = None,
+    topics: Annotated[list[str] | None, _S_TOPICS] = None,
+    status: Annotated[str | list[str], _S_STATUS] = "active",
+    origin: Annotated[str | None, _S_ORIGIN] = None,
+    unseen: Annotated[bool, _S_UNSEEN] = False,
+    since: Annotated[str | None, _S_SINCE] = None,
+    tasks: Annotated[str | None, _S_TASKS] = None,
+    limit: Annotated[int, _S_LIMIT] = 20,
 ) -> LedgerSearchResult:
     """Find agent-ledger entries: quirks, feedback and proposals agents log.
 
@@ -1711,23 +1735,8 @@ async def ledger_search(
     the filtered list, most recently changed first. One line per entry, no
     body: read entries with `ledger_get`. A feedback line says whether vault
     tasks cite it, and whether they are all done or cancelled (`tasks`).
-
-    Args:
-        query: words, or a ref such as Q14.
-        mode: both (default), words or meaning.
-        kinds: any of quirk, feedback, proposal.
-        area: an area (slug, `area/<slug>` or its main note's name), or "none".
-        topics: topic names; an entry must have them all.
-        status: active (default: current quirks, open and to_triage
-            feedback, every proposal), closed, any, a status, or a list.
-        origin: agent or owner.
-        unseen: only feedback the owner has not heard of yet: what to
-            bring to the owner (then mark it seen with `ledger_update`).
-        since: YYYY-MM-DD; changed on or after that day.
-        tasks: feedback by the state of the vault tasks citing it: open (one
-            is not done or cancelled), done (all closed, one done) or
-            cancelled (all cancelled).
-        limit: 1-100 per list (default 20).
+    Every result carries the area and topic names an entry can have
+    (`areas_and_topics`), for the entry you may log next.
     """
     return await ledger_search_impl(
         query=query, mode=mode, kinds=kinds, area=area, topics=topics, status=status, origin=origin,
@@ -1754,61 +1763,125 @@ async def ledger_get(refs: list[str], history: bool = False) -> LedgerGetResult:
     return await ledger_get_impl(refs, history=history)
 
 
+# ── ledger_add / ledger_update parameters ───────────────────────────────────
+#
+# Each rule an agent must follow lives in the parameter's own description in
+# the published schema, with the allowed values as `enum` (ledger F34: agents
+# refused three times in a row, one rule per refusal, though the docstring
+# held them). `json_schema_extra` only describes: the server's own checks
+# still decide, so a wrong value gets the ledger's refusal, which names every
+# problem at once, rather than a generic argument-validation error.
+
+_LEDGER_FIELD_HELP = {
+    "certainty": "how sure: tested (seen happen more than once, or deliberately), seen_once, inferred (a "
+                 "deduction or a guess), docs (from documentation, not tried) or untested. The owner's own "
+                 "observation counts like yours (tested if they saw it more than once); say who saw it in "
+                 "certainty_note",
+    "certainty_note": "what the certainty rests on",
+    "sources": "where it comes from (links, refs, files)",
+    "subtype": "unclear_instruction (a rule or note you had to interpret), friction (something got in the "
+               "way) or suggestion (an improvement idea)",
+    "component": "the file, tool or surface involved",
+    "leads": "ideas for fixing it, not a decision: what the owner decides becomes a vault task citing "
+             "`ledger F12`",
+    "target": "where the instruction lives (a note, a file, a rule)",
+    "proposed_text": "the first version proposed",
+    "final_text": "what went in (required when status is accepted or adjusted)",
+    "changes": "summary of what changed between proposed and final",
+    "owner_reason": "only if the owner gave one; never press for it",
+}
+
+
+def _ledger_details_schema(for_add: bool):
+    """`details` as an object whose properties name every kind's fields."""
+    def fill(schema: dict) -> None:
+        schema.pop("anyOf", None)
+        schema["type"] = "object"
+        props = {}
+        for kind, fields in _ledger_rules.KIND_FIELDS.items():
+            for name, cap in fields.items():
+                required = name in _ledger_rules.REQUIRED_FIELDS[kind]
+                prop = {
+                    "type": "string" if for_add else ["string", "null"],
+                    "maxLength": cap,
+                    "description": f"{kind} only{', required' if required else ''}: {_LEDGER_FIELD_HELP[name]}.",
+                }
+                if name in _ledger_rules.ENUM_FIELDS:
+                    prop["enum"] = list(_ledger_rules.ENUM_FIELDS[name]) + ([] if for_add else [None])
+                props[name] = prop
+        schema["properties"] = props
+    return fill
+
+
+def _required_by_kind() -> str:
+    return "; ".join(f"{'feedback' if k == 'feedback' else 'a ' + k} needs {' and '.join(fs)}"
+                     for k, fs in _ledger_rules.REQUIRED_FIELDS.items())
+
+
+_D_KIND = Field(description="quirk: how something behaves, observed by you or reported by the owner (a tool, a "
+                            "surface, a limit, what works included); feedback: something that got in the way of "
+                            "your work, or a wish for a change; proposal: a change to an agent instruction and its "
+                            "outcome. The same thing seen again: append to the existing entry (ledger_update) "
+                            "rather than add one.",
+                json_schema_extra={"enum": list(_ledger_rules.db.LEDGER_KINDS)})
+_D_TITLE = Field(description=f"One line, at most {_ledger_rules.TITLE_MAX} characters; the detail goes in body.",
+                 json_schema_extra={"maxLength": _ledger_rules.TITLE_MAX})
+_D_BODY = Field(description=f"Markdown, at most {_ledger_rules.BODY_MAX} characters.",
+                json_schema_extra={"maxLength": _ledger_rules.BODY_MAX})
+_D_AREA = Field(description="The area it concerns, by name, with or without the `area/` prefix (agent-personnel "
+                            "and area/agent-personnel are the same; results show the prefixed form). The names are "
+                            "in ledger_search results (areas_and_topics) and the guide. Feedback with no area is "
+                            "saved as to_triage.")
+_D_TOPICS = Field(description="Every topic that fits, by name (e.g. voice-bridge, claude-code): searches by topic "
+                              "miss an entry without them. The names are in ledger_search results "
+                              "(areas_and_topics) and the guide. When none fits, leave it out rather than force "
+                              "one; the area still files the entry.")
+_D_DETAILS_ADD = Field(description=f"The kind's own fields; {_required_by_kind()}. Each property says which "
+                                   "kind it belongs to; a field of another kind is refused.",
+                       json_schema_extra=_ledger_details_schema(for_add=True))
+_D_RELATED = Field(description='Refs of related entries ("see also"), e.g. ["Q14", "F3"]; the link shows on '
+                                  'both entries.')
+_D_ORIGIN = Field(description="Who asked for the entry: agent (default: you decided to log it), or owner when the "
+                              "owner asked for it to be logged. Any kind.",
+                  json_schema_extra={"enum": list(_ledger_rules.db.LEDGER_ORIGINS)})
+_D_STATUS_ADD = Field(description="Leave it out for a quirk or feedback (set for you). A proposal needs its "
+                                  "outcome: accepted (went in as proposed), adjusted (went in reworded or changed: "
+                                  "final_text holds what went in), rejected or withdrawn. A quirk may start stale.")
+_D_OBSERVED = Field(description="When it happened, YYYY-MM-DD (default today).")
+_D_SEEN_ADD = Field(description="Feedback only: true if you already talked it through with the owner. Always "
+                                "true with origin owner.")
+_D_AUTHOR = Field(description="Your own name, if you have one; leave it out otherwise (the credential you "
+                              "call with is recorded either way).")
+_D_CHALLENGES = Field(description="Summary-view line ids (ledger_digest with_ids=true) this contradicts; they "
+                                  "get flagged for review.")
+
+
 @mcp.tool(annotations=_LEDGER_WRITE)
 async def ledger_add(
-    kind: str,
-    title: str,
-    body: str = "",
-    area: str | None = None,
-    topics: list[str] | None = None,
-    details: dict | None = None,
-    related: list[str] | None = None,
-    origin: str = "agent",
-    status: str | None = None,
-    observed_on: str | None = None,
-    seen: bool | None = None,
-    author: str | None = None,
-    challenges: list[int] | None = None,
+    kind: Annotated[str, _D_KIND],
+    title: Annotated[str, _D_TITLE],
+    body: Annotated[str, _D_BODY] = "",
+    area: Annotated[str | None, _D_AREA] = None,
+    topics: Annotated[list[str] | None, _D_TOPICS] = None,
+    details: Annotated[dict | None, _D_DETAILS_ADD] = None,
+    related: Annotated[list[str] | None, _D_RELATED] = None,
+    origin: Annotated[str, _D_ORIGIN] = "agent",
+    status: Annotated[str | None, _D_STATUS_ADD] = None,
+    observed_on: Annotated[str | None, _D_OBSERVED] = None,
+    seen: Annotated[bool | None, _D_SEEN_ADD] = None,
+    author: Annotated[str | None, _D_AUTHOR] = None,
+    challenges: Annotated[list[int] | None, _D_CHALLENGES] = None,
 ) -> LedgerWriteResult:
     """Log an agent-ledger entry: a quirk, feedback or a proposal.
 
     Requires write permission. For what agents write for each other, never
     the owner's own notes. If no kind fits, log feedback (friction,
     component "agent ledger") saying what you wanted to record and why.
-    Unknown areas, topics or fields are refused with the valid ones. The
-    answer gives the new ref and up to five similar entries: if one holds the
-    same thing, mark the newer one superseded by the older (`ledger_update`).
-
-    Args:
-        kind: quirk, feedback or proposal.
-        title: one line, at most 150 characters.
-        body: Markdown, at most 16,000 characters.
-        area: the area it concerns (see `ledger_topics`). Feedback with no
-            area is saved as to_triage.
-        topics: topic names (see `ledger_topics`; create one with
-            `ledger_topic_edit`).
-        details: the kind's own fields. quirk: certainty (required): tested
-            (seen happen more than once, or deliberately), seen_once,
-            inferred (a deduction or a guess), docs (from documentation, not
-            tried) or untested; certainty_note, sources.
-            feedback: subtype (unclear_instruction, friction, suggestion;
-            required), component (file, tool or surface involved), leads
-            (ideas for fixing it, not a decision: what the owner decides to
-            do becomes a vault task citing `ledger F12`).
-            proposal: target (where the instruction lives; required),
-            proposed_text (the first version; required), final_text (what
-            went in), changes (summary of what changed), owner_reason (only
-            if the owner gave one; never press for it).
-        related: refs of related entries ("see also").
-        origin: agent (default), or owner when the owner asked to log it.
-        status: a proposal's outcome, required for one: accepted, adjusted,
-            rejected or withdrawn. A quirk may start stale.
-        observed_on: when it happened, YYYY-MM-DD (default today).
-        seen: feedback only: true if you already talked it through with the
-            owner. Always true with origin owner.
-        author: your own name, if you have one.
-        challenges: summary-view line ids this entry contradicts; they get
-            flagged for review.
+    Each parameter's description gives its rules and allowed values; give
+    the entry an area and its topics. A refusal names every problem at once
+    (`problems`), with the valid values. The answer gives the new ref and up
+    to five similar entries, with their topics: if one holds the same thing,
+    mark the newer one superseded by the older (`ledger_update`).
     """
     return await ledger_add_impl(
         kind, title, body=body, area=area, topics=topics, details=details, related=related, origin=origin,
@@ -1816,54 +1889,73 @@ async def ledger_add(
     )
 
 
+_D_REF = Field(description="The entry to change, e.g. Q14 or F3 (or use refs to mark feedback seen).")
+_D_REVISION = Field(description="The revision you read (ledger_get or ledger_search); refused as stale_revision "
+                                "if the entry changed since. Not needed with refs plus seen=true.")
+_D_REASON = Field(description="Why this change is made; kept in the history with the previous version. Not "
+                              "needed with refs plus seen=true.")
+_D_APPEND = Field(description="Add an observation as a paragraph, without rewriting the body (instead of body): "
+                              "the way to record the same thing seen again. The server puts today's date in front; "
+                              "don't add one. Combines with any other change in the same call.")
+_D_STATUS_UPD = Field(description="Close or reopen: handled (feedback dealt with; with handled_account), "
+                                  "superseded (with superseded_by), retracted (should never have been logged), stale "
+                                  "(a quirk no longer true, e.g. fixed upstream: say since when with append), or the "
+                                  "kind's open statuses (current, open, to_triage). dismissed is the owner's call "
+                                  "only. Combines with append, seen and other changes in one call.")
+_D_AREA_UPD = Field(description="An area name (as in ledger_add), or \"\" to clear it.")
+_D_TOPICS_ADD = Field(description="Topic names to add (names in ledger_search results, areas_and_topics).")
+_D_TOPICS_REMOVE = Field(description="Topic names to remove.")
+_D_DETAILS_UPD = Field(description="The kind's own fields (as in ledger_add): only the fields given change, the "
+                                   "others stay; null clears an optional one.",
+                       json_schema_extra=_ledger_details_schema(for_add=False))
+_D_SUPERSEDED = Field(description="With status superseded: the ref of the entry that holds the content (a "
+                                  "duplicate is superseded by the older one).")
+_D_HANDLED = Field(description="With status handled: what was done, or why nothing is left to do.")
+_D_RELATED_UPD = Field(description="Refs to add as related; the link shows on both entries.")
+_D_ORIGIN_UPD = Field(description="Corrects who asked for the entry to be logged (agent or owner); not who is "
+                                  "changing it now. Leave it out when closing or appending.", json_schema_extra={"enum": list(_ledger_rules.db.LEDGER_ORIGINS)})
+_D_CHALLENGES_UPD = Field(description="Summary-view line ids this change contradicts.")
+_D_SEEN_UPD = Field(description="Feedback only: true once the owner has heard of it (you told them, or they "
+                               "raised it). Combines with other changes on ref.")
+_D_REFS = Field(description="To mark several feedback entries seen at once: refs plus seen=true, with no other "
+                               "change, reason or revision. One entry with other changes: use ref.")
+
+
 @mcp.tool(annotations=_LEDGER_WRITE)
 async def ledger_update(
-    ref: str | None = None,
-    expected_revision: int | None = None,
-    reason: str | None = None,
-    title: str | None = None,
-    body: str | None = None,
-    append: str | None = None,
-    status: str | None = None,
-    area: str | None = None,
-    topics_add: list[str] | None = None,
-    topics_remove: list[str] | None = None,
-    details: dict | None = None,
-    superseded_by: str | None = None,
-    handled_account: str | None = None,
-    related: list[str] | None = None,
-    observed_on: str | None = None,
-    origin: str | None = None,
-    author: str | None = None,
-    challenges: list[int] | None = None,
-    seen: bool | None = None,
-    refs: list[str] | None = None,
+    ref: Annotated[str | None, _D_REF] = None,
+    expected_revision: Annotated[int | None, _D_REVISION] = None,
+    reason: Annotated[str | None, _D_REASON] = None,
+    title: Annotated[str | None, _D_TITLE] = None,
+    body: Annotated[str | None, _D_BODY] = None,
+    append: Annotated[str | None, _D_APPEND] = None,
+    status: Annotated[str | None, _D_STATUS_UPD] = None,
+    area: Annotated[str | None, _D_AREA_UPD] = None,
+    topics_add: Annotated[list[str] | None, _D_TOPICS_ADD] = None,
+    topics_remove: Annotated[list[str] | None, _D_TOPICS_REMOVE] = None,
+    details: Annotated[dict | None, _D_DETAILS_UPD] = None,
+    superseded_by: Annotated[str | None, _D_SUPERSEDED] = None,
+    handled_account: Annotated[str | None, _D_HANDLED] = None,
+    related: Annotated[list[str] | None, _D_RELATED_UPD] = None,
+    observed_on: Annotated[str | None, _D_OBSERVED] = None,
+    origin: Annotated[str | None, _D_ORIGIN_UPD] = None,
+    author: Annotated[str | None, _D_AUTHOR] = None,
+    challenges: Annotated[list[int] | None, _D_CHALLENGES_UPD] = None,
+    seen: Annotated[bool | None, _D_SEEN_UPD] = None,
+    refs: Annotated[list[str] | None, _D_REFS] = None,
 ) -> LedgerWriteResult:
     """Change an agent-ledger entry (with a reason), or mark feedback as seen.
 
-    Requires write permission. Give `ref`, `expected_revision` (from
-    `ledger_get` or `ledger_search`; refused as stale_revision if the entry
-    changed since) and `reason` (kept in the history with the previous
-    version). Nothing is deleted; close an entry with `status`: handled (with
-    `handled_account`: what was done, or why nothing is left to do),
-    superseded (with `superseded_by`: the entry holding the content; a
-    duplicate is superseded by the older one), retracted (should never have
-    been logged; nothing replaces it), stale (a quirk no longer true).
-    `dismissed` is the owner's call only: never set it on your own judgment.
-    Correct your own mistake by updating, with a reason. Summary-view lines
-    citing the entry get flagged: check each one (`ledger_digest_edit`).
+    Requires write permission. Give `ref`, `expected_revision` and `reason`.
+    Nothing is deleted; close an entry with `status`. A duplicate is
+    superseded by the older entry. `dismissed` is the owner's call only:
+    never set it on your own judgment. Correct your own mistake by updating,
+    with a reason. Summary-view lines citing the entry get flagged: check
+    each one (`ledger_digest_edit`). A refusal names every problem at once
+    (`problems`).
 
     Marking feedback seen (the owner has heard of it) needs no reason or
     revision: `refs` plus `seen=true`, many at once.
-
-    Args:
-        append: add an observation as a dated paragraph, without rewriting
-            the body (use instead of `body`).
-        area: an area, or "" to clear it.
-        details: the kind's own fields (see `ledger_add`); null clears an
-            optional one.
-        related: refs to add as related.
-        challenges: summary-view line ids this change contradicts.
     """
     return await ledger_update_impl(
         ref=ref, expected_revision=expected_revision, reason=reason, title=title, body=body, append=append,
@@ -1993,16 +2085,31 @@ def _forbid_unknown_arguments(server: FastMCP) -> None:
     """
     for tool in server._tool_manager.list_tools():
         base = tool.fn_metadata.arg_model
-        tool.fn_metadata.arg_model = type(
-            base.__name__,
-            (base,),
-            {
-                "__module__": base.__module__,
-                "__doc__": base.__doc__,
-                "model_config": ConfigDict({**base.model_config, "extra": "forbid"}),
-            },
-        )
+        namespace = {
+            "__module__": base.__module__,
+            "__doc__": base.__doc__,
+            "model_config": ConfigDict({**base.model_config, "extra": "forbid"}),
+        }
+        if "details" in tool.parameters.get("properties", {}) and tool.name.startswith("ledger_"):
+            namespace["_details_field_at_top_level"] = model_validator(mode="before")(_ledger_details_hint)
+        tool.fn_metadata.arg_model = type(base.__name__, (base,), namespace)
         tool.parameters["additionalProperties"] = False
+
+
+def _ledger_details_hint(cls, data):
+    """A kind's field passed beside `details` instead of inside it (agent test, ledger F34).
+
+    Without this the refusal is pydantic's bare "extra inputs are not
+    permitted"; with it, the agent is told where the field goes.
+    """
+    if isinstance(data, dict):
+        fields = {f for fs in _ledger_rules.KIND_FIELDS.values() for f in fs}
+        misplaced = sorted(k for k in data if k in fields)
+        if misplaced:
+            raise ValueError(
+                f"{', '.join(misplaced)} {'goes' if len(misplaced) == 1 else 'go'} inside details, e.g. "
+                f"details={{\"{misplaced[0]}\": …}}. Nothing was written.")
+    return data
 
 
 # `MCP_REJECT_UNKNOWN_ARGUMENTS=false` is the rollback: the SDK's ignore

@@ -453,6 +453,7 @@ Recurring tasks are read, never changed. Read
 `ledger_topic_edit`: what agents log for each other, in the `ledger_*`
 tables (migration 032), never in the vault. Every change names the revision
 it read and a reason, and keeps the previous version; nothing is deleted.
+What an agent needs is where it already is (fork, owner's decision 2026-11-10, ledger F34): `ledger_add` and `ledger_update` publish each rule and its allowed values in the parameter schema (describing only; the server decides), one refusal lists every problem (`problems`), and `ledger_search` results, a topic-less `ledger_add` and `get_vault_guide` carry the area and topic names.
 Search returns two separate lists, by words and by meaning. A vault task
 citing `ledger F12` is the only link between feedback and the work decided
 on it: the ledger and task tools derive the other direction from
