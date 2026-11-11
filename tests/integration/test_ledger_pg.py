@@ -976,7 +976,10 @@ async def test_a_write_shows_the_current_state_of_what_its_text_cites(ctx):
     assert updated.cites is None
     assert any(n.startswith(f'Does the title still hold? It reads: "Wait loop; a longer cap untested '
                             f'({quirk.ref})". If not') for n in updated.notes)
-    retitled = await tools.ledger_update_impl(ref=added.ref, expected_revision=2, reason="fix",
+    handled = await tools.ledger_update_impl(ref=added.ref, expected_revision=2, reason="done", status="handled",
+                                             handled_account=f"Settled by [{quirk.ref}]")
+    assert [c["ref"] for c in handled.cites] == [quirk.ref]
+    retitled = await tools.ledger_update_impl(ref=added.ref, expected_revision=3, reason="fix",
                                               title=f"Wait loop; longer cap tested [{quirk.ref}]",
                                               append="Fixed the title.")
     assert [c["ref"] for c in retitled.cites] == [quirk.ref]
@@ -985,7 +988,8 @@ async def test_a_write_shows_the_current_state_of_what_its_text_cites(ctx):
 
 async def test_an_update_lists_what_cites_the_entry(sessionmaker, ctx):
     quirk = await add_quirk("The cap is 20 s", area="home")
-    citing = await add_quirk("A summary of the cap", area="home", body=f"Per {quirk.ref}, untested.")
+    citing = await add_quirk("A summary of the cap", area="home", body="An open fence:\n```\nnever closed",
+                             details={"certainty": "tested", "sources": f"Per {quirk.ref}, untested."})
     await add_quirk("Unrelated", area="home", body=f"{quirk.ref}0 is another entry")
     await _task_note(sessionmaker, ctx, "plans.md")
     task = await tools.create_task_impl(f"Revisit the cap [{quirk.ref}]", path="plans.md")
@@ -994,6 +998,15 @@ async def test_an_update_lists_what_cites_the_entry(sessionmaker, ctx):
                                         encoding="utf-8")
     (ctx / "Diary (private)").mkdir()
     (ctx / "Diary (private)" / "d.md").write_text(f"secret [{quirk.ref}]\n", encoding="utf-8")
+    (ctx / "Health (Private)").mkdir()
+    (ctx / "Health (Private)" / "h.md").write_text("# H\n", encoding="utf-8")
+    async with sessionmaker() as session:
+        await session.execute(text(
+            "INSERT INTO notes_metadata (user_id, file_path, title, tags, frontmatter, content_hash) "
+            "VALUES (NULL, 'Health (Private)/h.md', 't', '{}', '{}', 'h')"))
+        await session.commit()
+    secret = await tools.create_task_impl(f"Ask the doctor about it [{quirk.ref}]", path="Health (Private)/h.md")
+    assert secret.error is None, secret.error
     async with sessionmaker() as session:
         # The keyword index the note search starts from (the index pass fills it in production).
         for rel, content in (("_/rules.md", f"A rule. [P1, {quirk.ref}]"),
@@ -1018,7 +1031,10 @@ async def test_an_update_lists_what_cites_the_entry(sessionmaker, ctx):
     assert changed.error is None, changed.error
     by = changed.cited_by
     assert [e["ref"] for e in by["entries"]] == [citing.ref]
-    assert [t["ref"] for t in by["tasks"]] == [f"plans.md:{task.line}"]
+    assert by["tasks"] == [{"ref": f"Health (Private)/h.md:{secret.line}", "status": "TODO"},
+                           {"ref": f"plans.md:{task.line}", "status": "TODO", "text": task.text}]
+    got = (await tools.ledger_get_impl([quirk.ref])).entries[0]
+    assert "text" not in got.tasks[0] and got.tasks[1]["text"] == task.text
     assert by["notes"] == [{"ref": "Diary (private)/d.md:1"},
                            {"ref": "_/rules.md:1", "text": f"- A rule. [P1, {quirk.ref}]"}]
     assert changed.notes[0].startswith(

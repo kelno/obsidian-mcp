@@ -8431,7 +8431,7 @@ LEDGER_TASK_STATES = ("open", "done", "cancelled")
 
 
 async def _ledger_task_links(session, uid):
-    """`(links, None)`: the vault tasks citing feedback, by number; `(None, why)` when they can't be read.
+    """`(links, None)`: the vault tasks citing ledger entries, by ref (`F12`); `(None, why)` when they can't be read.
 
     Statuses are read with the owner's Tasks plugin settings, as `list_tasks`
     reads them, from the task index.
@@ -8615,7 +8615,7 @@ async def ledger_get_impl(refs: list[str], history: bool = False) -> LedgerGetRe
         tasks_state = _ledger_tasks.task_state(t.status_type for t in citing)
         if entry.kind != "feedback" and tasks_state == "open":
             open_count = sum(1 for t in citing if t.status_type not in ("DONE", "CANCELLED", "NON_TASK"))
-            notes.append(f"{entry.ref}: {open_count} open vault task{'s' if open_count != 1 else ''} cite"
+            notes.append(f"{_ledger_tasks.canonical(entry.ref)}: {open_count} open vault task{'s' if open_count != 1 else ''} cite"
                          f"{'' if open_count != 1 else 's'} it (tasks): something is pending on this "
                          f"{entry.kind}, such as a decision postponed until some event. Read "
                          f"{'them' if open_count != 1 else 'it'} before relying on the entry.")
@@ -8628,7 +8628,7 @@ async def ledger_get_impl(refs: list[str], history: bool = False) -> LedgerGetRe
             superseded_by=sup.get(entry.superseded_by), handled_account=entry.handled_account,
             handled_at=entry.handled_at.isoformat() if entry.handled_at else None, author=entry.author,
             cited_by=cited.get(entry.id) or None, embedded=entry.embedded_hash == entry.content_hash,
-            tasks=[t.as_dict() for t in citing] or None,
+            tasks=[_ledger_task_dict(t) for t in citing] or None,
             tasks_state=tasks_state,
         )
         size = _ledger.json_size(item.model_dump())
@@ -8797,7 +8797,8 @@ async def ledger_update_impl(
     changed = updated.changed or []
     written = [title if "title" in changed else None, append if append is not None else body,
                *(v for k, v in (details or {}).items() if isinstance(v, str) and k in changed),
-               handled_account if "handled_account" in changed else None]
+               handled_account if ("handled_account" in changed
+                                   or ("status" in changed and entry.status == "handled")) else None]
     cites = await _ledger_cites(uid, entry.ref, written, notes)
     dependants = None
     if any(_ledger_is_content_change(c) for c in changed):
@@ -8849,8 +8850,16 @@ async def _ledger_cites(uid, own_ref: str, texts, notes: list[str]) -> list[dict
 
 
 def _ledger_private(path: str) -> bool:
-    """A note in a private folder: a folder whose name ends in ` (private)`, at any depth."""
-    return any(part.endswith(" (private)") for part in path.split("/")[:-1])
+    """A note in a private folder: a folder whose name ends in ` (private)`, at any depth, any case."""
+    return any(part.lower().endswith(" (private)") for part in path.replace("\\", "/").split("/")[:-1])
+
+
+def _ledger_task_dict(task) -> dict:
+    """A citing task for a result: its text left out when it sits in a private folder."""
+    item = task.as_dict()
+    if _ledger_private(task.ref.rsplit(":", 1)[0]):
+        del item["text"]
+    return item
 
 
 async def _ledger_dependants(uid, entry, notes: list[str]) -> dict | None:
@@ -8868,7 +8877,7 @@ async def _ledger_dependants(uid, entry, notes: list[str]) -> dict | None:
     try:
         async with async_session() as session:
             entries, total = await _ledger_tasks.entries_citing(
-                session, uid, entry, _ledger.text_columns(), _ledger.entry_text, limit=LEDGER_DEPENDANTS_MAX,
+                session, uid, entry, _ledger.text_columns(), _ledger.entry_texts, limit=LEDGER_DEPENDANTS_MAX,
                 day=_ledger_day)
             if entries:
                 out["entries"] = entries
@@ -8879,7 +8888,7 @@ async def _ledger_dependants(uid, entry, notes: list[str]) -> dict | None:
                 notes.append(links_note)
             citing = (links or {}).get(ref_str, [])
             if citing:
-                out["tasks"] = [t.as_dict() for t in citing[:LEDGER_DEPENDANTS_MAX]]
+                out["tasks"] = [_ledger_task_dict(t) for t in citing[:LEDGER_DEPENDANTS_MAX]]
                 if len(citing) > LEDGER_DEPENDANTS_MAX:
                     out["tasks_total"] = len(citing)
             candidates = await _ledger_tasks.note_candidates(session, uid, ref)

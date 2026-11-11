@@ -7,15 +7,18 @@ ref such as Q14 counts as well, since nothing else there looks like one.
 
 Matching rules, shared by every tool that reads citations:
 
-- A ref is a capital Q, F or P and 1 to 6 digits; leading zeros don't matter
-  (`[Q01]` cites Q1). Lower-case letters are not refs.
+- A ref is a capital Q, F or P and a number of 1 to 6 digits, after any
+  leading zeros (`[Q01]` cites Q1). Lower-case letters are not refs.
 - A bracket holds refs only, separated by commas, with optional spaces or
   tabs (ASCII only, so the SQL prefilters below can promise to be a superset).
 - Not a citation: a Markdown link `[F12](…)`, a reference-style link
   `[F12][x]` or `[x][F12]`, a reference definition `[F12]: …` at the start of
-  a line, an image `![F12]`, a wikilink `[[F12]]`, a footnote `[^F12]`, and
-  anything inside inline code or a fenced code block, where refs are shown as
-  examples rather than cited.
+  a line, an image `![F12]`, an escaped bracket, a wikilink `[[F12]]`, a
+  footnote `[^F12]`, and anything inside inline code or a fenced code block
+  (at any indentation), where refs are shown as examples rather than cited.
+  Two ref brackets side by side (`[P35][P48]`) and a checkbox right before
+  one (`- [x][Q14]`) are citations.
+- Lines are split on newlines only, as Obsidian numbers them.
 - A bare ref is a whole word not preceded by `#`, `/`, `[` or `^`.
 """
 
@@ -26,16 +29,22 @@ from dataclasses import dataclass
 
 #: One ref inside a bracket or bare: kind letter, then the number without its leading zeros.
 _REF = r"([QFP])0*([0-9]{1,6})(?![0-9A-Za-z_])"
-#: A bracket of refs: `[Q14]`, `[P35, P48]`.
+#: A bracket of refs: `[Q14]`, `[P35, P48]`; leading zeros allowed (`[Q0014]`).
 _BRACKET_RE = re.compile(
-    r"\[[ \t]*(?:[QFP][0-9]{1,6}[ \t]*,[ \t]*)*[QFP][0-9]{1,6}[ \t]*\]"
+    r"\[[ \t]*(?:[QFP]0*[0-9]{1,6}[ \t]*,[ \t]*)*[QFP]0*[0-9]{1,6}[ \t]*\]"
 )
 _REF_IN_BRACKET_RE = re.compile(r"([QFP])0*([0-9]{1,6})")
 #: A bare ref: a whole word, not a tag, a path part, a bracket's content or a footnote.
 _BARE_RE = re.compile(r"(?<![\w#/\[^])" + _REF)
 #: Inline code: a run of backticks, then the shortest text up to the same run.
 _CODE_SPAN_RE = re.compile(r"(`+)(?!`).*?(?<!`)\1(?!`)")
-_FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
+#: A fence line, at any indentation (fences inside nested list items are indented),
+#: with what follows the fence: a closing fence has nothing but spaces after it.
+_FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+#: A list item's checkbox right before a bracket: `- [x][Q14]`.
+_CHECKBOX_LEAD_RE = re.compile(r"[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+\[.\]\Z")
+#: Lines as Obsidian numbers them: split on newline only, ends kept.
+_LINE_RE = re.compile(r"[^\n]*\n|[^\n]+\Z")
 _REF_DEFINITION_LEAD_RE = re.compile(r"[ ]{0,3}\Z")
 
 #: A POSIX regex PostgreSQL can apply to keep only lines that may hold a
@@ -57,11 +66,12 @@ def _masked(text: str) -> str:
     """`text` with code (fenced blocks, inline spans) blanked out, same length."""
     out = []
     fence: str | None = None
-    for line in text.splitlines(keepends=True):
+    for line in _LINE_RE.findall(text):
         stripped = line.rstrip("\r\n")
         match = _FENCE_RE.match(stripped)
         if fence is not None:
-            if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence):
+            if (match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence)
+                    and not match.group(2).strip()):
                 fence = None
             out.append(" " * len(stripped) + line[len(stripped):])
             continue
@@ -74,12 +84,23 @@ def _masked(text: str) -> str:
 
 
 def _is_link_or_definition(text: str, start: int, end: int) -> bool:
+    """Whether the bracket at `start:end` is Markdown syntax rather than a citation.
+
+    Next to another bracket it is a link (`[x][F12]`, `[F12][x]`) unless that
+    bracket is a ref list too (`[P35][P48]`) or a list item's checkbox
+    (`- [x][Q14]`).
+    """
     before = text[start - 1] if start > 0 else ""
     after = text[end] if end < len(text) else ""
-    if before in ("[", "]", "!") or after in ("(", "[", "]"):
+    line_start = text.rfind("\n", 0, start) + 1
+    if before in ("[", "!", "\\") or after in ("(", "]"):
+        return True
+    if before == "]" and not (_CHECKBOX_LEAD_RE.match(text[line_start:start])
+                              or any(m.end() == start for m in _BRACKET_RE.finditer(text, line_start, start))):
+        return True
+    if after == "[" and not _BRACKET_RE.match(text, end):
         return True
     if after == ":":
-        line_start = text.rfind("\n", 0, start) + 1
         if _REF_DEFINITION_LEAD_RE.match(text[line_start:start]):
             return True
     return False
@@ -125,7 +146,7 @@ def in_ledger_text(text: str | None) -> list[Ref]:
 
 def lines_citing(text: str, ref: Ref) -> list[int]:
     """The 1-based line numbers of `text` that cite `ref` in brackets."""
-    return [number for number, line in enumerate(_masked(text).splitlines(), start=1)
+    return [number for number, line in enumerate(_masked(text).split("\n"), start=1)
             if any(r == ref for _, r in _bracketed_found(line))]
 
 

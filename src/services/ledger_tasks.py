@@ -198,7 +198,7 @@ async def cited_states(session: AsyncSession, uid: int | None, refs: Iterable[Re
 
 
 async def entries_citing(session: AsyncSession, uid: int | None, entry: LedgerEntry, text_columns,
-                         text_of: Callable[[LedgerEntry], str], *, limit: int,
+                         texts_of: Callable[[LedgerEntry], list[str]], *, limit: int,
                          day: Callable[[object], str | None]) -> tuple[list[dict], int]:
     """`(entries, total)`: the caller's other entries whose text cites `entry`, bare or bracketed.
 
@@ -215,12 +215,13 @@ async def entries_citing(session: AsyncSession, uid: int | None, entry: LedgerEn
             func.concat_ws(" ", *text_columns).op("~")(citations.sql_ref_pattern(ref)))
         .order_by(LedgerEntry.updated_at.desc(), LedgerEntry.id.desc())
     )).scalars().all()
-    citing = [e for e in rows if ref in citations.in_ledger_text(text_of(e))]
+    # Field by field: an unclosed code fence in one field must not hide the others.
+    citing = [e for e in rows if any(ref in citations.in_ledger_text(t) for t in texts_of(e))]
     return [entry_state(e, day) for e in citing[:limit]], len(citing)
 
 
 async def note_candidates(session: AsyncSession, uid: int | None, ref: Ref) -> list[str]:
-    """Indexed notes whose words include the ref (`q14`, `q014`): the ones that may cite it.
+    """Indexed notes whose words include the ref (`q14`, `q014`, …): the ones that may cite it.
 
     The keyword index drops the brackets, so the caller reads each note and
     matches exactly.
@@ -228,7 +229,9 @@ async def note_candidates(session: AsyncSession, uid: int | None, ref: Ref) -> l
     from src.services.fts import combined_tsquery
 
     letter = ref.letter.lower()
-    query = " or ".join(f"{letter}{'0' * zeros}{ref.number}" for zeros in range(3))
+    # Every padding the parser accepts up to 7 characters of digits (`[Q0000014]`
+    # is rare; longer paddings are not searched).
+    query = " or ".join(f"{letter}{'0' * zeros}{ref.number}" for zeros in range(8 - len(str(ref.number))))
     owner = NoteMetadata.user_id.is_(None) if uid is None else NoteMetadata.user_id == uid
     return list((await session.execute(
         select(NoteMetadata.file_path)

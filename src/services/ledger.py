@@ -634,9 +634,9 @@ def text_columns():
     return [getattr(LedgerEntry, name) for name in TEXT_FIELDS]
 
 
-def entry_text(entry) -> str:
-    """All of an entry's text, for finding the refs it cites."""
-    return "\n\n".join(v for v in (getattr(entry, name, None) for name in TEXT_FIELDS) if v)
+def entry_texts(entry) -> list[str]:
+    """Each of an entry's text fields, for finding the refs it cites."""
+    return [v for v in (getattr(entry, name, None) for name in TEXT_FIELDS) if v]
 
 
 def text_regconfig():

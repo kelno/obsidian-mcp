@@ -35,6 +35,12 @@ def refs(items):
     ("```\n[Q14]\n```\n[F1]", ["F1"]),                   # fenced code
     ("~~~md\n[Q14]\n~~~", []),
     ("- [ ] #task do it [F3] #area/x", ["F3"]),          # a checkbox is not a ref
+    ("[P35][P48] and [Q1]", ["P35", "P48", "Q1"]),      # ref brackets side by side
+    ("- [x][Q14] done", ["Q14"]),
+    ("[F0000012]", ["F12"]),
+    ("an escaped \\[F12]", []),
+    ("- item\n    ```\n    [Q14]\n    ```\n", []),       # an indented fence in a list
+    ("```\n```python\n[Q14]\n```\n[F1]", ["F1"]),      # a fence with an info string does not close
     ("ledger F12", []),
     ("", []),
 ])
@@ -64,6 +70,13 @@ def test_lines_citing_counts_bracketed_refs_only():
     text = "intro Q14\n- rule [P41]\n`[Q14]`\nsee [Q014, P2]\n"
     assert lc.lines_citing(text, lc.Ref("Q", 14)) == [4]
     assert lc.lines_citing(text, lc.Ref("P", 41)) == [2]
+
+
+def test_line_numbers_follow_newlines_only():
+    # Python's splitlines would also split on these; Obsidian does not.
+    text = "```\na\u2028b\x0cc\x85d\n```\n[Q14]\nx\u2028[P1]\n"
+    assert lc.lines_citing(text, lc.Ref("Q", 14)) == [4]
+    assert lc.lines_citing(text, lc.Ref("P", 1)) == [5]
 
 
 @pytest.mark.parametrize("text", ["[F12]", "[ \tQ1, P2]", "x [P35, P48] y", "[Q014]"])
