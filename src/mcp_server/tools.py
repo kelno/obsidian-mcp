@@ -9059,7 +9059,7 @@ OPEN_AREA_INSTRUCTIONS = (
     "Starting work: check each task and entry against the work you're starting (read an entry with ledger_get "
     "when its title is not enough). Is it related? Does the owner need to hear about it? Is it done, or made "
     "stale, by this work (set_task_status or edit_task for a task, ledger_update for an entry)? Is this work the "
-    "event a \"When …\" task (#when) waits for? If so, tell the owner before acting on it.",
+    "event a \"When …\" task (#when) waits for? If so, say so to the owner in your reply before you tick or change that task.",
     "Answering a status question (\"where am I on X?\"): report the Current position (with its date) and the "
     "#next tasks, or say none is marked #next; the rest is for agents about to act.",
 )
