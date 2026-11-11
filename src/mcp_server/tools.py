@@ -3425,7 +3425,7 @@ async def create_note_impl(
                 return err
             # D9: the bytes this call published, which `_atomic_write_at`
             # encoded exactly this way.
-            return f"Created note: {path}" + _published_hash_clause(
+            created = f"Created note: {path}" + _published_hash_clause(
                 content.encode("utf-8")
             )
         except FileExistsError:
@@ -3439,6 +3439,7 @@ async def create_note_impl(
             return _body_refusal(str(e), "validation_failed")
         except OSError as e:
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
+    return created + await _note_refs_report(uid, None, content)
 
 
 # Row-level excerpt bound for the graph tools. `link_text` is note text the
@@ -4439,7 +4440,9 @@ async def edit_note_impl(
                 tofile=path,
                 lineterm="",
             ))
-            return diff or f"No changes for {path}"
+            if not diff:
+                return f"No changes for {path}"
+            return diff + await _note_refs_report(uid, existing, new_content)
 
         # #88. Placed after the `dry_run` return above on purpose: a dry run
         # publishes nothing and so needs no confirmation, but every mode that
@@ -4467,7 +4470,7 @@ async def edit_note_impl(
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
         return success_message + _published_hash_clause(
             new_content.encode("utf-8")
-        )
+        ) + await _note_refs_report(uid, existing, new_content)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -5928,9 +5931,10 @@ async def delete_note_impl(
     an agent that knows to look will find, so both destroy content the caller
     may have read; the comparison runs **before** the pin, the `.trash` rename
     and the unlink. Success reports no `content_hash` — nothing remains to
-    hash. The incumbent is read **only** when a hash was supplied or the
-    deployment requires one, so an unguarded delete reads nothing it does not
-    read today.
+    hash. The incumbent is compared **only** when a hash was supplied or the
+    deployment requires one. It is also read once, bounded by
+    `MAX_NOTE_BYTES` and best-effort, for the ledger refs its lines cite
+    (`_note_refs_report`); that read never refuses the delete.
     """
     if err := _require_write():
         return err
@@ -5949,6 +5953,16 @@ async def delete_note_impl(
             target, path, missing=f"Note not found: {path}"
         ):
             return err
+
+        # The note's text, for the ledger refs its lines cite (the result
+        # lists them: the entries that shaped what is being deleted). A
+        # bounded read through the held descriptor, best-effort: an unreadable
+        # or over-cap note just gets no list.
+        try:
+            refs_source, _over = _read_incumbent(target, path, MAX_NOTE_BYTES)
+            deleted_text = refs_source.decode("utf-8") if refs_source is not None else None
+        except (OSError, UnicodeDecodeError):
+            deleted_text = None
 
         if expected_hash is not None or settings.write_precondition_required:
             # The read is not "solely to populate `current_hash`": under
@@ -5992,7 +6006,7 @@ async def delete_note_impl(
                     return err
             except OSError as e:
                 return _body_refusal(f"Permanent delete failed: {e}", "io_failure")
-            return f"Permanently deleted: {path}"
+            return f"Permanently deleted: {path}" + await _note_refs_report(uid, deleted_text, None)
 
         # One `renameat2(RENAME_NOREPLACE)` from the note's own parent
         # descriptor into `.trash`, walked from the same resolved root: the
@@ -6035,7 +6049,7 @@ async def delete_note_impl(
             return _body_refusal(str(e), "io_failure")
         except OSError as e:
             return _body_refusal(f"Soft-delete failed: {e}", "io_failure")
-        return f"Soft-deleted: {path} → {dest}"
+        return f"Soft-deleted: {path} → {dest}" + await _note_refs_report(uid, deleted_text, None)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -6540,6 +6554,18 @@ async def write_file_impl(
             info = target.lstat()
             over_cap = info is not None and info.st_size > read_cap
 
+        # A markdown note's previous text, for the ledger refs on the lines
+        # this write replaces (best-effort, bounded like a note read).
+        previous_note = None
+        if overwrite and target.rel.lower().endswith(".md"):
+            if incumbent is not None:
+                previous_note = incumbent
+            elif not over_cap:
+                try:
+                    previous_note, _over = _read_incumbent(target, path, MAX_NOTE_BYTES)
+                except OSError:
+                    previous_note = None
+
         if encoding == "base64":
             try:
                 data = base64.b64decode(content, validate=True)
@@ -6585,12 +6611,25 @@ async def write_file_impl(
         except OSError as e:
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
         result = f"Wrote {len(data):,} bytes to {path}"
+        refs = await _write_file_refs_report(uid, target.rel, previous_note, data)
         if over_cap or len(data) > read_cap:
             return result + (
                 f" — hash not reported: incumbent or published file exceeds "
                 f"{read_cap_name} ({read_cap:,} bytes)"
-            )
-        return result + _published_hash_clause(data)
+            ) + refs
+        return result + _published_hash_clause(data) + refs
+
+
+async def _write_file_refs_report(uid, rel: str, previous: bytes | None, data: bytes) -> str:
+    """`_note_refs_report` for a `write_file` that wrote a markdown note; "" otherwise."""
+    if not rel.lower().endswith(".md"):
+        return ""
+    try:
+        old = previous.decode("utf-8") if previous is not None else None
+        new = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+    return await _note_refs_report(uid, old, new)
 
 
 @_tracked("list_files", ["folder", "pattern", "recursive", "limit"])
@@ -8860,6 +8899,60 @@ async def _ledger_cites(uid, own_ref: str, texts, notes: list[str]) -> list[dict
     notes.insert(0, "Entries your text cites, as they stand now (cites): check your wording matches them."
                  + (" An unknown ref names no entry." if any(c["status"] == "unknown" for c in cites) else ""))
     return cites
+
+
+#: How a note writer's result names the two lists (the results are text).
+NOTE_CHANGED_REFS_LABEL = "changed_lines_cite"
+NOTE_CITES_LABEL = "cites"
+
+
+def _ledger_state_line(state: dict) -> str:
+    """One entry as it stands now, for a note writer's text result."""
+    if state.get("status") == "unknown":
+        return f"- {state['ref']}: no such ledger entry."
+    facts = [state["kind"], state["status"]]
+    if state.get("certainty"):
+        facts.append(state["certainty"])
+    if state.get("updated"):
+        facts.append(f"updated {state['updated']}")
+    return f"- {state['ref']} ({', '.join(facts)}): \"{state['title']}\""
+
+
+async def _note_refs_report(uid, old: str | None, new: str | None) -> str:
+    """What a note write's result adds about the ledger entries its lines cite.
+
+    `changed_lines_cite`: the entries cited (`[P54, P80]`) on the lines this
+    write removes or rewrites, as they stand now, so the agent reads what
+    shaped those lines before undoing it. `cites`: the entries the new text
+    cites that the note did not, as they stand now, so a stale one is caught
+    at write time. Both come from `ledger_tasks.cited_states`, the function
+    behind `ledger_add`'s and `ledger_update`'s `cites`.
+
+    "" when neither has anything. Never fails the write: a failure is said in
+    one line.
+    """
+    changed, added = _ledger_citations.changed_line_refs(old, new)
+    if not changed and not added:
+        return ""
+    try:
+        async with async_session() as session:
+            changed_states = await _ledger_tasks.cited_states(session, uid, changed, own_ref=None, day=_ledger_day)
+            added_states = await _ledger_tasks.cited_states(session, uid, added, own_ref=None, day=_ledger_day)
+    except Exception as exc:  # noqa: BLE001 — the write stands; the result says the check failed
+        # debug, not warning: a caller drives this path (the D18 permit rule); the result tells the caller.
+        logger.debug("note write: the ledger entries its lines cite could not be read", exc_info=True)
+        refs = ", ".join(str(r) for r in (*changed, *added))
+        return (f"\n\nThe ledger entries this write's lines cite ({refs}) could not be read "
+                f"({type(exc).__name__}): read them with ledger_get before relying on the change.")
+    parts = []
+    if changed_states:
+        parts.append(f"{NOTE_CHANGED_REFS_LABEL}: the lines you changed or removed carry these refs, the entries "
+                     "that shaped them. If you haven't read them, read them now with ledger_get and check your "
+                     "change doesn't undo what they decided.\n" + "\n".join(map(_ledger_state_line, changed_states)))
+    if added_states:
+        parts.append(f"{NOTE_CITES_LABEL}: refs your new text adds, as they stand now; check your wording matches "
+                     "them.\n" + "\n".join(map(_ledger_state_line, added_states)))
+    return "\n\n" + "\n\n".join(parts)
 
 
 def _ledger_private(path: str) -> bool:

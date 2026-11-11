@@ -128,3 +128,20 @@ def test_link_groups_tasks_by_cited_ref_of_any_kind_and_skips_non_tasks():
 
 def test_canonical_drops_leading_zeros():
     assert lt.canonical("Q014") == "Q14" and lt.canonical("F3") == "F3"
+
+
+
+# ── A note write: refs on the lines it changes, refs it adds ─────────────────
+
+def test_changed_line_refs_reads_removed_and_rewritten_lines_only():
+    old = "intro\n- Rule one gets forgotten. [P54, P80]\n- Rule two. [P3]\n```\n[Q9]\n```\n"
+    new = "intro\n- Rule two. [P3]\n- Rule one is kept in a note. [P54, F12]\n```\n[Q9]\n```\n"
+    changed, added = lc.changed_line_refs(old, new)
+    assert refs(changed) == ["P54", "P80"]          # rule two only moved; the fenced line is an example
+    assert refs(added) == ["F12"]                   # P54 was already cited
+
+
+def test_changed_line_refs_for_a_create_and_a_delete():
+    assert lc.changed_line_refs(None, "a [Q1]\n") == ([], [lc.Ref("Q", 1)])
+    assert lc.changed_line_refs("a [Q1]\n", None) == ([lc.Ref("Q", 1)], [])
+    assert lc.changed_line_refs("same [Q1]\r\n", "same [Q1]\n") == ([], [])   # a line ending is not a change

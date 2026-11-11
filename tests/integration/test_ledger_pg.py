@@ -1152,3 +1152,65 @@ async def test_open_area_caps_tasks_and_points_to_list_tasks(sessionmaker, ctx, 
     assert len(result.tasks) == 2 and result.tasks_total == 3
     assert "No open task of this area carries #next." in result.notes
     assert any('list_tasks(area="area/home")' in n for n in result.notes)
+
+
+
+# ── Note writes show the ledger refs on the lines they change ────────────────
+
+RULES = "_/agent/Where agent instructions go.md"
+
+
+async def _rule_note(sessionmaker, root):
+    """Proposals P54 and P80 (accepted, rejected) and a rule note citing them."""
+    async with sessionmaker() as session:
+        await session.execute(text(
+            "INSERT INTO ledger_ref_counters (user_id, kind, last_number) VALUES (NULL, 'proposal', 53)"))
+        await session.commit()
+    p54 = await tools.ledger_add_impl(
+        "proposal", "Put agent rules where agents look", area="agent-personnel", status="accepted",
+        details={"target": "Where agent instructions go", "proposed_text": "x", "final_text": "y"})
+    async with sessionmaker() as session:
+        await session.execute(text("UPDATE ledger_ref_counters SET last_number = 79 WHERE kind = 'proposal'"))
+        await session.commit()
+    p80 = await tools.ledger_add_impl(
+        "proposal", "Keep rules in Claude's memory instead", area="agent-personnel", status="rejected",
+        details={"target": "Where agent instructions go", "proposed_text": "z"})
+    assert (p54.ref, p80.ref) == ("P54", "P80"), (p54, p80)
+    (root / "_" / "agent").mkdir(parents=True)
+    (root / RULES).write_text(
+        "Intro.\n\n- A rule kept only in memory gets forgotten. [P54, P80]\n- Another rule. [P3]\n",
+        encoding="utf-8")
+
+
+async def test_an_edit_lists_the_refs_on_the_lines_it_changes(sessionmaker, ctx):
+    await _rule_note(sessionmaker, ctx)
+    quirk = await add_quirk("A stale claim", area="home")
+    dry = await tools.edit_note_impl(
+        RULES, f"- A rule lives in a note. [P54, {quirk.ref}]", find="- A rule kept only in memory gets "
+        "forgotten. [P54, P80]", dry_run=True)
+    assert dry.startswith("---") and "changed_lines_cite: the lines you changed or removed" in dry
+    assert '- P54 (proposal, accepted, updated ' in dry and '): "Put agent rules where agents look"' in dry
+    assert '- P80 (proposal, rejected, updated ' in dry
+    assert f"cites: refs your new text adds" in dry and f'- {quirk.ref} (quirk, current, tested, updated ' in dry
+    assert "- P3" not in dry                                        # its line is untouched
+
+    done = await tools.edit_note_impl(
+        RULES, f"- A rule lives in a note. [P54, {quirk.ref}]", find="- A rule kept only in memory gets "
+        "forgotten. [P54, P80]")
+    assert done.startswith(f"Updated note: {RULES}") and "changed_lines_cite:" in done
+    assert "- P3: no such ledger entry." not in done
+    unrelated = await tools.edit_note_impl(RULES, "Intro, reworded.", find="Intro.")
+    assert "changed_lines_cite" not in unrelated and "cites:" not in unrelated
+
+
+async def test_create_write_and_delete_report_refs_too(sessionmaker, ctx):
+    await _rule_note(sessionmaker, ctx)
+    created = await tools.create_note_impl("_/agent/New.md", "- New rule. [P80, F404]\n")
+    assert "cites: refs your new text adds" in created and "- F404: no such ledger entry." in created
+    assert "changed_lines_cite" not in created
+    written = await tools.write_file_impl("_/agent/New.md", "- Rewritten.\n", encoding="text", overwrite=True)
+    assert "changed_lines_cite:" in written and "- P80 (proposal, rejected" in written
+    deleted = await tools.delete_note_impl(RULES)
+    assert deleted.startswith("Soft-deleted:") and "- P54 (proposal, accepted" in deleted
+    plain = await tools.write_file_impl("notes.txt", "[P54]", encoding="text")
+    assert "changed_lines_cite" not in plain and "cites:" not in plain

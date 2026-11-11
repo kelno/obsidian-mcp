@@ -150,6 +150,39 @@ def lines_citing(text: str, ref: Ref) -> list[int]:
             if any(r == ref for _, r in _bracketed_found(line))]
 
 
+def changed_line_refs(old: str | None, new: str | None) -> tuple[list[Ref], list[Ref]]:
+    """`(on_changed_lines, added)` for a note write from `old` to `new` text.
+
+    - `on_changed_lines`: refs cited in brackets on the lines of `old` that
+      `new` no longer holds as they were (removed or rewritten). A line only
+      moved elsewhere unchanged is not one. Lines are compared whole, as a
+      multiset, so the cost stays linear in the note's length.
+    - `added`: refs cited in brackets in `new` that `old` did not cite anywhere.
+
+    Each line is read in its note's context, so a ref inside a fenced block is
+    an example, not a citation. `None` stands for no note (a create, a delete).
+    """
+    from collections import Counter
+
+    old_lines = (old or "").split("\n") if old is not None else []
+    new_lines = (new or "").split("\n") if new is not None else []
+    old_refs = [[r for _, r in _bracketed_found(line)] for line in _masked(old or "").split("\n")] \
+        if old is not None else []
+    new_refs = [[r for _, r in _bracketed_found(line)] for line in _masked(new or "").split("\n")] \
+        if new is not None else []
+    kept = Counter(line.rstrip("\r") for line in new_lines)
+    changed = []
+    for line, refs in zip(old_lines, old_refs):
+        key = line.rstrip("\r")
+        if kept[key] > 0:
+            kept[key] -= 1
+            continue
+        changed.extend(refs)
+    before = {r for refs in old_refs for r in refs}
+    added = [r for refs in new_refs for r in refs if r not in before]
+    return _unique(changed), _unique(added)
+
+
 def sql_ref_pattern(ref: Ref) -> str:
     """A POSIX regex for PostgreSQL: text that may name `ref`, bare or bracketed (a superset)."""
     return f"{ref.letter}0*{ref.number}([^0-9]|$)"

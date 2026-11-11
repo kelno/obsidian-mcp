@@ -387,6 +387,10 @@ async def create_note(
     See `get_vault_guide` for Obsidian syntax and any vault-specific conventions
     (naming, folder placement, frontmatter, tags).
 
+    **Agent-ledger refs.** When the note cites agent-ledger entries in
+    brackets (`[Q14]`), the result ends with `cites:`, each entry as it stands
+    now: check your wording matches them.
+
     Refuses a path whose final component is a symlink, naming its target, so a
     write never lands on a note other than the one named; symlinked folders
     inside the vault work normally.
@@ -444,6 +448,12 @@ async def edit_note(
 
     See `get_vault_guide` for Obsidian syntax and any vault-specific conventions
     (naming, folder placement, frontmatter, tags).
+
+    **Agent-ledger refs on the lines.** When the lines this write removes or
+    rewrites cite agent-ledger entries in brackets (`[P54, P80]`), the result
+    ends with `changed_lines_cite:`, each entry as it stands now: they record
+    what shaped those lines, so read them (`ledger_get`) before undoing it.
+    Refs your new text adds come after `cites:`, as they stand now. A `dry_run` shows both after the diff.
 
     Four mutually exclusive modes (set at most one of append/find/section):
     1. **Full replace** (default): provide only `content`. `content` becomes the
@@ -860,6 +870,10 @@ async def delete_note(
     """Delete a note from the vault. Requires write permission — a `readwrite` API key, or an OAuth token
     carrying the `readwrite` scope.
 
+    When the note's lines cite agent-ledger entries in brackets
+    (`[P54, P80]`), the result ends with `changed_lines_cite:`, each entry as
+    it stands now: they record what shaped the text you are deleting.
+
     By default this is a soft-delete: the file is moved to
     `.trash/<YYYYMMDD-HHMMSS>-<basename>-<8 hex>` inside the vault root, by a
     single non-replacing rename, so an existing trash entry is never
@@ -1059,6 +1073,8 @@ async def write_file(
     generated PDF or image). Requires write permission — a `readwrite` API key, or an OAuth token
     carrying the `readwrite` scope.
     Peer to `create_note`/`edit_note`, which stay markdown-only.
+    Writing a `.md` note, the result lists agent-ledger refs like
+    `edit_note`'s (`changed_lines_cite:`, `cites:`).
 
     `content` carries the bytes: with `encoding="base64"` (default) it is
     base64-decoded to raw bytes; with `encoding="text"` it is written verbatim
