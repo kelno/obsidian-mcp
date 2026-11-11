@@ -47,9 +47,13 @@ class EntrySummary(_OmitNone):
     similarity: float | None = None
     #: True when the other list of the same search also holds this entry.
     in_both_lists: bool | None = None
-    #: Feedback cited by vault tasks (`ledger F12`): open (one is not done or
-    #: cancelled), done (all closed, one done) or cancelled (all cancelled).
+    #: The state of the vault tasks citing the entry (`[F12]`), any kind: open
+    #: (one is not done or cancelled), done (all closed, one done) or
+    #: cancelled (all cancelled).
     tasks: str | None = None
+    #: In a search by area: the entry is filed under another area and found
+    #: through these topics, which belong to the area searched.
+    via_topic: str | None = None
 
 
 class LedgerSearchResult(_LedgerResult):
@@ -93,8 +97,10 @@ class LedgerEntryFull(_OmitNone):
     author: str | None = None
     #: Summary-view lines that cite this entry.
     cited_by: list[dict] | None = None
-    #: Feedback: the vault tasks citing it (`ledger F12`), each with its
-    #: `ref` (path:line), `status` type and `text`, and their overall state.
+    #: The vault tasks citing it (`[F12]`), each with its `ref` (path:line),
+    #: `status` type and `text`, and their overall state. Feedback: decided
+    #: when one that is not cancelled cites it. A quirk or proposal: an open
+    #: one means something is pending on it.
     tasks: list[dict] | None = None
     tasks_state: str | None = None
     #: Every past version, oldest first, with who, when and why.
@@ -132,6 +138,17 @@ class LedgerWriteResult(_LedgerResult):
     seen: dict | None = None
     #: `ledger_add` with no area or no topics: the names it could have had.
     areas_and_topics: dict | None = None
+    #: Every entry the text just written cites (bracketed or bare), as it
+    #: stands now: `{ref, kind, title, status, certainty?, updated}`, or
+    #: `{ref, status: unknown}` for a ref with no entry.
+    cites: list[dict] | None = None
+    #: `ledger_update` after a change to what the entry says: what cites it.
+    #: `entries` (other entries' text, as in `cites`), `tasks` (vault tasks,
+    #: as in `ledger_get`), `notes` (other vault lines citing it in brackets,
+    #: `{ref: path:line, text}`; no text for a note in a private folder), each
+    #: at most 20, with `entries_total` / `tasks_total` / `notes_total` when
+    #: there are more.
+    cited_by: dict | None = None
 
 
 class LedgerDigestResult(_LedgerResult):

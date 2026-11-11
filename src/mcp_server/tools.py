@@ -7694,7 +7694,7 @@ from src.mcp_server.task_result import (  # noqa: E402
     TaskWriteResult,
 )
 from src.services import task_format as _tf, task_index as _task_index, task_ops as _task_ops  # noqa: E402
-from src.services import ledger_tasks as _ledger_tasks  # noqa: E402
+from src.services import ledger_citations as _ledger_citations, ledger_tasks as _ledger_tasks  # noqa: E402
 from src.services import task_query as _tq  # noqa: E402
 from src.services.task_scan import split_lines as _task_split_lines  # noqa: E402
 from src.services.task_settings import TasksSettingsError, read_settings as _read_task_settings  # noqa: E402
@@ -8034,7 +8034,7 @@ async def _task_ledger_refs(uid, line_text: str, note_path: str, note_text: str,
     even when the immediate re-index could not run. A failure here does not
     undo the write: it is said in a note.
     """
-    if not _ledger_tasks.cited_numbers(line_text) and not _ledger_tasks.bare_numbers(line_text):
+    if not _ledger_citations.bracketed(line_text) and not _ledger_citations.bare(line_text):
         return [], []
     try:
         from src.services.task_scan import scan_note
@@ -8045,7 +8045,7 @@ async def _task_ledger_refs(uid, line_text: str, note_path: str, note_text: str,
             return await _ledger_tasks.refs_on_line(
                 session, uid, line_text,
                 lambda line, path: _task_ops.parse_line(line, path, task_settings, registry),
-                note_path=note_path, note_rows=_ledger_tasks.rows_of_note(note_path, scanned))
+                note_path=note_path, note_rows=_ledger_tasks.rows_of_note(note_path, scanned), day=_ledger_day)
     except Exception as exc:  # noqa: BLE001 — the write already happened; the note says so, the write stands
         return [], [f"The task was written, but its ledger citations could not be checked ({type(exc).__name__})."]
 
@@ -8506,15 +8506,18 @@ async def ledger_search_impl(
             if links is None:
                 return _ledger_failed(LedgerSearchResult, _body_refusal(
                     f"{links_note}. The tasks filter needs them. Nothing was listed.", "task_settings_invalid"))
-            filters.feedback_numbers = tuple(sorted(n for n, s in task_states.items() if s == tasks))
+            filters.feedback_numbers = tuple(sorted(
+                int(ref[1:]) for ref, state in task_states.items() if ref[0] == "F" and state == tasks))
         described = {"status": status, "kinds": kinds, "area": filters.area or ("none" if filters.no_area else None),
                      "topics": topics, "origin": origin, "unseen": unseen or None, "since": since, "tasks": tasks}
         described = {k: v for k, v in described.items() if v is not None}
         notes = [links_note] if links_note else []
 
+        via: dict[int, str] = {}
+
         def summary(row, **extra):
-            state = task_states.get(int(row.ref[1:])) if row.kind == "feedback" else None
-            return _ledger_summary(row, tasks=state, **extra)
+            return _ledger_summary(row, tasks=task_states.get(_ledger_tasks.canonical(row.ref)),
+                                   via_topic=via.get(row.id), **extra)
 
         clauses = filters.where(uid)
         if query is None:
@@ -8522,6 +8525,7 @@ async def ledger_search_impl(
                 select(*_ledger_summary_columns()).where(*clauses)
                 .order_by(LedgerEntry.updated_at.desc(), LedgerEntry.id.desc()).limit(limit + 1)
             )).all()
+            via.update(await _ledger.via_topics(session, filters, rows[:limit]))
             return LedgerSearchResult(entries=[summary(r) for r in rows[:limit]],
                                       truncated=len(rows) > limit, filters=described, notes=notes or None,
                                       areas_and_topics=vocabulary)
@@ -8559,6 +8563,8 @@ async def ledger_search_impl(
         meaning = None
         if mode in ("both", "meaning"):
             meaning = await _ledger_embed.meaning_search(session, uid, query, filters, limit)
+        via.update(await _ledger.via_topics(
+            session, filters, words[:limit] + ([h["row"] for h in meaning.hits] if meaning else [])))
     by_words_ids = {r.id for r in words[:limit]}
     by_meaning_ids = {h["row"].id for h in meaning.hits} if meaning else set()
     both = mode == "both"
@@ -8598,14 +8604,21 @@ async def ledger_get_impl(refs: list[str], history: bool = False) -> LedgerGetRe
             sup = await _ledger.superseding_refs(session, [e.superseded_by for e in entries])
             past = await _ledger.history(session, ids) if (history and ids) else {}
             links, links_note = ({}, None)
-            if any(e.kind == "feedback" for e in entries):
+            if entries:
                 links, links_note = await _ledger_task_links(session, uid)
     except _ledger.LedgerError as exc:
         return _ledger_refused(LedgerGetResult, exc)
     cap = int(settings.max_read_response_chars)
     out, not_returned, used, notes = [], [], 0, ([links_note] if links_note else [])
     for entry in entries:
-        citing = (links or {}).get(entry.number, []) if entry.kind == "feedback" else []
+        citing = (links or {}).get(_ledger_tasks.canonical(entry.ref), [])
+        tasks_state = _ledger_tasks.task_state(t.status_type for t in citing)
+        if entry.kind != "feedback" and tasks_state == "open":
+            open_count = sum(1 for t in citing if t.status_type not in ("DONE", "CANCELLED", "NON_TASK"))
+            notes.append(f"{entry.ref}: {open_count} open vault task{'s' if open_count != 1 else ''} cite"
+                         f"{'' if open_count != 1 else 's'} it (tasks): something is pending on this "
+                         f"{entry.kind}, such as a decision postponed until some event. Read "
+                         f"{'them' if open_count != 1 else 'it'} before relying on the entry.")
         item = LedgerEntryFull(
             ref=entry.ref, kind=entry.kind, status=entry.status, revision=entry.revision, title=entry.title,
             body=entry.body, origin=entry.origin, observed_on=entry.observed_on.isoformat(),
@@ -8616,7 +8629,7 @@ async def ledger_get_impl(refs: list[str], history: bool = False) -> LedgerGetRe
             handled_at=entry.handled_at.isoformat() if entry.handled_at else None, author=entry.author,
             cited_by=cited.get(entry.id) or None, embedded=entry.embedded_hash == entry.content_hash,
             tasks=[t.as_dict() for t in citing] or None,
-            tasks_state=_ledger_tasks.task_state(t.status_type for t in citing),
+            tasks_state=tasks_state,
         )
         size = _ledger.json_size(item.model_dump())
         if out and used + size > cap:
@@ -8683,6 +8696,8 @@ async def ledger_add_impl(
     entry = added.entry
     _ledger_embed.enqueue(entry.id)
     notes = list(added.notes)
+    cites = await _ledger_cites(uid, entry.ref, [title, body, *(v for v in (details or {}).values()
+                                                                 if isinstance(v, str))], notes)
     if entry.status == "to_triage":
         notes.append(f"{entry.ref} has no area, so it is to_triage until one is set (ledger_update area=…).")
     elif entry.area_tag is None:
@@ -8707,7 +8722,7 @@ async def ledger_add_impl(
     return LedgerWriteResult(
         ref=entry.ref, revision=entry.revision, status=entry.status, similar=added.similar or None,
         flagged_lines=_ledger_flagged(added.flagged), view_hints=added.hints or None, notes=notes or None,
-        areas_and_topics=added.names,
+        areas_and_topics=added.names, cites=cites,
     )
 
 
@@ -8779,9 +8794,136 @@ async def ledger_update_impl(
     if updated.flagged:
         notes.append("This change flagged summary-view lines that cite the entry: check each one now, and "
                      "replace it or resolve it if it still holds (ledger_digest_edit).")
+    changed = updated.changed or []
+    written = [title if "title" in changed else None, append if append is not None else body,
+               *(v for k, v in (details or {}).items() if isinstance(v, str) and k in changed),
+               handled_account if "handled_account" in changed else None]
+    cites = await _ledger_cites(uid, entry.ref, written, notes)
+    dependants = None
+    if any(_ledger_is_content_change(c) for c in changed):
+        dependants = await _ledger_dependants(uid, entry, notes)
+    if any(c.startswith("body") for c in changed) and "title" not in changed:
+        notes.append(f"Does the title still hold? It reads: \"{entry.title}\". If not, change it (title=…).")
     return LedgerWriteResult(ref=entry.ref, revision=entry.revision, status=entry.status,
-                             changed=updated.changed or None, flagged_lines=_ledger_flagged(updated.flagged),
-                             notes=notes or None)
+                             changed=changed or None, flagged_lines=_ledger_flagged(updated.flagged),
+                             notes=notes or None, cites=cites, cited_by=dependants)
+
+
+#: Changes to what an entry says. A pure seen, topic, area, related, origin
+#: or observed_on change leaves what cites it as true as it was.
+_LEDGER_CONTENT_CHANGES = ("title", "body", "status", "handled_account", "superseded_by",
+                           *(f for fs in _ledger.KIND_FIELDS.values() for f in fs))
+
+#: How many of each kind of dependant `ledger_update` lists.
+LEDGER_DEPENDANTS_MAX = 20
+#: How many candidate notes it reads from disk to find bracketed citations.
+LEDGER_DEPENDANT_NOTES_READ_MAX = 200
+
+
+def _ledger_is_content_change(change: str) -> bool:
+    return change.split(" ", 1)[0] in _LEDGER_CONTENT_CHANGES
+
+
+async def _ledger_cites(uid, own_ref: str, texts, notes: list[str]) -> list[dict] | None:
+    """The entries the text just written cites, as they stand now; a note asks to check the wording.
+
+    The write has happened: a failure here is a note, never a failed write.
+    """
+    refs = [r for t in texts if t for r in _ledger_citations.in_ledger_text(t)]
+    if not refs:
+        return None
+    try:
+        async with async_session() as session:
+            cites = await _ledger_tasks.cited_states(session, uid, refs, own_ref=own_ref, day=_ledger_day)
+    except Exception as exc:  # noqa: BLE001 — the write stands; the note says the check failed
+        # debug, not warning: a caller drives this path (the D18 permit rule); the note tells the caller.
+        logger.debug("ledger write: the entries its text cites could not be read", exc_info=True)
+        notes.append(f"The entries your text cites could not be read ({type(exc).__name__}): read them with "
+                     "ledger_get and check your wording against them.")
+        return None
+    if not cites:
+        return None
+    notes.insert(0, "Entries your text cites, as they stand now (cites): check your wording matches them."
+                 + (" An unknown ref names no entry." if any(c["status"] == "unknown" for c in cites) else ""))
+    return cites
+
+
+def _ledger_private(path: str) -> bool:
+    """A note in a private folder: a folder whose name ends in ` (private)`, at any depth."""
+    return any(part.endswith(" (private)") for part in path.split("/")[:-1])
+
+
+async def _ledger_dependants(uid, entry, notes: list[str]) -> dict | None:
+    """What cites `entry`, for `ledger_update` after a change to what it says.
+
+    Other entries whose text cites it (bare or bracketed), vault tasks citing
+    it and other vault notes citing it in brackets (paths and line numbers;
+    the line's text too, except for notes in a private folder). Each list is
+    capped at `LEDGER_DEPENDANTS_MAX`, with its total. The write has
+    happened: a failure here is a note, never a failed write.
+    """
+    ref_str = _ledger_tasks.canonical(entry.ref)
+    ref = _ledger_citations.Ref(ref_str[0], entry.number)
+    out: dict = {}
+    try:
+        async with async_session() as session:
+            entries, total = await _ledger_tasks.entries_citing(
+                session, uid, entry, _ledger.text_columns(), _ledger.entry_text, limit=LEDGER_DEPENDANTS_MAX,
+                day=_ledger_day)
+            if entries:
+                out["entries"] = entries
+                if total > len(entries):
+                    out["entries_total"] = total
+            links, links_note = await _ledger_task_links(session, uid)
+            if links_note:
+                notes.append(links_note)
+            citing = (links or {}).get(ref_str, [])
+            if citing:
+                out["tasks"] = [t.as_dict() for t in citing[:LEDGER_DEPENDANTS_MAX]]
+                if len(citing) > LEDGER_DEPENDANTS_MAX:
+                    out["tasks_total"] = len(citing)
+            candidates = await _ledger_tasks.note_candidates(session, uid, ref)
+        task_lines = {t.ref for t in citing}
+        found, unread = [], max(0, len(candidates) - LEDGER_DEPENDANT_NOTES_READ_MAX)
+        for path in candidates[:LEDGER_DEPENDANT_NOTES_READ_MAX]:
+            try:
+                data = await asyncio.to_thread(read_bytes, path, uid, MAX_NOTE_BYTES)
+                text_ = data.decode("utf-8")
+            except (FileNotFoundError, ValueError, OSError, UnicodeDecodeError):
+                continue  # gone or unreadable since the index saw it: nothing to check there
+            text_lines = text_.splitlines()
+            lines = [n for n in _ledger_citations.lines_citing(text_, ref) if f"{path}:{n}" not in task_lines]
+            if not lines:
+                continue
+            private = _ledger_private(path)
+            for n in lines:
+                item = {"ref": f"{path}:{n}"}
+                if not private:
+                    item["text"] = text_lines[n - 1].strip()[:300]
+                found.append(item)
+        if found:
+            out["notes"] = found[:LEDGER_DEPENDANTS_MAX]
+            if len(found) > LEDGER_DEPENDANTS_MAX:
+                out["notes_total"] = len(found)
+        if unread:
+            notes.append(f"{unread} more note(s) may cite {ref_str} but were not read (the limit is "
+                         f"{LEDGER_DEPENDANT_NOTES_READ_MAX}): keyword_search \"{ref_str}\" finds them.")
+    except Exception as exc:  # noqa: BLE001 — the write stands; the note says the check failed
+        # debug, not warning: a caller drives this path (the D18 permit rule); the note tells the caller.
+        logger.debug("ledger_update: what cites %s could not be read", ref_str, exc_info=True)
+        notes.append(f"What cites {ref_str} could not be read ({type(exc).__name__}): search for it before "
+                     "relying on your change being the whole story.")
+        return out or None
+    if not out:
+        return None
+    truncated = any(k.endswith("_total") for k in out)
+    private = any("text" not in item for item in out.get("notes", ()))
+    notes.insert(0, f"These cite {ref_str} (cited_by): check each still holds after your change."
+                 + (f" Each list shows at most {LEDGER_DEPENDANTS_MAX}; its _total says how many there are."
+                    if truncated else "")
+                 + (" A note listed without its text is in a private folder: don't open it; name it to the "
+                    "owner if your change may affect it." if private else ""))
+    return out
 
 
 @_tracked("ledger_digest", ["slug", "with_ids"], refusal_result=_ledger_gate(LedgerDigestResult))

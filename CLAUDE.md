@@ -454,10 +454,9 @@ Recurring tasks are read, never changed. Read
 tables (migration 032), never in the vault. Every change names the revision
 it read and a reason, and keeps the previous version; nothing is deleted.
 What an agent needs is where it already is (fork, owner's decision 2026-11-10, ledger F34): `ledger_add` and `ledger_update` publish each rule and its allowed values in the parameter schema (describing only; the server decides), one refusal lists every problem (`problems`), and `ledger_search` results, a topic-less `ledger_add` and `get_vault_guide` carry the area and topic names.
-Search returns two separate lists, by words and by meaning. A vault task
-citing `ledger F12` is the only link between feedback and the work decided
-on it: the ledger and task tools derive the other direction from
-`note_tasks` at read time (`src/services/ledger_tasks.py`), nothing stored;
+Search returns two separate lists, by words and by meaning (an area search also finds entries tied to the area by a topic). A vault task
+citing `[F12]` (any kind, several as `[P35, P48]`; `src/services/ledger_citations.py`) is the only link between an entry and the work on it: the ledger and task tools derive the other direction from
+`note_tasks` at read time (`src/services/ledger_tasks.py`), nothing stored. Writes show the current state of every entry their text cites, and an update what cites the entry (fork, owner's tenet 2026-11-11, F60: compute is cheap, so the tool shows an agent what it needs at the moment of choice);
 feedback's ideas live in `leads` (stored in the column `fix`, which a
 032 stamp-back rerun requires). The four
 writers draw on the write budget (`write_class`) though they change no

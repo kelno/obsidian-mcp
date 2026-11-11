@@ -743,6 +743,10 @@ async def _task_note(sessionmaker, root, rel="t.md", body="# T\n"):
         await session.commit()
 
 
+def without_day(item: dict) -> dict:
+    return {k: v for k, v in item.items() if k != "updated"}
+
+
 async def test_feedback_leads_replace_fix(ctx):
     added = await tools.ledger_add_impl("feedback", "Leads", area="home",
                                         details={"subtype": "friction", "leads": "maybe X"})
@@ -759,9 +763,11 @@ async def test_a_task_citing_feedback_is_linked_both_ways(sessionmaker, ctx):
     entry = await tools.ledger_add_impl("feedback", "Bridge loops", area="home", details={"subtype": "friction"})
     other = await tools.ledger_add_impl("feedback", "Other thing", area="home", details={"subtype": "friction"})
 
-    created = await tools.create_task_impl(f"Fix the loop (Ledger {entry.ref.replace('F', 'F0')})", path="t.md")
+    created = await tools.create_task_impl(f"Fix the loop [{entry.ref.replace('F', 'F0')}]", path="t.md")
     assert created.error is None, created.error
-    assert created.ledger_refs == [{"ref": entry.ref, "title": "Bridge loops", "status": "open", "tasks": "open"}]
+    assert [without_day(r) for r in created.ledger_refs] == [
+        {"ref": entry.ref, "kind": "feedback", "title": "Bridge loops", "status": "open", "tasks": "open"}]
+    assert created.ledger_refs[0]["updated"]
     got = (await tools.ledger_get_impl([entry.ref])).entries[0]
     assert got.tasks_state == "open" and got.tasks == [
         {"ref": f"t.md:{created.line}", "status": "TODO", "text": created.text}]
@@ -771,18 +777,19 @@ async def test_a_task_citing_feedback_is_linked_both_ways(sessionmaker, ctx):
 
     done = await tools.set_task_status_impl("t.md", created.line, created.text, created.content_hash, status="done")
     assert done.error is None, done.error
-    assert done.ledger_refs == [{"ref": entry.ref, "title": "Bridge loops", "status": "open", "tasks": "done"}]
+    assert [without_day(r) for r in done.ledger_refs] == [
+        {"ref": entry.ref, "kind": "feedback", "title": "Bridge loops", "status": "open", "tasks": "done"}]
     assert [e.ref for e in (await tools.ledger_search_impl(tasks="done")).entries] == [entry.ref]
     by_query = await tools.ledger_search_impl(query="loops", mode="words", tasks="done")
     assert [e.tasks for e in by_query.by_words] == ["done"]
 
     # A second task citing it, still open: the entry is open again.
-    second = await tools.create_task_impl(f"Check it holds (ledger {entry.ref})", path="t.md")
+    second = await tools.create_task_impl(f"Check it holds [{entry.ref}]", path="t.md")
     assert second.ledger_refs[0]["tasks"] == "open"
     assert (await tools.ledger_search_impl(tasks="done")).entries == []
 
     # Only cancelled tasks: the decision was dropped.
-    dropped = await tools.create_task_impl(f"Do it (ledger {other.ref})", path="t.md")
+    dropped = await tools.create_task_impl(f"Do it [{other.ref}]", path="t.md")
     cancelled = await tools.set_task_status_impl("t.md", dropped.line, dropped.text, dropped.content_hash,
                                                  status="cancelled")
     assert cancelled.ledger_refs[0]["tasks"] == "cancelled"
@@ -798,9 +805,9 @@ async def test_a_task_in_a_note_the_index_lacks_still_counts(sessionmaker, ctx):
     not report the entry as done."""
     await _task_note(sessionmaker, ctx)
     entry = await tools.ledger_add_impl("feedback", "Half done", area="home", details={"subtype": "friction"})
-    first = await tools.create_task_impl(f"Part one (ledger {entry.ref})", path="t.md")
+    first = await tools.create_task_impl(f"Part one [{entry.ref}]", path="t.md")
     await tools.set_task_status_impl("t.md", first.line, first.text, first.content_hash, status="done")
-    second = await tools.create_task_impl(f"Part two (ledger {entry.ref})")  # the inbox, created now
+    second = await tools.create_task_impl(f"Part two [{entry.ref}]")  # the inbox, created now
     assert second.error is None and second.created_note is True and second.indexed is False, second
     assert second.ledger_refs[0]["tasks"] == "open"
 
@@ -808,13 +815,14 @@ async def test_a_task_in_a_note_the_index_lacks_still_counts(sessionmaker, ctx):
 async def test_task_tools_point_out_a_bare_ref_and_an_unknown_one(sessionmaker, ctx):
     await _task_note(sessionmaker, ctx, "u.md")
     entry = await tools.ledger_add_impl("feedback", "Named", area="home", details={"subtype": "friction"})
-    bare = await tools.create_task_impl(f"See {entry.ref} later, F5 key", path="u.md")
+    bare = await tools.create_task_impl(f"See {entry.ref} later, F5 key, `[{entry.ref}]` in code", path="u.md")
     assert bare.ledger_refs is None
-    assert bare.notes and f"mentions {entry.ref} without `ledger`" in bare.notes[0] and len(bare.notes) == 1
-    unknown = await tools.create_task_impl("Do (ledger F999)", path="u.md")
+    assert bare.notes and f"mentions {entry.ref} without brackets" in bare.notes[0] and len(bare.notes) == 1
+    assert f"write [{entry.ref}]" in bare.notes[0]
+    unknown = await tools.create_task_impl("Do [F999]", path="u.md")
     assert unknown.ledger_refs == [{"ref": "F999", "status": "unknown"}]
     edited = await tools.edit_task_impl("u.md", bare.line, bare.text, unknown.content_hash,
-                                        description=f"See it later (ledger {entry.ref})")
+                                        description=f"See it later [{entry.ref}]")
     assert edited.error is None, edited.error
     assert edited.ledger_refs[0]["ref"] == entry.ref and edited.notes is None
 
@@ -917,3 +925,114 @@ async def test_the_guide_lists_the_ledgers_rules_topics_and_areas(ctx):
     assert "Areas: agent-personnel, home." in section
     assert "seen_once" in section and "unclear_instruction" in section and "150 characters" in section
 
+
+
+# ── Citations: any kind, current state at write time, dependants on change ───
+
+async def test_a_task_may_cite_a_quirk_and_the_quirk_shows_it_is_pending(sessionmaker, ctx):
+    """F60's case: a decision postponed until some event, as a task citing the quirk."""
+    await _task_note(sessionmaker, ctx, "q.md")
+    quirk = await add_quirk("The app dropped a call at about 30 s", area="home")
+    fb = await tools.ledger_add_impl("feedback", "Pending", area="home", details={"subtype": "friction"})
+    created = await tools.create_task_impl(
+        f"When the waits are reworked: revisit the cap [{quirk.ref}, {fb.ref}] #when", path="q.md")
+    assert created.error is None, created.error
+    assert [without_day(r) for r in created.ledger_refs] == [
+        {"ref": quirk.ref, "kind": "quirk", "title": "The app dropped a call at about 30 s", "status": "current",
+         "certainty": "tested", "tasks": "open"},
+        {"ref": fb.ref, "kind": "feedback", "title": "Pending", "status": "open", "tasks": "open"}]
+
+    got = await tools.ledger_get_impl([quirk.ref])
+    assert got.entries[0].tasks_state == "open" and got.entries[0].tasks[0]["ref"] == f"q.md:{created.line}"
+    assert any(n.startswith(f"{quirk.ref}: 1 open vault task cites it") and "pending" in n for n in got.notes)
+    listed = await tools.ledger_search_impl(kinds=["quirk"])
+    assert {e.ref: e.tasks for e in listed.entries}[quirk.ref] == "open"
+    # The tasks filter stays about feedback: a quirk with open tasks is not listed.
+    assert [e.ref for e in (await tools.ledger_search_impl(tasks="open")).entries] == [fb.ref]
+
+    done = await tools.set_task_status_impl("q.md", created.line, created.text, created.content_hash, status="done")
+    assert done.error is None, done.error
+    got = await tools.ledger_get_impl([quirk.ref])
+    assert got.entries[0].tasks_state == "done" and got.notes is None
+
+
+async def test_a_write_shows_the_current_state_of_what_its_text_cites(ctx):
+    """F58's case: "untested (Q14)" written while Q14 said tested."""
+    quirk = await add_quirk("Long calls work in the background", area="home",
+                            details={"certainty": "tested"})
+    added = await tools.ledger_add_impl(
+        "feedback", f"Wait loop; a longer cap untested ({quirk.ref})", area="home",
+        body="See [P404] and F1 itself.", details={"subtype": "friction", "leads": f"read {quirk.ref} first"})
+    assert added.error is None, added.error
+    assert [without_day(c) for c in added.cites] == [
+        {"ref": quirk.ref, "kind": "quirk", "title": "Long calls work in the background", "status": "current",
+         "certainty": "tested"},
+        {"ref": "P404", "status": "unknown"}]
+    assert added.notes[0].startswith("Entries your text cites, as they stand now")
+    assert "unknown ref" in added.notes[0]
+
+    updated = await tools.ledger_update_impl(ref=added.ref, expected_revision=1, reason="more", append="Nothing new.")
+    assert updated.error is None, updated.error
+    assert updated.cites is None
+    assert any(n.startswith(f'Does the title still hold? It reads: "Wait loop; a longer cap untested '
+                            f'({quirk.ref})". If not') for n in updated.notes)
+    retitled = await tools.ledger_update_impl(ref=added.ref, expected_revision=2, reason="fix",
+                                              title=f"Wait loop; longer cap tested [{quirk.ref}]",
+                                              append="Fixed the title.")
+    assert [c["ref"] for c in retitled.cites] == [quirk.ref]
+    assert not any("Does the title still hold" in n for n in retitled.notes)
+
+
+async def test_an_update_lists_what_cites_the_entry(sessionmaker, ctx):
+    quirk = await add_quirk("The cap is 20 s", area="home")
+    citing = await add_quirk("A summary of the cap", area="home", body=f"Per {quirk.ref}, untested.")
+    await add_quirk("Unrelated", area="home", body=f"{quirk.ref}0 is another entry")
+    await _task_note(sessionmaker, ctx, "plans.md")
+    task = await tools.create_task_impl(f"Revisit the cap [{quirk.ref}]", path="plans.md")
+    (ctx / "_").mkdir()
+    (ctx / "_" / "rules.md").write_text(f"- A rule. [P1, {quirk.ref}]\n- An example: `[{quirk.ref}]`\n",
+                                        encoding="utf-8")
+    (ctx / "Diary (private)").mkdir()
+    (ctx / "Diary (private)" / "d.md").write_text(f"secret [{quirk.ref}]\n", encoding="utf-8")
+    async with sessionmaker() as session:
+        # The keyword index the note search starts from (the index pass fills it in production).
+        for rel, content in (("_/rules.md", f"A rule. [P1, {quirk.ref}]"),
+                             ("Diary (private)/d.md", f"secret [{quirk.ref}]")):
+            await session.execute(text(
+                "INSERT INTO notes_metadata (user_id, file_path, title, tags, frontmatter, content_hash) "
+                "VALUES (NULL, :p, 'n', '{}', '{}', 'h')"), {"p": rel})
+        for rel, content in (("_/rules.md", f"A rule. [P1, {quirk.ref}]"),
+                             ("Diary (private)/d.md", f"secret [{quirk.ref}]"),
+                             ("plans.md", f"Revisit the cap [{quirk.ref}]")):
+            await session.execute(text(
+                "UPDATE notes_metadata SET content_tsvector = to_tsvector('simple', :c) WHERE file_path = :p"),
+                {"p": rel, "c": content})
+        await session.commit()
+
+    seen_only = await tools.ledger_update_impl(ref=quirk.ref, expected_revision=1, reason="topic",
+                                               area="agent-personnel")
+    assert seen_only.error is None and seen_only.cited_by is None, seen_only
+
+    changed = await tools.ledger_update_impl(ref=quirk.ref, expected_revision=2, reason="tested",
+                                             append="Tested: longer calls work.")
+    assert changed.error is None, changed.error
+    by = changed.cited_by
+    assert [e["ref"] for e in by["entries"]] == [citing.ref]
+    assert [t["ref"] for t in by["tasks"]] == [f"plans.md:{task.line}"]
+    assert by["notes"] == [{"ref": "Diary (private)/d.md:1"},
+                           {"ref": "_/rules.md:1", "text": f"- A rule. [P1, {quirk.ref}]"}]
+    assert changed.notes[0].startswith(
+        f"These cite {quirk.ref} (cited_by): check each still holds after your change. A note listed without "
+        "its text is in a private folder: don't open it")
+
+
+async def test_an_area_search_finds_entries_through_the_areas_topics(ctx):
+    await tools.ledger_topic_edit_impl("create", "voice-bridge", "needed", kind="system", description="Bridge",
+                                       area="home")
+    own = await add_quirk("Filed under home", area="home")
+    other = await add_quirk("Filed elsewhere", area="agent-personnel", topics=["voice-bridge"])
+    await add_quirk("Not related", area="agent-personnel")
+    listed = await tools.ledger_search_impl(area="home")
+    assert {e.ref: e.via_topic for e in listed.entries} == {own.ref: None, other.ref: "voice-bridge"}
+    by_words = await tools.ledger_search_impl(query="filed", area="home", mode="words")
+    assert {e.ref: e.via_topic for e in by_words.by_words} == {own.ref: None, other.ref: "voice-bridge"}

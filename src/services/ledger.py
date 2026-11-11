@@ -620,13 +620,23 @@ def search_document():
     Computed at query time rather than stored: the ledger is small, and a
     stored vector would go stale silently when `FTS_CONFIGS` changes.
     """
-    doc = func.concat_ws(
-        " ", LedgerEntry.ref, LedgerEntry.title, LedgerEntry.body, LedgerEntry.component, LedgerEntry.leads,
-        LedgerEntry.certainty_note, LedgerEntry.sources, LedgerEntry.target, LedgerEntry.proposed_text,
-        LedgerEntry.final_text, LedgerEntry.changes, LedgerEntry.owner_reason, LedgerEntry.handled_account,
-    )
+    doc = func.concat_ws(" ", LedgerEntry.ref, *text_columns())
     parts = [func.to_tsvector(literal(cfg).cast(text_regconfig()), doc) for cfg in settings.fts_configs]
     return reduce(lambda a, b: a.op("||")(b), parts)
+
+
+#: An entry's text fields: what it says, and so what it can cite.
+TEXT_FIELDS = ("title", "body", "component", "leads", "certainty_note", "sources", "target", "proposed_text",
+               "final_text", "changes", "owner_reason", "handled_account")
+
+
+def text_columns():
+    return [getattr(LedgerEntry, name) for name in TEXT_FIELDS]
+
+
+def entry_text(entry) -> str:
+    """All of an entry's text, for finding the refs it cites."""
+    return "\n\n".join(v for v in (getattr(entry, name, None) for name in TEXT_FIELDS) if v)
 
 
 def text_regconfig():
@@ -650,6 +660,11 @@ def tsquery_for(query: str, *, any_word: bool = False):
 class Filters:
     kinds: list[str] = field(default_factory=list)
     area: str | None = None
+    #: With `area`: the active topics belonging to that area, `{id: slug}`.
+    #: An entry filed under another area that carries one of them is found
+    #: by the area too (an entry has one area, but its topics can tie it to
+    #: others).
+    area_topics: dict[int, str] = field(default_factory=dict)
     no_area: bool = False
     topic_ids: list[int] = field(default_factory=list)
     statuses: tuple[str, ...] = ACTIVE_STATUSES
@@ -664,7 +679,11 @@ class Filters:
         if self.kinds:
             clauses.append(LedgerEntry.kind.in_(self.kinds))
         if self.area is not None:
-            clauses.append(LedgerEntry.area_tag == self.area)
+            by_area = LedgerEntry.area_tag == self.area
+            if self.area_topics:
+                by_area = or_(by_area, LedgerEntry.id.in_(select(LedgerEntryTopic.entry_id).where(
+                    LedgerEntryTopic.topic_id.in_(sorted(self.area_topics)))))
+            clauses.append(by_area)
         if self.no_area:
             clauses.append(LedgerEntry.area_tag.is_(None))
         for topic_id in self.topic_ids:
@@ -713,6 +732,10 @@ async def build_filters(session: AsyncSession, uid: int | None, *, kinds=None, a
             f.no_area = True
         else:
             f.area = resolve_area(await area_index(session, uid), area)
+            f.area_topics = dict((await session.execute(
+                select(LedgerTopic.id, LedgerTopic.slug).where(
+                    _owner(LedgerTopic, uid), LedgerTopic.area_tag == f.area, LedgerTopic.status == "active")
+            )).all())
     topics = bounded_list(topics, "topics")
     if topics:
         # A filter may name a merged topic: its entries moved to the target.
@@ -732,6 +755,20 @@ async def build_filters(session: AsyncSession, uid: int | None, *, kinds=None, a
     if since is not None:
         f.since = parse_day(since, "since")
     return f
+
+
+async def via_topics(session: AsyncSession, filters: Filters, rows) -> dict[int, str]:
+    """`{entry id: topic slugs}` for rows an area filter found through a topic, not their own area."""
+    ids = [r.id for r in rows if filters.area is not None and r.area_tag != filters.area]
+    if not ids or not filters.area_topics:
+        return {}
+    out: dict[int, list[str]] = {}
+    for entry_id, topic_id in (await session.execute(
+        select(LedgerEntryTopic.entry_id, LedgerEntryTopic.topic_id).where(
+            LedgerEntryTopic.entry_id.in_(ids), LedgerEntryTopic.topic_id.in_(sorted(filters.area_topics)))
+    )).all():
+        out.setdefault(entry_id, []).append(filters.area_topics[topic_id])
+    return {k: ", ".join(sorted(v)) for k, v in out.items()}
 
 
 # ── Add ──────────────────────────────────────────────────────────────────────

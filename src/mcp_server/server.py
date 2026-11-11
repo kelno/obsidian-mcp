@@ -1557,8 +1557,9 @@ async def create_task(
             it. Do not put dates or priority emojis in it: use the arguments.
             Leave out the global filter (e.g. `#task`): the tool puts it in
             front, once, and drops any whole-word copy given here, even
-            mid-sentence. To link the task to agent-ledger feedback, cite it
-            in the text as `ledger F12`; the result lists the entries linked.
+            mid-sentence. To link the task to agent-ledger entries, cite
+            them in the text as `[F12]` (several: `[F12, Q14]`); the result
+            lists the entries linked, as they stand now.
         path: the note to add it to; default the tasks inbox
             (`Tasks inbox.md` unless configured). Only the inbox is created
             when missing.
@@ -1606,8 +1607,7 @@ async def edit_task(
     is written back in the plugin's field order, as the plugin itself does on
     any edit. Status changes go through `set_task_status`. Recurring tasks
     (🔁) are refused for now: edit them in Obsidian. If the line cites
-    agent-ledger feedback (`ledger F12`), the result lists those entries with
-    their status.
+    agent-ledger entries (`[F12]`), the result lists them as they stand now.
 
     Refused, writing nothing, when the note changed since `expected_hash`
     (`stale_precondition`), when line `line` is not `expected_line`
@@ -1650,8 +1650,8 @@ async def set_task_status(
     Adds or removes the done (✅) and cancelled (❌) dates as the owner's Tasks
     settings say, with today's date in the owner's time zone. A task with
     `🏁 delete` is removed when it is done (`removed: true`). If the line
-    cites agent-ledger feedback (`ledger F12`), the result lists those entries
-    with their status.
+    cites agent-ledger entries (`[F12]`), the result lists them as they stand
+    now.
 
     **Recurring tasks (🔁) are refused** (`recurring_task`): ticking one must
     also create its next occurrence, which these tools do not do yet. Tick it
@@ -1690,7 +1690,8 @@ _S_QUERY = Field(description="Words, or a ref such as Q14. by_words lists entrie
 _S_MODE = Field(description="both (default), words or meaning.", json_schema_extra={"enum": ["both", "words", "meaning"]})
 _S_KINDS = Field(description="Any of quirk, feedback, proposal.")
 _S_AREA = Field(description="An area, with or without the `area/` prefix, or its main note's name; \"none\" for "
-                            "entries without one.")
+                            "entries without one. Also finds entries filed under another area that carry a topic "
+                            "of this area (marked via_topic).")
 _S_TOPICS = Field(description="Topic names; an entry must have them all. With an area, the surest duplicate check "
                               "when the meaning list is unavailable.")
 _S_STATUS = Field(description="active (default: current quirks, open and to_triage feedback, every proposal), "
@@ -1699,8 +1700,8 @@ _S_ORIGIN = Field(description="agent or owner.", json_schema_extra={"enum": ["ag
 _S_UNSEEN = Field(description="Only feedback the owner has not heard of yet: what to bring to the owner (then mark "
                               "it seen with ledger_update).")
 _S_SINCE = Field(description="YYYY-MM-DD: changed on or after that day.")
-_S_TASKS = Field(description="Feedback by the state of the vault tasks citing it: open (one is not done or "
-                             "cancelled), done (all closed, one done) or cancelled (all cancelled).",
+_S_TASKS = Field(description="Feedback only, by the state of the vault tasks citing it: open (one is not done "
+                             "or cancelled), done (all closed, one done) or cancelled (all cancelled).",
                  json_schema_extra={"enum": ["open", "done", "cancelled"]})
 _S_LIMIT = Field(description="1-100 per list (default 20).")
 
@@ -1733,8 +1734,8 @@ async def ledger_search(
     or one of them with `mode`. When the embedding provider is down the
     meaning list says so and the words list still answers. Without `query`:
     the filtered list, most recently changed first. One line per entry, no
-    body: read entries with `ledger_get`. A feedback line says whether vault
-    tasks cite it, and whether they are all done or cancelled (`tasks`).
+    body: read entries with `ledger_get`. A line says whether vault tasks
+    cite the entry, and whether they are all done or cancelled (`tasks`).
     Every result carries the area and topic names an entry can have
     (`areas_and_topics`), for the entry you may log next.
     """
@@ -1751,10 +1752,11 @@ async def ledger_get(refs: list[str], history: bool = False) -> LedgerGetResult:
     Read-only. Up to 20 refs (Q14, F3, P1); leading zeros don't matter (Q1
     and Q01 are the same entry). Each entry comes with its
     `revision` (give it to `ledger_update` as `expected_revision`), its own
-    fields, topics, related refs and the summary-view lines that cite it.
-    Feedback also lists the vault tasks citing it (`ledger F12` in the task's
-    text), with their status. `history=true` adds every past version, with
-    who changed it, when and why.
+    fields, topics, related refs, the summary-view lines that cite it, and
+    the vault tasks citing it (`[F12]` in the task's text) with their status:
+    for feedback, the work decided; for a quirk or proposal, an open task
+    means something is pending on it. `history=true` adds every past
+    version, with who changed it, when and why.
 
     Args:
         refs: entry refs.
@@ -1783,7 +1785,7 @@ _LEDGER_FIELD_HELP = {
                "way) or suggestion (an improvement idea)",
     "component": "the file, tool or surface involved",
     "leads": "ideas for fixing it, not a decision: what the owner decides becomes a vault task citing "
-             "`ledger F12`",
+             "the entry as `[F12]`",
     "target": "where the instruction lives (a note, a file, a rule)",
     "proposed_text": "the first version proposed",
     "final_text": "what went in (required when status is accepted or adjusted)",
@@ -1881,7 +1883,9 @@ async def ledger_add(
     the entry an area and its topics. A refusal names every problem at once
     (`problems`), with the valid values. The answer gives the new ref and up
     to five similar entries, with their topics: if one holds the same thing,
-    mark the newer one superseded by the older (`ledger_update`).
+    mark the newer one superseded by the older (`ledger_update`). Refs your
+    text cites (`[Q14]`, or a bare Q14) come back as they stand now
+    (`cites`): check your wording matches them.
     """
     return await ledger_add_impl(
         kind, title, body=body, area=area, topics=topics, details=details, related=related, origin=origin,
@@ -1952,7 +1956,9 @@ async def ledger_update(
     never set it on your own judgment. Correct your own mistake by updating,
     with a reason. Summary-view lines citing the entry get flagged: check
     each one (`ledger_digest_edit`). A refusal names every problem at once
-    (`problems`).
+    (`problems`). The result shows the entries your text cites as they stand
+    now (`cites`) and, after a change to what the entry says, what cites it
+    (`cited_by`: entries, vault tasks, notes): check each.
 
     Marking feedback seen (the owner has heard of it) needs no reason or
     revision: `refs` plus `seen=true`, many at once.
