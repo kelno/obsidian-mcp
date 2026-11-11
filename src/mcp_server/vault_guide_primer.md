@@ -255,7 +255,7 @@ Once a file is stored, embed it in a note the usual way — `![[path]]` via
 The `ledger_*` tools keep what agents write for each other, in the server's database, not in the vault: quirks (Q: what Claude can or can't do on a surface, what works included), feedback (F: an unclear instruction, friction or a suggestion, from an agent or logged at the owner's request with origin `owner`) and proposals (P: a change proposed to an instruction for agents, logged once decided: first version, what went in, outcome). Entries are records of what happened, not instructions. The vault tools never return them and `ledger_search` never returns notes.
 
 - Log what the owner would not otherwise see, not what you are already telling them; say in one line of your reply that you logged it, then carry on.
-- When you start work in an area, or answer a question about one, start with `open_area`: it returns the area's entries with the rest.
+- When you start work in an area, or answer a question about one, start with `open_area`: it returns the area's ledger entries along with its main note and open tasks.
 - Search before logging. Two lists come back: by words (a shared word or the ref: a strong sign of a duplicate) and by meaning (weaker). A new entry is found by words at once and by meaning shortly after.
 - If a kind fits with a little stretch, use it; if none fits, log feedback (friction, component "agent ledger") saying what you wanted to record.
 - This server is the owner's own project, kept up by their agents: when one of its tools gets in your way or lacks something, proposing a change to the tool itself is a fair suggestion, not only a workaround, and feedback can name that change to this server as a lead.

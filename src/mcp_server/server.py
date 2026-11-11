@@ -1677,8 +1677,8 @@ async def set_task_status(
 
 # ── open_area (fork) ────────────────────────────────────────────────────────
 
-_A_AREA = Field(description="The area: its slug (voice-bridge), its tag (#area/voice-bridge) or its main note's "
-                            "name (Voice bridge). Give area or folder.")
+_A_AREA = Field(description="The area: its slug (voice-bridge), its tag (#area/voice-bridge), area/voice-bridge "
+                            "or its main note's name (Voice bridge). Give area or folder, not both.")
 _A_FOLDER = Field(description="Instead of area: an absolute path outside the vault, such as the repo or working "
                               "directory a session runs in; matched against each area's related folders, a "
                               "subfolder included.")
@@ -1693,13 +1693,15 @@ async def open_area(
 
     Read-only. Call it first when you start work in an area or answer a
     question about one, and when a session works in a folder outside the
-    vault (`folder`). One call returns the area's tag and description, its
-    main note's text (the agent rules at its top and `## Current position`;
-    without its Tasks section), its related folders outside the vault, its
-    active ledger entries (as `ledger_search(area=…)` lists them) and its
-    open tasks from every note carrying its tag, `#next` first, then
-    `instructions` saying what to do with them. A folder no area lists comes
-    back with `found: false`: ask the owner which area it belongs to.
+    vault (`folder`), to find its area. One call returns the area's tag and
+    description, its main note's text (the agent rules at its top and
+    `## Current position`; without its Tasks section), its related folders
+    outside the vault, its active ledger entries (those filed under another
+    area but carrying one of its topics are marked `via_topic`), and its open
+    tasks from every note carrying its tag, `#next` first, then by urgency.
+    Both lists are capped; `notes` say where the rest is. `instructions`
+    then say what to do with it all. A folder no area lists comes back with
+    `found: false`: ask the owner which area it belongs to.
     """
     return await open_area_impl(area=area, folder=folder)
 

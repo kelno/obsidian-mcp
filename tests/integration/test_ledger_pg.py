@@ -1109,6 +1109,7 @@ async def test_open_area_gathers_the_note_folders_entries_and_tasks(sessionmaker
     assert len(result.instructions) == 2 and "#when" in result.instructions[0]
     assert "Current position" in result.instructions[1]
     assert result.archived is None and result.tasks_total is None
+    assert not any("carries #next" in n for n in result.notes or [])
 
 
 async def test_open_area_by_folder(sessionmaker, ctx, monkeypatch):
@@ -1149,4 +1150,5 @@ async def test_open_area_caps_tasks_and_points_to_list_tasks(sessionmaker, ctx, 
         await tools.create_task_impl(f"Step {i}", path="plans.md", areas=["home"])
     result = await tools.open_area_impl(area="home")
     assert len(result.tasks) == 2 and result.tasks_total == 3
+    assert "No open task of this area carries #next." in result.notes
     assert any('list_tasks(area="area/home")' in n for n in result.notes)

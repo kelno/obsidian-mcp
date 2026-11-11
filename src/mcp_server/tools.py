@@ -9056,11 +9056,12 @@ OPEN_AREA_TASKS_MAX = 30
 OPEN_AREA_TASKS_HEADING = "Tasks"
 
 OPEN_AREA_INSTRUCTIONS = (
-    "Starting work: check each task and entry against the work you're starting. Is it related? Should it go to "
-    "the owner? Is it done, or made stale, by this work (tick or update it with the task tools, update the entry "
-    "with ledger_update)? Is this work the event a \"When …\" task (#when) waits for?",
-    "Answering a status question (\"where am I on X?\"): report the Current position and the #next tasks; the rest "
-    "is for agents about to act.",
+    "Starting work: check each task and entry against the work you're starting (read an entry with ledger_get "
+    "when its title is not enough). Is it related? Does the owner need to hear about it? Is it done, or made "
+    "stale, by this work (set_task_status or edit_task for a task, ledger_update for an entry)? Is this work the "
+    "event a \"When …\" task (#when) waits for? If so, tell the owner before acting on it.",
+    "Answering a status question (\"where am I on X?\"): report the Current position (with its date) and the "
+    "#next tasks, or say none is marked #next; the rest is for agents about to act.",
 )
 
 
@@ -9204,8 +9205,11 @@ async def _open_area_tasks(tag: str, uid, notes: list[str]) -> tuple[list[AreaTa
     if total > len(out):
         notes.append(f"{len(out)} of {total} open tasks are listed (#next first, then by urgency): "
                      f"list_tasks(area=\"{tag}\") lists them all.")
+    if out and not any(t.next for t in out):
+        notes.append("No open task of this area carries #next.")
     if any(t.text is None for t in out):
-        notes.append("A task listed without its text is in a private folder: read it only if the owner asks.")
+        notes.append("A task listed without its text is in a private folder: read it only if the owner asks; "
+                     "leave it out of your checks otherwise.")
     return out, total
 
 
