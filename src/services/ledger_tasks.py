@@ -179,7 +179,9 @@ async def refs_on_line(session: AsyncSession, uid: int | None, text: str,
         refs.append({**entry_state(entry, day), "tasks": task_states.get(str(ref))})
     notes = [
         f"The line mentions {ref} without brackets, so it is not linked to ledger entry {ref} "
-        f"(\"{entries[ref].title}\"). To link it, write [{ref}]."
+        f"(\"{entries[ref].title}\"). To link it, write [{ref}]"
+        + ("; a task citing feedback marks the owner's decision on it, so link only work the owner decided."
+           if entries[ref].kind == "feedback" else ".")
         for ref in loose if ref in entries
     ]
     return refs, notes

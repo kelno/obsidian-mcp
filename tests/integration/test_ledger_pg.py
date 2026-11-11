@@ -818,7 +818,7 @@ async def test_task_tools_point_out_a_bare_ref_and_an_unknown_one(sessionmaker, 
     bare = await tools.create_task_impl(f"See {entry.ref} later, F5 key, `[{entry.ref}]` in code", path="u.md")
     assert bare.ledger_refs is None
     assert bare.notes and f"mentions {entry.ref} without brackets" in bare.notes[0] and len(bare.notes) == 1
-    assert f"write [{entry.ref}]" in bare.notes[0]
+    assert f"write [{entry.ref}]; a task citing feedback marks the owner's decision" in bare.notes[0]
     unknown = await tools.create_task_impl("Do [F999]", path="u.md")
     assert unknown.ledger_refs == [{"ref": "F999", "status": "unknown"}]
     edited = await tools.edit_task_impl("u.md", bare.line, bare.text, unknown.content_hash,
