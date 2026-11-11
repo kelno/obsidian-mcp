@@ -1052,3 +1052,101 @@ async def test_an_area_search_finds_entries_through_the_areas_topics(ctx):
     assert {e.ref: e.via_topic for e in listed.entries} == {own.ref: None, other.ref: "voice-bridge"}
     by_words = await tools.ledger_search_impl(query="filed", area="home", mode="words")
     assert {e.ref: e.via_topic for e in by_words.by_words} == {own.ref: None, other.ref: "voice-bridge"}
+
+
+
+# ── open_area ────────────────────────────────────────────────────────────────
+
+AREAS_TABLE = """# Areas
+
+| Area | Related folders | Vault folder |
+| --- | --- | --- |
+| Home sweet home | `D:\\work\\home-repo` (a repo) | [[projects/Home/Home\\|Home]] |
+| Agents | (none) | [[projects/Agent personnel/Agent personnel\\|Agent personnel]] |
+| Village | `D:\\work\\village` | no folder yet; a game |
+| Shared | `D:\\work\\shared` | [[projects/Home/Home\\|Home]] |
+| Shared too | `D:\\work\\shared` | [[projects/Agent personnel/Agent personnel\\|Agent personnel]] |
+"""
+
+
+async def _open_area_vault(sessionmaker, root):
+    (root / "Areas").mkdir()
+    (root / "Areas" / "Areas.md").write_text(AREAS_TABLE, encoding="utf-8")
+    (root / "projects" / "Home").mkdir(parents=True)
+    (root / "projects" / "Home" / "Home.md").write_text(
+        "---\narea_tag: area/home\n---\nAgents: read this first.\n\n## Current position\n\n- Painting.\n\n"
+        "## Tasks\n\n- [ ] #task in the main note #area/home\n\n## Notes\n\n- kept\n", encoding="utf-8")
+    await _task_note(sessionmaker, root, "plans.md")
+    (root / "Secret (private)").mkdir()
+    await _task_note(sessionmaker, root, "Secret (private)/s.md")
+
+
+async def test_open_area_gathers_the_note_folders_entries_and_tasks(sessionmaker, ctx):
+    await _open_area_vault(sessionmaker, ctx)
+    await tools.ledger_topic_edit_impl("create", "paint", "needed", kind="system", description="Paint", area="home")
+    own = await add_quirk("Paint dries slowly", area="home")
+    other = await add_quirk("Brushes", area="agent-personnel", topics=["paint"])
+    later = await tools.create_task_impl("Buy paint #area/home", path="plans.md", areas=[])
+    first = await tools.create_task_impl("Sand the wall #next", path="plans.md", areas=["home"])
+    done = await tools.create_task_impl("Old one", path="plans.md", areas=["home"], status="done")
+    secret = await tools.create_task_impl("Private step", path="Secret (private)/s.md", areas=["home"])
+    elsewhere = await tools.create_task_impl("Agents' work", path="plans.md", areas=["agent-personnel"])
+    for r in (later, first, done, secret, elsewhere):
+        assert r.error is None, r.error
+
+    result = await tools.open_area_impl(area="Home")
+    assert result.error is None, result.error
+    assert (result.found, result.area, result.tag, result.name) == (True, "area/home", "#area/home", "Home sweet home")
+    assert result.main_note == "projects/Home/Home.md" and result.related_folders == ["D:\\work\\home-repo"]
+    assert result.main_note_text.startswith("Agents: read this first.") and "## Current position" in result.main_note_text
+    assert "#task" not in result.main_note_text and "## Notes\n\n- kept" in result.main_note_text
+    assert {e.ref: e.via_topic for e in result.entries} == {own.ref: None, other.ref: "paint"}
+    refs = [t.ref for t in result.tasks]
+    assert refs[0] == f"plans.md:{first.line}" and result.tasks[0].next is True
+    assert set(refs) == {f"plans.md:{first.line}", f"plans.md:{later.line}", f"Secret (private)/s.md:{secret.line}"}
+    hidden = next(t for t in result.tasks if t.ref.startswith("Secret"))
+    assert hidden.text is None and hidden.status == "TODO"
+    assert len(result.instructions) == 2 and "#when" in result.instructions[0]
+    assert "Current position" in result.instructions[1]
+    assert result.archived is None and result.tasks_total is None
+
+
+async def test_open_area_by_folder(sessionmaker, ctx, monkeypatch):
+    await _open_area_vault(sessionmaker, ctx)
+    by_folder = await tools.open_area_impl(folder="d:/WORK/home-repo/src")
+    assert by_folder.area == "area/home" and by_folder.matched_folder == "D:\\work\\home-repo"
+
+    nowhere = await tools.open_area_impl(folder="D:\\work\\unknown")
+    assert nowhere.found is False and "Ask the owner which area it belongs to" in nowhere.notes[0]
+    shared = await tools.open_area_impl(folder="D:\\work\\shared")
+    assert shared.found is False and "several areas" in shared.notes[0]
+    village = await tools.open_area_impl(folder="D:\\work\\village")
+    assert village.found is True and village.area is None and village.name == "Village"
+    assert "no main note yet" in village.notes[0]
+
+    monkeypatch.setattr(tools.settings, "archive_folder", "projects")
+    archived = await tools.open_area_impl(area="home")
+    assert archived.archived is True and archived.notes[0].startswith("This area is archived")
+
+
+async def test_open_area_refuses_both_or_neither_and_an_unknown_area(ctx):
+    assert code(await tools.open_area_impl()) == "invalid_argument"
+    assert code(await tools.open_area_impl(area="home", folder="D:\\x")) == "invalid_argument"
+    assert code(await tools.open_area_impl(area="nowhere")) == "not_found"
+
+
+async def test_open_area_without_the_list_of_areas_still_answers(sessionmaker, ctx):
+    result = await tools.open_area_impl(area="home")
+    assert result.error is None and result.area == "area/home" and result.related_folders is None
+    assert any("list of areas" in n and "was not found" in n for n in result.notes)
+    assert code(await tools.open_area_impl(folder="D:\\work\\home-repo")) == "not_found"
+
+
+async def test_open_area_caps_tasks_and_points_to_list_tasks(sessionmaker, ctx, monkeypatch):
+    await _open_area_vault(sessionmaker, ctx)
+    monkeypatch.setattr(tools, "OPEN_AREA_TASKS_MAX", 2)
+    for i in range(3):
+        await tools.create_task_impl(f"Step {i}", path="plans.md", areas=["home"])
+    result = await tools.open_area_impl(area="home")
+    assert len(result.tasks) == 2 and result.tasks_total == 3
+    assert any('list_tasks(area="area/home")' in n for n in result.notes)

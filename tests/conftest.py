@@ -89,6 +89,7 @@ SETTINGS_ENV_KEYS = (
     "FETCH_PAGE_MAX_BYTES",
     # Task tools (fork).
     "TASKS_INBOX_PATH",
+    "AREAS_INDEX_PATH",
     "TASKS_TIMEZONE",
     "TASKS_PLUGIN_SETTINGS_PATH",
     # Agent ledger (fork).

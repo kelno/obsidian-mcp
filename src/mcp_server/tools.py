@@ -8446,6 +8446,22 @@ async def _ledger_task_links(session, uid):
     return _ledger_tasks.link(rows, lambda line, path: _task_ops.parse_line(line, path, task_settings, registry)), None
 
 
+async def _ledger_listed(session, uid, filters, limit: int):
+    """`(rows, truncated, via_topic by entry id)`: the filtered entries, newest change first.
+
+    `ledger_search` without a query, and `open_area`'s entries.
+    """
+    from sqlalchemy import select
+
+    from src.models.db import LedgerEntry
+
+    rows = (await session.execute(
+        select(*_ledger_summary_columns()).where(*filters.where(uid))
+        .order_by(LedgerEntry.updated_at.desc(), LedgerEntry.id.desc()).limit(limit + 1)
+    )).all()
+    return rows[:limit], len(rows) > limit, await _ledger.via_topics(session, filters, rows[:limit])
+
+
 def _ledger_flagged(flagged) -> list[FlaggedLine] | None:
     return [FlaggedLine(line=f.line_id, view=f.digest, text=f.text, reason=f.reason) for f in flagged] or None
 
@@ -8521,13 +8537,10 @@ async def ledger_search_impl(
 
         clauses = filters.where(uid)
         if query is None:
-            rows = (await session.execute(
-                select(*_ledger_summary_columns()).where(*clauses)
-                .order_by(LedgerEntry.updated_at.desc(), LedgerEntry.id.desc()).limit(limit + 1)
-            )).all()
-            via.update(await _ledger.via_topics(session, filters, rows[:limit]))
-            return LedgerSearchResult(entries=[summary(r) for r in rows[:limit]],
-                                      truncated=len(rows) > limit, filters=described, notes=notes or None,
+            rows, truncated, found_via = await _ledger_listed(session, uid, filters, limit)
+            via.update(found_via)
+            return LedgerSearchResult(entries=[summary(r) for r in rows],
+                                      truncated=truncated, filters=described, notes=notes or None,
                                       areas_and_topics=vocabulary)
 
         words: list = []
@@ -9014,3 +9027,246 @@ async def ledger_topic_edit_impl(
     verb = {"create": "created", "describe": "redescribed", "merge": "merged"}[action]
     return LedgerTopicEditResult(topic=done.topic, moved=done.moved or None, notes=[
         f"Tell the owner in your reply that you {verb} topic {done.topic['name']}, so they can follow the structure."])
+
+
+# ── open_area (fork) ─────────────────────────────────────────────────────────
+#
+# The one call an agent makes when it opens an area: to start work there, or
+# to answer a question about it. It gathers what the agent would otherwise
+# collect in several calls and may skip: the main note (agent rules at the
+# top, `## Current position`), the area's folders outside the vault, its
+# ledger entries and its open tasks. See docs/architecture/open-area.md.
+#
+# Kept as one function per part so later parts slot in beside them: notes
+# changed since an agent last looked, stale-task hints, matching a "When …"
+# task's trigger.
+
+from src.mcp_server.area_result import AreaTask, OpenAreaResult  # noqa: E402
+from src.services import areas_index as _areas_index  # noqa: E402
+
+_TYPED_OUTCOME_RESULTS = (*_TYPED_OUTCOME_RESULTS, OpenAreaResult)
+
+#: The main note's text is cut past this many characters.
+OPEN_AREA_NOTE_MAX_CHARS = 15000
+#: Active ledger entries listed (the rest: `ledger_search(area=…)`).
+OPEN_AREA_ENTRIES_MAX = 40
+#: Open tasks listed (the rest: `list_tasks(area=…)`).
+OPEN_AREA_TASKS_MAX = 30
+#: The section of the main note left out: the open tasks come from every note instead.
+OPEN_AREA_TASKS_HEADING = "Tasks"
+
+OPEN_AREA_INSTRUCTIONS = (
+    "Starting work: check each task and entry against the work you're starting. Is it related? Should it go to "
+    "the owner? Is it done, or made stale, by this work (tick or update it with the task tools, update the entry "
+    "with ledger_update)? Is this work the event a \"When …\" task (#when) waits for?",
+    "Answering a status question (\"where am I on X?\"): report the Current position and the #next tasks; the rest "
+    "is for agents about to act.",
+)
+
+
+def _open_area_refusal(message: str) -> OpenAreaResult:
+    return OpenAreaResult(error=message)
+
+
+def _open_area_failed(prose: str, code: str = "invalid_argument") -> OpenAreaResult:
+    outcome = _body_refusal(prose, code)
+    result = OpenAreaResult(error=str(outcome))
+    result._body_outcome = outcome
+    return result
+
+
+def _read_vault_text(path: str, uid) -> str:
+    """A vault note's text, up to `MAX_NOTE_BYTES`; FileNotFoundError, ValueError or OSError otherwise."""
+    return read_bytes(path, uid, MAX_NOTE_BYTES).decode("utf-8", errors="replace")
+
+
+def _archived(main_note: str) -> bool | None:
+    folder = settings.archive_folder
+    if not folder:
+        return None
+    return main_note.casefold().startswith(folder.strip("/").casefold() + "/")
+
+
+async def _open_area_rows(uid, notes: list[str]) -> list | None:
+    """The rows of the list of areas, or None with a note saying why."""
+    path = settings.areas_index_path
+    try:
+        text_ = await asyncio.to_thread(_read_vault_text, path, uid)
+        return _areas_index.parse(text_)
+    except FileNotFoundError:
+        notes.append(f"The list of areas ({path}) was not found, so related folders are unknown.")
+    except (ValueError, OSError) as exc:
+        notes.append(f"The list of areas ({path}) could not be read ({type(exc).__name__}).")
+    except _areas_index.AreasIndexError as exc:
+        notes.append(f"The list of areas ({path}) could not be read: {exc}.")
+    return None
+
+
+async def _open_area_main_note(path: str, uid, notes: list[str]) -> tuple[str | None, int | None]:
+    """`(text, full length when cut)`: the main note without frontmatter and its Tasks section."""
+    try:
+        text_ = await asyncio.to_thread(_read_vault_text, path, uid)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        notes.append(f"The main note {path} could not be read ({type(exc).__name__}).")
+        return None, None
+    text_, _removed = _areas_index.strip_section(_areas_index.strip_frontmatter(text_), OPEN_AREA_TASKS_HEADING)
+    text_ = text_.strip("\n") + "\n"
+    if len(text_) <= OPEN_AREA_NOTE_MAX_CHARS:
+        return text_, None
+    notes.append(f"The main note's text is cut at {OPEN_AREA_NOTE_MAX_CHARS:,} of {len(text_):,} characters: "
+                 f"read_note(\"{path}\") has the rest.")
+    return text_[:OPEN_AREA_NOTE_MAX_CHARS], len(text_)
+
+
+async def _open_area_entries(tag: str, uid, notes: list[str]) -> tuple[list, bool]:
+    """Active ledger entries of the area, as `ledger_search(area=…)` lists them."""
+    try:
+        async with async_session() as session:
+            filters = await _ledger.build_filters(session, uid, area=tag)
+            rows, truncated, via = await _ledger_listed(session, uid, filters, OPEN_AREA_ENTRIES_MAX)
+            links, links_note = await _ledger_task_links(session, uid)
+    except _ledger.LedgerError as exc:
+        notes.append(f"The area's ledger entries could not be listed: {exc}")
+        return [], False
+    if links_note:
+        notes.append(links_note)
+    states = _ledger_tasks.states(links) if links is not None else {}
+    entries = [_ledger_summary(r, tasks=states.get(_ledger_tasks.canonical(r.ref)), via_topic=via.get(r.id))
+               for r in rows]
+    if truncated:
+        notes.append(f"Only the {OPEN_AREA_ENTRIES_MAX} most recently changed active entries are listed: "
+                     f"ledger_search(area=\"{tag}\") lists the rest, by words or meaning too.")
+    return entries, truncated
+
+
+async def _open_area_tasks(tag: str, uid, notes: list[str]) -> tuple[list[AreaTask], int]:
+    """`(tasks, total)`: open tasks carrying `#<tag>` (or a tag under it), in any note.
+
+    `#next` first, then by urgency; each listed line checked on disk like
+    `list_tasks`. Statuses are read with the owner's Tasks settings.
+    """
+    from sqlalchemy import select
+
+    from src.models.db import NoteMetadata, NoteTask
+
+    try:
+        task_settings, registry, today = await _task_context(uid)
+    except _task_ops.TaskOpError as exc:
+        notes.append(f"The area's tasks could not be read: {exc}")
+        return [], 0
+    wanted = "#" + tag.casefold()
+    async with async_session() as session:
+        rows = (await session.execute(
+            select(NoteMetadata.file_path, NoteTask.line_number, NoteTask.line)
+            .join(NoteMetadata, NoteMetadata.id == NoteTask.note_id)
+            .where(_note_owner_predicate(uid), NoteTask.kind == "task", NoteTask.line.ilike(f"%{wanted}%"))
+        )).all()
+
+    def select_open():
+        found = []
+        for row in rows:
+            task = _task_ops.parse_line(row.line, row.file_path, task_settings, registry)
+            if task is None or task.status.type in ("DONE", "CANCELLED", "NON_TASK"):
+                continue
+            tags = [t.casefold() for t in task.tags]
+            if not any(t == wanted or t.startswith(wanted + "/") for t in tags):
+                continue
+            found.append((row, task, "#next" in tags))
+        found.sort(key=lambda item: (not item[2], -_tf.urgency(item[1], today), item[0].file_path,
+                                     item[0].line_number))
+        return found
+
+    found = await asyncio.to_thread(select_open)
+    current: dict[str, tuple] = {}
+    out, stale = [], 0
+    for row, task, is_next in found:
+        if len(out) >= OPEN_AREA_TASKS_MAX:
+            break
+        if row.file_path not in current:
+            current[row.file_path] = await asyncio.to_thread(_read_current_note, row.file_path, uid)
+        _hash, note_lines, _reason = current[row.file_path]
+        on_disk = (note_lines[row.line_number - 1][0]
+                   if note_lines is not None and row.line_number <= len(note_lines) else None)
+        if on_disk != row.line:
+            stale += 1
+            continue
+        out.append(AreaTask(
+            ref=f"{row.file_path}:{row.line_number}",
+            text=None if _ledger_private(row.file_path) else row.line,
+            status=task.status.type, next=True if is_next else None,
+            due=task.due.text if task.due is not None else None,
+            scheduled=task.scheduled.text if task.scheduled is not None else None,
+        ))
+    total = len(found) - stale
+    if stale:
+        notes.append(f"{stale} task line(s) changed since the index read them and are left out; the next index "
+                     "pass picks them up.")
+    if total > len(out):
+        notes.append(f"{len(out)} of {total} open tasks are listed (#next first, then by urgency): "
+                     f"list_tasks(area=\"{tag}\") lists them all.")
+    if any(t.text is None for t in out):
+        notes.append("A task listed without its text is in a private folder: read it only if the owner asks.")
+    return out, total
+
+
+@_tracked("open_area", ["area", "folder"], refusal_result=_open_area_refusal)
+async def open_area_impl(area: str | None = None, folder: str | None = None) -> OpenAreaResult:
+    if (area is None) == (folder is None) or not (area or folder or "").strip():
+        return _open_area_failed("give area (its name, slug or tag) or folder (a path outside the vault), "
+                                 "one of the two.")
+    uid = current_user_id.get()
+    notes: list[str] = []
+    areas = await _area_index(uid)
+    declared = {path.casefold(): (tag, path, description) for tag, path, description in areas.described()}
+    rows = await _open_area_rows(uid, notes)
+    matched_folder, row = None, None
+
+    if folder is not None:
+        if rows is None:
+            return _open_area_failed(f"{notes[0]} A folder cannot be matched to an area without it.",
+                                     "not_found")
+        hits = _areas_index.rows_for_folder(rows, folder)
+        if not hits:
+            return OpenAreaResult(found=False, notes=[
+                f"No area lists {folder} (or a folder above it) among its related folders in "
+                f"{settings.areas_index_path}. Ask the owner which area it belongs to."])
+        deepest = len(_areas_index.normalise_folder(hits[0][1]))
+        tied = {h[0].name for h in hits if len(_areas_index.normalise_folder(h[1])) == deepest}
+        if len(tied) > 1:
+            return OpenAreaResult(found=False, notes=[
+                f"{folder} is listed under several areas ({', '.join(sorted(tied))}) in "
+                f"{settings.areas_index_path}: ask the owner which one it belongs to, then call open_area(area=…)."])
+        row, matched_folder = hits[0]
+        if row.main_note is None or row.main_note.casefold() not in declared:
+            why = ("it has no main note yet" if row.main_note is None
+                   else f"its main note {row.main_note} declares no area_tag")
+            return OpenAreaResult(
+                found=True, name=row.name, matched_folder=matched_folder, related_folders=row.folders or None,
+                main_note=row.main_note, notes=[f"{folder} belongs to the area {row.name!r}, but {why}: the "
+                                                f"list of areas says \"{row.vault_cell}\"."])
+        tag, main_note, description = declared[row.main_note.casefold()]
+    else:
+        try:
+            tag = areas.lookup(area)
+        except _tq.QueryError as exc:
+            return _open_area_failed(f"{exc}.", "not_found")
+        _tag, main_note, description = next(d for d in areas.described() if d[0] == tag)
+        if rows is not None:
+            row = _areas_index.row_for_main_note(rows, main_note)
+
+    if rows is not None and row is None:
+        notes.append(f"The area has no row in {settings.areas_index_path}, so its related folders are unknown.")
+    text_, full_chars = await _open_area_main_note(main_note, uid, notes)
+    entries, entries_truncated = await _open_area_entries(tag, uid, notes)
+    tasks, tasks_total = await _open_area_tasks(tag, uid, notes)
+    archived = _archived(main_note)
+    if archived:
+        notes.insert(0, "This area is archived: its work is finished. Tell the owner before starting new work in it.")
+    return OpenAreaResult(
+        found=True, area=tag, tag="#" + tag, name=row.name if row else None, description=description,
+        main_note=main_note, archived=archived, matched_folder=matched_folder, main_note_text=text_,
+        main_note_chars=full_chars, related_folders=(row.folders or None) if row else None,
+        entries=entries or None, entries_truncated=entries_truncated or None,
+        tasks=tasks or None, tasks_total=tasks_total if tasks_total > len(tasks) else None,
+        instructions=list(OPEN_AREA_INSTRUCTIONS), notes=notes or None,
+    )

@@ -351,6 +351,10 @@ Each entry identifies every direct return branch. PROPAGATE means classify at th
 - **PROPAGATE** write permission. **REFUSE invalid_argument**, **not_found**, **already_exists**, **stale_revision** (optional `expected_revision`), **validation_failed**.
 - **SUCCESS — no outcome marker**: the topic, and `moved` for a merge.
 
+### open_area_impl — src/mcp_server/tools.py (open_area, fork)
+- **REFUSE invalid_argument** (neither or both of `area` and `folder`), **not_found** (an unknown area; a folder when the list of areas cannot be read).
+- **SUCCESS — no outcome marker**: the area with its main note, folders, entries and tasks; `found: false` for a folder no area lists. A part that cannot be read is a note, never a refusal.
+
 ## Shared/nested helper inventory
 
 ### _confirmed_publication — tools.py:706

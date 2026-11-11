@@ -8,6 +8,7 @@ from typing import Annotated
 from pydantic import ConfigDict, Field, model_validator
 
 from src.config import settings
+from src.mcp_server.area_result import OpenAreaResult
 from src.mcp_server.fetch_result import FetchPageResult
 from src.mcp_server.ledger_result import (
     LedgerDigestEditResult,
@@ -49,6 +50,7 @@ from src.mcp_server.tools import (
     ledger_topics_impl,
     ledger_update_impl,
     list_files_impl,
+    open_area_impl,
     list_notes_impl,
     list_tasks_impl,
     move_file_impl,
@@ -1671,6 +1673,35 @@ async def set_task_status(
     return await set_task_status_impl(
         path, line, expected_line, expected_hash, status=status, symbol=symbol
     )
+
+
+# ── open_area (fork) ────────────────────────────────────────────────────────
+
+_A_AREA = Field(description="The area: its slug (voice-bridge), its tag (#area/voice-bridge) or its main note's "
+                            "name (Voice bridge). Give area or folder.")
+_A_FOLDER = Field(description="Instead of area: an absolute path outside the vault, such as the repo or working "
+                              "directory a session runs in; matched against each area's related folders, a "
+                              "subfolder included.")
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+async def open_area(
+    area: Annotated[str | None, _A_AREA] = None,
+    folder: Annotated[str | None, _A_FOLDER] = None,
+) -> OpenAreaResult:
+    """Open an area: its rules, current position, ledger entries and open tasks.
+
+    Read-only. Call it first when you start work in an area or answer a
+    question about one, and when a session works in a folder outside the
+    vault (`folder`). One call returns the area's tag and description, its
+    main note's text (the agent rules at its top and `## Current position`;
+    without its Tasks section), its related folders outside the vault, its
+    active ledger entries (as `ledger_search(area=…)` lists them) and its
+    open tasks from every note carrying its tag, `#next` first, then
+    `instructions` saying what to do with them. A folder no area lists comes
+    back with `found: false`: ask the owner which area it belongs to.
+    """
+    return await open_area_impl(area=area, folder=folder)
 
 
 # ── Agent ledger (fork) ─────────────────────────────────────────────────────

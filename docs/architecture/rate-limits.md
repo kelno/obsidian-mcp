@@ -66,8 +66,12 @@ design). `write_class` therefore means "charged to the write bucket", which
 is all it ever selected in code; it no longer implies "changes vault bytes".
 The ledger readers are `ledger_search` (class `embedding`: its default mode
 embeds the query) and `ledger_get`, `ledger_digest`, `ledger_topics`
-(`light`). Adding them moved `TOOL_CLASSES`, so `CLASS_MAPPING_VERSION` is 4.
+(`light`). Adding them moved `TOOL_CLASSES`, so `CLASS_MAPPING_VERSION` was 4.
 See [agent ledger](agent-ledger.md).
+
+`open_area` (fork) is class `scan`: it reads every task line carrying the
+area's tag and the area's ledger entries. Adding it moved `TOOL_CLASSES`, so
+`CLASS_MAPPING_VERSION` is 5. See [open_area](open-area.md).
 
 ## The principal is the grant, not the token, and not (client, user)
 

@@ -144,7 +144,7 @@ F58 restated Q14 as "untested" without reading it, and later agents trusted the 
 
 ## Rate control and the write budget
 
-The four writers (`ledger_add`, `ledger_update`, `ledger_digest_edit`, `ledger_topic_edit`) carry `write_class=True`, so they draw on the per-principal write bucket like the vault writers, and are concurrency class `write`. `ledger_search` is class `embedding` (its default mode embeds the query), `ledger_get`, `ledger_digest`, `ledger_topics` are `light`. `CLASS_MAPPING_VERSION` is 4. In code `write_class` only ever selected the bucket; its docstring and `rate-limits.md` used to define it as "changes vault bytes", which the ledger writers do not. The meaning is now "charged to the write budget", and the docs list the two groups (choice 6).
+The four writers (`ledger_add`, `ledger_update`, `ledger_digest_edit`, `ledger_topic_edit`) carry `write_class=True`, so they draw on the per-principal write bucket like the vault writers, and are concurrency class `write`. `ledger_search` is class `embedding` (its default mode embeds the query), `ledger_get`, `ledger_digest`, `ledger_topics` are `light`. `CLASS_MAPPING_VERSION` was 4 then (see `rate-limits.md` for the current value). In code `write_class` only ever selected the bucket; its docstring and `rate-limits.md` used to define it as "changes vault bytes", which the ledger writers do not. The meaning is now "charged to the write budget", and the docs list the two groups (choice 6).
 
 ## Import and export
 

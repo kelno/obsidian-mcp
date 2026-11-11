@@ -1136,6 +1136,7 @@ to multi-user later resumes where you left off without re-bootstrapping
 | `TASKS_TIMEZONE` | `Europe/Brussels` | The owner's time zone: every "today" the task tools use. An unknown zone stops the server at startup. |
 | `LAST_AI_EDIT_FIELD` | unset | A frontmatter property every note write sets to the write's date, time and offset (e.g. `last_ai_edit`); unset stamps nothing |
 | `LAST_AI_EDIT_EXCLUDE` | empty | Comma-separated globs of vault paths never stamped (e.g. `_/*,CLAUDE.md`) |
+| `AREAS_INDEX_PATH` | `Areas/Areas.md` | The note listing every area in one table (columns "Related folders" and "Vault folder"); `open_area` reads it for related folders and to resolve `folder=` |
 | `ARCHIVE_FOLDER` | unset | A folder mirroring the tree (e.g. `Archive`); `move_note` says when the folder a note left has a counterpart there |
 | `TASKS_PLUGIN_SETTINGS_PATH` | `.obsidian/plugins/obsidian-tasks-plugin/data.json` | The Tasks plugin's settings file in the vault, read on every task call |
 | `VAULT_ALLOW_NAMED_STAGING_FALLBACK` | `false` | Accept named staging on filesystems without `O_TMPFILE`. One flag, both write paths. See [System requirements](#system-requirements). |
