@@ -275,3 +275,9 @@ def render(report: LinkReport, *, dry_run: bool = False) -> str:
                     "holds: drop it.")
         parts.append("links_flagged: left as written, check each:\n" + listed(flags, flag))
     return ("\n\n" + "\n\n".join(parts)) if parts else ""
+
+
+#: The line comparison and frontmatter span, shared with `title_heading` so
+#: both pick a write's changed lines the same way.
+changed_lines = _changed_lines
+frontmatter_lines = _frontmatter_lines

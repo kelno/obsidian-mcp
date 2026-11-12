@@ -3412,6 +3412,8 @@ async def create_note_impl(
         if target.lstat() is None and (
                 err := await _hand_written_task_error(uid, "create_note", target.rel, None, content)):
             return err
+        # The title heading first, so the link report's line numbers are the written note's.
+        content, title_removed = _title_heading.strip(None, content, target.rel)
         content, links_report, links_failure = await _full_path_links(uid, target.rel, None, content)
         # The agent-edit stamp, before the size check: the cap binds what is
         # written.
@@ -3451,8 +3453,8 @@ async def create_note_impl(
             return _body_refusal(str(e), "validation_failed")
         except OSError as e:
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
-    return created + name_flag + _links_text(links_report, links_failure, shift=links_shift) + \
-        await _note_refs_report(uid, None, content)
+    return created + name_flag + _title_heading.render(title_removed) + \
+        _links_text(links_report, links_failure, shift=links_shift) + await _note_refs_report(uid, None, content)
 
 
 # Row-level excerpt bound for the graph tools. `link_text` is note text the
@@ -4437,7 +4439,11 @@ async def edit_note_impl(
 
         # Bare-name wikilinks on the lines this write adds or changes get the
         # note's full path (the vault's link rule), before the diff and the stamp.
-        links_report, links_failure = None, ""
+        # A first heading repeating the note's name goes first, so the link
+        # report's line numbers are the written note's.
+        links_report, links_failure, title_removed = None, "", None
+        if new_content != existing:
+            new_content, title_removed = _title_heading.strip(existing, new_content, target.rel)
         if new_content != existing:
             new_content, links_report, links_failure = await _full_path_links(
                 uid, target.rel, existing, new_content)
@@ -4471,7 +4477,8 @@ async def edit_note_impl(
             ))
             if not diff:
                 return f"No changes for {path}"
-            return (diff + _links_text(links_report, links_failure, dry_run=True, shift=links_shift)
+            return (diff + _title_heading.render(title_removed, dry_run=True)
+                    + _links_text(links_report, links_failure, dry_run=True, shift=links_shift)
                     + await _note_refs_report(uid, existing, new_content))
 
         # #88. Placed after the `dry_run` return above on purpose: a dry run
@@ -4500,8 +4507,8 @@ async def edit_note_impl(
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
         return success_message + _published_hash_clause(
             new_content.encode("utf-8")
-        ) + _links_text(links_report, links_failure, shift=links_shift) + await _note_refs_report(
-            uid, existing, new_content)
+        ) + _title_heading.render(title_removed) + _links_text(
+            links_report, links_failure, shift=links_shift) + await _note_refs_report(uid, existing, new_content)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -6655,11 +6662,12 @@ async def write_file_impl(
                 except UnicodeDecodeError:
                     readable = False   # every line would look new: links left as sent
                 if readable:
+                    rewritten, title_removed = _title_heading.strip(old_text, new_note, target.rel)
                     rewritten, links_report, links_failure = await _full_path_links(
-                        uid, target.rel, old_text, new_note)
+                        uid, target.rel, old_text, rewritten)
                     if rewritten != new_note:
                         data = rewritten.encode("utf-8")
-                    links_text = _links_text(links_report, links_failure)
+                    links_text = _title_heading.render(title_removed) + _links_text(links_report, links_failure)
 
         # **The cap follows the NORMALISED name, not the caller's string.**
         # `open_mutable` drops empty and `.` components, so `"big.md/."` is
@@ -9164,6 +9172,8 @@ def _ledger_state_line(state: dict) -> str:
         facts.append(f"updated {state['updated']}")
     return f"- {state['ref']} ({', '.join(facts)}): \"{state['title']}\""
 
+
+from src.services import title_heading as _title_heading  # noqa: E402
 
 #: The refusal for a note named against its folder's `note_names: dated`.
 NOTE_NAME_DATE = "note_name_date"

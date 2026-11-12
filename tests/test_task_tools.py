@@ -753,3 +753,20 @@ class _Refused:
 
     def __init__(self, text):
         self.error = text
+
+
+
+# ── A first heading repeating the note's name ────────────────────────────────
+
+def test_the_note_tools_drop_a_title_heading_they_would_add(vault):
+    created = asyncio.run(tools.create_note_impl("Dog food.md", "# Dog food\n\nKibble.\n"))
+    assert "title_heading_removed: the first line, `# Dog food`" in created
+    assert read(vault, "Dog food.md") == "Kibble.\n"
+    note(vault, "Vet.md", "Old body\n")
+    dry = asyncio.run(tools.edit_note_impl("Vet.md", "# Vet\n\nNew body\n", dry_run=True))
+    assert "+New body" in dry and "+# Vet" not in dry and "would be removed" in dry
+    kept = note(vault, "Kept.md", "# Kept\n\nBody\n")
+    untouched = asyncio.run(tools.edit_note_impl("Kept.md", "More", append=True))
+    assert "title_heading_removed" not in untouched and read(vault, "Kept.md").startswith("# Kept")
+    written = asyncio.run(tools.write_file_impl("W.md", "# w\nText\n", encoding="text"))
+    assert "title_heading_removed" in written and read(vault, "W.md") == "Text\n"

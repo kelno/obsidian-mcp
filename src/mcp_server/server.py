@@ -407,6 +407,13 @@ async def create_note(
     so reordering is fine), and showing one in a code span or fenced code
     block are allowed.
 
+    **No title heading.** Obsidian shows the file name as the note's title,
+    so when the body's first non-blank line is a heading (`#` to `######`)
+    whose text is the note's name (case and surrounding spaces ignored, no
+    formatting stripped) and this write adds or changes that line, it is
+    removed with the blank lines after it, and the result says so under
+    `title_heading_removed:`. The write is never refused for it.
+
     **Wikilinks get the note's full path.** Write links with the full path
     yourself (`[[Areas/Areas|Areas]]`); this is a safety net. On the lines a
     write adds or changes (never on lines it leaves as they were, nor on
@@ -490,6 +497,13 @@ async def edit_note(
     keeping one unchanged (the same text, wherever it now sits in the note,
     so reordering is fine), and showing one in a code span or fenced code
     block are allowed.
+
+    **No title heading.** Obsidian shows the file name as the note's title,
+    so when the body's first non-blank line is a heading (`#` to `######`)
+    whose text is the note's name (case and surrounding spaces ignored, no
+    formatting stripped) and this write adds or changes that line, it is
+    removed with the blank lines after it, and the result says so under
+    `title_heading_removed:`. The write is never refused for it.
 
     **Wikilinks get the note's full path.** Write links with the full path
     yourself (`[[Areas/Areas|Areas]]`); this is a safety net. On the lines a
@@ -1143,7 +1157,8 @@ async def write_file(
     (`task_line_by_hand`): tasks go through the task tools. A new `.md`
     note's name is checked like `create_note`'s (`note_name_date`). Bare-name
     wikilinks get the note's full path as in `edit_note`
-    (`links_rewritten:`, `links_flagged:`).
+    (`links_rewritten:`, `links_flagged:`), and a first heading repeating the
+    note's name is dropped (`title_heading_removed:`).
 
     `content` carries the bytes: with `encoding="base64"` (default) it is
     base64-decoded to raw bytes; with `encoding="text"` it is written verbatim
