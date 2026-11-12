@@ -832,3 +832,19 @@ def test_line_ending_review_cases(vault):
     note(vault, "g.md", "old\r")
     asyncio.run(tools.edit_note_impl("g.md", "# g\nbody\n"))
     assert read(vault, "g.md") == "body\r"
+
+
+
+def test_a_rule_edit_without_a_proposal_ref_is_nudged(vault):
+    note(vault, "_/agent/Rules.md", "- Rule one. [P35]\n- Rule two.\n")
+    dry = asyncio.run(tools.edit_note_impl("_/agent/Rules.md", "- Rule one, reworded. [P35]", find="- Rule one. [P35]",
+                                           dry_run=True))
+    assert "rule_change_unlogged: these rule lines changed and none gained a proposal ref:" in dry
+    assert "- line 1: - Rule one, reworded. [P35]" in dry and "ledger_add (kind proposal)" in dry
+    logged = asyncio.run(tools.edit_note_impl("_/agent/Rules.md", "- Rule one, reworded. [P35, P95]",
+                                              find="- Rule one. [P35]"))
+    assert logged.startswith(("Updated note", "Replaced")) and "rule_change_unlogged" not in logged
+    elsewhere = asyncio.run(tools.create_note_impl("Notes/Plain.md", "- Not a rule.\n"))
+    assert "rule_change_unlogged" not in elsewhere
+    created = asyncio.run(tools.create_note_impl("_/agent/New.md", "- A new rule.\n"))
+    assert "rule_change_unlogged" in created

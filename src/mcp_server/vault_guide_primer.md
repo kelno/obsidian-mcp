@@ -201,6 +201,10 @@ wikilink to a vault note titled `NodeName`.
 
 Vaults that use the Tasks plugin keep tasks as checkbox lines in its emoji format (`- [ ] Pay rent 📅 2026-11-05`). List them with `list_tasks`, and add or change them only with `create_task`, `edit_task` and `set_task_status`: the tools follow the vault's own Tasks settings, and the note tools (`edit_note`, `create_note`, `write_file`) refuse a write that adds or changes a task line (`task_line_by_hand`). Deleting a task line with them, keeping one unchanged (the same text, wherever it sits in the note), or showing one in a code span or fenced code block is allowed. If the vault sets a global filter (a marker every task carries, such as `#task`), the tools add it themselves; don't put it in the description. A checkbox without it is then an ordinary checkbox, not a task.
 
+## Agent rules (this server)
+
+The vault's agent rules (`_/agent/**` and the root `CLAUDE.md`) end each line with the refs of the proposals that shaped it (`[P54, P80]`). When a write there adds or changes lines and none gains a proposal ref, the note tools add `rule_change_unlogged:` to their result with those lines: if the change follows a decision of the owner's, log it with `ledger_add` (kind proposal) and add its ref at the end of each changed line; a typo fix or a change of wording only needs nothing.
+
 ## Titles (this server)
 
 Obsidian shows a note's file name as its title, so don't start a note with a heading repeating its name. When a write through the note tools adds or changes the body's first non-blank line and it is a heading (`#` to `######`) whose text is exactly the note's name (the whole file name without `.md`, a date included; case and surrounding spaces ignored, formatting such as `**` not stripped), the tool removes it and says so under `title_heading_removed:`. A heading the write leaves as it was stays, and a near repeat (`# Call with the vet` in `2026-11-12 Call with the vet`, `# **Dog food**`) is yours to avoid.

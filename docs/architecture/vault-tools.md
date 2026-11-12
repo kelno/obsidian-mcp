@@ -411,6 +411,10 @@ Line numbers in the result are the published note's (after the agent-edit stamp)
 
 Limitations (adversarial review, 2026-11-12, accepted): the note list is the index, minutes behind hand edits, so a note created by hand since the last pass counts as no note, and if an older note shares its name the link is rewritten to that older note; indented (4-space) code blocks are not recognised; a CR-only note is one line; a write the rewrite pushes over the size cap is refused as too large.
 
+### A rule edit with no proposal ref is pointed out (fork, owner's decision, 2026-11-12)
+
+The vault's agent rules (`_/agent/**` and the root `CLAUDE.md`, `RULES_FOLDER` / `RULES_ROOT_NOTE` in `tools.py`) cite on each line the proposals that shaped it, and a decided change logs one proposal and adds its ref to each changed line. `edit_note` (every mode, `dry_run` included), `create_note` and `write_file` on those notes run `ledger_citations.rule_lines_unlogged` on the text they write: the non-blank lines it adds or changes outside the frontmatter (the multiset comparison of the other checks, line endings, a BOM and surrounding spaces ignored), and the `P` refs those lines cite in brackets against the refs on the lines the write removed. When none gains a `P` ref, the result adds one `rule_change_unlogged:` block with up to five of the lines (cut at 120 characters) and the next step: log the owner's decision with `ledger_add` (kind proposal) and cite it on each changed line, or nothing for a typo or wording that changes no meaning. Never a refusal. Lines only removed or moved, and frontmatter-only changes, say nothing; a ref in code is not a citation; a ref moved from a removed line is not a new one.
+
 ### The note writers name the ledger refs on the lines they change (fork, owner's design, 2026-11-12)
 
 The vault's agent rules end each line with the refs of the proposals that shaped it (`... gets forgotten. [P54, P80]`), and from 2026-11-12 they are edited only through these tools. So `edit_note` (every mode, `dry_run` included, after the diff), `create_note`, `delete_note` and `write_file` on a `.md` target append to their text result:

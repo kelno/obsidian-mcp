@@ -161,3 +161,26 @@ def test_a_line_of_thousands_of_brackets_parses_in_linear_time():
     changed, _added = lc.changed_line_refs("[P1]" * 50000, "x")
     assert changed == [lc.Ref("P", 1)]
     assert time.monotonic() - start < 5          # was about 52 s for 20,000 before the fix
+
+
+
+# ── A rule edit with no proposal ref ─────────────────────────────────────────
+
+def test_rule_lines_unlogged():
+    old = "- Rule one. [P35]\n- Rule two.\n"
+    # Reworded with no new ref: listed.
+    assert lc.rule_lines_unlogged(old, "- Rule one, reworded. [P35]\n- Rule two.\n") == [
+        (1, "- Rule one, reworded. [P35]")]
+    # A new proposal ref beside the old one: carries its proposal.
+    assert lc.rule_lines_unlogged(old, "- Rule one, reworded. [P35, P95]\n- Rule two.\n") == []
+    # A line only removed, or only moved: nothing to say.
+    assert lc.rule_lines_unlogged(old, "- Rule two.\n") == []
+    assert lc.rule_lines_unlogged(old, "- Rule two.\n- Rule one. [P35]\n") == []
+    # A ref moved from a removed line is not a new one.
+    assert lc.rule_lines_unlogged(old, "- Rule one merged with two. [P35]\n") == [
+        (1, "- Rule one merged with two. [P35]")]
+    # Frontmatter lines and blank lines don't count; a ref in code is not a citation.
+    assert lc.rule_lines_unlogged("---\na: 1\n---\nx\n", "---\na: 2\n---\nx\n\n", skip_leading=3) == []
+    assert lc.rule_lines_unlogged(None, "- New rule `[P95]`\n") == [(1, "- New rule `[P95]`")]
+    # Line endings alone are no change.
+    assert lc.rule_lines_unlogged("a\r\nb\r\n", "a\nb\n") == []

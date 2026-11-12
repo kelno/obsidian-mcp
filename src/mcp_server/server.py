@@ -407,6 +407,14 @@ async def create_note(
     so reordering is fine), and showing one in a code span or fenced code
     block are allowed.
 
+    **Rule edits carry their proposal.** In the vault's agent rules
+    (`_/agent/**` and the root `CLAUDE.md`), when a write adds or changes
+    lines (outside the frontmatter) and none of them gains a proposal ref
+    (`[P95]`), the result adds `rule_change_unlogged:` with those lines: log
+    an owner's decision with `ledger_add` (kind proposal) and cite it at the
+    end of each changed line; a typo fix or a change of wording only needs
+    nothing. Never a refusal.
+
     **No title heading.** Obsidian shows the file name as the note's title,
     so when the body's first non-blank line is a heading (`#` to `######`)
     whose text is exactly the note's name (its whole file name without
@@ -500,6 +508,14 @@ async def edit_note(
     keeping one unchanged (the same text, wherever it now sits in the note,
     so reordering is fine), and showing one in a code span or fenced code
     block are allowed.
+
+    **Rule edits carry their proposal.** In the vault's agent rules
+    (`_/agent/**` and the root `CLAUDE.md`), when a write adds or changes
+    lines (outside the frontmatter) and none of them gains a proposal ref
+    (`[P95]`), the result adds `rule_change_unlogged:` with those lines: log
+    an owner's decision with `ledger_add` (kind proposal) and cite it at the
+    end of each changed line; a typo fix or a change of wording only needs
+    nothing. Never a refusal.
 
     **No title heading.** Obsidian shows the file name as the note's title,
     so when the body's first non-blank line is a heading (`#` to `######`)
@@ -1165,7 +1181,8 @@ async def write_file(
     note's name is checked like `create_note`'s (`note_name_date`). Bare-name
     wikilinks get the note's full path as in `edit_note`
     (`links_rewritten:`, `links_flagged:`), and a first heading repeating the
-    note's name is dropped (`title_heading_removed:`).
+    note's name is dropped (`title_heading_removed:`). A rule note written
+    with no new proposal ref gets `rule_change_unlogged:` as in `edit_note`.
 
     `content` carries the bytes: with `encoding="base64"` (default) it is
     base64-decoded to raw bytes; with `encoding="text"` it is written verbatim

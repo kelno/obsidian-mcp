@@ -211,3 +211,51 @@ def changed_line_refs(old: str | None, new: str | None) -> tuple[list[Ref], list
 def sql_ref_pattern(ref: Ref) -> str:
     """A POSIX regex for PostgreSQL: text that may name `ref`, bare or bracketed (a superset)."""
     return f"{ref.letter}0*{ref.number}([^0-9]|$)"
+
+
+def rule_lines_unlogged(old: str | None, new: str, *, skip_leading: int = 0) -> list[tuple[int, str]]:
+    """The lines a rule edit adds or changes, when none of them gains a proposal ref.
+
+    `[(line number, text)]` of the non-blank lines `new` holds that `old` did
+    not (compared as the other note checks compare: line endings and
+    surrounding spaces ignored), past the first `skip_leading` lines (the
+    frontmatter). Empty when there are none, or when at least one of them
+    cites in brackets a proposal (`P`) the lines the write removed did not
+    cite: the change carries its proposal. Refs are read in the note's own
+    fence context, as everywhere else.
+    """
+    from collections import Counter
+
+    def rows(text: str | None):
+        if text is None:
+            return []
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        masked = _masked(text).split("\n")
+        return [(i, line, {r for _, r in _bracketed_found(m) if r.letter == "P"})
+                for i, (line, m) in enumerate(zip(text.split("\n"), masked))]
+
+    def same(line: str) -> str:
+        return line.lstrip("﻿").strip()
+
+    old_rows, new_rows = rows(old), rows(new)
+    left = Counter(same(line) for _, line, _refs in old_rows)
+    added = []
+    for i, line, refs in new_rows:
+        key = same(line)
+        if left[key] > 0:
+            left[key] -= 1
+        elif i >= skip_leading and key:
+            added.append((i, line, refs))
+    if not added:
+        return []
+    kept = Counter(same(line) for _, line, _refs in new_rows)
+    removed_refs = set()
+    for _, line, refs in old_rows:
+        key = same(line)
+        if kept[key] > 0:
+            kept[key] -= 1
+        else:
+            removed_refs |= refs
+    if any(refs - removed_refs for _, _, refs in added):
+        return []
+    return [(i + 1, line.strip()) for i, line, _refs in added]
