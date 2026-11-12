@@ -613,22 +613,23 @@ def test_the_declared_content_loss_is_reachable_from_the_tool(vault):
 # 3.3b — the declared newline residual, pinned as bytes so it cannot drift.
 
 
-def test_a_crlf_note_comes_back_with_an_lf_body(vault):
-    """`read_note` applies universal-newline translation; `edit_note` rewrites
-    raw bytes. So the *selected body* is rewritten LF while the heading line
-    and everything outside the section keep their own terminators."""
+def test_a_crlf_note_keeps_its_crlf_body(vault):
+    """`read_note` applies universal-newline translation; `edit_note` writes
+    the caller's text with the note's own dominant line ending, so a CRLF
+    note round-trips byte-identically."""
     write(vault, "n.md", "# A\r\nold\r\n# B\r\nkeep\r\n")
     # "old\n" is what the read path hands back for that body.
     asyncio.run(tools.edit_note_impl("n.md", "old\n", section="#1"))
-    assert read(vault, "n.md") == "# A\r\nold\n# B\r\nkeep\r\n"
+    assert read(vault, "n.md") == "# A\r\nold\r\n# B\r\nkeep\r\n"
 
 
-def test_the_normalisation_is_per_terminator_not_per_note(vault):
-    """A mixed-ending note is not "a CRLF note": every terminator inside the
-    selected body comes back as LF, and only those."""
+def test_a_mixed_note_writes_the_body_with_its_most_common_ending(vault):
+    """A mixed-ending note: the selected body takes the note's most common
+    ending (here a lone CR, three against two CRLF and one LF); everything
+    outside it keeps its own."""
     write(vault, "n.md", "# A\r\none\r\ntwo\nthree\r# B\rkeep\r")
     asyncio.run(tools.edit_note_impl("n.md", "one\ntwo\nthree\n", section="#1"))
-    assert read(vault, "n.md") == "# A\r\none\ntwo\nthree\n# B\rkeep\r"
+    assert read(vault, "n.md") == "# A\r\none\rtwo\rthree\r# B\rkeep\r"
 
 
 # 4.2 — the frontmatter rules #128 established, unchanged by this change.

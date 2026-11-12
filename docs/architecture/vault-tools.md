@@ -1296,19 +1296,12 @@ re-addressing break the widening caused. Nothing here is a live constraint any
 more; the history is kept only so the phrase #140's spec uses — "fenced code
 block **as recognised by the shared masker**" — still has a referent.
 
-### Declared residual: a section round trip normalises the body's terminators
+### Line endings: the note keeps its own (fork, owner's decision, 2026-11-12)
 
-Beside the whole-note newline residual #128 already declared: `read_note`
-applies universal-newline translation before the caller ever sees a section,
-while `edit_note` reads and rewrites raw bytes. A section round trip therefore
-rewrites *that section's* terminators as LF and leaves everything else alone.
-Measured, and pinned as bytes:
+`read_note` applies universal-newline translation, so callers send LF; a note written as CRLF (by a script on Windows, say) used to fail a multi-line `edit_note(find=…)` with `match_not_found` and got LF lines spliced into it by section and append writes. Now `edit_note` takes the note's most common line ending (`_dominant_eol`: CRLF, LF or a lone CR; LF on a tie or with none) and:
 
-- `# A\r\nold\r\n# B\r\nkeep\r\n` → `# A\r\nold\n# B\r\nkeep\r\n`
-- mixed endings, since the normalisation is per-terminator and not per-note:
-  `# A\r\none\r\ntwo\nthree\r# B\rkeep\r` → `# A\r\none\ntwo\nthree\n# B\rkeep\r`
+- writes the caller's text with it in every mode but `replace_frontmatter=True` (section body, append and its separator, full replace and the metadata-only separator, the `find` replacement), so a CRLF note stays CRLF and an LF one LF, and a `read_note` → `edit_note` round trip is byte-identical unless the note mixes endings, where the written part takes the most common one;
+- matches `find` as sent, then with the note's endings, then with LF ones, first match wins;
+- leaves terminators outside the written text alone. `replace_frontmatter=True` stays byte-exact: the deliberate way to change a note's endings.
 
-Content is preserved; bytes are not. Normalising on write would rewrite
-terminators the caller never touched, so this is accepted rather than fixed:
-the byte-identity guarantee is scoped to LF-bodied notes and both `edit_note`
-docstrings say so.
+The changed-line comparisons (task lines, links, title heading) and `edit_task` / `set_task_status`'s `expected_line` already ignore line endings. Pinned as bytes in `test_issue_140_section_round_trip.py` (`# A\r\nold\r\n# B\r\nkeep\r\n` round-trips unchanged) and the `#128` frontmatter tests.

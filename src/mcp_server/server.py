@@ -241,8 +241,8 @@ async def read_note(
     end first, or full replacement replaces the whole body with the fragment.
     A section `content` is byte-exact input for `edit_note(section=...)` under
     the same completeness condition. Byte-identity holds for notes whose body
-    newlines are LF: terminators inside the selected content come back as LF,
-    because this tool normalises and the write tools rewrite raw bytes.
+    newlines use one ending: the content comes back as LF, and `edit_note`
+    writes text with the note's own most common ending.
 
     Args:
         path: Vault-relative path to the note (e.g. "Cards/My Note.md")
@@ -540,8 +540,9 @@ async def edit_note(
        included.
     2. **Append**: `append=True`; `content` is added at the end (preceded by a single newline).
     3. **Find & replace**: `find=<exact text>`; replaced with `content`. Must match
-       exactly once unless `replace_all=True`. This mode operates on the raw
-       file, so it is the one mode that can edit frontmatter text in place.
+       exactly once unless `replace_all=True`. Line endings don't matter for
+       the match (an LF `find` matches a CRLF note). This mode operates on the
+       raw file, so it is the one mode that can edit frontmatter text in place.
     4. **Section**: `section=<heading>`; replaces the **whole body** under the
        named ATX heading — see "Section mode: what `content` replaces" below.
        Use the path-style form `Parent/Child` to disambiguate when the same heading
@@ -589,12 +590,12 @@ async def edit_note(
       the heading line in the `heading` field and the body in the `content`
       field, and this tool takes exactly that `content`. Pass the field
       through unchanged — there is nothing to split off and nothing to strip.
-    - Byte-identity holds for notes whose body newlines are LF. Every non-LF
-      terminator inside the **selected body** (CRLF, or a lone CR) comes back
-      as LF — the read path normalises and this tool writes raw bytes — whether
-      the note uses one dialect throughout or mixes them. Terminators outside
-      the selected body are untouched, so a round trip can leave a note with
-      more mixed endings than it started with.
+    - The note keeps its line endings: in every mode but
+      `replace_frontmatter=True` (which writes `content` byte for byte), the
+      text you send is written with the note's own most common ending (CRLF,
+      LF or a lone CR), so a CRLF note stays CRLF and an LF one LF. A
+      `read_note` → `edit_note` round trip is byte-identical unless the note
+      mixes endings, where the written part takes the most common one.
 
     Section mode resolves headings over the frontmatter-stripped body, exactly
     as `read_note` does, so `#N` ordinals agree between the two and a YAML `#`

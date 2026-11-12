@@ -150,7 +150,7 @@ def test_a_crlf_note_keeps_its_crlf_block_while_the_body_arrives_lf(vault):
 
     after = read(vault, "n.md")
     assert after.startswith("---\r\ntitle: CRLF\r\n---\r\n")
-    assert after == "---\r\ntitle: CRLF\r\n---\r\n" + "line one\nline two\n"
+    assert after == original                    # the body is written with the note's CRLF
 
 
 # ── the separator (D2) ──────────────────────────────────────────────────────
@@ -472,7 +472,7 @@ def test_a_lone_cr_block_is_preserved_by_default_full_replace(vault):
     result = asyncio.run(tools.edit_note_impl("n.md", "new body\n"))
     assert "Updated note" in result
     # The block keeps its CR bytes exactly; only the body is the caller's.
-    assert read(vault, "n.md") == "---\rtitle: Keep\r---\rnew body\n"
+    assert read(vault, "n.md") == "---\rtitle: Keep\r---\rnew body\r"
 
 
 def test_a_lone_cr_note_round_trips_through_read_note(vault):
@@ -486,7 +486,7 @@ def test_a_lone_cr_note_round_trips_through_read_note(vault):
     asyncio.run(tools.edit_note_impl("n.md", body))
     after = read(vault, "n.md")
     assert after.startswith("---\rtitle: CR\r---\r")
-    assert after == "---\rtitle: CR\r---\r" + "line one\nline two\n"
+    assert after == "---\rtitle: CR\r---\r" + "line one\rline two\r"
     # And in particular: exactly one block, not two, and not zero.
     assert after.count("---") == 2
 
@@ -497,10 +497,10 @@ def test_a_lone_cr_metadata_only_note_gains_one_separator(vault):
     body is the caller's bytes."""
     write(vault, "n.md", "---\rtitle: Meta\r---")
     asyncio.run(tools.edit_note_impl("n.md", "Body\n"))
-    assert read(vault, "n.md") == "---\rtitle: Meta\r---\nBody\n"
+    assert read(vault, "n.md") == "---\rtitle: Meta\r---\rBody\r"
 
 
 def test_a_defective_lone_cr_block_still_replaces_wholesale(vault):
     write(vault, "n.md", "---\ra: [\r---\rbody\r")
     asyncio.run(tools.edit_note_impl("n.md", "replacement\n"))
-    assert read(vault, "n.md") == "replacement\n"
+    assert read(vault, "n.md") == "replacement\r"

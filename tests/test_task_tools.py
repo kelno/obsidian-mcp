@@ -779,3 +779,30 @@ def test_a_heading_that_is_the_whole_change_is_no_change_in_both_modes(vault):
     assert dry.startswith("No changes for Dog food.md") and "would be removed" in dry
     assert real.startswith("No changes for Dog food.md") and "was removed" in real
     assert content_hash_for_bytes((vault / "Dog food.md").read_bytes()) == h
+
+
+
+# ── Line endings: the caller's LF and the note's CRLF match, and the note keeps its own ──
+
+def test_a_multi_line_find_matches_a_crlf_note_and_the_note_stays_crlf(vault):
+    note(vault, "c.md", "intro\r\nline one\r\nline two\r\nend\r\n")
+    result = asyncio.run(tools.edit_note_impl("c.md", "first\nsecond", find="line one\nline two"))
+    assert result.startswith("Updated note"), result
+    assert read(vault, "c.md") == "intro\r\nfirst\r\nsecond\r\nend\r\n"
+    appended = asyncio.run(tools.edit_note_impl("c.md", "more\nlines", append=True))
+    assert appended.startswith("Updated note")
+    assert read(vault, "c.md") == "intro\r\nfirst\r\nsecond\r\nend\r\n\r\nmore\r\nlines"
+
+
+def test_an_lf_note_stays_lf_when_the_caller_sends_crlf(vault):
+    note(vault, "l.md", "a\nb\nc\n")
+    asyncio.run(tools.edit_note_impl("l.md", "B1\r\nB2", find="b\r\nc"))
+    assert read(vault, "l.md") == "a\nB1\nB2\n"
+    asyncio.run(tools.edit_note_impl("l.md", "x\r\ny\r\n"))
+    assert read(vault, "l.md") == "x\ny\n"
+
+
+def test_replace_frontmatter_stays_byte_exact(vault):
+    note(vault, "e.md", "a\r\nb\r\n")
+    asyncio.run(tools.edit_note_impl("e.md", "x\ny\n", replace_frontmatter=True))
+    assert read(vault, "e.md") == "x\ny\n"

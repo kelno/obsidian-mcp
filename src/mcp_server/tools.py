@@ -2185,9 +2185,9 @@ async def read_note_impl(
       returned text cannot reproduce. Hand it to a write tool as
       `expected_hash` to bind the write to the bytes this read saw.
 
-    Byte-identity on a round trip holds for LF-bodied notes; terminators inside
-    the selected body come back as LF because this path normalises and the
-    write path rewrites raw bytes.
+    The content comes back with LF line endings; `edit_note` writes text with
+    the note's own most common ending, so a round trip of a CRLF (or lone-CR)
+    note is byte-identical too, unless the note mixes endings.
 
     There is no textual procedure for recovering content from this response,
     and none is needed: the field is the recovery.
@@ -4177,11 +4177,11 @@ async def edit_note_impl(
     the docstrings had to describe recovering the body from it. Every such
     procedure was forgeable by a note's own frontmatter into a write that
     clobbered the section, which is why the response is fields now — #149,
-    `docs/architecture/vault-tools.md`.) Byte-identity holds for notes
-    whose body newlines are LF; every non-LF terminator inside the *selected
-    body* comes back as LF, whether the note uses one dialect throughout or
-    mixes them, because the read path normalises and this tool writes raw
-    bytes. Terminators outside the selected body are untouched.
+    `docs/architecture/vault-tools.md`.) Every mode but `replace_frontmatter`
+    writes the caller's text with the note's own most common line ending
+    (CRLF, LF or a lone CR), so a note keeps its endings whatever the caller
+    sends, and `find` matches whether the caller's text and the note use the
+    same endings or not. Terminators outside the text written are untouched.
 
     Section mode resolves and replaces over the frontmatter-stripped body, so
     a YAML `#` comment is never selectable and never counted by an ordinal,
@@ -4340,6 +4340,9 @@ async def edit_note_impl(
 
         new_content: str | None = None
         success_message: str = f"Updated note: {path}"
+        # The note's own line ending: what the caller's text is written with,
+        # so a CRLF note stays CRLF and an LF one LF.
+        eol = _dominant_eol(existing)
 
         if section is not None:
             # D5. A valid block is held out of the scan entirely, so heading
@@ -4363,7 +4366,7 @@ async def edit_note_impl(
             # block is (#150).
             if err := _unmatched_fence_error(path, scan_text, diagnosis):
                 return err
-            new_body, err = replace_section(scan_text, section, content)
+            new_body, err = replace_section(scan_text, section, _to_eol(content, eol))
             if err is not None:
                 return _body_refusal(err, "selector_unresolved")
             new_content = diagnosis.block + new_body
@@ -4373,7 +4376,14 @@ async def edit_note_impl(
                     _body_refusal("edit_note: find must be a non-empty string. "
                     "An empty find would match every position and corrupt the note.", "invalid_argument")
                 )
-            count = existing.count(find)
+            # Line endings don't matter for a match: the find text as sent,
+            # then with the note's own endings, then with LF ones.
+            for candidate in dict.fromkeys((find, _to_eol(find, eol), _to_eol(find, "\n"))):
+                count = existing.count(candidate)
+                if count:
+                    find = candidate
+                    break
+            content = _to_eol(content, eol)
             if count == 0:
                 preview = existing[:500]
                 return (
@@ -4394,7 +4404,7 @@ async def edit_note_impl(
             else:
                 new_content = existing.replace(find, content, 1)
         elif append:
-            new_content = existing + "\n" + content
+            new_content = existing + eol + _to_eol(content, eol)
         elif replace_frontmatter:
             # Today's behaviour, now opt-in: the whole file, frontmatter
             # included, becomes exactly `content`. Also the escape hatch for
@@ -4410,6 +4420,9 @@ async def edit_note_impl(
             # cannot be inferred from content shape, so it is asked for
             # explicitly instead.
             _, _, diagnosis = parse_frontmatter_diagnose(existing)
+            # The note keeps its own line endings (`replace_frontmatter=True`
+            # is the byte-exact way to change them).
+            content = _to_eol(content, eol)
             if not diagnosis.valid:
                 # Nothing valid to preserve (absent or defective) — wholesale,
                 # which is what keeps the repair path open without the flag.
@@ -4427,7 +4440,7 @@ async def edit_note_impl(
                 # terminator to CRLF — the block would no longer be the
                 # byte-identical slice this branch promises.
                 separator = (
-                    "\n" if content and not block.endswith(("\n", "\r")) else ""
+                    eol if content and not block.endswith(("\n", "\r")) else ""
                 )
                 new_content = block + separator + content
 
@@ -9177,6 +9190,26 @@ def _ledger_state_line(state: dict) -> str:
 
 
 from src.services import title_heading as _title_heading  # noqa: E402
+
+_EOL_RE = re.compile(r"\r\n|\r|\n")
+
+
+def _dominant_eol(text: str) -> str:
+    """The note's most common line ending (`\n` when it has none, or on a tie)."""
+    crlf = text.count("\r\n")
+    cr = text.count("\r") - crlf
+    lf = text.count("\n") - crlf
+    if crlf > lf and crlf >= cr:
+        return "\r\n"
+    if cr > lf and cr > crlf:
+        return "\r"
+    return "\n"
+
+
+def _to_eol(text: str, eol: str) -> str:
+    """`text` with every line ending (CRLF, CR, LF) written as `eol`."""
+    return _EOL_RE.sub(eol, text) if ("\r" in text or (eol != "\n" and "\n" in text)) else text
+
 
 #: The refusal for a note named against its folder's `note_names: dated`.
 NOTE_NAME_DATE = "note_name_date"

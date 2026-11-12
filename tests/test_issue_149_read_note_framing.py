@@ -1500,4 +1500,4 @@ async def test_a_crlf_section_round_trip_matches_the_declared_residual(vault):
     out = await tools.read_note_impl("n.md", section="#1")
     assert out.content == "old\n"
     await tools.edit_note_impl("n.md", out.content, section="#1")
-    assert read(vault, "n.md") == "# A\r\nold\n# B\r\nkeep\r\n"
+    assert read(vault, "n.md") == "# A\r\nold\r\n# B\r\nkeep\r\n"

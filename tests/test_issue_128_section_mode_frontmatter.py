@@ -247,7 +247,7 @@ def test_a_lone_cr_block_is_held_out_of_the_section_scan(vault):
     after = read(vault, "n.md")
     # `#1` is the body's first heading, not the `#` comment inside the block —
     # which is what proves the block was held out of the scan.
-    assert after == "---\r# Not A Heading\rtitle: T\r---\r## Tasks\rnew\n## Notes\rkeep\r"
+    assert after == "---\r# Not A Heading\rtitle: T\r---\r## Tasks\rnew\r## Notes\rkeep\r"
     # The block is reattached byte-identically, CR terminators included.
     assert after.startswith("---\r# Not A Heading\rtitle: T\r---\r")
 
@@ -322,7 +322,7 @@ def test_a_heading_inside_a_cr_fenced_block_is_not_selectable(vault):
     # `#1` resolved to `Real` on the write side too, and the code fence — both
     # of its delimiters and the heading inside it — is untouched.
     assert after == (
-        "---\rtitle: T\r---\r```\r## Hidden\r```\r## Real\rnew\n## Next\rkeep\r"
+        "---\rtitle: T\r---\r```\r## Hidden\r```\r## Real\rnew\r## Next\rkeep\r"
     )
     assert after.count("```") == 2
     assert "## Hidden" in after
