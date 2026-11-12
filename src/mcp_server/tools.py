@@ -72,6 +72,7 @@ from src.services.quotas import admit as _admit_quota, quota_refusal_message
 from src.services.search import full_text_search
 from src.services.usage_params import render_usage_params
 from src.services.usage_stats import OVER_QUOTA_PARAM
+from src import plugins as _plugins
 from src.services import ai_edit_stamp, page_text, transfer, vault_fs
 from src.services import open_note_url as _open_note_url
 from src.services.vault import (
@@ -3421,9 +3422,13 @@ async def create_note_impl(
         if target.lstat() is None and (
                 err := await _hand_written_task_error(uid, "create_note", target.rel, None, content)):
             return err
+        plugin_run = _plugins.NoteWriteRun("create_note", target.rel, None, dry_run=False, user_id=uid)
+        if target.lstat() is None and (refusal := await plugin_run.check(content)):
+            return _body_refusal(refusal.message, refusal.code)
         # The title heading first, so the link report's line numbers are the written note's.
         content, title_removed = _title_heading.strip(None, content, target.rel)
         content, links_report, links_failure = await _full_path_links(uid, target.rel, None, content)
+        content = await plugin_run.rewrite(content)
         # The agent-edit stamp, before the size check: the cap binds what is
         # written.
         unstamped_lines = _line_count(content)
@@ -3464,7 +3469,7 @@ async def create_note_impl(
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
     return created + name_flag + await _rule_change_unlogged(target.rel, None, content) + \
         _title_heading.render(title_removed) + _links_text(links_report, links_failure, shift=links_shift) + \
-        await _note_refs_report(uid, None, content)
+        plugin_run.render(shift=links_shift) + await _note_refs_report(uid, None, content)
 
 
 # Row-level excerpt bound for the graph tools. `link_text` is note text the
@@ -4464,6 +4469,9 @@ async def edit_note_impl(
         if new_content != existing and (
                 err := await _hand_written_task_error(uid, "edit_note", target.rel, existing, new_content)):
             return err
+        plugin_run = _plugins.NoteWriteRun("edit_note", target.rel, existing, dry_run=dry_run, user_id=uid)
+        if new_content != existing and (refusal := await plugin_run.check(new_content)):
+            return _body_refusal(refusal.message, refusal.code)
 
         # Bare-name wikilinks on the lines this write adds or changes get the
         # note's full path (the vault's link rule), before the diff and the stamp.
@@ -4478,6 +4486,7 @@ async def edit_note_impl(
         if new_content != existing:
             new_content, links_report, links_failure = await _full_path_links(
                 uid, target.rel, existing, new_content)
+            new_content = await plugin_run.rewrite(new_content)
 
         # The agent-edit stamp, on a write that changes something (a no-op
         # stays a no-op), before the size cap and the diff so both see the
@@ -4511,6 +4520,7 @@ async def edit_note_impl(
             return (diff + await _rule_change_unlogged(target.rel, existing, new_content)
                     + _title_heading.render(title_removed, dry_run=True)
                     + _links_text(links_report, links_failure, dry_run=True, shift=links_shift)
+                    + plugin_run.render(shift=links_shift, dry_run=True)
                     + await _note_refs_report(uid, existing, new_content))
 
         # #88. Placed after the `dry_run` return above on purpose: a dry run
@@ -4540,8 +4550,8 @@ async def edit_note_impl(
         return success_message + _published_hash_clause(
             new_content.encode("utf-8")
         ) + await _rule_change_unlogged(target.rel, existing, new_content) + _title_heading.render(title_removed) + \
-            _links_text(links_report, links_failure, shift=links_shift) + await _note_refs_report(
-                uid, existing, new_content)
+            _links_text(links_report, links_failure, shift=links_shift) + plugin_run.render(shift=links_shift) + \
+            await _note_refs_report(uid, existing, new_content)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -6694,14 +6704,20 @@ async def write_file_impl(
                     readable = True
                 except UnicodeDecodeError:
                     readable = False   # every line would look new: links left as sent
-                if readable:
+                if readable and new_note != old_text:
+                    plugin_run = _plugins.NoteWriteRun("write_file", target.rel, old_text, dry_run=False, user_id=uid)
+                    # An existing file the no-clobber publish refuses: `already_exists` wins.
+                    if (overwrite or not exists) and (refusal := await plugin_run.check(new_note)):
+                        return _body_refusal(refusal.message, refusal.code)
                     rewritten, title_removed = _title_heading.strip(old_text, new_note, target.rel)
                     rewritten, links_report, links_failure = await _full_path_links(
                         uid, target.rel, old_text, rewritten)
+                    rewritten = await plugin_run.rewrite(rewritten)
                     if rewritten != new_note:
                         data = rewritten.encode("utf-8")
                     links_text = (await _rule_change_unlogged(target.rel, old_text, rewritten)
-                                  + _title_heading.render(title_removed) + _links_text(links_report, links_failure))
+                                  + _title_heading.render(title_removed) + _links_text(links_report, links_failure)
+                                  + plugin_run.render())
 
         # **The cap follows the NORMALISED name, not the caller's string.**
         # `open_mutable` drops empty and `.` components, so `"big.md/."` is

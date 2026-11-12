@@ -598,6 +598,14 @@ class Settings(BaseSettings):
     # Vault-relative. See docs/architecture/open-area.md.
     areas_index_path: str = "Areas/Areas.md"
 
+    # ── Plugins (fork) ───────────────────────────────────────────────────────
+    # The plugins this deployment loads, by module name under `src/plugins/`,
+    # in the order they run: behaviour that follows one vault's conventions,
+    # kept out of the core. JSON list or comma-separated. Empty (the default):
+    # the plain core. A name that does not load stops the server at startup.
+    # See docs/architecture/plugins.md.
+    plugins: Annotated[list[str], NoDecode] = []
+
     # ── Agent-edit stamp and archive hint (fork) ─────────────────────────────
     #
     # When set, every tool that writes a note's text (create_note, edit_note,
@@ -1266,6 +1274,29 @@ class Settings(BaseSettings):
         if not isinstance(v, (list, tuple)):
             raise ValueError("LAST_AI_EDIT_EXCLUDE and RULE_FILE_PATTERNS must be lists of glob patterns")
         return [p for p in (str(i).strip().lstrip("/") for i in v) if p]
+
+    @field_validator("plugins", mode="before")
+    @classmethod
+    def _parse_plugins(cls, v):
+        """A JSON list, a comma-separated string, or a list of plugin names;
+        each stripped, empties dropped; each must be a Python identifier
+        (a module name under `src/plugins/`). Whether it loads is checked at
+        startup, not here: the alembic init container imports these settings."""
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("["):
+                import json
+
+                v = json.loads(s)
+            else:
+                v = s.split(",")
+        if not isinstance(v, (list, tuple)):
+            raise ValueError("PLUGINS must be a list of plugin names")
+        names = [n for n in (str(i).strip() for i in v) if n]
+        for name in names:
+            if not name.isidentifier():
+                raise ValueError(f"PLUGINS: {name!r} is not a plugin name (a module name under src/plugins/)")
+        return names
 
     @field_validator("last_ai_edit_field", "archive_folder", mode="before")
     @classmethod

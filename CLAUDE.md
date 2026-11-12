@@ -399,6 +399,7 @@ update it in the same change.** What stays here is the short list:
   queue, then the embed stage's sweep within its budget); the reset and the
   startup dimension check cover `ledger_embeddings`. See
   [agent ledger](docs/architecture/agent-ledger.md).
+- **A plugin never fails a write, and never touches what the caller kept** (fork, owner's design 2026-11-12). `PLUGINS` names the plugins a deployment loads (`src/plugins/`), in run order; a name that does not load stops the server at startup. On the note writers, every plugin's `check` sees the caller's own text and the first refusal wins; `rewrite`s chain in order after the core's own. A hook that raises or returns something unusable, or a rewrite that alters a non-blank line the caller kept or the frontmatter, is set aside with a `plugin_error:` line and an ERROR log, and the write goes ahead. See [plugins](docs/architecture/plugins.md).
 - **Agents read the guide** (fork, owner's design assumption). `get_vault_guide` is the agent's manual; an agent that skips it is a bug to fix (in the guide's description or the client's setup), not a case to design around. claude.ai shows an agent only about the first 80 characters of a tool's description until it searches its tools, so every tool's first line must stand on its own, and the guide's must say to read it first.
 - `MCP_SANDBOX_MODE=true` is a registry-eval-only switch: lifespan skips `_check_embedding_dim` and the indexer, and `APIKeyMiddleware` bypasses auth on `/mcp/*`. Lets Glama's sandbox build the image and validate MCP introspection without external deps. Never enable in production — tools register but cannot run.
 
@@ -490,6 +491,7 @@ summaries.
 | [usage-attribution.md](docs/architecture/usage-attribution.md) | `usage_logs`, `_log_usage`, actor columns |
 | [control-panel.md](docs/architecture/control-panel.md) | panel templates, flash messages, admin guards, the Danger zone |
 | [tasks.md](docs/architecture/tasks.md) | the four task tools, `src/services/task_*.py`, `note_tasks` / migration 031, and any Tasks plugin upgrade |
+| [plugins.md](docs/architecture/plugins.md) | `src/plugins/`, the `PLUGINS` setting, the plugin calls in the note writers, and moving a vault-specific behaviour out of the core |
 | [agent-ledger.md](docs/architecture/agent-ledger.md) | the eight `ledger_*` tools, `src/services/ledger*.py`, the `ledger_*` tables / migration 032, `scripts/ledger_import.py` / `ledger_export.py`, and the ledger's vectors in the reset and the embed stage |
 
 Formal requirements live in `openspec/specs/`; the change history and its

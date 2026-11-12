@@ -24,6 +24,7 @@ from src.limiter import limiter
 from src.mcp_server.auth import APIKeyMiddleware
 from src.mcp_server.server import mcp
 from src.oauth.routes import router as oauth_router
+from src import plugins
 from src.services import error_log, panel_csp, security_events, vault, vault_overlap
 from src.services.index_state import (
     KEY_EMBEDDING_FINGERPRINT,
@@ -504,6 +505,23 @@ def _log_panel_csp_mode() -> None:
         )
 
 
+def _load_plugins() -> None:
+    """Load the plugins `PLUGINS` names, or refuse to start.
+
+    A name that does not load would otherwise surface on the first note
+    write, and a vault's guards silently missing is worse than a server that
+    does not start. First of the startup steps that can fail: it needs no
+    database and no vault, and sandbox mode registers the same tools.
+    """
+    try:
+        loaded = plugins.active()
+    except plugins.PluginLoadError as e:
+        logging.getLogger(__name__).critical("%s", e)
+        sys.exit(1)
+    logging.getLogger(__name__).info(
+        "Plugins loaded: %s", ", ".join(p.name for p in loaded) if loaded else "none (plain core)")
+
+
 def _log_unknown_arguments_mode() -> None:
     """Warn once, at startup, when undeclared tool arguments are ignored (#295).
 
@@ -550,6 +568,7 @@ async def lifespan(app: FastAPI):
     # ERROR, so it sees every module's errors without any of them opting in;
     # process-lifetime only, no schema — see `src/services/error_log.py`.
     error_log.attach()
+    _load_plugins()
     _log_panel_csp_mode()
     _log_unknown_arguments_mode()
     warn_admin_password_in_environment()

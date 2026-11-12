@@ -419,6 +419,10 @@ For a `.md` note matching one, `edit_note` (every mode, `dry_run` included), `cr
 
 Limitations (adversarial review, 2026-11-12, accepted): one changed line gaining a new ref clears the others in the same write (rules are often edited one line at a time, and checking each line would flag headings and prose); citing a ref the note already holds on an unchanged line counts as new for a changed line only when the removed lines didn't carry it; a duplicated line may be reported under another copy's line number; indentation-only changes are not seen.
 
+### Plugins' checks and rewrites on the note writers (fork, owner's design, 2026-11-12)
+
+`create_note`, `edit_note` and `write_file` on a `.md` run the loaded plugins' `check` after the core's own refusals and their `rewrite` after the core's own rewrites (title heading, links), before the stamp and the size cap; their blocks follow the core's in the result. A plugin bug never fails a write, and a rewrite may not touch a non-blank line the caller kept or the frontmatter. See [plugins.md](plugins.md).
+
 ### The note writers name the ledger refs on the lines they change (fork, owner's design, 2026-11-12)
 
 The vault's agent rules end each line with the refs of the proposals that shaped it (`... gets forgotten. [P54, P80]`), and from 2026-11-12 they are edited only through these tools. So `edit_note` (every mode, `dry_run` included, after the diff), `create_note`, `delete_note` and `write_file` on a `.md` target append to their text result:
