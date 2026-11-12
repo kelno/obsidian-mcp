@@ -83,32 +83,49 @@ def _masked(text: str) -> str:
     return "".join(out)
 
 
-def _is_link_or_definition(text: str, start: int, end: int) -> bool:
+#: A list item's lead before its checkbox is short; a longer prefix is not one.
+_CHECKBOX_LEAD_MAX = 40
+
+
+def _is_link_or_definition(text: str, start: int, end: int, line_start: int, bracket_ends: set[int]) -> bool:
     """Whether the bracket at `start:end` is Markdown syntax rather than a citation.
 
     Next to another bracket it is a link (`[x][F12]`, `[F12][x]`) unless that
     bracket is a ref list too (`[P35][P48]`) or a list item's checkbox
-    (`- [x][Q14]`).
+    (`- [x][Q14]`). Constant work per bracket (`bracket_ends` and
+    `line_start` come from one pass), so a line of thousands of brackets
+    stays linear.
     """
     before = text[start - 1] if start > 0 else ""
     after = text[end] if end < len(text) else ""
-    line_start = text.rfind("\n", 0, start) + 1
     if before in ("[", "!", "\\") or after in ("(", "]"):
         return True
-    if before == "]" and not (_CHECKBOX_LEAD_RE.match(text[line_start:start])
-                              or any(m.end() == start for m in _BRACKET_RE.finditer(text, line_start, start))):
-        return True
+    if before == "]" and start not in bracket_ends:
+        lead = text[line_start:start] if start - line_start <= _CHECKBOX_LEAD_MAX else ""
+        if not (lead and _CHECKBOX_LEAD_RE.match(lead)):
+            return True
     if after == "[" and not _BRACKET_RE.match(text, end):
         return True
-    if after == ":":
-        if _REF_DEFINITION_LEAD_RE.match(text[line_start:start]):
-            return True
+    if after == ":" and start - line_start <= 3 and _REF_DEFINITION_LEAD_RE.match(text[line_start:start]):
+        return True
     return False
 
 
 def _bracket_spans(masked: str) -> list[tuple[int, int]]:
-    return [m.span() for m in _BRACKET_RE.finditer(masked)
-            if not _is_link_or_definition(masked, *m.span())]
+    from bisect import bisect_right
+
+    matches = [m.span() for m in _BRACKET_RE.finditer(masked)]
+    if not matches:
+        return []
+    ends = {end for _, end in matches}
+    newlines = [i for i, c in enumerate(masked) if c == "\n"]
+
+    def line_start(pos: int) -> int:
+        k = bisect_right(newlines, pos - 1)
+        return newlines[k - 1] + 1 if k else 0
+
+    return [(start, end) for start, end in matches
+            if not _is_link_or_definition(masked, start, end, line_start(start), ends)]
 
 
 def _unique(refs) -> list[Ref]:
@@ -164,20 +181,28 @@ def changed_line_refs(old: str | None, new: str | None) -> tuple[list[Ref], list
     """
     from collections import Counter
 
-    old_lines = (old or "").split("\n") if old is not None else []
-    new_lines = (new or "").split("\n") if new is not None else []
-    old_refs = [[r for _, r in _bracketed_found(line)] for line in _masked(old or "").split("\n")] \
-        if old is not None else []
-    new_refs = [[r for _, r in _bracketed_found(line)] for line in _masked(new or "").split("\n")] \
-        if new is not None else []
-    kept = Counter(line.rstrip("\r") for line in new_lines)
+    def lines_and_refs(text: str | None) -> list[tuple[str, tuple[Ref, ...]]]:
+        if text is None:
+            return []
+        # Any line ending counts here, a lone CR included: the comparison is
+        # about lines, and a CR-only note would otherwise be one long line.
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        masked = _masked(text)
+        return [(line, tuple(r for _, r in _bracketed_found(m)))
+                for line, m in zip(text.split("\n"), masked.split("\n"))]
+
+    old_rows, new_rows = lines_and_refs(old), lines_and_refs(new)
+    # A line is kept when the same text cites the same refs in the new note:
+    # one the edit put inside a code fence (its refs gone) counts as changed.
+    kept = Counter(new_rows)
     changed = []
-    for line, refs in zip(old_lines, old_refs):
-        key = line.rstrip("\r")
-        if kept[key] > 0:
-            kept[key] -= 1
+    for row in old_rows:
+        if kept[row] > 0:
+            kept[row] -= 1
             continue
-        changed.extend(refs)
+        changed.extend(row[1])
+    old_refs = [refs for _, refs in old_rows]
+    new_refs = [refs for _, refs in new_rows]
     before = {r for refs in old_refs for r in refs}
     added = [r for refs in new_refs for r in refs if r not in before]
     return _unique(changed), _unique(added)

@@ -1210,7 +1210,22 @@ async def test_create_write_and_delete_report_refs_too(sessionmaker, ctx):
     assert "changed_lines_cite" not in created
     written = await tools.write_file_impl("_/agent/New.md", "- Rewritten.\n", encoding="text", overwrite=True)
     assert "changed_lines_cite:" in written and "- P80 (proposal, rejected" in written
-    deleted = await tools.delete_note_impl(RULES)
+    unguarded = await tools.delete_note_impl("_/agent/New.md")     # reads nothing, so lists nothing
+    assert unguarded.startswith("Soft-deleted:") and "changed_lines_cite" not in unguarded
+    from src.services.vault import content_hash_for_bytes
+    rules_hash = content_hash_for_bytes((ctx / RULES).read_bytes())
+    deleted = await tools.delete_note_impl(RULES, expected_hash=rules_hash)
     assert deleted.startswith("Soft-deleted:") and "- P54 (proposal, accepted" in deleted
     plain = await tools.write_file_impl("notes.txt", "[P54]", encoding="text")
     assert "changed_lines_cite" not in plain and "cites:" not in plain
+
+
+
+async def test_note_refs_lists_are_capped_and_unread_text_is_said(sessionmaker, ctx, monkeypatch):
+    await _rule_note(sessionmaker, ctx)
+    monkeypatch.setattr(tools, "NOTE_REFS_MAX", 1)
+    created = await tools.create_note_impl("_/agent/Many.md", "- x [P54, P80, F404]\n")
+    assert "- and 2 more" in created
+    (ctx / "_" / "agent" / "Latin1.md").write_bytes("- caf\xe9 [P54]\n".encode("latin-1"))
+    written = await tools.write_file_impl("_/agent/Latin1.md", "- new [P80]\n", encoding="text", overwrite=True)
+    assert "The previous text could not be read" in written and "cites:" in written

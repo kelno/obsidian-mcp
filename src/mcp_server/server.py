@@ -452,8 +452,10 @@ async def edit_note(
     **Agent-ledger refs on the lines.** When the lines this write removes or
     rewrites cite agent-ledger entries in brackets (`[P54, P80]`), the result
     ends with `changed_lines_cite:`, each entry as it stands now: they record
-    what shaped those lines, so read them (`ledger_get`) before undoing it.
-    Refs your new text adds come after `cites:`, as they stand now. A `dry_run` shows both after the diff.
+    what shaped those lines. Read them (`ledger_get`) and check your change
+    doesn't undo what they decided. To see them before writing, call with
+    `dry_run=true`: it shows both lists after the diff. Refs your new text
+    adds (not ones it keeps) come after `cites:`, as they stand now.
 
     Four mutually exclusive modes (set at most one of append/find/section):
     1. **Full replace** (default): provide only `content`. `content` becomes the
@@ -870,9 +872,10 @@ async def delete_note(
     """Delete a note from the vault. Requires write permission — a `readwrite` API key, or an OAuth token
     carrying the `readwrite` scope.
 
-    When the note's lines cite agent-ledger entries in brackets
-    (`[P54, P80]`), the result ends with `changed_lines_cite:`, each entry as
-    it stands now: they record what shaped the text you are deleting.
+    With `expected_hash`, when the note's lines cite agent-ledger entries in
+    brackets (`[P54, P80]`), the result ends with `changed_lines_cite:`, each
+    entry as it stands now. To check them before deleting, read the note and
+    `ledger_get` its refs first.
 
     By default this is a soft-delete: the file is moved to
     `.trash/<YYYYMMDD-HHMMSS>-<basename>-<8 hex>` inside the vault root, by a

@@ -5931,10 +5931,10 @@ async def delete_note_impl(
     an agent that knows to look will find, so both destroy content the caller
     may have read; the comparison runs **before** the pin, the `.trash` rename
     and the unlink. Success reports no `content_hash` — nothing remains to
-    hash. The incumbent is compared **only** when a hash was supplied or the
-    deployment requires one. It is also read once, bounded by
-    `MAX_NOTE_BYTES` and best-effort, for the ledger refs its lines cite
-    (`_note_refs_report`); that read never refuses the delete.
+    hash. The incumbent is read **only** when a hash was supplied or the
+    deployment requires one, so an unguarded delete reads nothing it does not
+    read today. When it was read, the result also lists the ledger refs its
+    lines cite (`_note_refs_report`).
     """
     if err := _require_write():
         return err
@@ -5954,15 +5954,10 @@ async def delete_note_impl(
         ):
             return err
 
-        # The note's text, for the ledger refs its lines cite (the result
-        # lists them: the entries that shaped what is being deleted). A
-        # bounded read through the held descriptor, best-effort: an unreadable
-        # or over-cap note just gets no list.
-        try:
-            refs_source, _over = _read_incumbent(target, path, MAX_NOTE_BYTES)
-            deleted_text = refs_source.decode("utf-8") if refs_source is not None else None
-        except (OSError, UnicodeDecodeError):
-            deleted_text = None
+        # The note's text, for the ledger refs its lines cite: only when the
+        # precondition below reads it anyway. An unguarded delete reads
+        # nothing (a tested guarantee), so it lists no refs.
+        deleted_text, deleted_unread = None, False
 
         if expected_hash is not None or settings.write_precondition_required:
             # The read is not "solely to populate `current_hash`": under
@@ -5974,6 +5969,11 @@ async def delete_note_impl(
             cap_name, cap_bytes = _note_precondition_cap()
             try:
                 incumbent, over_cap = _read_incumbent(target, path, cap_bytes)
+                try:
+                    deleted_text = incumbent.decode("utf-8") if incumbent is not None else None
+                except UnicodeDecodeError:
+                    deleted_text = None
+                deleted_unread = deleted_text is None
             except OSError as e:
                 return _body_refusal(f"Failed to read {path}: {e}", "io_failure")
             if incumbent is None and not over_cap:
@@ -6006,7 +6006,8 @@ async def delete_note_impl(
                     return err
             except OSError as e:
                 return _body_refusal(f"Permanent delete failed: {e}", "io_failure")
-            return f"Permanently deleted: {path}" + await _note_refs_report(uid, deleted_text, None)
+            return f"Permanently deleted: {path}" + await _note_refs_report(
+                uid, deleted_text, None, old_unread=deleted_unread)
 
         # One `renameat2(RENAME_NOREPLACE)` from the note's own parent
         # descriptor into `.trash`, walked from the same resolved root: the
@@ -6049,7 +6050,8 @@ async def delete_note_impl(
             return _body_refusal(str(e), "io_failure")
         except OSError as e:
             return _body_refusal(f"Soft-delete failed: {e}", "io_failure")
-        return f"Soft-deleted: {path} → {dest}" + await _note_refs_report(uid, deleted_text, None)
+        return f"Soft-deleted: {path} → {dest}" + await _note_refs_report(
+            uid, deleted_text, None, old_unread=deleted_unread)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -6556,15 +6558,19 @@ async def write_file_impl(
 
         # A markdown note's previous text, for the ledger refs on the lines
         # this write replaces (best-effort, bounded like a note read).
-        previous_note = None
+        previous_note, previous_unread = None, False
         if overwrite and target.rel.lower().endswith(".md"):
             if incumbent is not None:
-                previous_note = incumbent
-            elif not over_cap:
+                previous_note = incumbent if len(incumbent) <= MAX_NOTE_BYTES else None
+                previous_unread = previous_note is None
+            elif over_cap:
+                previous_unread = True
+            else:
                 try:
-                    previous_note, _over = _read_incumbent(target, path, MAX_NOTE_BYTES)
+                    previous_note, over_note_cap = _read_incumbent(target, path, MAX_NOTE_BYTES)
+                    previous_unread = over_note_cap
                 except OSError:
-                    previous_note = None
+                    previous_unread = True
 
         if encoding == "base64":
             try:
@@ -6611,7 +6617,7 @@ async def write_file_impl(
         except OSError as e:
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
         result = f"Wrote {len(data):,} bytes to {path}"
-        refs = await _write_file_refs_report(uid, target.rel, previous_note, data)
+        refs = await _write_file_refs_report(uid, target.rel, previous_note, data, previous_unread)
         if over_cap or len(data) > read_cap:
             return result + (
                 f" — hash not reported: incumbent or published file exceeds "
@@ -6620,16 +6626,21 @@ async def write_file_impl(
         return result + _published_hash_clause(data) + refs
 
 
-async def _write_file_refs_report(uid, rel: str, previous: bytes | None, data: bytes) -> str:
+async def _write_file_refs_report(uid, rel: str, previous: bytes | None, data: bytes, unread: bool) -> str:
     """`_note_refs_report` for a `write_file` that wrote a markdown note; "" otherwise."""
     if not rel.lower().endswith(".md"):
         return ""
+    old = None
+    if previous is not None:
+        try:
+            old = previous.decode("utf-8")
+        except UnicodeDecodeError:
+            unread = True
     try:
-        old = previous.decode("utf-8") if previous is not None else None
         new = data.decode("utf-8")
     except UnicodeDecodeError:
         return ""
-    return await _note_refs_report(uid, old, new)
+    return await _note_refs_report(uid, old, new, old_unread=unread)
 
 
 @_tracked("list_files", ["folder", "pattern", "recursive", "limit"])
@@ -8904,6 +8915,8 @@ async def _ledger_cites(uid, own_ref: str, texts, notes: list[str]) -> list[dict
 #: How a note writer's result names the two lists (the results are text).
 NOTE_CHANGED_REFS_LABEL = "changed_lines_cite"
 NOTE_CITES_LABEL = "cites"
+#: Entries listed in each; past it, "and N more".
+NOTE_REFS_MAX = 30
 
 
 def _ledger_state_line(state: dict) -> str:
@@ -8918,7 +8931,7 @@ def _ledger_state_line(state: dict) -> str:
     return f"- {state['ref']} ({', '.join(facts)}): \"{state['title']}\""
 
 
-async def _note_refs_report(uid, old: str | None, new: str | None) -> str:
+async def _note_refs_report(uid, old: str | None, new: str | None, *, old_unread: bool = False) -> str:
     """What a note write's result adds about the ledger entries its lines cite.
 
     `changed_lines_cite`: the entries cited (`[P54, P80]`) on the lines this
@@ -8928,12 +8941,19 @@ async def _note_refs_report(uid, old: str | None, new: str | None) -> str:
     at write time. Both come from `ledger_tasks.cited_states`, the function
     behind `ledger_add`'s and `ledger_update`'s `cites`.
 
+    `old_unread`: the write replaced text this call could not read (over
+    the note cap, not UTF-8), so the changed lines are unknown; said in a line.
+
     "" when neither has anything. Never fails the write: a failure is said in
-    one line.
+    one line. The parse runs off the event loop.
     """
-    changed, added = _ledger_citations.changed_line_refs(old, new)
+    changed, added = await asyncio.to_thread(_ledger_citations.changed_line_refs, old, new)
+    unread = ("\n\nThe previous text could not be read, so the ledger refs on the lines this write replaced "
+              "are not listed." if old_unread else "")
     if not changed and not added:
-        return ""
+        return unread
+    more = {"changed": max(0, len(changed) - NOTE_REFS_MAX), "added": max(0, len(added) - NOTE_REFS_MAX)}
+    changed, added = changed[:NOTE_REFS_MAX], added[:NOTE_REFS_MAX]
     try:
         async with async_session() as session:
             changed_states = await _ledger_tasks.cited_states(session, uid, changed, own_ref=None, day=_ledger_day)
@@ -8943,16 +8963,20 @@ async def _note_refs_report(uid, old: str | None, new: str | None) -> str:
         logger.debug("note write: the ledger entries its lines cite could not be read", exc_info=True)
         refs = ", ".join(str(r) for r in (*changed, *added))
         return (f"\n\nThe ledger entries this write's lines cite ({refs}) could not be read "
-                f"({type(exc).__name__}): read them with ledger_get before relying on the change.")
+                f"({type(exc).__name__}): read them with ledger_get before relying on the change." + unread)
     parts = []
     if changed_states:
         parts.append(f"{NOTE_CHANGED_REFS_LABEL}: the lines you changed or removed carry these refs, the entries "
                      "that shaped them. If you haven't read them, read them now with ledger_get and check your "
-                     "change doesn't undo what they decided.\n" + "\n".join(map(_ledger_state_line, changed_states)))
+                     "change doesn't undo what they decided: for an accepted or adjusted proposal, what went in; "
+                     "for a rejected or withdrawn one, what was turned down.\n"
+                     + "\n".join(map(_ledger_state_line, changed_states))
+                     + (f"\n- and {more['changed']} more" if more["changed"] else ""))
     if added_states:
-        parts.append(f"{NOTE_CITES_LABEL}: refs your new text adds, as they stand now; check your wording matches "
-                     "them.\n" + "\n".join(map(_ledger_state_line, added_states)))
-    return "\n\n" + "\n\n".join(parts)
+        parts.append(f"{NOTE_CITES_LABEL}: refs your new text adds, as they stand now; check that what your text "
+                     "says matches what they say.\n" + "\n".join(map(_ledger_state_line, added_states))
+                     + (f"\n- and {more['added']} more" if more["added"] else ""))
+    return "\n\n" + "\n\n".join(parts) + unread
 
 
 def _ledger_private(path: str) -> bool:

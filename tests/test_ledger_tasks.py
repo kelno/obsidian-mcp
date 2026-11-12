@@ -145,3 +145,19 @@ def test_changed_line_refs_for_a_create_and_a_delete():
     assert lc.changed_line_refs(None, "a [Q1]\n") == ([], [lc.Ref("Q", 1)])
     assert lc.changed_line_refs("a [Q1]\n", None) == ([lc.Ref("Q", 1)], [])
     assert lc.changed_line_refs("same [Q1]\r\n", "same [Q1]\n") == ([], [])   # a line ending is not a change
+
+
+
+def test_changed_line_refs_reads_lone_cr_lines_and_fences_the_edit_opens():
+    assert lc.changed_line_refs("a [P1]\rb [P2]\r", "a [P1]\rb [P2]\rc\r") == ([], [])
+    # The edit opened a fence above a rule line: its refs are gone, so it changed.
+    assert lc.changed_line_refs("r [P1]\n", "```\nr [P1]\n") == ([lc.Ref("P", 1)], [])
+
+
+def test_a_line_of_thousands_of_brackets_parses_in_linear_time():
+    import time
+
+    start = time.monotonic()
+    changed, _added = lc.changed_line_refs("[P1]" * 50000, "x")
+    assert changed == [lc.Ref("P", 1)]
+    assert time.monotonic() - start < 5          # was about 52 s for 20,000 before the fix
