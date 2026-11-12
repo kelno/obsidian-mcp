@@ -9,9 +9,11 @@ push to `main` builds and publishes the image `ghcr.io/kelno/obsidian-mcp:main`
 automatically, so a push can reach production. How and where the fork is
 deployed is not part of this repo.
 
-Last checked against `upstream/main` at `564e9e0` (#338) on 2026-10-23.
+How the fork follows upstream, and what goes in the table below, is in `CLAUDE.md`, "Following upstream". The last sync is the merge base of `main` and `upstream/main`.
 
 ## What differs from upstream
+
+Each row says what differs and why; a row goes when the difference ends.
 
 | Change | Commit | Upstream status |
 | --- | --- | --- |
@@ -19,12 +21,12 @@ Last checked against `upstream/main` at `564e9e0` (#338) on 2026-10-23.
 | `delete_folder` tool: remove an empty folder with one `rmdir`; new refusal code `folder_not_empty` | `bcfc113`, `9c4f5ee` | Not proposed yet |
 | `list_files` reports a missing folder as `not_found` ("Folder not found"), not `invalid_path` | `d0d67c1` | Not proposed yet |
 | `move_file` and `move_note` precondition refusals say "move" instead of "write" | `f3cfef6` | Not proposed yet; depends on `move_file` |
-| `delete_file` names `.trash/` entries in UTC, like `delete_note` | `5744b33` | [#339](https://github.com/maxkuminov/obsidian-mcp/pull/339), open |
+| `delete_file` names `.trash/` entries in UTC, like `delete_note` | `5744b33` | Merged upstream ([#339](https://github.com/maxkuminov/obsidian-mcp/pull/339)); the row goes at the next resync |
 | Embedding per-request timeouts as settings (`OLLAMA_REQUEST_TIMEOUT_SECONDS`, `OPENAI_REQUEST_TIMEOUT_SECONDS`), `OPENAI_EMBED_BATCH_SIZE`; the OpenAI provider no longer retries a read timeout | `312d740` | Not proposed yet |
-| Higher default MCP rate limits (600/120 general, 120/30 write) | `f3618a0` | Upstream's own [#337](https://github.com/maxkuminov/obsidian-mcp/pull/337), open; merged here early |
+| Higher default MCP rate limits (600/120 general, 120/30 write) | `f3618a0` | Upstream's own [#337](https://github.com/maxkuminov/obsidian-mcp/pull/337), merged upstream; the row goes at the next resync |
 | `fetch_page` tool: fetch a public page under `import_from_url`'s SSRF policy and return its text (HTML → Markdown via markdownify, main content only) to the agent in structured fields marked untrusted; new deps `markdownify`, `beautifulsoup4`; setting `FETCH_PAGE_MAX_BYTES` | `4aa8987` | Not proposed yet |
 | Outbound fetches send an identifiable `User-Agent` (`OUTBOUND_USER_AGENT`); httpx's default was refused with a 403 by Wikipedia | `e20e5cd` | Not proposed yet |
-| Tests pass on Windows checkouts and outside UTC: `.gitattributes` keeps `*.sh` LF; `test_a_naive_expires_at_does_not_raise` builds its naive time in UTC | `f81f2c8`, `9cccebd` | [#342](https://github.com/maxkuminov/obsidian-mcp/pull/342), open |
+| Tests pass on Windows checkouts and outside UTC: `.gitattributes` keeps `*.sh` LF; `test_a_naive_expires_at_does_not_raise` builds its naive time in UTC | `f81f2c8`, `9cccebd` | Merged upstream ([#342](https://github.com/maxkuminov/obsidian-mcp/pull/342)); the row goes at the next resync |
 | Task tools `list_tasks`, `create_task`, `edit_task`, `set_task_status`: the Obsidian Tasks plugin's emoji format ported from its 8.6.0 source, following its settings file in the vault; table `note_tasks` (migration 031) filled by the index pass, extraction version 4; new refusal codes `line_mismatch`, `not_a_task`, `recurring_task`, `task_settings_invalid`; settings `TASKS_INBOX_PATH`, `TASKS_TIMEZONE`, `TASKS_PLUGIN_SETTINGS_PATH`. See `docs/architecture/tasks.md` | `da0ab22` | Fork-only, never proposed |
 | The index walk skips Syncthing conflict copies (`*.sync-conflict-*`) like dot-files, so their checkboxes never show up as tasks; the vault guide's primer says to manage tasks with the task tools, which add the vault's global filter themselves | `55e1d79`, `0bb51d1` | Fork-only, never proposed |
 | `CLAUDE.md` / `AGENTS.md` no longer point to upstream's machine-local `~/.claude/rules/engineering-workflow.md` (OpenSpec flow, Codex audit gates); the review budget, the adversarial review of write-tool changes and the end-to-end check stay as repo rules; `CLAUDE.md`'s Git section says the fork is AI-managed, and `AGENTS.md` no longer addresses Codex | `d9cf6cf`, `aeb966c` | Fork-only, never proposed |
@@ -42,7 +44,7 @@ Last checked against `upstream/main` at `564e9e0` (#338) on 2026-10-23.
 | `create_note`, `move_note` and `write_file` (a new `.md`) check a note's name against its folder's `note_names` setting, declared on folder notes (`dated`: refused as `note_name_date` without its date first, with the corrected name; `undated`: a dated name flagged), areas and the archive mirroring the top level. See `docs/architecture/vault-tools.md` | `a7ab414`, `0437e27` | Fork-only, never proposed |
 | `edit_note`, `create_note` and `write_file` on `.md` drop a first heading repeating the note's name from the text they add or change (`title_heading_removed:`). See `docs/architecture/vault-tools.md` | `8efece9`, `4e33f96` | Fork-only, never proposed |
 | `edit_note` writes the caller's text with the note's own most common line ending (CRLF stays CRLF) and matches `find` whatever the endings; `replace_frontmatter=True` stays byte-exact. See `docs/architecture/vault-tools.md`, 'Line endings' | `39617ba`, `1d63c3b` | Fork-only, never proposed |
-| The note writers point out a change to a rule note (setting `RULE_FILE_PATTERNS`, empty by default) whose changed lines gain no proposal ref (`rule_change_unlogged:`). See `docs/architecture/vault-tools.md` | (this change) | Fork-only, never proposed |
+| The note writers point out a change to a rule note (setting `RULE_FILE_PATTERNS`, empty by default) whose changed lines gain no proposal ref (`rule_change_unlogged:`). See `docs/architecture/vault-tools.md` | `1ac2e1b`, `24626d4` | Fork-only, never proposed |
 | Open-note links: with `OPEN_NOTE_URL` set (an http(s) template with `{path}`), `read_note` (`open_url`), `open_area` (`main_note_open_url`), `create_note` and the search and listing tools (` — open_url: <link>` per note) carry a link opening the note in Obsidian; tool descriptions and the guide say to give it when pointing the user to a note. See `docs/architecture/vault-tools.md` | `ac36f68` | Fork-only, never proposed |
 | Plugins: setting `PLUGINS` loads modules from `src/plugins/` at startup (refusing to start on one that does not load); the note writers run their `check` and `rewrite` hooks, setting aside a failing or overreaching one with `plugin_error:`; the plugin `kelno_vault`, empty for now, is where this vault's conventions move. See `docs/architecture/plugins.md` | (this change) | Fork-only, never proposed |
 | `image-no-tests` workflow: builds and publishes the image on every push to `main`, without the test suite | `4ee2d8a`, `8f540b4` | Fork-only, never proposed |
@@ -135,22 +137,3 @@ request already running, so a query during indexing can take up to one
 request's time. Changing the provider or model changes the embedding
 fingerprint and needs a re-embed; the URL does not, so the bulk embed can
 run against a fast machine first and `OLLAMA_URL` be switched afterwards.
-
-## Pending pull requests
-
-- [#339](https://github.com/maxkuminov/obsidian-mcp/pull/339), ours, open.
-  When upstream merges it, the next sync makes `5744b33` redundant.
-- [#337](https://github.com/maxkuminov/obsidian-mcp/pull/337), upstream's,
-  open. Merged here at its current head `f3618a0`. If upstream changes it
-  before merging, the next sync brings the final version, which may conflict
-  with the early merge.
-
-## Syncing with upstream
-
-```bash
-git fetch upstream
-git merge upstream/main
-```
-
-Then update the table above: drop rows that upstream has merged, and move
-"Last checked" to the new `upstream/main`.

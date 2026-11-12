@@ -84,6 +84,15 @@ This fork is an AI-managed repo: its owner, kelno, has their own AI agents maint
 
 The AI-managed rules above set the pace here. Anything on `main` may be deployed at any time (see `FORK.md`), so push `main` when a piece of work is ready to deploy, never just to save it; work in progress stays on a branch. Before that push, the full checks must have passed once for the piece of work: the full suite including `make test-integration`, plus `make test-schema` and `make db-check` for a migration. A fix after them, even right before the push, needs only the tests for what changed (for a tool description or the guide, the test files that name it), not another full run. The report says what changed since the full run.
 
+### Following upstream
+
+This fork follows `maxkuminov/obsidian-mcp` under kelno's rules for forks, kept in kelno's private agent setup; they include an upstream check at the start of a session. What is specific here:
+
+- The record of how the fork differs is `FORK.md`, "What differs from upstream": one row per difference, saying what differs and why.
+- An upstream tool the owner hasn't decided on is switched off by naming it in a `SWITCHED_OFF` list in `src/mcp_server/server.py`: its code stays, it is not registered, and its tests run with it registered. The first resync that leaves a tool off adds the list. Any other upstream feature stays off through its own setting.
+- A fork migration's revision id comes from 1001 up (file `1001_<name>.py`, revision `"1001"`), chained after the current head, never upstream's next number. Migrations 031 and 032 predate this and share their ids with upstream's 031 and 032; the next resync renumbers them, with a one-time fix of the live database's migration record.
+- A resync is a piece of work like any other here: the full checks above before its push to `main`, and the adversarial review below, since it changes the write tools.
+
 ## Review and checks
 
 **Review budget:** triage adversarial findings on plausible input and real impact, accepted limitations recorded in the relevant architecture note rather than polished away, and say which findings were declined. Rigor on what matters; ship in a day what can ship in a day.
