@@ -391,8 +391,10 @@ async def create_note(
     task line (a checkbox line the Tasks plugin reads as a task, with the
     vault's global filter such as `#task`) is refused with
     `task_line_by_hand`, naming the lines, and writes nothing: use
-    `create_task`, `edit_task` or `set_task_status`. Deleting a task line, or
-    moving one unchanged, is allowed.
+    `create_task`, `edit_task` or `set_task_status`. Deleting a task line,
+    keeping one unchanged (the same text, wherever it now sits in the note,
+    so reordering is fine), and showing one in a code span or fenced code
+    block are allowed.
 
     **Agent-ledger refs.** When the note cites agent-ledger entries in
     brackets (`[Q14]`), the result ends with `cites:`, each entry as it stands
@@ -460,8 +462,10 @@ async def edit_note(
     task line (a checkbox line the Tasks plugin reads as a task, with the
     vault's global filter such as `#task`) is refused with
     `task_line_by_hand`, naming the lines, and writes nothing: use
-    `create_task`, `edit_task` or `set_task_status`. Deleting a task line, or
-    moving one unchanged, is allowed.
+    `create_task`, `edit_task` or `set_task_status`. Deleting a task line,
+    keeping one unchanged (the same text, wherever it now sits in the note,
+    so reordering is fine), and showing one in a code span or fenced code
+    block are allowed.
 
     **Agent-ledger refs on the lines.** When the lines this write removes or
     rewrites cite agent-ledger entries in brackets (`[P54, P80]`), the result

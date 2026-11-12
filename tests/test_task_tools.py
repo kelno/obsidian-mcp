@@ -684,6 +684,18 @@ def test_create_note_and_write_file_refuse_task_lines_but_not_other_checkboxes(v
     assert code(_Refused(new)) == "task_line_by_hand"
     txt = asyncio.run(tools.write_file_impl("t.txt", "- [ ] #task not a note\n", encoding="text"))
     assert txt.startswith("Wrote")
+    import base64
+    latin = base64.b64encode(b"caf\xe9\n- [ ] #task Sneaky\n").decode()
+    assert code(_Refused(asyncio.run(tools.write_file_impl("l.md", latin)))) == "task_line_by_hand"
+    exists = asyncio.run(tools.create_note_impl("w.md", "- [ ] #task Same\n"))
+    assert code(_Refused(exists)) == "already_exists"
+
+
+def test_trailing_whitespace_and_indentation_are_not_a_change(vault):
+    write_settings(vault, FILTERED)
+    note(vault, "s.md", "## Next\n- [ ] #task Keep  \n\t- [ ] #task Sub\n")
+    ok = asyncio.run(tools.edit_note_impl("s.md", "- [ ] #task Keep\n    - [ ] #task Sub\n", section="Next"))
+    assert ok.startswith("Updated note"), ok
 
 
 def test_without_a_tasks_settings_file_checkboxes_are_not_checked(vault):

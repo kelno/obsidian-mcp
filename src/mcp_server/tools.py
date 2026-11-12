@@ -3403,7 +3403,9 @@ async def create_note_impl(
     except ValueError as e:
         return _body_refusal(str(e), "validation_failed")
     with target:
-        if err := await _hand_written_task_error(uid, "create_note", target.rel, None, content):
+        # An existing note is refused as `already_exists` below: that answer wins.
+        if target.lstat() is None and (
+                err := await _hand_written_task_error(uid, "create_note", target.rel, None, content)):
             return err
         # The agent-edit stamp, before the size check: the cap binds what is
         # written.
@@ -6591,18 +6593,18 @@ async def write_file_impl(
         else:
             data = content.encode("utf-8")
 
-        if target.rel.lower().endswith(".md"):
-            try:
-                new_note = data.decode("utf-8")
-            except UnicodeDecodeError:
-                new_note = None
-            if new_note is not None:
-                try:
-                    old_note = previous_note.decode("utf-8") if previous_note is not None else None
-                except UnicodeDecodeError:
-                    old_note = None
-                if err := await _hand_written_task_error(uid, "write_file", target.rel, old_note, new_note):
-                    return err
+        # Task lines go through the task tools. Bytes that are not UTF-8 are
+        # read leniently, so they cannot switch the check off. Not checked: a
+        # write the no-clobber publish refuses as `already_exists` (that
+        # answer wins), and an overwrite whose old text could not be read
+        # (every task in it would look new).
+        exists = target.lstat() is not None
+        if target.rel.lower().endswith(".md") and (overwrite or not exists) and not (
+                overwrite and exists and previous_note is None):
+            old_note = previous_note.decode("utf-8", errors="replace") if previous_note is not None else None
+            if err := await _hand_written_task_error(
+                    uid, "write_file", target.rel, old_note, data.decode("utf-8", errors="replace")):
+                return err
 
         # **The cap follows the NORMALISED name, not the caller's string.**
         # `open_mutable` drops empty and `.` components, so `"big.md/."` is
@@ -8199,11 +8201,13 @@ async def _hand_written_task_error(uid, tool: str, path: str, old: str | None, n
                 if s.kind == "task" and _task_ops.parse_line(s.text, path, task_settings, registry) is not None]
 
     def check():
-        before = Counter(line for _n, line in task_lines(old))
+        # Compared without surrounding whitespace: trailing spaces and the
+        # indentation's characters are not what a task says.
+        before = Counter(line.strip() for _n, line in task_lines(old))
         offending = []
         for number, line in task_lines(new):
-            if before[line] > 0:
-                before[line] -= 1
+            if before[line.strip()] > 0:
+                before[line.strip()] -= 1
             else:
                 offending.append((number, line))
         return offending
@@ -8217,9 +8221,9 @@ async def _hand_written_task_error(uid, tool: str, path: str, old: str | None, n
         f"{tool}: this write adds or changes task lines by hand, which the vault's rules leave to the task tools. "
         f"Nothing was written.\n{shown}" + (f"\n- and {more} more" if more > 0 else "") + "\n"
         "Create a task with create_task; change one with edit_task (its text or dates) or set_task_status (done, "
-        "cancelled, …), which write the Tasks plugin's format and re-index the note at once. Deleting a task line, "
-        "or moving one unchanged, is allowed, and so is text that only mentions the global filter outside a task "
-        "line (in a code span, say).",
+        "cancelled), which write the Tasks plugin's format. Write the rest of your text without these lines. "
+        "Allowed: deleting a task line; keeping one unchanged (the same text, wherever it sits in the note, so "
+        "reordering is fine); showing one in a code span or fenced code block.",
         TASK_LINE_BY_HAND,
     )
 
