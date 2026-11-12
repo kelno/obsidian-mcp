@@ -7898,6 +7898,19 @@ def _task_item(entry: _tq.Entry, content_hash: str, today) -> TaskItem:
     )
 
 
+def _task_private_hidden(note_path: str, path_filter: str | None) -> bool:
+    """A task line in a private folder, to list by location only (F63).
+
+    The private-folder rule keeps such notes' content out of what agents
+    stumble on. A `list_tasks` query that names a private folder in its `path`
+    asked for it, so its tasks come with their text; any other query lists
+    them as `path:line` only.
+    """
+    if not _ledger_private(note_path):
+        return False
+    return not (path_filter and "(private)" in path_filter.lower())
+
+
 def _read_current_note(path: str, uid: int | None) -> tuple[str | None, list | None, str]:
     """`(content_hash, lines, reason)` for a note as it is on disk now."""
     try:
@@ -8018,12 +8031,17 @@ async def list_tasks_impl(
             note_lines[entry.line_number - 1][0]
             if note_lines is not None and entry.line_number <= len(note_lines) else None
         )
+        hidden = _task_private_hidden(entry.path, path)
         if content_hash is None or on_disk != entry.text:
             stale.append(StaleTask(
                 ref=f"{entry.path}:{entry.line_number}", path=entry.path, line=entry.line_number,
-                indexed_text=entry.text,
+                indexed_text=None if hidden else entry.text,
                 reason=reason or "the line changed since the index read it; it is re-indexed at the next pass",
             ))
+            continue
+        if hidden:
+            tasks.append(TaskItem(ref=f"{entry.path}:{entry.line_number}", path=entry.path,
+                                  line=entry.line_number, private=True, status_type=entry.task.status.type))
             continue
         tasks.append(_task_item(entry, content_hash, today))
 
@@ -8042,16 +8060,18 @@ async def list_tasks_impl(
         notes.append("The plugin's global query was applied as well, as Obsidian applies it to every query.")
     if sort == "random":
         notes.append("random order is this server's own shuffle; Obsidian's `sort by random` orders differently.")
-    # Problems come back with every query, whatever it asked: a private note's
-    # line is shown as path:line and reason only, as open_area and cited_by do (F63).
+    # A private note's tasks and problems are listed by location only, unless
+    # the query's `path` names a private folder, as open_area and cited_by do (F63).
     problem_items = [
         TaskProblem(ref=f"{r.file_path}:{r.line_number}", path=r.file_path, line=r.line_number,
-                    text=None if _ledger_private(r.file_path) else r.line, reason=r.reason or "unknown")
+                    text=None if _task_private_hidden(r.file_path, path) else r.line,
+                    reason=r.reason or "unknown")
         for r in problems[:TASK_LIST_MAX_PROBLEMS]
     ]
-    if any(p.text is None for p in problem_items):
-        notes.append("A problem listed without its text is in a private folder: read it only if the owner asks; "
-                     "leave it out of your checks otherwise.")
+    if (any(t.private for t in tasks) or any(p.text is None for p in problem_items)
+            or any(st.indexed_text is None for st in stale)):
+        notes.append("A task or problem listed by location only is in a private folder: read it only if the owner "
+                     "asks, or list it with a `path` naming that folder; leave it out of your checks otherwise.")
     return TaskListResult(
         tasks=tasks,
         total_matched=total,
