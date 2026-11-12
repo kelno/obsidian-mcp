@@ -1243,9 +1243,9 @@ async def test_ticking_the_last_citing_task_asks_to_close_the_feedback(sessionma
     one = await tools.set_task_status_impl("f51.md", first.line, first.text, second.content_hash, status="done")
     assert not any("now all done" in n for n in one.notes or [])          # part two is still open
     two = await tools.set_task_status_impl("f51.md", second.line, second.text, one.content_hash, status="done")
-    assert two.notes == [
+    assert len(two.notes) == 1 and two.notes[0].startswith(
         f"{fb.ref}'s tasks are now all done: close it with ledger_update(ref=\"{fb.ref}\", status=\"handled\", "
-        "handled_account=…) saying what was done, unless something in it is still open; then say so to the owner."]
+        "handled_account=…) saying what was done, unless part of it is still to do")
     again = await tools.set_task_status_impl("f51.md", second.line, two.text, two.content_hash, status="done")
     assert not any("now all done" in n for n in again.notes or [])        # it was already done
     got = (await tools.ledger_get_impl([fb.ref])).entries[0]
@@ -1261,9 +1261,12 @@ async def test_cancelling_the_last_citing_task_says_undecided_and_a_quirk_gets_o
     cancelled = await tools.set_task_status_impl("f51b.md", task.line, task.text, task.content_hash,
                                                  status="cancelled")
     assert cancelled.notes == [
-        f"{fb.ref}'s tasks are now all cancelled: it is undecided again and stays open; say so to the owner if "
-        "they don't know.",
-        f"{quirk.ref} has no open citing task any more: what was pending on it is no longer open."]
+        f"{fb.ref}'s tasks are now all cancelled: no decision on it stands any more, so it stays open, waiting for "
+        "the owner's call; say so to the owner if they don't know.",
+        f"{quirk.ref} has no open citing task any more: nothing is pending on it now; the quirk itself stays as it is."]
+    redone = await tools.set_task_status_impl("f51b.md", task.line, cancelled.text, cancelled.content_hash,
+                                              status="done")
+    assert any(n.startswith(f"{fb.ref}'s tasks are now all done") for n in redone.notes)
 
 
 async def test_open_area_flags_feedback_whose_tasks_the_owner_ticked(sessionmaker, ctx):
@@ -1275,5 +1278,16 @@ async def test_open_area_flags_feedback_whose_tasks_the_owner_ticked(sessionmake
     from src.services import task_index
     await task_index.reindex_note_tasks_now(None, "plans.md", (ctx / "plans.md").read_text(encoding="utf-8"))
     result = await tools.open_area_impl(area="home")
-    flag = next(n for n in result.notes if n.startswith("Feedback whose citing tasks are all done"))
+    flag = next(n for n in result.notes if n.startswith("Feedback of this area whose citing tasks are all done"))
     assert f"({fb.ref};" in flag and other.ref not in flag and 'status="handled"' in flag
+
+
+async def test_a_delete_on_done_removal_still_points_to_closing_the_feedback(sessionmaker, ctx):
+    """The review's case: the only citing task, with 🏁 delete, disappears when ticked."""
+    await _task_note(sessionmaker, ctx, "f51c.md")
+    fb = await tools.ledger_add_impl("feedback", "Only one task", area="home", details={"subtype": "friction"})
+    task = await tools.create_task_impl(f"Only [{fb.ref}]", path="f51c.md", on_completion="delete")
+    done = await tools.set_task_status_impl("f51c.md", task.line, task.text, task.content_hash, status="done")
+    assert done.removed is True
+    assert any(n.startswith(f"{fb.ref}'s tasks are now all done (the task you ticked was removed by 🏁 delete")
+               for n in done.notes or []), done.notes

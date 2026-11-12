@@ -8115,7 +8115,8 @@ async def _task_written(uid, target, line_number, previous, written, new_text, t
         if refs:
             notes = notes + _task_closing_notes(
                 refs, _task_status_type(previous, target.rel, task_settings, registry),
-                "DONE" if extra.get("removed") else _task_status_type(written, target.rel, task_settings, registry))
+                "DONE" if extra.get("removed") else _task_status_type(written, target.rel, task_settings, registry),
+                removed=bool(extra.get("removed")))
     if refs or notes:
         extra = {**extra, "ledger_refs": [{k: v for k, v in r.items() if v is not None} for r in refs] or None,
                  "notes": notes or None}
@@ -8145,33 +8146,45 @@ def _task_status_type(line: str | None, path: str, task_settings, registry) -> s
     return task.status.type if task is not None else None
 
 
-def _task_closing_notes(refs: list[dict], before: str | None, after: str | None) -> list[str]:
+def _task_closing_notes(refs: list[dict], before: str | None, after: str | None, *,
+                        removed: bool = False) -> list[str]:
     """What this write's closing of a task means for the ledger entries it cites (ledger F51).
 
-    Only when this write closed the task (it was open, or new, and is now
-    done or cancelled), and only from the entries' task state after it:
-    feedback whose citing tasks are now all done is ready to close as
-    `handled`; all cancelled, it is undecided again. For a quirk or
-    proposal, its citing tasks being all closed means nothing is pending on
-    it any more. Nothing is closed for the agent.
+    Only when this write closed the task or changed how it closed (open or
+    new → done or cancelled, done ↔ cancelled), and only from the entries'
+    task state after it, as the task index has it: feedback whose citing
+    tasks are now all done is ready to close as `handled`; all cancelled,
+    no decision on it stands. A task `🏁 delete` removed counts as done: it
+    no longer cites the entry, so without it the entry would have no task
+    and read as undecided. For a current quirk or a proposal, its citing
+    tasks being all closed means nothing is pending on it any more. Nothing
+    is closed for the agent.
     """
-    if after not in _TASK_CLOSED_TYPES or before in _TASK_CLOSED_TYPES:
+    if after not in _TASK_CLOSED_TYPES or before == after:
         return []
     notes = []
     for ref in refs:
         state, kind = ref.get("tasks"), ref.get("kind")
+        if removed and state in (None, "cancelled"):
+            state = "done"   # the removed line was done; done and cancelled together read as done
         if kind == "feedback" and ref.get("status") in ("open", "to_triage"):
             if state == "done":
+                gone = (" (the task you ticked was removed by 🏁 delete, so no task cites it any more)"
+                        if removed and ref.get("tasks") is None else "")
                 notes.append(
-                    f"{ref['ref']}'s tasks are now all done: close it with ledger_update(ref=\"{ref['ref']}\", "
-                    "status=\"handled\", handled_account=…) saying what was done, unless something in it is still "
-                    "open; then say so to the owner.")
+                    f"{ref['ref']}'s tasks are now all done{gone}: close it with ledger_update(ref=\"{ref['ref']}\", "
+                    "status=\"handled\", handled_account=…) saying what was done, unless part of it is still to "
+                    "do (a lead not built yet, say: then tell the owner instead of closing it); then say so to the "
+                    "owner. The task state is the index's: a task added by hand in the last minutes may not count "
+                    "yet.")
             elif state == "cancelled":
                 notes.append(
-                    f"{ref['ref']}'s tasks are now all cancelled: it is undecided again and stays open; say so to "
-                    "the owner if they don't know.")
-        elif kind in ("quirk", "proposal") and state in ("done", "cancelled"):
-            notes.append(f"{ref['ref']} has no open citing task any more: what was pending on it is no longer open.")
+                    f"{ref['ref']}'s tasks are now all cancelled: no decision on it stands any more, so it stays "
+                    "open, waiting for the owner's call; say so to the owner if they don't know.")
+        elif state in ("done", "cancelled") and (
+                kind == "proposal" or (kind == "quirk" and ref.get("status") == "current")):
+            notes.append(f"{ref['ref']} has no open citing task any more: nothing is pending on it now; the "
+                         f"{kind} itself stays as it is.")
     return notes
 
 
@@ -9303,10 +9316,11 @@ async def _open_area_entries(tag: str, uid, notes: list[str]) -> tuple[list, boo
     if links is not None:
         to_close = await _open_area_to_close(tag, uid, states)
         if to_close:
-            notes.insert(0, f"Feedback whose citing tasks are all done ({', '.join(to_close)}; the owner may have "
-                            "ticked them in Obsidian): close each with ledger_update(status=\"handled\", "
-                            "handled_account=…) saying what was done, unless something in it is still open; then "
-                            "say so to the owner.")
+            notes.insert(0, f"Feedback of this area whose citing tasks are all done ({', '.join(to_close)}; the "
+                            "owner may have ticked them in Obsidian): once the work you were asked for allows, or now "
+                            "if the owner asked about the area, close each with ledger_update(status=\"handled\", "
+                            "handled_account=…) saying what was done, unless part of it is still to do (then tell "
+                            "the owner instead); then say so to the owner.")
     return entries, truncated
 
 
@@ -9317,6 +9331,9 @@ async def _open_area_to_close(tag: str, uid, states: dict[str, str]) -> list[str
         return []
     async with async_session() as session:
         filters = await _ledger.build_filters(session, uid, kinds=["feedback"], area=tag)
+        # Filed under this area only: feedback tied to it by a topic belongs to
+        # another area, whose agents close it.
+        filters.area_topics = {}
         filters.feedback_numbers = done
         rows, truncated, _via = await _ledger_listed(session, uid, filters, OPEN_AREA_ENTRIES_MAX)
     return [r.ref for r in rows] + (["…"] if truncated else [])
