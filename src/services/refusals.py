@@ -126,6 +126,9 @@ BODY_CODES = frozenset({
     # line is not a task the plugin reads; a status change on a `🔁` task; the
     # vault's Tasks plugin settings cannot be applied.
     "line_mismatch", "not_a_task", "recurring_task", "task_settings_invalid",
+    # A general note writer asked to add or change a task line by hand: tasks
+    # go through the task tools.
+    "task_line_by_hand",
     # Agent ledger (fork): the entry, line or topic changed since the
     # revision the caller read; the result carries `current_revision`.
     "stale_revision",

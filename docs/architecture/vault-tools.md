@@ -378,6 +378,10 @@ With `LAST_AI_EDIT_FIELD` set, every tool that writes a note's text sets that fr
 - **`LAST_AI_EDIT_FIELD` must load as a string key**: `true`, `yes`, `null` and the like pass a name pattern but load as a bool or None, and are refused at startup.
 - **Accepted (review, 2026-11-10):** L1, `move_note` stamps in its preflight, so with many sources the stamp precedes the file's modification time by the planning time (seconds); the `Recent` view's tolerance is a minute. L2, a note left unstamped by a refusal above (duplicate keys already present, a column-0 list under the key, a block scalar with a blank line) is left so without a word: failing safe, not loudly. L3, the archive hint's `lstat` follows intermediate symlinks, so a configured `ARCHIVE_FOLDER` pointing outside the vault probes there; only a yes/no comes back, and the setting is the operator's. Local edits on the owner's PC do not go through the server; a Claude Code hook in the owner's setup stamps those, with the same line rules (no YAML parser there, so it refuses any quoted spelling of the key instead of re-parsing).
 
+### The note writers refuse task lines written by hand (fork, owner's decision, 2026-11-12)
+
+`edit_note`, `create_note` and `write_file` on a `.md` refuse a write that adds or changes a task line (`task_line_by_hand`, nothing written): tasks are created and changed only with the task tools. Deleting a task line, or moving one unchanged, passes. Where the check sits and what counts as a task line: "Task lines are written by the task tools only" in [task tools](tasks.md).
+
 ### The note writers name the ledger refs on the lines they change (fork, owner's design, 2026-11-12)
 
 The vault's agent rules end each line with the refs of the proposals that shaped it (`... gets forgotten. [P54, P80]`), and from 2026-11-12 they are edited only through these tools. So `edit_note` (every mode, `dry_run` included, after the diff), `create_note`, `delete_note` and `write_file` on a `.md` target append to their text result:

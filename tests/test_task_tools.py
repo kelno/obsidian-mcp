@@ -6,6 +6,7 @@ replaced by fakes, so these tests are about the bytes written. The database
 side (the rows, `list_tasks`) is in tests/integration/test_task_tools_pg.py.
 """
 
+import asyncio
 import json
 from datetime import date, datetime, timezone
 
@@ -634,3 +635,65 @@ async def test_a_duplicate_field_is_refused_not_dropped(vault):
     result = await edit(vault, text + "\n", 1, text, priority="low")
     assert code(result) == "not_a_task"
     assert read(vault, "n.md") == text + "\n"
+
+
+
+# ── The note tools refuse task lines written by hand ─────────────────────────
+
+FILTERED = {**OWNER_SETTINGS, "globalFilter": "#task"}
+
+
+def test_edit_note_refuses_a_new_or_changed_task_line_and_writes_nothing(vault):
+    write_settings(vault, FILTERED)
+    h = note(vault, "n.md", "# N\n\n- [ ] #task Old one\n- [ ] plain checkbox\n")
+    added = asyncio.run(tools.edit_note_impl("n.md", "- [ ] #task New one", append=True))
+    assert code(_Refused(added)) == "task_line_by_hand"
+    assert "line 6: - [ ] #task New one" in added and "create_task" in added
+    changed = asyncio.run(tools.edit_note_impl("n.md", "- [x] #task Old one", find="- [ ] #task Old one"))
+    assert code(_Refused(changed)) == "task_line_by_hand" and "edit_task" in changed
+    dry = asyncio.run(tools.edit_note_impl("n.md", "- [ ] #task Dry", append=True, dry_run=True))
+    assert code(_Refused(dry)) == "task_line_by_hand"
+    assert content_hash_for_bytes((vault / "n.md").read_bytes()) == h
+
+
+def test_edit_note_allows_deleting_moving_mentioning_and_untouched_task_lines(vault):
+    write_settings(vault, FILTERED)
+    note(vault, "m.md", "# M\n\n- [ ] #task Keep\n- [ ] #task Drop\nText\n")
+    ok = [
+        asyncio.run(tools.edit_note_impl("m.md", "", find="- [ ] #task Drop\n")),                 # delete
+        asyncio.run(tools.edit_note_impl("m.md", "Text, reworded", find="Text")),               # untouched
+        asyncio.run(tools.edit_note_impl("m.md", "Use `- [ ] #task x` via create_task.\n- [ ] a plain box",
+                                         append=True)),                                          # mentions
+        asyncio.run(tools.edit_note_impl("m.md", "# M\n\nText, reworded\n- [ ] #task Keep\n")),   # moved
+        asyncio.run(tools.edit_note_impl("m.md", "```\n- [ ] #task in a fence\n```", append=True)),
+    ]
+    for result in ok:
+        assert result.startswith(("Updated note", "Replaced")), result
+
+
+def test_create_note_and_write_file_refuse_task_lines_but_not_other_checkboxes(vault):
+    write_settings(vault, FILTERED)
+    refused = asyncio.run(tools.create_note_impl("c.md", "- [ ] #task Hand-written\n"))
+    assert code(_Refused(refused)) == "task_line_by_hand" and not (vault / "c.md").exists()
+    plain = asyncio.run(tools.create_note_impl("p.md", "- [ ] just a box\n"))
+    assert plain.startswith("Created note")
+    note(vault, "w.md", "- [ ] #task Same\n")
+    same = asyncio.run(tools.write_file_impl("w.md", "Intro\n- [ ] #task Same\n", encoding="text", overwrite=True))
+    assert same.startswith("Wrote")
+    new = asyncio.run(tools.write_file_impl("w.md", "- [ ] #task Other\n", encoding="text", overwrite=True))
+    assert code(_Refused(new)) == "task_line_by_hand"
+    txt = asyncio.run(tools.write_file_impl("t.txt", "- [ ] #task not a note\n", encoding="text"))
+    assert txt.startswith("Wrote")
+
+
+def test_without_a_tasks_settings_file_checkboxes_are_not_checked(vault):
+    (vault / ".obsidian" / "plugins" / "obsidian-tasks-plugin" / "data.json").unlink()
+    created = asyncio.run(tools.create_note_impl("x.md", "- [ ] #task anything\n"))
+    assert created.startswith("Created note")
+
+
+class _Refused:
+    """A string refusal, shaped for `code()`."""
+
+    def __init__(self, text):
+        self.error = text

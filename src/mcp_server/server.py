@@ -387,6 +387,13 @@ async def create_note(
     See `get_vault_guide` for Obsidian syntax and any vault-specific conventions
     (naming, folder placement, frontmatter, tags).
 
+    **Task lines go through the task tools.** A write that adds or changes a
+    task line (a checkbox line the Tasks plugin reads as a task, with the
+    vault's global filter such as `#task`) is refused with
+    `task_line_by_hand`, naming the lines, and writes nothing: use
+    `create_task`, `edit_task` or `set_task_status`. Deleting a task line, or
+    moving one unchanged, is allowed.
+
     **Agent-ledger refs.** When the note cites agent-ledger entries in
     brackets (`[Q14]`), the result ends with `cites:`, each entry as it stands
     now: check your wording matches them.
@@ -448,6 +455,13 @@ async def edit_note(
 
     See `get_vault_guide` for Obsidian syntax and any vault-specific conventions
     (naming, folder placement, frontmatter, tags).
+
+    **Task lines go through the task tools.** A write that adds or changes a
+    task line (a checkbox line the Tasks plugin reads as a task, with the
+    vault's global filter such as `#task`) is refused with
+    `task_line_by_hand`, naming the lines, and writes nothing: use
+    `create_task`, `edit_task` or `set_task_status`. Deleting a task line, or
+    moving one unchanged, is allowed.
 
     **Agent-ledger refs on the lines.** When the lines this write removes or
     rewrites cite agent-ledger entries in brackets (`[P54, P80]`), the result
@@ -1077,7 +1091,9 @@ async def write_file(
     carrying the `readwrite` scope.
     Peer to `create_note`/`edit_note`, which stay markdown-only.
     Writing a `.md` note, the result lists agent-ledger refs like
-    `edit_note`'s (`changed_lines_cite:`, `cites:`).
+    `edit_note`'s (`changed_lines_cite:`, `cites:`), and a write that adds
+    or changes a task line is refused like `edit_note`'s
+    (`task_line_by_hand`): tasks go through the task tools.
 
     `content` carries the bytes: with `encoding="base64"` (default) it is
     base64-decoded to raw bytes; with `encoding="text"` it is written verbatim
