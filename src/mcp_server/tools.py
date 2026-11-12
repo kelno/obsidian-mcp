@@ -3410,7 +3410,9 @@ async def create_note_impl(
         content, links_report, links_failure = await _full_path_links(uid, target.rel, None, content)
         # The agent-edit stamp, before the size check: the cap binds what is
         # written.
+        unstamped_lines = _line_count(content)
         content = ai_edit_stamp.stamp(content, target.rel)
+        links_shift = _line_count(content) - unstamped_lines
         if err := _note_size_error(content):
             return err
         # #88, immediately before the publication and after every refusal that
@@ -3444,7 +3446,8 @@ async def create_note_impl(
             return _body_refusal(str(e), "validation_failed")
         except OSError as e:
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
-    return created + _links_text(links_report, links_failure) + await _note_refs_report(uid, None, content)
+    return created + _links_text(links_report, links_failure, shift=links_shift) + await _note_refs_report(
+        uid, None, content)
 
 
 # Row-level excerpt bound for the graph tools. `link_text` is note text the
@@ -4437,8 +4440,11 @@ async def edit_note_impl(
         # The agent-edit stamp, on a write that changes something (a no-op
         # stays a no-op), before the size cap and the diff so both see the
         # bytes that would be written.
+        links_shift = 0
         if new_content != existing:
+            unstamped_lines = _line_count(new_content)
             new_content = ai_edit_stamp.stamp(new_content, target.rel)
+            links_shift = _line_count(new_content) - unstamped_lines
 
         # Bound the *result*, before the diff and before the atomic write, so an
         # over-cap edit is refused by the tool in every mode (including dry_run)
@@ -4460,7 +4466,7 @@ async def edit_note_impl(
             ))
             if not diff:
                 return f"No changes for {path}"
-            return (diff + _links_text(links_report, links_failure, dry_run=True)
+            return (diff + _links_text(links_report, links_failure, dry_run=True, shift=links_shift)
                     + await _note_refs_report(uid, existing, new_content))
 
         # #88. Placed after the `dry_run` return above on purpose: a dry run
@@ -4489,7 +4495,8 @@ async def edit_note_impl(
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
         return success_message + _published_hash_clause(
             new_content.encode("utf-8")
-        ) + _links_text(links_report, links_failure) + await _note_refs_report(uid, existing, new_content)
+        ) + _links_text(links_report, links_failure, shift=links_shift) + await _note_refs_report(
+            uid, existing, new_content)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -6615,7 +6622,8 @@ async def write_file_impl(
                     uid, "write_file", target.rel, old_note, data.decode("utf-8", errors="replace")):
                 return err
         links_text = ""
-        if target.rel.lower().endswith(".md"):
+        # Not when the old text could not be read: every line would look new.
+        if target.rel.lower().endswith(".md") and not (overwrite and exists and previous_note is None):
             try:
                 new_note = data.decode("utf-8")
             except UnicodeDecodeError:
@@ -6623,13 +6631,15 @@ async def write_file_impl(
             if new_note is not None:
                 try:
                     old_text = previous_note.decode("utf-8") if previous_note is not None else None
+                    readable = True
                 except UnicodeDecodeError:
-                    old_text = None
-                rewritten, links_report, links_failure = await _full_path_links(
-                    uid, target.rel, old_text, new_note)
-                if rewritten != new_note:
-                    data = rewritten.encode("utf-8")
-                links_text = _links_text(links_report, links_failure)
+                    readable = False   # every line would look new: links left as sent
+                if readable:
+                    rewritten, links_report, links_failure = await _full_path_links(
+                        uid, target.rel, old_text, new_note)
+                    if rewritten != new_note:
+                        data = rewritten.encode("utf-8")
+                    links_text = _links_text(links_report, links_failure)
 
         # **The cap follows the NORMALISED name, not the caller's string.**
         # `open_mutable` drops empty and `.` components, so `"big.md/."` is
@@ -9124,7 +9134,7 @@ async def _full_path_links(uid, path: str, old: str | None, new: str) -> tuple[s
     """
     from src.services import link_paths
 
-    if "[[" not in new:
+    if not link_paths.needs_check(old, new):
         return new, None, ""
     try:
         from sqlalchemy import select
@@ -9144,10 +9154,11 @@ async def _full_path_links(uid, path: str, old: str | None, new: str) -> tuple[s
                            "write each link with the note's full path yourself.")
 
 
-def _links_text(report, failure: str, *, dry_run: bool = False) -> str:
+def _links_text(report, failure: str, *, dry_run: bool = False, shift: int = 0) -> str:
+    """The result's link blocks; `shift`: lines the agent-edit stamp added above, so line numbers match the note."""
     from src.services import link_paths
 
-    return failure or (link_paths.render(report, dry_run=dry_run) if report else "")
+    return failure or (link_paths.render(link_paths.shifted(report, shift), dry_run=dry_run) if report else "")
 
 
 async def _note_refs_report(uid, old: str | None, new: str | None, *, old_unread: bool = False) -> str:
