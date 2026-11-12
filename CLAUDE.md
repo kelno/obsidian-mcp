@@ -56,6 +56,9 @@ hostnames) must stay out of tracked files. The mechanism:
 - The repo's `docker-compose.yml` and the deploy-dir copy are kept
   identical; if you change one, copy it over.
 
+## The core serves any vault
+This fork's core must serve any Obsidian vault as it is. Behaviour that follows one vault's own conventions (its folder names and layout, its private folders, its naming or linking rules, an agent setup like the ledger) goes in a plugin that a deployment loads, never in the core; the core only offers the hook points. A feature that would help other vaults too, but not every one, goes behind a setting, off by default. The test before adding behaviour: would someone running this on their own vault want it without asking? If not, it belongs in a plugin. Until the plugin system exists, such behaviour goes behind a setting, off by default.
+
 ## Commands
 - `make init` — first-time setup
 - `make deploy` — compose-host build, backup, migration, and deploy (production
