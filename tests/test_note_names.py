@@ -21,20 +21,24 @@ DECLARED = {
     ("Archive/Areas/X/Log/sub", "dated", "Log/Log.md", "Log"),
     ("Archive/Reference", "undated", "Reference/Reference.md", "Reference"),
     ("Areas/Odd/Log", "undated", "Areas/Odd/Log/Log.md", None),
+    ("Areas/Odd/Log/2026", "undated", "Areas/Odd/Log/Log.md", None),     # nearer note wins below it too
+    ("Archive/Areas/Odd/Log", "undated", "Areas/Odd/Log/Log.md", "Areas/Odd/Log"),
     ("Areas/Champignons", "dated", "Areas/Areas.md", None),             # no mirror for the area folder itself
 ])
 def test_resolution(folder, value, source, mirrored):
-    found = nn.Rules(DECLARED).resolve(folder)
+    found = nn.Rules(DECLARED.get).resolve(folder)
     assert (found.value, found.source, found.mirrored) == (value, source, mirrored)
 
 
 @pytest.mark.parametrize("folder", ["", "Notes", "Inbox", "Documents/x"])
 def test_no_setting_no_check(folder):
-    assert nn.Rules(DECLARED).resolve(folder) is None
+    assert nn.Rules(DECLARED.get).resolve(folder) is None
 
 
 @pytest.mark.parametrize("stem", ["2026-11-12 Call", "2025-10-XX Trip", "2024-XX-XX Old", "2026-11-12",
-                                  "2024-02-29 Leap", "2026-11-12 Review of 2025-03 plan"])
+                                  "2024-02-29 Leap", "2026-11-12 Review of 2025-03 plan", "XXXX-XX-XX Legacy",
+                                  "2026-11-12 1430-1530 Call", "2026-11-12 2025-2026 season review",
+                                  "2026-11-12 0612 34 56 78 Plombier", "2026-11-12 15000000 views"])
 def test_right_names(stem):
     assert nn.check_dated(stem) is None
 
@@ -43,7 +47,9 @@ def test_right_names(stem):
     ("2025-10-00 Trip", "2025-10-XX Trip"),
     ("2024-00-00 Old", "2024-XX-XX Old"),
     ("2025-03-28 2025-03-28 Title", "2025-03-28 Title"),
-    ("2025-03-28 2025-03-29 Title", "2025-03-28 Title"),
+    ("2025-03-28 2025-03-29 Title", None),                    # maybe a span: no guess
+    ("2025-10-00 2025-10-00 Trip", None),                     # the fix would still carry two dates
+    ("Call 2026-11-12 2026-11-13", None),
     ("Call with bank 2026-11-12", "2026-11-12 Call with bank"),
     ("2026_11_12 Call", "2026-11-12 Call"),
     ("20261112 Call", "2026-11-12 Call"),
@@ -60,6 +66,9 @@ def test_wrong_names(stem, corrected):
 
 
 def test_exempt_and_undated_check():
-    assert nn.exempt("Log/Log.md") and nn.exempt("Log/Untitled 3.md")
+    assert nn.exempt("Log/Log.md") and nn.exempt("Log/Log.MD") and nn.exempt("Log/Untitled 3.md")
+    assert nn.archived_unchanged("Areas/X/Log/Setup.md", "Archive/Areas/X/Log/Setup.md")
+    assert not nn.archived_unchanged("Areas/X/Log/Setup.md", "Archive/Areas/X/Log/Other.md")
     assert not nn.exempt("Log/Call.md")
     assert nn.starts_with_date("2026-11-12 Server") and not nn.starts_with_date("Server 2026")
+    assert not nn.starts_with_date("2024-2025 Budget") and not nn.starts_with_date("1200-1500 Tarifs")

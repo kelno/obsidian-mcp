@@ -5182,7 +5182,11 @@ async def _move_note_locked(
 
         # The destination's name, against its folder's `note_names` setting:
         # before the index queries, the preflight and the rename.
-        name_err, name_flag = await _note_name_check(uid, "move_note", to_rel)
+        # Not for a note archived under its own name: that records it as it was.
+        from src.services.note_names import archived_unchanged
+
+        name_err, name_flag = (None, "") if archived_unchanged(from_rel, to_rel) else \
+            await _note_name_check(uid, "move_note", to_rel)
         if name_err:
             return name_err
 
@@ -9168,51 +9172,52 @@ NOTE_NAME_DATE = "note_name_date"
 async def _note_name_check(uid, tool: str, rel: str):
     """`(refusal or None, flag text)` for a note about to be named `rel` (`note_names`).
 
-    The setting comes from the folder notes' `note_names` frontmatter, as the
-    index has it (`src/services/note_names.py`). In a dated folder a wrong
-    name is refused, with the corrected name when it can be derived; in an
-    undated one a name starting with a date is written and flagged. When the
-    folder notes cannot be read the name is not checked (logged at debug).
+    The setting comes from the folder notes' `note_names` frontmatter, read
+    from disk walking up the path (a few small, bounded reads; see
+    `src/services/note_names.py`). In a dated folder a wrong name is refused,
+    with the corrected name when it can be derived; in an undated one a name
+    starting with a date is written and flagged. A folder note that cannot
+    be read counts as setting nothing (logged at debug).
     """
     from src.services import note_names
+    from src.services.vault import parse_frontmatter_diagnose
 
     if not rel.lower().endswith(".md") or note_names.exempt(rel):
         return None, ""
-    try:
-        from sqlalchemy import select
 
-        from src.models.db import NoteMetadata
+    def lookup(path: str):
+        try:
+            raw = read_bytes(path, uid, MAX_NOTE_BYTES).decode("utf-8")
+        except FileNotFoundError:
+            return None
+        except (ValueError, OSError, UnicodeDecodeError):
+            # debug, not warning: a caller drives this path (the D18 permit rule).
+            logger.debug("%s: folder note %s could not be read for note_names", tool, path, exc_info=True)
+            return None
+        frontmatter, _body, _diagnosis = parse_frontmatter_diagnose(raw)
+        return (frontmatter or {}).get(note_names.FIELD) if isinstance(frontmatter, dict) else None
 
-        async with async_session() as session:
-            rows = (await session.execute(
-                select(NoteMetadata.file_path, NoteMetadata.frontmatter).where(
-                    _note_owner_predicate(uid), NoteMetadata.frontmatter.has_key(note_names.FIELD))
-            )).all()
-    except Exception:  # noqa: BLE001 — the name goes unchecked; the write is not blocked by a read failure
-        # debug, not warning: a caller drives this path (the D18 permit rule).
-        logger.debug("%s: note_names could not be read; %s not checked", tool, rel, exc_info=True)
-        return None, ""
-    rules = note_names.Rules({r.file_path: (r.frontmatter or {}).get(note_names.FIELD) for r in rows})
     folder, name = posixpath.split(rel)
-    setting = rules.resolve(folder)
+    setting = await asyncio.to_thread(note_names.Rules(lookup).resolve, folder)
     if setting is None:
         return None, ""
     stem = name[:-3]
     where = (f"`{note_names.FIELD}: {setting.value}` in {setting.source}"
-             + (f", which {folder} mirrors as a copy of the top-level {setting.mirrored}/" if setting.mirrored else ""))
+             + (f", which {folder} follows as a mirror of {setting.mirrored}/" if setting.mirrored else ""))
     if setting.value == note_names.DATED:
         problem = note_names.check_dated(stem)
         if problem is None:
             return None, ""
-        fix = (f" Name it `{posixpath.join(folder, problem.corrected)}.md`." if problem.corrected else
-               " Name it `YYYY-MM-DD Title` (an unknown part as XX, never 00), with the note's own date.")
+        fix = (f" Call again with `{posixpath.join(folder, problem.corrected)}.md`." if problem.corrected else
+               " Start the name with the date the note is about (the day it happened); a note with no date of its"
+               " own, kept current, belongs in an undated folder (`Reference/`, say).")
         return _body_refusal(
             f"{tool}: notes in {folder}/ are named with their date first ({where}), and in `{name}` "
             f"{problem.message}{fix} Nothing was written.", NOTE_NAME_DATE), ""
     if note_names.starts_with_date(stem):
-        return None, (f"\n\nnote_name: `{name}` starts with a date, but notes in {folder}/ carry none ({where}): "
-                      "they describe the present. Rename it without the date (move_note) unless the date is "
-                      "part of what it is.")
+        return None, (f"\n\nnote_name: the note was written, but `{name}` starts with a date, and notes in "
+                      f"{folder}/ carry none ({where}): they describe the present. Rename it without the date "
+                      "(move_note) unless the date is part of what it is.")
     return None, ""
 
 

@@ -6,7 +6,8 @@ only, at the start. Notes that describe the present carry no date.
 
 **Where it applies is declared in the vault, never in code.** A folder note
 (`<folder>/<folder>.md`) may carry the frontmatter `note_names: dated` or
-`note_names: undated`. For a note at `<dir>/<name>.md`, walking up from
+`note_names: undated` (read from the note on disk, so a change counts at
+once). For a note at `<dir>/<name>.md`, walking up from
 `<dir>` (itself included) towards the vault root, the first of these decides,
 level by level:
 
@@ -30,29 +31,32 @@ from __future__ import annotations
 import posixpath
 import re
 from dataclasses import dataclass
+from typing import Callable
 
 DATED, UNDATED = "dated", "undated"
 FIELD = "note_names"
 #: The mirror roots: `Areas/<area>/…` and `Archive/…` copy the vault's top level.
 AREAS, ARCHIVE = "Areas", "Archive"
 
-#: A date written right: `2025-03-28`, `2025-10-XX`, `2024-XX-XX`.
-_DATE = r"(?P<y>[0-9]{4})-(?P<m>[0-9]{2}|XX)-(?P<d>[0-9]{2}|XX)"
+#: A date written right: `2025-03-28`, `2025-10-XX`, `2024-XX-XX`, `XXXX-XX-XX` (year unknown too).
+_DATE = r"(?P<y>[0-9]{4}|XXXX)-(?P<m>[0-9]{2}|XX)-(?P<d>[0-9]{2}|XX)"
 _GOOD_START_RE = re.compile(rf"^{_DATE}(?:(?P<sep> )(?P<rest>.+))?$")
+#: A second date right after the first, written strictly: `2025-03-28 Title`.
+_STRICT_DATE_START_RE = re.compile(rf"^{_DATE}(?: (?P<rest>.+))?$")
 #: A date in a loose form at the start: `2025_03_28`, `2025.03.28`, `20250328`, `2025-03-28-Title`, lower `xx`.
 _LOOSE_START_RE = re.compile(
-    r"^(?P<y>[0-9]{4})[-_. ]?(?P<m>[0-9]{2}|[Xx]{2})[-_. ]?(?P<d>[0-9]{2}|[Xx]{2})(?:[ _\-.]+(?P<rest>.*))?$")
+    r"^(?P<y>[0-9]{4})[-_.]?(?P<m>[0-9]{2}|[Xx]{2})[-_.]?(?P<d>[0-9]{2}|[Xx]{2})(?:[ _\-.]+(?P<rest>.*))?$")
 #: A date at the very end: `Title 2025-03-28`.
 _TRAILING_RE = re.compile(rf"^(?P<title>.+?)[ _-]+{_DATE}$")
-#: Any date-like start, for the undated check.
-_ANY_DATE_START_RE = re.compile(r"^[0-9]{4}[-_.]?(?:[0-9]{2}|[Xx]{2})[-_.]?(?:[0-9]{2}|[Xx]{2})(?![0-9])")
+#: Any date-like start, for the undated check: a year, a month and a day in range.
+_ANY_DATE_START_RE = re.compile(r"^[0-9]{4}[-_.](?:0[1-9]|1[0-2]|XX)[-_.](?:0[1-9]|[12][0-9]|3[01]|XX)(?![0-9])")
 
 
 @dataclass(frozen=True)
 class Setting:
     value: str          # dated or undated
     source: str         # the folder note that sets it
-    mirrored: str | None = None   # the top-level folder the note's folder mirrors, when it came that way
+    mirrored: str | None = None   # the top-level path the note's folder mirrors, when it came that way
 
 
 @dataclass(frozen=True)
@@ -66,30 +70,44 @@ def folder_note(folder: str) -> str:
 
 
 class Rules:
-    """`note_names` as the vault's folder notes declare it: `{folder: (value, folder note path)}`."""
+    """`note_names` as the vault's folder notes declare it.
 
-    def __init__(self, declared: dict[str, str]):
-        # `declared`: folder-note path → its `note_names` value.
-        self.by_folder: dict[str, tuple[str, str]] = {}
-        for path, value in declared.items():
-            if value not in (DATED, UNDATED):
-                continue
-            folder = posixpath.dirname(path)
-            if folder and path == folder_note(folder):
-                self.by_folder[folder.lower()] = (value, path)
+    `lookup(folder_note_path)` returns that folder note's `note_names` value,
+    or None when the note is absent or sets none (the tools read the note
+    from disk; the tests pass a dict's `get`). Each folder note is looked up
+    at most once per `Rules`.
+    """
 
-    def resolve(self, folder: str, _depth: int = 0) -> Setting | None:
-        folder = folder.strip("/")
-        level = folder
-        while level and _depth < 16:
-            own = self.by_folder.get(level.lower())
-            if own:
-                return Setting(own[0], own[1])
-            mirrored = _mirror(level)
-            if mirrored:
-                found = self.resolve(mirrored, _depth + 1)
-                if found:
-                    return Setting(found.value, found.source, found.mirrored or mirrored.split("/")[0])
+    def __init__(self, lookup: Callable[[str], object]):
+        self._lookup = lookup
+        self._seen: dict[str, str | None] = {}
+
+    def _own(self, folder: str) -> str | None:
+        path = folder_note(folder)
+        if path not in self._seen:
+            value = self._lookup(path)
+            self._seen[path] = value if value in (DATED, UNDATED) else None
+        return self._seen[path]
+
+    def _at(self, level: str, _depth: int = 0) -> Setting | None:
+        """The setting decided at exactly `level`: its folder note, else its mirror at the same level."""
+        own = self._own(level)
+        if own:
+            return Setting(own, folder_note(level))
+        mirrored = _mirror(level)
+        if mirrored and _depth < 8:
+            found = self._at(mirrored, _depth + 1)
+            if found:
+                return Setting(found.value, found.source, found.mirrored or mirrored)
+        return None
+
+    def resolve(self, folder: str) -> Setting | None:
+        """Walking up from `folder`, the first level that decides (see the module's docstring)."""
+        level = folder.strip("/")
+        while level:
+            found = self._at(level)
+            if found:
+                return found
             level = posixpath.dirname(level)
         return None
 
@@ -108,11 +126,18 @@ def exempt(path: str) -> bool:
     """A folder note, or an "Untitled" note."""
     folder, name = posixpath.split(path)
     stem = name[:-3] if name.lower().endswith(".md") else name
-    return bool(folder) and path == folder_note(folder) or stem.lower().startswith("untitled")
+    return bool(folder) and stem == posixpath.basename(folder) or stem.lower().startswith("untitled")
+
+
+def archived_unchanged(from_path: str, to_path: str) -> bool:
+    """A move into `Archive/` that keeps the note's name: archiving a record as it was, not naming one."""
+    return to_path.startswith(ARCHIVE + "/") and posixpath.basename(from_path) == posixpath.basename(to_path)
 
 
 def _valid(y: str, m: str, d: str) -> str | None:
     """Why a date's parts are wrong, or None."""
+    if y == "XXXX" and (m != "XX" or d != "XX"):
+        return "a known month or day with an unknown year"
     if m == "XX" and d != "XX":
         return "a known day with an unknown month"
     if m != "XX" and not 1 <= int(m) <= 12:
@@ -120,7 +145,7 @@ def _valid(y: str, m: str, d: str) -> str | None:
     if d != "XX":
         import calendar
 
-        days = calendar.monthrange(int(y), int(m))[1] if m != "XX" else 31
+        days = calendar.monthrange(int(y) if y != "XXXX" else 2000, int(m))[1] if m != "XX" else 31
         if not 1 <= int(d) <= days:
             return f"day {d} does not exist" + (f" in {y}-{m}" if m != "XX" else "")
     return None
@@ -132,23 +157,40 @@ def _fix_parts(y: str, m: str, d: str) -> tuple[str, str, str]:
 
 
 def check_dated(stem: str) -> Problem | None:
-    """What is wrong with a name in a dated folder, or None when it is right."""
-    pattern = "`YYYY-MM-DD Title` (an unknown part as XX, as in `2025-10-XX Title` or `2024-XX-XX Title`)"
+    """What is wrong with a name in a dated folder, or None when it is right.
+
+    A corrected name is offered only when it can be derived without changing
+    what the name says, and only when it passes this check itself.
+    """
+    problem = _check(stem)
+    if problem is not None and problem.corrected is not None and _check(problem.corrected) is not None:
+        return Problem(problem.message)
+    return problem
+
+
+def _check(stem: str) -> Problem | None:
+    pattern = ("`YYYY-MM-DD Title` (an unknown part as XX, as in `2025-10-XX Title`, `2024-XX-XX Title` or "
+               "`XXXX-XX-XX Title`; never 00)")
     good = _GOOD_START_RE.match(stem)
     if good:
         y, m, d, rest = good.group("y"), good.group("m"), good.group("d"), good.group("rest")
         if m == "00" or d == "00":
             fy, fm, fd = _fix_parts(y, m, d)
+            why = _valid(fy, fm, fd)
             fixed = f"{fy}-{fm}-{fd}" + (f" {rest}" if rest else "")
-            return Problem("an unknown month or day is written XX, never 00.", fixed if not _valid(fy, fm, fd) else None)
+            return Problem("an unknown month or day is written XX, never 00"
+                           + (f"; and {why}." if why else "."), None if why else fixed)
         if why := _valid(y, m, d):
             return Problem(f"the date is not a real one: {why}.")
-        if rest:
-            second = _LOOSE_START_RE.match(rest)
-            if second and _GOOD_START_RE.match(f"{second.group('y')}-{second.group('m').upper()}-{second.group('d').upper()}"):
-                tail = second.group("rest")
-                return Problem("the name carries a second date right after the first: one date only, at the start.",
-                               f"{y}-{m}-{d} {tail}" if tail else f"{y}-{m}-{d}")
+        second = _STRICT_DATE_START_RE.match(rest) if rest else None
+        if second and _valid(*_fix_parts(second.group("y"), second.group("m"), second.group("d"))) is None:
+            tail = second.group("rest")
+            same = (second.group("y"), second.group("m"), second.group("d")) == (y, m, d)
+            return Problem(
+                "the name carries a second date right after the first: one date only, at the start"
+                + ("." if same else " (for a span of days, name it by its first day and put the end in the title "
+                                     "or the note)."),
+                (f"{y}-{m}-{d} {tail}" if tail else f"{y}-{m}-{d}") if same else None)
         return None
     loose = _LOOSE_START_RE.match(stem)
     if loose:
@@ -158,10 +200,11 @@ def check_dated(stem: str) -> Problem | None:
         if _valid(y, m, d) is None and fixed != stem:
             return Problem(f"the date at the start is not written {pattern}.", fixed)
     trailing = _TRAILING_RE.match(stem)
-    if trailing:
+    if trailing and not _TRAILING_RE.match(trailing.group("title")):
         y, m, d = _fix_parts(trailing.group("y"), trailing.group("m"), trailing.group("d"))
         if _valid(y, m, d) is None:
-            return Problem("the date is at the end: it goes at the start.", f"{y}-{m}-{d} {trailing.group('title').strip()}")
+            return Problem("the date is at the end: it goes at the start.",
+                           f"{y}-{m}-{d} {trailing.group('title').strip()}")
     return Problem(f"the name does not start with its date: it should read {pattern}.")
 
 

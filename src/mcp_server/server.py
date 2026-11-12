@@ -388,14 +388,15 @@ async def create_note(
     (naming, folder placement, frontmatter, tags).
 
     **Dated note names.** Where a folder note (`<folder>/<folder>.md`)
-    sets `note_names: dated` (for that folder, the folders below it, and the
-    same-named folders under an area or the archive, unless a nearer folder
-    note says otherwise), a new note's name must start with its date,
-    `YYYY-MM-DD Title` (an unknown part as XX, never 00; one date only):
-    otherwise the call is refused with `note_name_date`, naming the folder
-    note and, when it can, the corrected name. Where it sets
-    `note_names: undated`, a name starting with a date is written and
-    flagged (`note_name:`).
+    sets `note_names: dated` (for that folder and the folders below it at any
+    depth, and for a folder under an area or the archive named like a
+    top-level one, unless a nearer folder note says otherwise), a new note's
+    name must start with the date it is about, `YYYY-MM-DD Title` (an unknown
+    part as XX, never 00; one date only): otherwise the call is refused with
+    `note_name_date`, writing nothing, naming the folder note and, when it
+    can, the corrected name. Where it sets `note_names: undated`, a name
+    starting with a date is written and flagged (`note_name:`). No setting
+    above: no check.
 
     **Task lines go through the task tools.** A write that adds or changes a
     task line (a checkbox line the Tasks plugin reads as a task, with the

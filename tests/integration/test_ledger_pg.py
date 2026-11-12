@@ -1322,38 +1322,35 @@ async def _named_folders(sessionmaker, root):
         (root / folder).mkdir(exist_ok=True)
         (root / folder / f"{folder}.md").write_text(f"---\nnote_names: {value}\n---\n", encoding="utf-8")
     (root / "Areas" / "Champignons" / "Log").mkdir(parents=True, exist_ok=True)
-    async with sessionmaker() as session:
-        for folder, value in (("Log", "dated"), ("Reference", "undated")):
-            await session.execute(text(
-                "INSERT INTO notes_metadata (user_id, file_path, title, tags, frontmatter, content_hash) "
-                "VALUES (NULL, :p, :t, '{}', CAST(:f AS jsonb), 'h')"),
-                {"p": f"{folder}/{folder}.md", "t": folder, "f": json.dumps({"note_names": value})})
-        await session.commit()
 
 
 async def test_a_dated_folder_refuses_a_wrong_name_and_names_the_fix(sessionmaker, ctx):
     await _named_folders(sessionmaker, ctx)
     wrong = await tools.create_note_impl("Log/2025-10-00 Trip.md", "x\n")
     assert code(_Text(wrong)) == "note_name_date" and not (ctx / "Log" / "2025-10-00 Trip.md").exists()
-    assert "Name it `Log/2025-10-XX Trip.md`" in wrong and "`note_names: dated` in Log/Log.md" in wrong
+    assert "Call again with `Log/2025-10-XX Trip.md`" in wrong and "`note_names: dated` in Log/Log.md" in wrong
     mirrored = await tools.create_note_impl("Areas/Champignons/Log/Harvest.md", "x\n")
     assert code(_Text(mirrored)) == "note_name_date"
-    assert "which Areas/Champignons/Log mirrors as a copy of the top-level Log/" in mirrored
+    assert "which Areas/Champignons/Log follows as a mirror of Log/" in mirrored
     ok = await tools.create_note_impl("Log/2026-11-12 Call.md", "x\n")
     assert ok.startswith("Created note") and "note_name" not in ok
     moved = await tools.move_note_impl("Log/2026-11-12 Call.md", "Log/Call 2026-11-12.md")
-    assert code(_Text(moved)) == "note_name_date" and "Name it `Log/2026-11-12 Call.md`" in moved
+    assert code(_Text(moved)) == "note_name_date" and "Call again with `Log/2026-11-12 Call.md`" in moved
     assert (ctx / "Log" / "2026-11-12 Call.md").exists()
     written = await tools.write_file_impl("Log/notes.md", "x\n", encoding="text")
     assert code(_Text(written)) == "note_name_date"
     folder_note = await tools.edit_note_impl("Log/Log.md", "more", append=True)
     assert folder_note.startswith("Updated note")
+    (ctx / "Areas" / "Champignons" / "Log" / "Setup.md").write_text("old\n", encoding="utf-8")
+    archived = await tools.move_note_impl("Areas/Champignons/Log/Setup.md", "Archive/Areas/Champignons/Log/Setup.md")
+    assert archived.startswith("Moved"), archived                     # archived under its own name: not checked
 
 
 async def test_an_undated_folder_flags_a_dated_name_and_writes_it(sessionmaker, ctx):
     await _named_folders(sessionmaker, ctx)
     created = await tools.create_note_impl("Reference/2026-11-12 Server.md", "x\n")
-    assert created.startswith("Created note") and "note_name: `2026-11-12 Server.md` starts with a date" in created
+    assert created.startswith("Created note")
+    assert "note_name: the note was written, but `2026-11-12 Server.md` starts with a date" in created
     assert "`note_names: undated` in Reference/Reference.md" in created
     elsewhere = await tools.create_note_impl("Inbox/whatever.md", "x\n")   # no setting: no check
     assert elsewhere.startswith("Created note") and "note_name" not in elsewhere
