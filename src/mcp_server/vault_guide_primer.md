@@ -201,6 +201,10 @@ wikilink to a vault note titled `NodeName`.
 
 Vaults that use the Tasks plugin keep tasks as checkbox lines in its emoji format (`- [ ] Pay rent 📅 2026-11-05`). List them with `list_tasks`, and add or change them only with `create_task`, `edit_task` and `set_task_status`: the tools follow the vault's own Tasks settings, and the note tools (`edit_note`, `create_note`, `write_file`) refuse a write that adds or changes a task line (`task_line_by_hand`). Deleting a task line with them, keeping one unchanged (the same text, wherever it sits in the note), or showing one in a code span or fenced code block is allowed. If the vault sets a global filter (a marker every task carries, such as `#task`), the tools add it themselves; don't put it in the description. A checkbox without it is then an ordinary checkbox, not a task.
 
+## Note names (this server)
+
+A folder note (`<folder>/<folder>.md`) can declare how its notes are named, in its frontmatter: `note_names: dated` or `note_names: undated`. It holds for that folder and the folders below it; a folder under an area (`Areas/<area>/Log`) or under `Archive/` with the name of a top-level folder takes that folder's setting, unless a nearer folder note sets its own. In a dated folder, `create_note`, `move_note` and `write_file` (a new `.md`) refuse a name that doesn't start with its date, `YYYY-MM-DD Title` (an unknown part as `XX`, never `00`; one date only), with `note_name_date`, naming the folder note and the corrected name when it can be derived. In an undated folder, a name starting with a date is written and flagged.
+
 ## Plugin syntax (Dataview, Templater, etc.)
 
 Notes may contain plugin syntax that looks executable:

@@ -3403,6 +3403,11 @@ async def create_note_impl(
     except ValueError as e:
         return _body_refusal(str(e), "validation_failed")
     with target:
+        name_err, name_flag = (None, "")
+        if target.lstat() is None:
+            name_err, name_flag = await _note_name_check(uid, "create_note", target.rel)
+            if name_err:
+                return name_err
         # An existing note is refused as `already_exists` below: that answer wins.
         if target.lstat() is None and (
                 err := await _hand_written_task_error(uid, "create_note", target.rel, None, content)):
@@ -3446,8 +3451,8 @@ async def create_note_impl(
             return _body_refusal(str(e), "validation_failed")
         except OSError as e:
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
-    return created + _links_text(links_report, links_failure, shift=links_shift) + await _note_refs_report(
-        uid, None, content)
+    return created + name_flag + _links_text(links_report, links_failure, shift=links_shift) + \
+        await _note_refs_report(uid, None, content)
 
 
 # Row-level excerpt bound for the graph tools. `link_text` is note text the
@@ -5175,6 +5180,12 @@ async def _move_note_locked(
         from_rel = src_target.rel
         to_rel = dst_target.rel
 
+        # The destination's name, against its folder's `note_names` setting:
+        # before the index queries, the preflight and the rename.
+        name_err, name_flag = await _note_name_check(uid, "move_note", to_rel)
+        if name_err:
+            return name_err
+
         pre_move_index: dict | None = None
         rewrite_sources: list[str] = [from_rel] if rewrite_links else []
         if rewrite_links:
@@ -5919,7 +5930,7 @@ async def _move_note_locked(
             parts.append(_hash_unavailable_clause(to_rel))
         if hint := _archive_counterpart_hint(uid, from_rel, to_rel):
             parts.append(hint)
-        message = " — ".join(parts) if len(parts) > 1 else parts[0]
+        message = (" — ".join(parts) if len(parts) > 1 else parts[0]) + name_flag
         if db_failed or failed_rewrite_sources or stopped:
             return _body_refusal(
                 message, partial_marker or "partial_completion", disposition="partial"
@@ -6615,6 +6626,11 @@ async def write_file_impl(
         # answer wins), and an overwrite whose old text could not be read
         # (every task in it would look new).
         exists = target.lstat() is not None
+        name_flag = ""
+        if not exists:
+            name_err, name_flag = await _note_name_check(uid, "write_file", target.rel)
+            if name_err:
+                return name_err
         if target.rel.lower().endswith(".md") and (overwrite or not exists) and not (
                 overwrite and exists and previous_note is None):
             old_note = previous_note.decode("utf-8", errors="replace") if previous_note is not None else None
@@ -6680,8 +6696,8 @@ async def write_file_impl(
             return result + (
                 f" — hash not reported: incumbent or published file exceeds "
                 f"{read_cap_name} ({read_cap:,} bytes)"
-            ) + links_text + refs
-        return result + _published_hash_clause(data) + links_text + refs
+            ) + name_flag + links_text + refs
+        return result + _published_hash_clause(data) + name_flag + links_text + refs
 
 
 async def _write_file_refs_report(uid, rel: str, previous: bytes | None, data: bytes, unread: bool) -> str:
@@ -9143,6 +9159,61 @@ def _ledger_state_line(state: dict) -> str:
     if state.get("updated"):
         facts.append(f"updated {state['updated']}")
     return f"- {state['ref']} ({', '.join(facts)}): \"{state['title']}\""
+
+
+#: The refusal for a note named against its folder's `note_names: dated`.
+NOTE_NAME_DATE = "note_name_date"
+
+
+async def _note_name_check(uid, tool: str, rel: str):
+    """`(refusal or None, flag text)` for a note about to be named `rel` (`note_names`).
+
+    The setting comes from the folder notes' `note_names` frontmatter, as the
+    index has it (`src/services/note_names.py`). In a dated folder a wrong
+    name is refused, with the corrected name when it can be derived; in an
+    undated one a name starting with a date is written and flagged. When the
+    folder notes cannot be read the name is not checked (logged at debug).
+    """
+    from src.services import note_names
+
+    if not rel.lower().endswith(".md") or note_names.exempt(rel):
+        return None, ""
+    try:
+        from sqlalchemy import select
+
+        from src.models.db import NoteMetadata
+
+        async with async_session() as session:
+            rows = (await session.execute(
+                select(NoteMetadata.file_path, NoteMetadata.frontmatter).where(
+                    _note_owner_predicate(uid), NoteMetadata.frontmatter.has_key(note_names.FIELD))
+            )).all()
+    except Exception:  # noqa: BLE001 — the name goes unchecked; the write is not blocked by a read failure
+        # debug, not warning: a caller drives this path (the D18 permit rule).
+        logger.debug("%s: note_names could not be read; %s not checked", tool, rel, exc_info=True)
+        return None, ""
+    rules = note_names.Rules({r.file_path: (r.frontmatter or {}).get(note_names.FIELD) for r in rows})
+    folder, name = posixpath.split(rel)
+    setting = rules.resolve(folder)
+    if setting is None:
+        return None, ""
+    stem = name[:-3]
+    where = (f"`{note_names.FIELD}: {setting.value}` in {setting.source}"
+             + (f", which {folder} mirrors as a copy of the top-level {setting.mirrored}/" if setting.mirrored else ""))
+    if setting.value == note_names.DATED:
+        problem = note_names.check_dated(stem)
+        if problem is None:
+            return None, ""
+        fix = (f" Name it `{posixpath.join(folder, problem.corrected)}.md`." if problem.corrected else
+               " Name it `YYYY-MM-DD Title` (an unknown part as XX, never 00), with the note's own date.")
+        return _body_refusal(
+            f"{tool}: notes in {folder}/ are named with their date first ({where}), and in `{name}` "
+            f"{problem.message}{fix} Nothing was written.", NOTE_NAME_DATE), ""
+    if note_names.starts_with_date(stem):
+        return None, (f"\n\nnote_name: `{name}` starts with a date, but notes in {folder}/ carry none ({where}): "
+                      "they describe the present. Rename it without the date (move_note) unless the date is "
+                      "part of what it is.")
+    return None, ""
 
 
 async def _full_path_links(uid, path: str, old: str | None, new: str) -> tuple[str, object | None, str]:

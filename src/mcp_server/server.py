@@ -387,6 +387,16 @@ async def create_note(
     See `get_vault_guide` for Obsidian syntax and any vault-specific conventions
     (naming, folder placement, frontmatter, tags).
 
+    **Dated note names.** Where a folder note (`<folder>/<folder>.md`)
+    sets `note_names: dated` (for that folder, the folders below it, and the
+    same-named folders under an area or the archive, unless a nearer folder
+    note says otherwise), a new note's name must start with its date,
+    `YYYY-MM-DD Title` (an unknown part as XX, never 00; one date only):
+    otherwise the call is refused with `note_name_date`, naming the folder
+    note and, when it can, the corrected name. Where it sets
+    `note_names: undated`, a name starting with a date is written and
+    flagged (`note_name:`).
+
     **Task lines go through the task tools.** A write that adds or changes a
     task line (a checkbox line the Tasks plugin reads as a task, with the
     vault's global filter such as `#task`) is refused with
@@ -810,6 +820,12 @@ async def move_note(
     """Move or rename a note inside the vault. Requires write permission — a `readwrite` API key, or an OAuth token
     carrying the `readwrite` scope.
 
+    The new name is checked against its folder's `note_names` setting, as in
+    `create_note`: in a dated folder a name without its date first is
+    refused with `note_name_date` (the corrected name given when it can be
+    derived), before anything moves; in an undated one a name starting with
+    a date is moved and flagged (`note_name:`).
+
     Updates `notes_metadata.file_path` for the moved note and `note_links.target_path`
     rows whose stored target matched the old path. Backlinks via `target_note_id`
     keep working without rewriting source notes (the moved note's id is unchanged).
@@ -1123,7 +1139,8 @@ async def write_file(
     Writing a `.md` note, the result lists agent-ledger refs like
     `edit_note`'s (`changed_lines_cite:`, `cites:`), and a write that adds
     or changes a task line is refused like `edit_note`'s
-    (`task_line_by_hand`): tasks go through the task tools. Bare-name
+    (`task_line_by_hand`): tasks go through the task tools. A new `.md`
+    note's name is checked like `create_note`'s (`note_name_date`). Bare-name
     wikilinks get the note's full path as in `edit_note`
     (`links_rewritten:`, `links_flagged:`).
 
