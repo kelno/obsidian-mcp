@@ -1,8 +1,8 @@
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.db import NoteMetadata
-from src.services import timing
+from src.services import private_folders, timing
 from src.services.filters import apply_note_filters
 from src.services.fts import combined_tsquery
 
@@ -15,11 +15,20 @@ async def full_text_search(
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
     user_id: int | None = None,
+    hide_private: bool = False,
+    counts: dict | None = None,
 ) -> list[dict]:
     """Full-text search over notes_metadata using tsvector.
 
     The tsquery is built from `settings.fts_configs` (see `src/services/fts.py`)
     so query-time configs match the index-time configs in `indexer.py`.
+
+    `hide_private` (with private folders configured) leaves notes under a
+    private folder out inside the query, so the limit is still filled, and
+    sets `counts["private_hidden"]` to the number of private matches that
+    would have been among these results: every one when the results did not
+    fill the limit, else those ranked ahead of the last result shown; at
+    most `limit`, as for the vector searches.
     """
     limit = max(1, min(limit, 500))
     tsquery = combined_tsquery(query)
@@ -50,8 +59,9 @@ async def full_text_search(
         )
         .where(NoteMetadata.content_tsvector.op("@@")(tsquery))
     )
+    private = "exclude" if hide_private and private_folders.enabled() else None
     stmt = apply_note_filters(
-        stmt, folder=folder, tags=tags, frontmatter=frontmatter, user_id=user_id
+        stmt, folder=folder, tags=tags, frontmatter=frontmatter, user_id=user_id, private=private
     )
     # `file_path` breaks rank ties deterministically. `ts_rank_cd` produces
     # plenty of them, and which tied row survived the LIMIT otherwise depended
@@ -61,6 +71,23 @@ async def full_text_search(
 
     result = await session.execute(stmt)
     rows = result.all()
+    if private is not None and counts is not None:
+        hidden = (
+            select(func.count())
+            .select_from(NoteMetadata)
+            .where(NoteMetadata.content_tsvector.op("@@")(tsquery))
+        )
+        hidden = apply_note_filters(
+            hidden, folder=folder, tags=tags, frontmatter=frontmatter, user_id=user_id, private="only"
+        )
+        if len(rows) >= limit:
+            # Ahead of the last result in the result's own order: rank, then path.
+            last = rows[-1]
+            ahead = func.ts_rank_cd(NoteMetadata.content_tsvector, tsquery)
+            hidden = hidden.where(or_(
+                ahead > last.rank, and_(ahead == last.rank, NoteMetadata.file_path < last.file_path)
+            ))
+        counts["private_hidden"] = min(int((await session.execute(hidden)).scalar_one()), limit)
     results = [
         {
             "path": row.file_path,

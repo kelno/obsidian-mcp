@@ -8,6 +8,7 @@ risks divergence (escape rules, containment semantics).
 from sqlalchemy import Select
 
 from src.models.db import NoteMetadata
+from src.services import private_folders
 
 
 def _escape_like(s: str) -> str:
@@ -21,6 +22,7 @@ def apply_note_filters(
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
     user_id: int | None = None,
+    private: str | None = None,
 ) -> Select:
     """Append optional `folder`, `tags`, `frontmatter`, `user_id` predicates
     to a select over NoteMetadata.
@@ -56,6 +58,17 @@ def apply_note_filters(
         stmt = stmt.where(NoteMetadata.tags.contains(tags))
     if frontmatter:
         stmt = stmt.where(NoteMetadata.frontmatter.contains(frontmatter))
+    # `private`: "exclude" leaves out notes under a private folder, "only"
+    # keeps just those (`src/services/private_folders.py`); None, or no
+    # private folders configured, filters nothing.
+    if private is not None and private_folders.enabled():
+        under_private = private_folders.sql_predicate(NoteMetadata.file_path)
+        if private == "exclude":
+            stmt = stmt.where(~under_private)
+        elif private == "only":
+            stmt = stmt.where(under_private)
+        else:
+            raise ValueError(f"private must be 'exclude' or 'only', not {private!r}")
     if user_id is None:
         stmt = stmt.where(NoteMetadata.user_id.is_(None))
     else:

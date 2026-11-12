@@ -73,7 +73,7 @@ from src.services.search import full_text_search
 from src.services.usage_params import render_usage_params
 from src.services.usage_stats import OVER_QUOTA_PARAM
 from src import plugins as _plugins
-from src.services import ai_edit_stamp, page_text, transfer, vault_fs
+from src.services import ai_edit_stamp, page_text, private_folders, transfer, vault_fs
 from src.services import open_note_url as _open_note_url
 from src.services.vault import (
     MAX_PATH_CHARS,
@@ -1976,7 +1976,7 @@ def _tracked(
 # trail unsearchable in both directions (#78).
 @_tracked(
     "keyword_search",
-    ["query", "folder", "limit", "tags", "frontmatter"],
+    ["query", "folder", "limit", "tags", "frontmatter", "include_private"],
     arg_char_caps={"query": MAX_SEARCH_QUERY_CHARS},
 )
 async def search_notes_impl(
@@ -1985,10 +1985,12 @@ async def search_notes_impl(
     limit: int = 20,
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
+    include_private: bool = False,
 ) -> str:
     """Full-text keyword search across vault notes."""
     limit = _clamp_limit(limit)
     uid = current_user_id.get()
+    counts: dict = {}
     async with async_session() as session:
         results = await full_text_search(
             session,
@@ -1998,9 +2000,12 @@ async def search_notes_impl(
             tags=tags,
             frontmatter=frontmatter,
             user_id=uid,
+            hide_private=not include_private,
+            counts=counts,
         )
+    hidden = _private_hidden_suffix(counts)
     if not results:
-        return f"No results for '{query}'"
+        return f"No results for '{query}'" + hidden
     lines = [f"Found {len(results)} results for '{query}':\n"]
     for r in results:
         tags_str = f" [{', '.join(r['tags'])}]" if r.get("tags") else ""
@@ -2008,7 +2013,13 @@ async def search_notes_impl(
             f"- **{r['title']}** (`{r['path']}`){tags_str} — rank: {r['rank']:.3f}"
             f"{_open_note_url.text_suffix(r['path'])}"
         )
-    return "\n".join(lines)
+    return "\n".join(lines) + hidden
+
+
+def _private_hidden_suffix(counts: dict) -> str:
+    """The last line of a search that left private notes out, or nothing (P98)."""
+    hidden = counts.get("private_hidden", 0)
+    return "\n\n" + private_folders.hidden_line(hidden) if hidden else ""
 
 
 def _window(body: str, offset: int, limit: int) -> tuple[str, int | None]:
@@ -2451,6 +2462,7 @@ async def semantic_search_impl(
     folder: str | None = None,
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
+    include_private: bool = False,
 ) -> str:
     """Vector similarity search over the configured embedding provider's vectors.
 
@@ -2463,6 +2475,7 @@ async def semantic_search_impl(
     """
     limit = _clamp_limit(limit, _MAX_SEMANTIC_RESULTS)
     uid = current_user_id.get()
+    counts: dict = {}
     try:
         async with async_session() as session:
             results = await semantic_search(
@@ -2473,6 +2486,8 @@ async def semantic_search_impl(
                 tags=tags,
                 frontmatter=frontmatter,
                 user_id=uid,
+                hide_private=not include_private,
+                counts=counts,
             )
     except refusals.ProviderInputTooLarge as exc:
         # The provider refused the input against **its own** token limit,
@@ -2513,8 +2528,9 @@ async def semantic_search_impl(
             ),
             marker=_PROVIDER_INPUT_REJECTED_MARKER,
         )
+    hidden = _private_hidden_suffix(counts)
     if not results:
-        return f"No semantic results for '{query}' (embeddings may still be building)"
+        return f"No semantic results for '{query}' (embeddings may still be building)" + hidden
     stale_count = sum(1 for r in results if r["stale"])
     truncated_count = sum(1 for r in results if r["embedding_truncated"])
     lines = [
@@ -2540,7 +2556,7 @@ async def semantic_search_impl(
         else:
             lines.append(f"  > {r['chunk'][:200]}...")
     lines.extend(_degradation_footer(stale_count, truncated_count))
-    return "\n".join(lines)
+    return "\n".join(lines) + hidden
 
 
 @_tracked("get_vault_guide", [])
@@ -2559,7 +2575,8 @@ async def get_vault_guide_impl() -> str:
     except ValueError as e:
         vault_section = f"# Vault-Specific Conventions\n\n{e}"
     ledger_section = await _ledger_guide(uid)
-    return f"{_VAULT_GUIDE_PRIMER}{_agent_edit_stamp_guide()}{ledger_section}\n\n---\n\n{vault_section}"
+    return (f"{_VAULT_GUIDE_PRIMER}{_agent_edit_stamp_guide()}{_private_folders_guide()}{ledger_section}"
+            f"\n\n---\n\n{vault_section}")
 
 
 async def _ledger_guide(uid) -> str:
@@ -2594,6 +2611,22 @@ async def _ledger_guide(uid) -> str:
         f"{_ledger.TITLE_MAX} characters. Areas go with or without the `area/` prefix.\n\n"
         f"Topics:\n{topic_lines}\n\n"
         f"Areas: {vocabulary['areas']}. Their descriptions are in `ledger_topics`."
+    )
+
+
+def _private_folders_guide() -> str:
+    """The guide's section on private folders, when they are configured (P98)."""
+    if not private_folders.enabled():
+        return ""
+    names = ", ".join(f"`{n}`" for n in private_folders.patterns())
+    return (
+        "\n\n## Private folders (this server)\n\n"
+        f"Folders named {names} (any case, at any depth) are private, with everything under them. "
+        "`keyword_search`, `semantic_search` and `find_related` leave their notes out and end with how many "
+        "they left out (\"2 matches in private folders not shown.\"); `list_tasks`, `ledger_get`, "
+        "`ledger_update` and `open_area` list their tasks and lines without the text. Pass "
+        "`include_private=true` only when the owner asked for something in a private folder, or a protocol "
+        "the owner set up does. Reading a private note by its path is not filtered."
     )
 
 
@@ -3826,7 +3859,7 @@ async def get_neighborhood_impl(path: str, depth: int = 1, limit: int = 50) -> s
 
 
 def find_related_stmt(source_id: int, avg_embedding: list[float], user_id: int | None,
-                      limit: int):
+                      limit: int, private: str | None = None):
     """The vector statement `find_related` runs, and its overfetch.
 
     Factored out of `find_related_impl` so the recall benchmark in
@@ -3872,11 +3905,16 @@ def find_related_stmt(source_id: int, avg_embedding: list[float], user_id: int |
     # why the caller's zero-row exact fallback is unconditional — there is no
     # unfiltered form of this statement left (D1a).
     stmt = stmt.where(_note_owner_predicate(user_id))
+    # `private`: "exclude" or "only" notes under a private folder (P98), as
+    # `apply_note_filters` does for the other searches.
+    if private is not None and private_folders.enabled():
+        under_private = private_folders.sql_predicate(NoteMetadata.file_path)
+        stmt = stmt.where(~under_private if private == "exclude" else under_private)
     return stmt.order_by(order).limit(overfetch)
 
 
-@_tracked("find_related", ["path", "limit"])
-async def find_related_impl(path: str, limit: int = 10) -> str:
+@_tracked("find_related", ["path", "limit", "include_private"])
+async def find_related_impl(path: str, limit: int = 10, include_private: bool = False) -> str:
     """Semantic neighbors via averaged chunk embeddings.
 
     Carries `semantic_search`'s per-row `stale` / `embedding_truncated`
@@ -3957,7 +3995,8 @@ async def find_related_impl(path: str, limit: int = 10) -> str:
         await session.execute(text("SET LOCAL random_page_cost = 1.1"))
         await session.execute(text("SET LOCAL hnsw.iterative_scan = 'relaxed_order'"))
 
-        stmt = find_related_stmt(source.id, avg_list, uid, limit)
+        private = "exclude" if not include_private and private_folders.enabled() else None
+        stmt = find_related_stmt(source.id, avg_list, uid, limit, private=private)
         rows = (await session.execute(stmt)).all()
 
         # Zero-row exact fallback, as in semantic_search: an empty result from
@@ -3975,6 +4014,12 @@ async def find_related_impl(path: str, limit: int = 10) -> str:
             await session.execute(text("SET LOCAL enable_indexscan = off"))
             rows = (await session.execute(stmt)).all()
             exact_fallback = True
+        # The private notes the results would have held (P98): the same scan
+        # over private notes only. No fallback of its own: empty undercounts.
+        private_rows = (
+            (await session.execute(find_related_stmt(source.id, avg_list, uid, limit, private="only"))).all()
+            if private else []
+        )
         timing.record("exact_fallback", exact_fallback)
         timing.add_ms("db_ms", time.monotonic() - vector_start)
 
@@ -3984,6 +4029,13 @@ async def find_related_impl(path: str, limit: int = 10) -> str:
         # dedupe, so the nearest chunk per note and the presented order are
         # both full precision.
         rows = sorted(rows, key=lambda r: r.distance)
+
+    hidden_suffix = ""
+    if private:
+        nearest: dict[int, float] = {}
+        for r in private_rows:
+            nearest[r.note_id] = min(float(r.distance), nearest.get(r.note_id, float("inf")))
+        hidden_suffix = _private_hidden_suffix({"private_hidden": _related_hidden_count(rows, nearest, limit)})
 
     if not rows:
         # A **true** zero-result: the source exists, it is embedded, the exact
@@ -4000,7 +4052,7 @@ async def find_related_impl(path: str, limit: int = 10) -> str:
         empty = [f"No related notes for `{path}`"]
         if source_stale:
             empty.append(_stale_source_line(path))
-        return "\n".join(empty)
+        return "\n".join(empty) + hidden_suffix
 
     # Dedupe by note_id, keeping the nearest chunk — ranked by the
     # full-precision cosine distance the database selected (#283: the scan
@@ -4060,7 +4112,24 @@ async def find_related_impl(path: str, limit: int = 10) -> str:
             snippet = r["chunk"].replace("\n", " ")[:200]
             lines.append(f"  > {snippet}…")
     lines.extend(_degradation_footer(stale_count, truncated_count))
-    return "\n".join(lines)
+    return "\n".join(lines) + hidden_suffix
+
+
+def _related_hidden_count(rows, private_nearest: dict[int, float], limit: int) -> int:
+    """How many private notes `find_related` would have listed (P98).
+
+    Every private neighbour when the results did not fill `limit`, else those
+    nearer than the last one listed; at most `limit`.
+    """
+    shown: dict[int, float] = {}
+    for r in rows:
+        shown[r.note_id] = min(float(r.distance), shown.get(r.note_id, float("inf")))
+    if len(shown) >= limit:
+        last = sorted(shown.values())[limit - 1]
+        ahead = [d for d in private_nearest.values() if d < last]
+    else:
+        ahead = list(private_nearest.values())
+    return min(len(ahead), limit)
 
 
 @_tracked("find_orphans", ["folder", "limit"])
@@ -7981,17 +8050,15 @@ def _task_item(entry: _tq.Entry, content_hash: str, today) -> TaskItem:
     )
 
 
-def _task_private_hidden(note_path: str, path_filter: str | None) -> bool:
-    """A task line in a private folder, to list by location only (F63).
+def _task_private_hidden(note_path: str, include_private: bool) -> bool:
+    """A task line in a private folder, to list by location only (F63, P98).
 
     The private-folder rule keeps such notes' content out of what agents
-    stumble on. A `list_tasks` query that names a private folder in its `path`
-    asked for it, so its tasks come with their text; any other query lists
-    them as `path:line` only.
+    come across. A call with `include_private` asked for it, so its tasks come
+    with their text; any other call lists them as `path:line` only. Nothing
+    is private unless `PRIVATE_FOLDER_NAMES` is set.
     """
-    if not _ledger_private(note_path):
-        return False
-    return not (path_filter and "(private)" in path_filter.lower())
+    return not include_private and private_folders.is_private(note_path)
 
 
 def _read_current_note(path: str, uid: int | None) -> tuple[str | None, list | None, str]:
@@ -8012,7 +8079,7 @@ def _read_current_note(path: str, uid: int | None) -> tuple[str | None, list | N
 @_tracked(
     "list_tasks",
     ["path", "status", "status_types", "tags", "exclude_tags", "area", "due", "scheduled",
-     "starts", "happens", "priority", "text", "sort", "limit"],
+     "starts", "happens", "priority", "text", "sort", "limit", "include_private"],
     refusal_result=_task_list_refusal,
 )
 async def list_tasks_impl(
@@ -8030,6 +8097,7 @@ async def list_tasks_impl(
     text: str | None = None,
     sort: str = "default",
     limit: int = 50,
+    include_private: bool = False,
 ) -> TaskListResult:
     """Tasks matching a Tasks query, from the index, verified against the disk.
 
@@ -8114,7 +8182,7 @@ async def list_tasks_impl(
             note_lines[entry.line_number - 1][0]
             if note_lines is not None and entry.line_number <= len(note_lines) else None
         )
-        hidden = _task_private_hidden(entry.path, path)
+        hidden = _task_private_hidden(entry.path, include_private)
         if content_hash is None or on_disk != entry.text:
             stale.append(StaleTask(
                 ref=f"{entry.path}:{entry.line_number}", path=entry.path, line=entry.line_number,
@@ -8144,17 +8212,18 @@ async def list_tasks_impl(
     if sort == "random":
         notes.append("random order is this server's own shuffle; Obsidian's `sort by random` orders differently.")
     # A private note's tasks and problems are listed by location only, unless
-    # the query's `path` names a private folder, as open_area and cited_by do (F63).
+    # the call sets `include_private`, as ledger_get and ledger_update do (F63, P98).
     problem_items = [
         TaskProblem(ref=f"{r.file_path}:{r.line_number}", path=r.file_path, line=r.line_number,
-                    text=None if _task_private_hidden(r.file_path, path) else r.line,
+                    text=None if _task_private_hidden(r.file_path, include_private) else r.line,
                     reason=r.reason or "unknown")
         for r in problems[:TASK_LIST_MAX_PROBLEMS]
     ]
     if (any(t.private for t in tasks) or any(p.text is None for p in problem_items)
             or any(st.indexed_text is None for st in stale)):
-        notes.append("A task or problem listed by location only is in a private folder: read it only if the owner "
-                     "asks, or list it with a `path` naming that folder; leave it out of your checks otherwise.")
+        notes.append("A task or problem listed by location only is in a private folder: leave it out of your "
+                     "checks unless the owner asked for it, or a protocol the owner set up does; then call again "
+                     "with include_private=true.")
     return TaskListResult(
         tasks=tasks,
         total_matched=total,
@@ -8947,8 +9016,8 @@ async def ledger_search_impl(
     return result
 
 
-@_tracked("ledger_get", ["refs", "history"], refusal_result=_ledger_gate(LedgerGetResult))
-async def ledger_get_impl(refs: list[str], history: bool = False) -> LedgerGetResult:
+@_tracked("ledger_get", ["refs", "history", "include_private"], refusal_result=_ledger_gate(LedgerGetResult))
+async def ledger_get_impl(refs: list[str], history: bool = False, include_private: bool = False) -> LedgerGetResult:
     uid = current_user_id.get()
     try:
         refs = _ledger.bounded_list(refs, "refs")
@@ -8988,7 +9057,7 @@ async def ledger_get_impl(refs: list[str], history: bool = False) -> LedgerGetRe
             superseded_by=sup.get(entry.superseded_by), handled_account=entry.handled_account,
             handled_at=entry.handled_at.isoformat() if entry.handled_at else None, author=entry.author,
             cited_by=cited.get(entry.id) or None, embedded=entry.embedded_hash == entry.content_hash,
-            tasks=[_ledger_task_dict(t) for t in citing] or None,
+            tasks=[_ledger_task_dict(t, include_private) for t in citing] or None,
             tasks_state=tasks_state,
         )
         size = _ledger.json_size(item.model_dump())
@@ -9009,6 +9078,8 @@ async def ledger_get_impl(refs: list[str], history: bool = False) -> LedgerGetRe
         used += size
     if not_returned:
         notes.append("Some entries were left out to stay within the response cap: read them in another call.")
+    if any("text" not in task for item in out for task in (item.tasks or ())):
+        notes.append(_LEDGER_PRIVATE_NOTE)
     return LedgerGetResult(entries=out, not_found=missing or None, not_returned=not_returned or None,
                            notes=notes or None)
 
@@ -9089,7 +9160,7 @@ async def ledger_add_impl(
 @_tracked(
     "ledger_update",
     ["ref", "refs", "expected_revision", "status", "seen", "area", "topics_add", "topics_remove",
-     "superseded_by", "related", "challenges"],
+     "superseded_by", "related", "challenges", "include_private"],
     refusal_result=_ledger_gate(LedgerWriteResult),
     write_class=True,
 )
@@ -9114,6 +9185,7 @@ async def ledger_update_impl(
     challenges: list[int] | None = None,
     seen: bool | None = None,
     refs: list[str] | None = None,
+    include_private: bool = False,
 ) -> LedgerWriteResult:
     if err := _ledger_write_gate():
         return _ledger_failed(LedgerWriteResult, err)
@@ -9162,7 +9234,7 @@ async def ledger_update_impl(
     cites = await _ledger_cites(uid, entry.ref, written, notes)
     dependants = None
     if any(_ledger_is_content_change(c) for c in changed):
-        dependants = await _ledger_dependants(uid, entry, notes)
+        dependants = await _ledger_dependants(uid, entry, notes, include_private)
     if any(c.startswith("body") for c in changed) and "title" not in changed:
         notes.append(f"Does the title still hold? It reads: \"{entry.title}\". If not, change it (title=…).")
     return LedgerWriteResult(ref=entry.ref, revision=entry.revision, status=entry.status,
@@ -9443,20 +9515,21 @@ async def _note_refs_report(uid, old: str | None, new: str | None, *, old_unread
     return "\n\n" + "\n\n".join(parts) + unread
 
 
-def _ledger_private(path: str) -> bool:
-    """A note in a private folder: a folder whose name ends in ` (private)`, at any depth, any case."""
-    return any(part.lower().endswith(" (private)") for part in path.replace("\\", "/").split("/")[:-1])
-
-
-def _ledger_task_dict(task) -> dict:
-    """A citing task for a result: its text left out when it sits in a private folder."""
+def _ledger_task_dict(task, include_private: bool = False) -> dict:
+    """A citing task for a result: its text left out when it sits in a private folder (P98)."""
     item = task.as_dict()
-    if _ledger_private(task.ref.rsplit(":", 1)[0]):
+    if not include_private and private_folders.is_private(task.ref.rsplit(":", 1)[0]):
         del item["text"]
     return item
 
 
-async def _ledger_dependants(uid, entry, notes: list[str]) -> dict | None:
+#: The note a ledger result carries when it listed a citing line without its text.
+_LEDGER_PRIVATE_NOTE = ("A task or note line listed without its text is in a private folder: leave it out of your "
+                        "checks unless the owner asked for it, or a protocol the owner set up does; then call again "
+                        "with include_private=true.")
+
+
+async def _ledger_dependants(uid, entry, notes: list[str], include_private: bool = False) -> dict | None:
     """What cites `entry`, for `ledger_update` after a change to what it says.
 
     Other entries whose text cites it (bare or bracketed), vault tasks citing
@@ -9482,7 +9555,7 @@ async def _ledger_dependants(uid, entry, notes: list[str]) -> dict | None:
                 notes.append(links_note)
             citing = (links or {}).get(ref_str, [])
             if citing:
-                out["tasks"] = [_ledger_task_dict(t) for t in citing[:LEDGER_DEPENDANTS_MAX]]
+                out["tasks"] = [_ledger_task_dict(t, include_private) for t in citing[:LEDGER_DEPENDANTS_MAX]]
                 if len(citing) > LEDGER_DEPENDANTS_MAX:
                     out["tasks_total"] = len(citing)
             candidates = await _ledger_tasks.note_candidates(session, uid, ref)
@@ -9498,7 +9571,7 @@ async def _ledger_dependants(uid, entry, notes: list[str]) -> dict | None:
             lines = [n for n in _ledger_citations.lines_citing(text_, ref) if f"{path}:{n}" not in task_lines]
             if not lines:
                 continue
-            private = _ledger_private(path)
+            private = not include_private and private_folders.is_private(path)
             for n in lines:
                 item = {"ref": f"{path}:{n}"}
                 if not private:
@@ -9520,12 +9593,11 @@ async def _ledger_dependants(uid, entry, notes: list[str]) -> dict | None:
     if not out:
         return None
     truncated = any(k.endswith("_total") for k in out)
-    private = any("text" not in item for item in out.get("notes", ()))
+    private = any("text" not in item for key in ("tasks", "notes") for item in out.get(key, ()))
     notes.insert(0, f"These cite {ref_str} (cited_by): check each still holds after your change."
                  + (f" Each list shows at most {LEDGER_DEPENDANTS_MAX}; its _total says how many there are."
                     if truncated else "")
-                 + (" A note listed without its text is in a private folder: don't open it; name it to the "
-                    "owner if your change may affect it." if private else ""))
+                 + (" " + _LEDGER_PRIVATE_NOTE if private else ""))
     return out
 
 
@@ -9797,7 +9869,7 @@ async def _open_area_tasks(tag: str, uid, notes: list[str]) -> tuple[list[AreaTa
             continue
         out.append(AreaTask(
             ref=f"{row.file_path}:{row.line_number}",
-            text=None if _ledger_private(row.file_path) else row.line,
+            text=None if private_folders.is_private(row.file_path) else row.line,
             status=task.status.type, next=True if is_next else None,
             due=task.due.text if task.due is not None else None,
             scheduled=task.scheduled.text if task.scheduled is not None else None,
@@ -9812,8 +9884,9 @@ async def _open_area_tasks(tag: str, uid, notes: list[str]) -> tuple[list[AreaTa
     if out and not any(t.next for t in out):
         notes.append("No open task of this area carries #next.")
     if any(t.text is None for t in out):
-        notes.append("A task listed without its text is in a private folder: read it only if the owner asks; "
-                     "leave it out of your checks otherwise.")
+        notes.append("A task listed without its text is in a private folder: leave it out of your checks unless "
+                     "the owner asked for it, or a protocol the owner set up does; then list_tasks(area=…, "
+                     "include_private=true) shows its text.")
     return out, total
 
 

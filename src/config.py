@@ -624,6 +624,16 @@ class Settings(BaseSettings):
     # nudge in its result. JSON list or comma-separated. Empty (the default):
     # no check. See docs/architecture/vault-tools.md.
     rule_file_patterns: Annotated[list[str], NoDecode] = []
+    # Folder names that make a folder private, as globs over one folder name
+    # (`*`, `?`; any case), matched against every folder in a note's path:
+    # everything under such a folder is private. keyword_search,
+    # semantic_search and find_related leave private notes out and count them
+    # unless called with `include_private`; list_tasks, ledger_get and
+    # ledger_update list their tasks and lines without text, and open_area
+    # always does. JSON list or comma-separated, e.g. `["* (private)"]`.
+    # Empty (the default): nothing is private and no tool shows
+    # `include_private`. See docs/architecture/search.md, "Private folders".
+    private_folder_names: Annotated[list[str], NoDecode] = []
     # The vault's archive folder, which mirrors the tree outside it. When set,
     # `move_note` says so when the folder a note leaves has a counterpart under
     # it; it never moves archive content. Unset: no hint.
@@ -1257,7 +1267,7 @@ class Settings(BaseSettings):
             raise ValueError("FTS_CONFIGS must contain at least one config name")
         return out
 
-    @field_validator("last_ai_edit_exclude", "rule_file_patterns", mode="before")
+    @field_validator("last_ai_edit_exclude", "rule_file_patterns", "private_folder_names", mode="before")
     @classmethod
     def _parse_last_ai_edit_exclude(cls, v):
         """A JSON list, a comma-separated string, or a list of glob patterns;
@@ -1272,7 +1282,8 @@ class Settings(BaseSettings):
             else:
                 v = s.split(",")
         if not isinstance(v, (list, tuple)):
-            raise ValueError("LAST_AI_EDIT_EXCLUDE and RULE_FILE_PATTERNS must be lists of glob patterns")
+            raise ValueError(
+                "LAST_AI_EDIT_EXCLUDE, RULE_FILE_PATTERNS and PRIVATE_FOLDER_NAMES must be lists of glob patterns")
         return [p for p in (str(i).strip().lstrip("/") for i in v) if p]
 
     @field_validator("plugins", mode="before")

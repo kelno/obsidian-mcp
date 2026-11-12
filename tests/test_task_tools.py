@@ -13,6 +13,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from src.auth.session import current_user_id
+from src.config import settings
 from src.mcp_server import tools
 from src.mcp_server.auth import current_permission
 from src.services import task_ops, task_query, vault as vault_service
@@ -552,6 +553,7 @@ async def test_list_tasks_success_shape(vault, monkeypatch):
 
 async def test_list_tasks_problems_in_a_private_folder_come_without_text(vault, monkeypatch):
     # F63: problems come back with every query; a private note's line is path:line and reason only.
+    monkeypatch.setattr(settings, "private_folder_names", ["* (private)"])
     rows = [
         _row("People (private)/Sam.md", 3, "problem", "-\t[ ] secret", "whitespace_after_marker"),
         _row("Areas/x.md", 4, "problem", "-\t[ ] open", "whitespace_after_marker"),
@@ -567,7 +569,8 @@ async def test_list_tasks_problems_in_a_private_folder_come_without_text(vault, 
     assert any("private folder" in n for n in result.notes)
 
 
-async def test_list_tasks_private_tasks_by_location_unless_the_path_names_the_folder(vault, monkeypatch):
+async def test_list_tasks_private_tasks_by_location_unless_include_private(vault, monkeypatch):
+    monkeypatch.setattr(settings, "private_folder_names", ["* (private)"])
     note(vault, "People (private)/Sam.md", "# S\n- [ ] call Sam about the secret\n- [ ] old\n")
     h = note(vault, "Areas/x.md", "- [ ] open thing\n")
     rows = [
@@ -588,10 +591,28 @@ async def test_list_tasks_private_tasks_by_location_unless_the_path_names_the_fo
     assert "secret" not in dumped and '"private":true' in dumped
     assert any("location only" in n for n in result.notes)
 
-    scoped = await tools.list_tasks_impl(path="people (private)/")
+    # Naming the folder in `path` no longer opens it (P98): only the argument does.
+    named = await tools.list_tasks_impl(path="people (private)/")
+    assert named.tasks[0].private is True and named.tasks[0].text is None
+
+    scoped = await tools.list_tasks_impl(path="people (private)/", include_private=True)
     assert [t.text for t in scoped.tasks] == ["- [ ] call Sam about the secret"]
     assert scoped.tasks[0].private is None and scoped.stale[0].indexed_text == "- [ ] stale secret line"
     assert not any("location only" in n for n in scoped.notes or [])
+    everywhere = await tools.list_tasks_impl(include_private=True)
+    assert "secret" in everywhere.model_dump_json()
+
+
+async def test_list_tasks_without_private_folders_configured_hides_nothing(vault, monkeypatch):
+    # The core serves any vault (P96): with PRIVATE_FOLDER_NAMES unset, a
+    # folder named like the owner's private ones is an ordinary folder.
+    monkeypatch.setattr(settings, "private_folder_names", [])
+    note(vault, "People (private)/Sam.md", "# S\n- [ ] call Sam\n")
+    rows = [_row("People (private)/Sam.md", 2, "task", "- [ ] call Sam")]
+    monkeypatch.setattr(tools, "async_session", lambda: _FakeSession(rows))
+    result = await tools.list_tasks_impl()
+    assert [t.text for t in result.tasks] == ["- [ ] call Sam"] and result.tasks[0].private is None
+    assert not any("private folder" in n for n in result.notes or [])
 
 
 async def test_list_tasks_refuses_an_unsupported_global_query(vault, monkeypatch):

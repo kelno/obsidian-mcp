@@ -17,7 +17,7 @@ from src.config import (
     settings,
 )
 from src.models.db import NoteEmbedding, NoteMetadata
-from src.services import refusals, timing
+from src.services import private_folders, refusals, timing
 from src.services.filters import apply_note_filters
 from src.services.index_state import (
     KEY_EMBEDDING_FINGERPRINT,
@@ -1470,8 +1470,15 @@ async def semantic_search(
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
     user_id: int | None = None,
+    hide_private: bool = False,
+    counts: dict | None = None,
 ) -> list[dict]:
     """Embed query and return the best-matching chunk per note (dedup), ordered by cosine distance.
+
+    `hide_private` (with private folders configured) leaves notes under a
+    private folder out inside the query, so the iterative scan still fills
+    the limit, and sets `counts["private_hidden"]` to the number of private
+    notes that would have been among these results (see the count below).
 
     The HNSW index picks the candidates; they are re-ranked by full-precision
     distance, and we over-fetch chunks and dedup per note in Python
@@ -1547,10 +1554,17 @@ async def semantic_search(
         )
         .join(NoteMetadata, NoteEmbedding.note_id == NoteMetadata.id)
     )
-    stmt = apply_note_filters(
-        stmt, folder=folder, tags=tags, frontmatter=frontmatter, user_id=user_id
+    private = "exclude" if hide_private and private_folders.enabled() else None
+    filtered = apply_note_filters(
+        stmt, folder=folder, tags=tags, frontmatter=frontmatter, user_id=user_id, private=private
     )
-    stmt = stmt.order_by(order).limit(overfetch)
+    private_stmt = (
+        apply_note_filters(
+            stmt, folder=folder, tags=tags, frontmatter=frontmatter, user_id=user_id, private="only"
+        ).order_by(order).limit(overfetch)
+        if private is not None and counts is not None else None
+    )
+    stmt = filtered.order_by(order).limit(overfetch)
 
     result = await session.execute(stmt)
     rows = result.fetchall()
@@ -1581,6 +1595,12 @@ async def semantic_search(
         await session.execute(text("SET LOCAL enable_indexscan = off"))
         rows = (await session.execute(stmt)).fetchall()
         exact_fallback = True
+    private_rows = []
+    if private_stmt is not None:
+        # The private notes the results would have held: the same scan over
+        # private notes only (after an exact fallback above, exact too). No
+        # zero-row fallback of its own: an empty answer only undercounts.
+        private_rows = (await session.execute(private_stmt)).fetchall()
     timing.record("exact_fallback", exact_fallback)
     timing.add_ms("db_ms", time.monotonic() - db_start)
 
@@ -1602,6 +1622,21 @@ async def semantic_search(
         deduped.append(row)
         if len(deduped) >= limit:
             break
+    if private_stmt is not None:
+        # Each private note's nearest chunk, counted when it ranks ahead of the
+        # last result shown (in the results' own order: distance, then path),
+        # or at all when the results did not fill the limit; at most `limit`.
+        best: dict[int, tuple] = {}
+        for row in private_rows:
+            key = (row.distance, row.file_path)
+            if row.note_id not in best or key < best[row.note_id]:
+                best[row.note_id] = key
+        if len(deduped) >= limit:
+            last = (deduped[-1].distance, deduped[-1].file_path)
+            ahead = [k for k in best.values() if k < last]
+        else:
+            ahead = list(best.values())
+        counts["private_hidden"] = min(len(ahead), limit)
 
     # ── Staleness and truncation, annotated from the already-hydrated row ──
     #

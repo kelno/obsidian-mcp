@@ -5,7 +5,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from typing import Annotated
 
-from pydantic import ConfigDict, Field, model_validator
+from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase
+from pydantic import ConfigDict, Field, create_model, model_validator
 
 from src.config import settings
 from src.mcp_server.area_result import OpenAreaResult
@@ -22,6 +23,7 @@ from src.mcp_server.ledger_result import (
 from src.mcp_server.read_result import ReadNoteResult
 from src.mcp_server.task_result import TaskListResult, TaskWriteResult
 from src.services import ledger as _ledger_rules
+from src.services import private_folders as _private_folders
 from src.mcp_server.tools import (
     check_upload_impl,
     create_note_impl,
@@ -142,6 +144,36 @@ mcp = FastMCP(
 )
 
 
+# ── include_private (P98) ────────────────────────────────────────────────────
+#
+# One argument, on every tool that can show a private note's content, and one
+# definition of private (`src/services/private_folders.py`). Its whole text is
+# in the parameter's description, so a deployment without private folders
+# drops the parameter and nothing about it is left (`_drop_include_private`).
+
+def _private_folders_named() -> str:
+    names = ", ".join(f"`{n}`" for n in _private_folders.patterns())
+    return f"folders named {names}, at any depth, and everything under them"
+
+
+_WHEN_PRIVATE = ("Set true only when the owner asked for something in a private folder, or a protocol the owner "
+                 "set up does.")
+_D_PRIVATE_SEARCH = Field(description=(
+    f"Also return notes in private folders ({_private_folders_named()}). Default false: they are left out, "
+    "and the result ends with how many would have been listed (\"2 matches in private folders not shown.\"). "
+    + _WHEN_PRIVATE))
+_D_PRIVATE_TASKS = Field(description=(
+    f"Show the text of tasks and problems in private folders ({_private_folders_named()}). Default false: "
+    "they are listed by location only (`ref`, and a task's `status_type` with `private: true`). "
+    + _WHEN_PRIVATE))
+_D_PRIVATE_LEDGER_GET = Field(description=(
+    f"Show the text of citing vault tasks in private folders ({_private_folders_named()}). Default false: "
+    "they are listed without their text. " + _WHEN_PRIVATE))
+_D_PRIVATE_LEDGER_UPDATE = Field(description=(
+    f"Show the text of the vault tasks and note lines in private folders ({_private_folders_named()}) "
+    "that `cited_by` lists. Default false: they are listed without their text. " + _WHEN_PRIVATE))
+
+
 @mcp.tool()
 async def keyword_search(
     query: str,
@@ -149,6 +181,7 @@ async def keyword_search(
     limit: int = 20,
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
+    include_private: Annotated[bool, _D_PRIVATE_SEARCH] = False,
 ) -> str:
     """Full-text keyword search via PostgreSQL tsvector. Use this for exact identifiers,
     code symbols, proper nouns, or known phrases — anywhere semantic noise hurts.
@@ -171,7 +204,8 @@ async def keyword_search(
             not match integer 0 (e.g. {"status": "draft"}).
     """
     return await search_notes_impl(
-        query, folder=folder, limit=limit, tags=tags, frontmatter=frontmatter
+        query, folder=folder, limit=limit, tags=tags, frontmatter=frontmatter,
+        include_private=include_private,
     )
 
 
@@ -348,6 +382,7 @@ async def semantic_search(
     folder: str | None = None,
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
+    include_private: Annotated[bool, _D_PRIVATE_SEARCH] = False,
 ) -> str:
     """Vector similarity search over the vault's chunk embeddings. Use this for conceptual
     or paraphrased queries — anywhere exact word matching would miss the point.
@@ -397,7 +432,8 @@ async def semantic_search(
             string "0" does not match integer 0 (e.g. {"status": "active"}).
     """
     return await semantic_search_impl(
-        query, limit=limit, folder=folder, tags=tags, frontmatter=frontmatter
+        query, limit=limit, folder=folder, tags=tags, frontmatter=frontmatter,
+        include_private=include_private,
     )
 
 
@@ -826,7 +862,9 @@ async def get_neighborhood(path: str, depth: int = 1, limit: int = 50) -> str:
 
 
 @mcp.tool()
-async def find_related(path: str, limit: int = 10) -> str:
+async def find_related(
+    path: str, limit: int = 10, include_private: Annotated[bool, _D_PRIVATE_SEARCH] = False,
+) -> str:
     """Semantically similar notes based on the source note's chunk embeddings,
     averaged then queried via pgvector.
 
@@ -865,7 +903,7 @@ async def find_related(path: str, limit: int = 10) -> str:
         path: Vault-relative path to the source note.
         limit: Maximum results (default 10, hard cap 50).
     """
-    return await find_related_impl(path, limit=limit)
+    return await find_related_impl(path, limit=limit, include_private=include_private)
 
 
 @mcp.tool()
@@ -1634,6 +1672,7 @@ async def list_tasks(
     text: str | None = None,
     sort: str = "default",
     limit: int = 50,
+    include_private: Annotated[bool, _D_PRIVATE_TASKS] = False,
 ) -> TaskListResult:
     """List tasks (Obsidian Tasks plugin, emoji format) matching a Tasks query.
 
@@ -1647,10 +1686,6 @@ async def list_tasks(
     quotes and callouts), outside code blocks and frontmatter. `- \\[ ] …`
     (escaped) is not a task. Lines that look like tasks but may not be read
     as one by the plugin are listed under `problems`, never dropped.
-
-    A task or problem in a private folder (a folder name ending in
-    ` (private)`) is listed by location only (`ref`, and a task's
-    `status_type`, with `private: true`), unless `path` names a private folder.
 
     Each task gives `ref` (`path:line`, 1-based), the exact line (`text`),
     parsed fields, and the note's `content_hash`. To change a task, pass
@@ -1693,7 +1728,7 @@ async def list_tasks(
     return await list_tasks_impl(
         path=path, status=status, status_types=status_types, tags=tags, exclude_tags=exclude_tags,
         area=area, due=due, scheduled=scheduled, starts=starts, happens=happens, priority=priority,
-        text=text, sort=sort, limit=limit,
+        text=text, sort=sort, limit=limit, include_private=include_private,
     )
 
 
@@ -1950,7 +1985,9 @@ async def ledger_search(
 
 
 @mcp.tool(annotations=_LEDGER_READ)
-async def ledger_get(refs: list[str], history: bool = False) -> LedgerGetResult:
+async def ledger_get(
+    refs: list[str], history: bool = False, include_private: Annotated[bool, _D_PRIVATE_LEDGER_GET] = False,
+) -> LedgerGetResult:
     """Read agent-ledger entries in full by ref, optionally with their history.
 
     Read-only. Up to 20 refs (Q14, F3, P1); leading zeros don't matter (Q1
@@ -1966,7 +2003,7 @@ async def ledger_get(refs: list[str], history: bool = False) -> LedgerGetResult:
         refs: entry refs.
         history: include past versions (default false).
     """
-    return await ledger_get_impl(refs, history=history)
+    return await ledger_get_impl(refs, history=history, include_private=include_private)
 
 
 # ── ledger_add / ledger_update parameters ───────────────────────────────────
@@ -2151,6 +2188,7 @@ async def ledger_update(
     challenges: Annotated[list[int] | None, _D_CHALLENGES_UPD] = None,
     seen: Annotated[bool | None, _D_SEEN_UPD] = None,
     refs: Annotated[list[str] | None, _D_REFS] = None,
+    include_private: Annotated[bool, _D_PRIVATE_LEDGER_UPDATE] = False,
 ) -> LedgerWriteResult:
     """Change an agent-ledger entry (with a reason), or mark feedback as seen.
 
@@ -2172,6 +2210,7 @@ async def ledger_update(
         status=status, area=area, topics_add=topics_add, topics_remove=topics_remove, details=details,
         superseded_by=superseded_by, handled_account=handled_account, related=related, observed_on=observed_on,
         origin=origin, author=author, challenges=challenges, seen=seen, refs=refs,
+        include_private=include_private,
     )
 
 
@@ -2275,6 +2314,31 @@ async def ledger_topic_edit(
     )
 
 
+def _drop_include_private(server: FastMCP) -> None:
+    """Without private folders, no tool shows `include_private` (P98).
+
+    `PRIVATE_FOLDER_NAMES` is off by default (the core serves any vault), and
+    an argument that can change nothing would only make agents wonder. Each
+    tool declaring it gets an argument model without the field, rebuilt from
+    the others, and its schema loses the property, the parameter's whole
+    text with it; the tool function keeps its default of false. Runs before
+    `_forbid_unknown_arguments`, so a caller passing it anyway is refused like
+    any undeclared argument. Same SDK internals as that pass, covered by
+    `tests/test_private_folders.py`.
+    """
+    for tool in server._tool_manager.list_tools():
+        base = tool.fn_metadata.arg_model
+        if "include_private" not in base.model_fields:
+            continue
+        fields = {name: (f.annotation, f) for name, f in base.model_fields.items() if name != "include_private"}
+        tool.fn_metadata.arg_model = create_model(
+            base.__name__, __base__=ArgModelBase, __module__=base.__module__, __doc__=base.__doc__, **fields,
+        )
+        tool.parameters.get("properties", {}).pop("include_private", None)
+        if "include_private" in tool.parameters.get("required", ()):
+            tool.parameters["required"].remove("include_private")
+
+
 def _forbid_unknown_arguments(server: FastMCP) -> None:
     """Refuse undeclared tool arguments on every registered tool (#295).
 
@@ -2321,6 +2385,9 @@ def _ledger_details_hint(cls, data):
                 f"details={{\"{misplaced[0]}\": …}}. Nothing was written.")
     return data
 
+
+if not _private_folders.enabled():
+    _drop_include_private(mcp)
 
 # `MCP_REJECT_UNKNOWN_ARGUMENTS=false` is the rollback: the SDK's ignore
 # behaviour and unmodified schemas. `src/main.py` logs it at WARNING on start.

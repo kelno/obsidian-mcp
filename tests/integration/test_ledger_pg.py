@@ -986,7 +986,8 @@ async def test_a_write_shows_the_current_state_of_what_its_text_cites(ctx):
     assert not any("Does the title still hold" in n for n in retitled.notes)
 
 
-async def test_an_update_lists_what_cites_the_entry(sessionmaker, ctx):
+async def test_an_update_lists_what_cites_the_entry(sessionmaker, ctx, monkeypatch):
+    monkeypatch.setattr(settings, "private_folder_names", ["* (private)"])
     quirk = await add_quirk("The cap is 20 s", area="home")
     citing = await add_quirk("A summary of the cap", area="home", body="An open fence:\n```\nnever closed",
                              details={"certainty": "tested", "sources": f"Per {quirk.ref}, untested."})
@@ -1038,8 +1039,21 @@ async def test_an_update_lists_what_cites_the_entry(sessionmaker, ctx):
     assert by["notes"] == [{"ref": "Diary (private)/d.md:1"},
                            {"ref": "_/rules.md:1", "text": f"- A rule. [P1, {quirk.ref}]"}]
     assert changed.notes[0].startswith(
-        f"These cite {quirk.ref} (cited_by): check each still holds after your change. A note listed without "
-        "its text is in a private folder: don't open it")
+        f"These cite {quirk.ref} (cited_by): check each still holds after your change. A task or note line "
+        "listed without its text is in a private folder: leave it out of your checks unless the owner asked")
+    assert any("without its text is in a private folder" in n for n in
+               (await tools.ledger_get_impl([quirk.ref])).notes)
+
+    # include_private (P98): the same lists, with the text.
+    opened = await tools.ledger_update_impl(ref=quirk.ref, expected_revision=3, reason="tested again",
+                                            append="Still holds.", include_private=True)
+    assert opened.error is None, opened.error
+    assert opened.cited_by["tasks"][0]["text"] == secret.text
+    assert opened.cited_by["notes"][0] == {"ref": "Diary (private)/d.md:1", "text": f"secret [{quirk.ref}]"}
+    assert not any("private folder" in n for n in opened.notes)
+    shown = (await tools.ledger_get_impl([quirk.ref], include_private=True))
+    assert shown.entries[0].tasks[0]["text"] == secret.text
+    assert not any("private folder" in n for n in shown.notes or [])
 
 
 async def test_an_area_search_finds_entries_through_the_areas_topics(ctx):
@@ -1081,7 +1095,8 @@ async def _open_area_vault(sessionmaker, root):
     await _task_note(sessionmaker, root, "Secret (private)/s.md")
 
 
-async def test_open_area_gathers_the_note_folders_entries_and_tasks(sessionmaker, ctx):
+async def test_open_area_gathers_the_note_folders_entries_and_tasks(sessionmaker, ctx, monkeypatch):
+    monkeypatch.setattr(settings, "private_folder_names", ["* (private)"])
     await _open_area_vault(sessionmaker, ctx)
     await tools.ledger_topic_edit_impl("create", "paint", "needed", kind="system", description="Paint", area="home")
     own = await add_quirk("Paint dries slowly", area="home")
