@@ -1523,7 +1523,8 @@ async def list_tasks(
     A task is a list item with a checkbox (`- [ ] …`, `1. [x] …`, also in
     quotes and callouts), outside code blocks and frontmatter. `- \\[ ] …`
     (escaped) is not a task. Lines that look like tasks but may not be read
-    as one by the plugin are listed under `problems`, never dropped.
+    as one by the plugin are listed under `problems`, never dropped; one in a
+    private folder comes without its text.
 
     Each task gives `ref` (`path:line`, 1-based), the exact line (`text`),
     parsed fields, and the note's `content_hash`. To change a task, pass

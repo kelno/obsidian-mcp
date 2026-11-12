@@ -3407,6 +3407,7 @@ async def create_note_impl(
         if target.lstat() is None and (
                 err := await _hand_written_task_error(uid, "create_note", target.rel, None, content)):
             return err
+        content, links_report, links_failure = await _full_path_links(uid, target.rel, None, content)
         # The agent-edit stamp, before the size check: the cap binds what is
         # written.
         content = ai_edit_stamp.stamp(content, target.rel)
@@ -3443,7 +3444,7 @@ async def create_note_impl(
             return _body_refusal(str(e), "validation_failed")
         except OSError as e:
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
-    return created + await _note_refs_report(uid, None, content)
+    return created + _links_text(links_report, links_failure) + await _note_refs_report(uid, None, content)
 
 
 # Row-level excerpt bound for the graph tools. `link_text` is note text the
@@ -4426,6 +4427,13 @@ async def edit_note_impl(
                 err := await _hand_written_task_error(uid, "edit_note", target.rel, existing, new_content)):
             return err
 
+        # Bare-name wikilinks on the lines this write adds or changes get the
+        # note's full path (the vault's link rule), before the diff and the stamp.
+        links_report, links_failure = None, ""
+        if new_content != existing:
+            new_content, links_report, links_failure = await _full_path_links(
+                uid, target.rel, existing, new_content)
+
         # The agent-edit stamp, on a write that changes something (a no-op
         # stays a no-op), before the size cap and the diff so both see the
         # bytes that would be written.
@@ -4452,7 +4460,8 @@ async def edit_note_impl(
             ))
             if not diff:
                 return f"No changes for {path}"
-            return diff + await _note_refs_report(uid, existing, new_content)
+            return (diff + _links_text(links_report, links_failure, dry_run=True)
+                    + await _note_refs_report(uid, existing, new_content))
 
         # #88. Placed after the `dry_run` return above on purpose: a dry run
         # publishes nothing and so needs no confirmation, but every mode that
@@ -4480,7 +4489,7 @@ async def edit_note_impl(
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
         return success_message + _published_hash_clause(
             new_content.encode("utf-8")
-        ) + await _note_refs_report(uid, existing, new_content)
+        ) + _links_text(links_report, links_failure) + await _note_refs_report(uid, existing, new_content)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -6605,6 +6614,22 @@ async def write_file_impl(
             if err := await _hand_written_task_error(
                     uid, "write_file", target.rel, old_note, data.decode("utf-8", errors="replace")):
                 return err
+        links_text = ""
+        if target.rel.lower().endswith(".md"):
+            try:
+                new_note = data.decode("utf-8")
+            except UnicodeDecodeError:
+                new_note = None   # not text a link can be rewritten in safely: left as sent
+            if new_note is not None:
+                try:
+                    old_text = previous_note.decode("utf-8") if previous_note is not None else None
+                except UnicodeDecodeError:
+                    old_text = None
+                rewritten, links_report, links_failure = await _full_path_links(
+                    uid, target.rel, old_text, new_note)
+                if rewritten != new_note:
+                    data = rewritten.encode("utf-8")
+                links_text = _links_text(links_report, links_failure)
 
         # **The cap follows the NORMALISED name, not the caller's string.**
         # `open_mutable` drops empty and `.` components, so `"big.md/."` is
@@ -6645,8 +6670,8 @@ async def write_file_impl(
             return result + (
                 f" — hash not reported: incumbent or published file exceeds "
                 f"{read_cap_name} ({read_cap:,} bytes)"
-            ) + refs
-        return result + _published_hash_clause(data) + refs
+            ) + links_text + refs
+        return result + _published_hash_clause(data) + links_text + refs
 
 
 async def _write_file_refs_report(uid, rel: str, previous: bytes | None, data: bytes, unread: bool) -> str:
@@ -8007,16 +8032,22 @@ async def list_tasks_impl(
         notes.append("The plugin's global query was applied as well, as Obsidian applies it to every query.")
     if sort == "random":
         notes.append("random order is this server's own shuffle; Obsidian's `sort by random` orders differently.")
+    # Problems come back with every query, whatever it asked: a private note's
+    # line is shown as path:line and reason only, as open_area and cited_by do (F63).
+    problem_items = [
+        TaskProblem(ref=f"{r.file_path}:{r.line_number}", path=r.file_path, line=r.line_number,
+                    text=None if _ledger_private(r.file_path) else r.line, reason=r.reason or "unknown")
+        for r in problems[:TASK_LIST_MAX_PROBLEMS]
+    ]
+    if any(p.text is None for p in problem_items):
+        notes.append("A problem listed without its text is in a private folder: read it only if the owner asks; "
+                     "leave it out of your checks otherwise.")
     return TaskListResult(
         tasks=tasks,
         total_matched=total,
         truncated=total > len(page),
         query=query,
-        problems=[
-            TaskProblem(ref=f"{r.file_path}:{r.line_number}", path=r.file_path, line=r.line_number,
-                        text=r.line, reason=r.reason or "unknown")
-            for r in problems[:TASK_LIST_MAX_PROBLEMS]
-        ],
+        problems=problem_items,
         problems_total=len(problems),
         stale=stale or None,
         today=today.isoformat(),
@@ -9082,6 +9113,41 @@ def _ledger_state_line(state: dict) -> str:
     if state.get("updated"):
         facts.append(f"updated {state['updated']}")
     return f"- {state['ref']} ({', '.join(facts)}): \"{state['title']}\""
+
+
+async def _full_path_links(uid, path: str, old: str | None, new: str) -> tuple[str, object | None, str]:
+    """`new` with its bare-name wikilinks given full paths (`link_paths`), the report, and a failure line.
+
+    Only lines the write adds or changes are touched. Never fails the write:
+    when the note list cannot be read, `new` is returned as is with a line
+    saying so.
+    """
+    from src.services import link_paths
+
+    if "[[" not in new:
+        return new, None, ""
+    try:
+        from sqlalchemy import select
+
+        from src.models.db import NoteMetadata
+
+        async with async_session() as session:
+            paths = (await session.execute(
+                select(NoteMetadata.file_path).where(_note_owner_predicate(uid)))).scalars().all()
+        index = link_paths.NoteIndex([*paths, path])
+        rewritten, report = await asyncio.to_thread(link_paths.rewrite, old, new, index)
+        return rewritten, report, ""
+    except Exception as exc:  # noqa: BLE001 — the write goes ahead unchanged; the result says so
+        # debug, not warning: a caller drives this path (the D18 permit rule); the result tells the caller.
+        logger.debug("note write: bare-name links could not be checked", exc_info=True)
+        return new, None, (f"\n\nBare-name links in this write could not be checked ({type(exc).__name__}): "
+                           "write each link with the note's full path yourself.")
+
+
+def _links_text(report, failure: str, *, dry_run: bool = False) -> str:
+    from src.services import link_paths
+
+    return failure or (link_paths.render(report, dry_run=dry_run) if report else "")
 
 
 async def _note_refs_report(uid, old: str | None, new: str | None, *, old_unread: bool = False) -> str:

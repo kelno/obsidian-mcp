@@ -49,7 +49,8 @@ class TaskProblem(_OmitNone):
     ref: str
     path: str
     line: int
-    text: str
+    #: The line as written; left out for a note in a private folder.
+    text: str | None = None
     reason: str
 
 

@@ -90,6 +90,8 @@ Each argument is one Tasks query line (the table is in `task_query.py`), and the
 
 The default sort is the plugin's (status type, urgency, due, priority, path), so "the first five" agree; `limit` applies after it.
 
+**Problems in private folders** (fork, F63, 2026-11-12): `problems` comes back with every query, whatever it asked, so a problem in a note under a folder whose name ends in ` (private)` (any depth, any case) is listed as `ref`, `path`, `line` and `reason`, without `text`, and a `notes` line says why, as `open_area` and `cited_by` do for citing tasks. The private-folder rule keeps such notes' content out of what agents stumble on.
+
 **Freshness**: the index finds the candidates; then each returned task's note is read from disk (at most `limit` notes), the line compared, and the note's real `content_hash` returned. A line that changed since the index read it goes to `stale`, never returned as current. The hash is the wire digest of the raw bytes (vault-tools L6: not `notes_metadata.content_hash`).
 
 ## The write tools

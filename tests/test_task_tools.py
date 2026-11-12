@@ -550,6 +550,23 @@ async def test_list_tasks_success_shape(vault, monkeypatch):
     assert result.settings["source"] == "file"
 
 
+async def test_list_tasks_problems_in_a_private_folder_come_without_text(vault, monkeypatch):
+    # F63: problems come back with every query; a private note's line is path:line and reason only.
+    rows = [
+        _row("People (private)/Sam.md", 3, "problem", "-\t[ ] secret", "whitespace_after_marker"),
+        _row("Areas/x.md", 4, "problem", "-\t[ ] open", "whitespace_after_marker"),
+    ]
+    monkeypatch.setattr(tools, "async_session", lambda: _FakeSession(rows))
+    result = await tools.list_tasks_impl()
+    assert result.error is None
+    by_ref = {p.ref: p for p in result.problems}
+    hidden, shown = by_ref["People (private)/Sam.md:3"], by_ref["Areas/x.md:4"]
+    assert hidden.text is None and hidden.reason == "whitespace_after_marker" and hidden.line == 3
+    assert shown.text == "-\t[ ] open"
+    assert "secret" not in result.model_dump_json()
+    assert any("private folder" in n for n in result.notes)
+
+
 async def test_list_tasks_refuses_an_unsupported_global_query(vault, monkeypatch):
     write_settings(vault, {**OWNER_SETTINGS, "globalQuery": "not done\ngroup by path"})
     result = await tools.list_tasks_impl()
