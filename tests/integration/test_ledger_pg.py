@@ -1291,3 +1291,24 @@ async def test_a_delete_on_done_removal_still_points_to_closing_the_feedback(ses
     assert done.removed is True
     assert any(n.startswith(f"{fb.ref}'s tasks are now all done (the task you ticked was removed by 🏁 delete")
                for n in done.notes or []), done.notes
+
+
+
+# ── Bare-name links get the note's full path on the lines a write changes ───
+
+async def test_note_writers_give_bare_name_links_their_full_path(sessionmaker, ctx):
+    (ctx / "projects" / "Home").mkdir(parents=True)
+    (ctx / "projects" / "Home" / "Home.md").write_text("Home\n", encoding="utf-8")
+    created = await tools.create_note_impl("links.md", "See [[Home]] and [[Nowhere]].\n")
+    assert created.startswith("Created note") and "links_rewritten:" in created
+    assert "- line 1: [[Home]] → [[projects/Home/Home|Home]]" in created
+    assert "[[Nowhere]] names no note" in created
+    assert (ctx / "links.md").read_text(encoding="utf-8").startswith("See [[projects/Home/Home|Home]]")
+
+    (ctx / "kept.md").write_text("Old [[Home]] stays.\n", encoding="utf-8")
+    dry = await tools.edit_note_impl("kept.md", "New [[Home#Plan]].", append=True, dry_run=True)
+    assert "+New [[projects/Home/Home#Plan|Home > Plan]]." in dry and "would get the note's full path" in dry
+    assert "-Old" not in dry                                       # the untouched line stays bare
+    written = await tools.write_file_impl("w.md", "[[Home|home]]\n", encoding="text")
+    assert "links_rewritten:" in written
+    assert (ctx / "w.md").read_text(encoding="utf-8") == "[[projects/Home/Home|home]]\n"

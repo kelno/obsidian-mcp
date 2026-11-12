@@ -382,6 +382,17 @@ With `LAST_AI_EDIT_FIELD` set, every tool that writes a note's text sets that fr
 
 `edit_note`, `create_note` and `write_file` on a `.md` refuse a write that adds or changes a task line (`task_line_by_hand`, nothing written): tasks are created and changed only with the task tools. Deleting a task line, or moving one unchanged, passes. Where the check sits and what counts as a task line: "Task lines are written by the task tools only" in [task tools](tasks.md).
 
+### The note writers give bare-name wikilinks their full path (fork, owner's decision, 2026-11-12)
+
+The vault's rule: a wikilink names its note by full path with a display name (`[[Areas/Areas|Areas]]`), never by bare name, because a bare name resolves to whichever note of that name wins (`links.resolve_target` picks the alphabetically first of several) and an old note with the same name once took links that way. `edit_note` (every mode; a `dry_run`'s diff shows the rewrite), `create_note` and `write_file` on a UTF-8 `.md` apply `src/services/link_paths.py` to the text they are about to write, after the task-line check and before the agent-edit stamp:
+
+- Only lines the write adds or changes (old and new compared as a multiset of lines), outside code spans, fenced blocks (the link index's masker) and the frontmatter.
+- A wikilink or note embed whose target is a bare name (no `/`, `.md` allowed) that exactly one note has, matched case-insensitively against the caller's indexed notes (plus the note being written): the target becomes that path without `.md`; anchors and display text are kept; a link with none gets the text Obsidian showed (`Areas`, `Areas > Heading`); an embed gets none. In a table row the pipe is `\|`.
+- Listed, never changed: a bare name several notes have (with the candidates), or none (perhaps a note still to create); a full path naming no note; a path in a code span right after a link (`` [[X/X|X]] (`X/X.md`) ``). An embed of a file that is not a note (`![[photo.png]]`) is left alone.
+- The result appends `links_rewritten:` (line, old → new) and `links_flagged:`, at most 30 each. The write is never refused for a link; when the note list cannot be read the text is written as sent and the result says so.
+
+The note list is the index (minutes behind a note created by hand): a note created in the last pass may count as no note, and a just-deleted one as a candidate.
+
 ### The note writers name the ledger refs on the lines they change (fork, owner's design, 2026-11-12)
 
 The vault's agent rules end each line with the refs of the proposals that shaped it (`... gets forgotten. [P54, P80]`), and from 2026-11-12 they are edited only through these tools. So `edit_note` (every mode, `dry_run` included, after the diff), `create_note`, `delete_note` and `write_file` on a `.md` target append to their text result:

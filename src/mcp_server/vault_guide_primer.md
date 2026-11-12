@@ -42,6 +42,8 @@ This paragraph can be linked to. ^my-block-id
 
 Block IDs are load-bearing references; don't rewrite or remove them.
 
+On this server, the note tools (`edit_note`, `create_note`, `write_file` to a `.md`) give a bare-name link you write (`[[Areas]]`) the note's full path when exactly one note has that name (`[[Areas/Areas|Areas]]`, display text kept or added), on the lines you add or change only, and list it under `links_rewritten:`. A name several notes share, or none has, is left as you wrote it and listed under `links_flagged:`: write the full path of the note you mean.
+
 ## Embeds (transclusion)
 
 Prefix any wikilink with `!` to inline the target's content where the

@@ -396,6 +396,16 @@ async def create_note(
     so reordering is fine), and showing one in a code span or fenced code
     block are allowed.
 
+    **Wikilinks get the note's full path.** On the lines a write adds or
+    changes (never on lines it leaves as they were), a wikilink or note embed
+    naming a note by bare name (`[[Areas]]`) that exactly one note has gets
+    that note's full path, display text kept or added so it reads the same
+    (`[[Areas/Areas|Areas]]`); the result lists each under
+    `links_rewritten:`. A bare name several notes have, or none, a full path
+    to no note, and a path in code formatting right after a link are left as
+    written and listed under `links_flagged:`. The write is never refused
+    for a link.
+
     **Agent-ledger refs.** When the note cites agent-ledger entries in
     brackets (`[Q14]`), the result ends with `cites:`, each entry as it stands
     now: check your wording matches them.
@@ -466,6 +476,16 @@ async def edit_note(
     keeping one unchanged (the same text, wherever it now sits in the note,
     so reordering is fine), and showing one in a code span or fenced code
     block are allowed.
+
+    **Wikilinks get the note's full path.** On the lines a write adds or
+    changes (never on lines it leaves as they were), a wikilink or note embed
+    naming a note by bare name (`[[Areas]]`) that exactly one note has gets
+    that note's full path, display text kept or added so it reads the same
+    (`[[Areas/Areas|Areas]]`); the result lists each under
+    `links_rewritten:`. A bare name several notes have, or none, a full path
+    to no note, and a path in code formatting right after a link are left as
+    written and listed under `links_flagged:`. The write is never refused
+    for a link.
 
     **Agent-ledger refs on the lines.** When the lines this write removes or
     rewrites cite agent-ledger entries in brackets (`[P54, P80]`), the result
@@ -1097,7 +1117,9 @@ async def write_file(
     Writing a `.md` note, the result lists agent-ledger refs like
     `edit_note`'s (`changed_lines_cite:`, `cites:`), and a write that adds
     or changes a task line is refused like `edit_note`'s
-    (`task_line_by_hand`): tasks go through the task tools.
+    (`task_line_by_hand`): tasks go through the task tools. Bare-name
+    wikilinks get the note's full path as in `edit_note`
+    (`links_rewritten:`, `links_flagged:`).
 
     `content` carries the bytes: with `encoding="base64"` (default) it is
     base64-decoded to raw bytes; with `encoding="text"` it is written verbatim
