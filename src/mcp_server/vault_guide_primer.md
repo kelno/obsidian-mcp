@@ -203,7 +203,7 @@ Vaults that use the Tasks plugin keep tasks as checkbox lines in its emoji forma
 
 ## Titles (this server)
 
-Obsidian shows a note's file name as its title, so don't start a note with a heading repeating its name. The note tools remove one they would write (the body's first non-blank line, a heading of any level whose text is the note's name, case aside) and say so under `title_heading_removed:`; a heading the write leaves as it was stays.
+Obsidian shows a note's file name as its title, so don't start a note with a heading repeating its name. When a write through the note tools adds or changes the body's first non-blank line and it is a heading (`#` to `######`) whose text is exactly the note's name (the whole file name without `.md`, a date included; case and surrounding spaces ignored, formatting such as `**` not stripped), the tool removes it and says so under `title_heading_removed:`. A heading the write leaves as it was stays, and a near repeat (`# Call with the vet` in `2026-11-12 Call with the vet`, `# **Dog food**`) is yours to avoid.
 
 ## Note names (this server)
 

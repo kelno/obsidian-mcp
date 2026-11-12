@@ -4444,6 +4444,9 @@ async def edit_note_impl(
         links_report, links_failure, title_removed = None, "", None
         if new_content != existing:
             new_content, title_removed = _title_heading.strip(existing, new_content, target.rel)
+            if new_content == existing:
+                # The heading was the whole change: nothing to write, in a dry run or not.
+                return f"No changes for {path}" + _title_heading.render(title_removed, dry_run=dry_run)
         if new_content != existing:
             new_content, links_report, links_failure = await _full_path_links(
                 uid, target.rel, existing, new_content)

@@ -409,10 +409,13 @@ async def create_note(
 
     **No title heading.** Obsidian shows the file name as the note's title,
     so when the body's first non-blank line is a heading (`#` to `######`)
-    whose text is the note's name (case and surrounding spaces ignored, no
-    formatting stripped) and this write adds or changes that line, it is
-    removed with the blank lines after it, and the result says so under
-    `title_heading_removed:`. The write is never refused for it.
+    whose text is exactly the note's name (its whole file name without
+    `.md`, a date included; case and surrounding spaces ignored, formatting
+    such as `**` not stripped) and this write adds or changes that line, it
+    is removed with the blank lines after it, and the result says so under
+    `title_heading_removed:`; the reported `content_hash` is of what was
+    written. Only exact repeats are caught: a near repeat is yours to avoid.
+    The write is never refused for it.
 
     **Wikilinks get the note's full path.** Write links with the full path
     yourself (`[[Areas/Areas|Areas]]`); this is a safety net. On the lines a
@@ -500,10 +503,13 @@ async def edit_note(
 
     **No title heading.** Obsidian shows the file name as the note's title,
     so when the body's first non-blank line is a heading (`#` to `######`)
-    whose text is the note's name (case and surrounding spaces ignored, no
-    formatting stripped) and this write adds or changes that line, it is
-    removed with the blank lines after it, and the result says so under
-    `title_heading_removed:`. The write is never refused for it.
+    whose text is exactly the note's name (its whole file name without
+    `.md`, a date included; case and surrounding spaces ignored, formatting
+    such as `**` not stripped) and this write adds or changes that line, it
+    is removed with the blank lines after it, and the result says so under
+    `title_heading_removed:`; the reported `content_hash` is of what was
+    written. Only exact repeats are caught: a near repeat is yours to avoid.
+    The write is never refused for it.
 
     **Wikilinks get the note's full path.** Write links with the full path
     yourself (`[[Areas/Areas|Areas]]`); this is a safety net. On the lines a

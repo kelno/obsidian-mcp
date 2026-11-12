@@ -770,3 +770,12 @@ def test_the_note_tools_drop_a_title_heading_they_would_add(vault):
     assert "title_heading_removed" not in untouched and read(vault, "Kept.md").startswith("# Kept")
     written = asyncio.run(tools.write_file_impl("W.md", "# w\nText\n", encoding="text"))
     assert "title_heading_removed" in written and read(vault, "W.md") == "Text\n"
+
+
+def test_a_heading_that_is_the_whole_change_is_no_change_in_both_modes(vault):
+    h = note(vault, "Dog food.md", "Body\n")
+    dry = asyncio.run(tools.edit_note_impl("Dog food.md", "# Dog food\nBody\n", dry_run=True))
+    real = asyncio.run(tools.edit_note_impl("Dog food.md", "# Dog food\nBody\n"))
+    assert dry.startswith("No changes for Dog food.md") and "would be removed" in dry
+    assert real.startswith("No changes for Dog food.md") and "was removed" in real
+    assert content_hash_for_bytes((vault / "Dog food.md").read_bytes()) == h

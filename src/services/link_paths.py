@@ -83,8 +83,8 @@ class NoteIndex:
 
 
 def _same(line: str) -> str:
-    """A line as compared between old and new: its line ending and surrounding spaces don't count."""
-    return line.rstrip("\r").strip()
+    """A line as compared between old and new: its line ending, a BOM and surrounding spaces don't count."""
+    return line.rstrip("\r").lstrip("﻿").strip()
 
 
 def _changed_lines(old: str | None, new: str) -> set[int]:

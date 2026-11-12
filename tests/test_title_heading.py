@@ -47,3 +47,11 @@ def test_render():
     assert "title_heading_removed: the first line, `# Dog food`" in th.render("# Dog food")
     assert "would be removed" in th.render("# Dog food", dry_run=True)
 
+
+def test_review_cases():
+    # A BOM on the existing first line does not make the resent heading new.
+    assert th.strip("﻿# B\nBody\n", "# B\nBody2\n", "B.md") == ("# B\nBody2\n", None)
+    # A heading at the very end keeps the line break before it.
+    assert th.strip("---\r\na: 1\r\n---\r\nOld\r\n", "---\r\na: 1\r\n---\r\n# G", "G.md")[0] == "---\r\na: 1\r\n---\r\n"
+    # A BOM before a new heading.
+    assert th.strip(None, "﻿# Dog food\nBody\n", "Dog food.md")[1] is not None

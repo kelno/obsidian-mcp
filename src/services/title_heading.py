@@ -44,7 +44,7 @@ def strip(old: str | None, new: str, path: str) -> tuple[str, str | None]:
     if i >= len(lines):
         return new, None
     line = lines[i].rstrip("\r")
-    match = _ATX_RE.match(line)
+    match = _ATX_RE.match(line.lstrip("﻿"))
     if not match or (match.group("text") or "").strip().lower() != stem:
         return new, None
     if i not in changed_lines(old, new):
@@ -52,7 +52,9 @@ def strip(old: str | None, new: str, path: str) -> tuple[str, str | None]:
     end = i + 1
     while end < len(lines) and not lines[end].strip() and end < len(lines) - 1:
         end += 1
-    return "\n".join(lines[:i] + lines[end:]), line
+    # When the heading ran to the end, keep the line break after what precedes
+    # it (a CRLF note would otherwise end on a bare CR).
+    return "\n".join(lines[:i] + (lines[end:] or [""])), line
 
 
 def render(removed: str | None, *, dry_run: bool = False) -> str:
