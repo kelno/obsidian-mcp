@@ -1672,7 +1672,8 @@ async def set_task_status(
     settings say, with today's date in the owner's time zone. A task with
     `🏁 delete` is removed when it is done (`removed: true`). If the line
     cites agent-ledger entries (`[F12]`), the result lists them as they stand
-    now.
+    now, and when this closes the last open task citing feedback, its `notes`
+    say whether to close that entry as handled.
 
     **Recurring tasks (🔁) are refused** (`recurring_task`): ticking one must
     also create its next occurrence, which these tools do not do yet. Tick it
@@ -1718,7 +1719,8 @@ async def open_area(
     outside the vault, its active ledger entries (those filed under another
     area but carrying one of its topics are marked `via_topic`), and its open
     tasks from every note carrying its tag, `#next` first, then by urgency.
-    Both lists are capped; `notes` say where the rest is. `instructions`
+    Both lists are capped; `notes` say where the rest is, and name open
+    feedback whose citing tasks are all done (ticked in Obsidian, say). `instructions`
     then say what to do with it all. A folder no area lists comes back with
     `found: false`: ask the owner which area it belongs to.
     """

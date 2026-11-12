@@ -1229,3 +1229,51 @@ async def test_note_refs_lists_are_capped_and_unread_text_is_said(sessionmaker, 
     (ctx / "_" / "agent" / "Latin1.md").write_bytes("- caf\xe9 [P54]\n".encode("latin-1"))
     written = await tools.write_file_impl("_/agent/Latin1.md", "- new [P80]\n", encoding="text", overwrite=True)
     assert "The previous text could not be read" in written and "cites:" in written
+
+
+
+# ── Closing the last citing task says what it means for the entry (F51) ─────
+
+async def test_ticking_the_last_citing_task_asks_to_close_the_feedback(sessionmaker, ctx):
+    await _task_note(sessionmaker, ctx, "f51.md")
+    fb = await tools.ledger_add_impl("feedback", "Ticks leave entries open", area="home",
+                                     details={"subtype": "friction"})
+    first = await tools.create_task_impl(f"Part one [{fb.ref}]", path="f51.md")
+    second = await tools.create_task_impl(f"Part two [{fb.ref}]", path="f51.md")
+    one = await tools.set_task_status_impl("f51.md", first.line, first.text, second.content_hash, status="done")
+    assert not any("now all done" in n for n in one.notes or [])          # part two is still open
+    two = await tools.set_task_status_impl("f51.md", second.line, second.text, one.content_hash, status="done")
+    assert two.notes == [
+        f"{fb.ref}'s tasks are now all done: close it with ledger_update(ref=\"{fb.ref}\", status=\"handled\", "
+        "handled_account=…) saying what was done, unless something in it is still open; then say so to the owner."]
+    again = await tools.set_task_status_impl("f51.md", second.line, two.text, two.content_hash, status="done")
+    assert not any("now all done" in n for n in again.notes or [])        # it was already done
+    got = (await tools.ledger_get_impl([fb.ref])).entries[0]
+    assert got.status == "open"                                           # nothing is closed for the agent
+
+
+async def test_cancelling_the_last_citing_task_says_undecided_and_a_quirk_gets_one_line(sessionmaker, ctx):
+    await _task_note(sessionmaker, ctx, "f51b.md")
+    fb = await tools.ledger_add_impl("feedback", "Dropped idea", area="home", details={"subtype": "friction"})
+    quirk = await add_quirk("Cap revisited later", area="home")
+    task = await tools.create_task_impl(f"When waits are reworked: revisit [{fb.ref}, {quirk.ref}] #when",
+                                        path="f51b.md")
+    cancelled = await tools.set_task_status_impl("f51b.md", task.line, task.text, task.content_hash,
+                                                 status="cancelled")
+    assert cancelled.notes == [
+        f"{fb.ref}'s tasks are now all cancelled: it is undecided again and stays open; say so to the owner if "
+        "they don't know.",
+        f"{quirk.ref} has no open citing task any more: what was pending on it is no longer open."]
+
+
+async def test_open_area_flags_feedback_whose_tasks_the_owner_ticked(sessionmaker, ctx):
+    await _open_area_vault(sessionmaker, ctx)
+    fb = await tools.ledger_add_impl("feedback", "Ticked in Obsidian", area="home", details={"subtype": "friction"})
+    other = await tools.ledger_add_impl("feedback", "Still going", area="home", details={"subtype": "friction"})
+    with open(ctx / "plans.md", "a", encoding="utf-8") as f:            # ticked by hand, no tool ran
+        f.write(f"- [x] #task Fixed it [{fb.ref}] ✅ 2026-11-11\n- [ ] #task Not yet [{other.ref}]\n")
+    from src.services import task_index
+    await task_index.reindex_note_tasks_now(None, "plans.md", (ctx / "plans.md").read_text(encoding="utf-8"))
+    result = await tools.open_area_impl(area="home")
+    flag = next(n for n in result.notes if n.startswith("Feedback whose citing tasks are all done"))
+    assert f"({fb.ref};" in flag and other.ref not in flag and 'status="handled"' in flag
