@@ -3453,7 +3453,7 @@ async def create_note_impl(
             return _body_refusal(str(e), "validation_failed")
         except OSError as e:
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
-    return created + name_flag + _rule_change_unlogged(target.rel, None, content) + \
+    return created + name_flag + await _rule_change_unlogged(target.rel, None, content) + \
         _title_heading.render(title_removed) + _links_text(links_report, links_failure, shift=links_shift) + \
         await _note_refs_report(uid, None, content)
 
@@ -4495,7 +4495,7 @@ async def edit_note_impl(
             ))
             if not diff:
                 return f"No changes for {path}"
-            return (diff + _rule_change_unlogged(target.rel, existing, new_content)
+            return (diff + await _rule_change_unlogged(target.rel, existing, new_content)
                     + _title_heading.render(title_removed, dry_run=True)
                     + _links_text(links_report, links_failure, dry_run=True, shift=links_shift)
                     + await _note_refs_report(uid, existing, new_content))
@@ -4526,7 +4526,7 @@ async def edit_note_impl(
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
         return success_message + _published_hash_clause(
             new_content.encode("utf-8")
-        ) + _rule_change_unlogged(target.rel, existing, new_content) + _title_heading.render(title_removed) + \
+        ) + await _rule_change_unlogged(target.rel, existing, new_content) + _title_heading.render(title_removed) + \
             _links_text(links_report, links_failure, shift=links_shift) + await _note_refs_report(
                 uid, existing, new_content)
 
@@ -6687,7 +6687,7 @@ async def write_file_impl(
                         uid, target.rel, old_text, rewritten)
                     if rewritten != new_note:
                         data = rewritten.encode("utf-8")
-                    links_text = (_rule_change_unlogged(target.rel, old_text, rewritten)
+                    links_text = (await _rule_change_unlogged(target.rel, old_text, rewritten)
                                   + _title_heading.render(title_removed) + _links_text(links_report, links_failure))
 
         # **The cap follows the NORMALISED name, not the caller's string.**
@@ -9229,35 +9229,44 @@ def _to_eol(text: str, eol: str) -> str:
     return _EOL_RE.sub(eol, text) if ("\r" in text or (eol != "\n" and "\n" in text)) else text
 
 
-#: The vault's agent rules: notes under this folder, and the root note named below.
-RULES_FOLDER, RULES_ROOT_NOTE = "_/agent/", "CLAUDE.md"
 #: Changed rule lines listed in `rule_change_unlogged:`.
 RULE_LINES_SHOWN = 5
 
 
-def _rule_change_unlogged(rel: str, old: str | None, new: str) -> str:
+async def _rule_change_unlogged(rel: str, old: str | None, new: str) -> str:
     """The result's `rule_change_unlogged:` block, or "".
 
-    For an agent rule (`_/agent/**`, the root `CLAUDE.md`): when the write
-    adds or changes non-blank lines outside the frontmatter and none of them
-    gains a proposal ref (`[P95]`), a nudge to log the decision and cite it.
-    Never a refusal.
+    For a note matching `RULE_FILE_PATTERNS` (the vault's rules for agents;
+    empty: no check): when the write adds or changes non-blank lines outside
+    the frontmatter and none of them gains a proposal ref (`[P95]`), a nudge
+    to log the decision and cite it. Never a refusal.
     """
+    import fnmatch
+
     from src.services.link_paths import frontmatter_lines
 
-    if not (rel.startswith(RULES_FOLDER) or rel == RULES_ROOT_NOTE) or not rel.lower().endswith(".md"):
+    if not rel.lower().endswith(".md") or not any(
+            fnmatch.fnmatchcase(rel, pattern) for pattern in settings.rule_file_patterns):
         return ""
-    lines = _ledger_citations.rule_lines_unlogged(
-        old, new, skip_leading=frontmatter_lines(new.replace("\r\n", "\n").replace("\r", "\n").split("\n")))
+    try:
+        skip = frontmatter_lines(new.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
+        lines = await asyncio.to_thread(_ledger_citations.rule_lines_unlogged, old, new, skip_leading=skip)
+    except Exception:  # noqa: BLE001 — a nudge never fails the write it follows
+        # debug, not warning: a caller drives this path (the D18 permit rule).
+        logger.debug("rule_change_unlogged could not be computed for %s", rel, exc_info=True)
+        return ""
     if not lines:
         return ""
     shown = "\n".join(f"- line {n}: {text[:120]}{'…' if len(text) > 120 else ''}"
                       for n, text in lines[:RULE_LINES_SHOWN])
     more = f"\n- and {len(lines) - RULE_LINES_SHOWN} more" if len(lines) > RULE_LINES_SHOWN else ""
-    return ("\n\nrule_change_unlogged: these rule lines changed and none gained a proposal ref:\n" + shown + more
+    return ("\n\nrule_change_unlogged: these rule lines were added or changed, and none of the lines this write "
+            "added or changed carries a proposal ref it didn't have before (a new one beside an old one would "
+            "count):\n" + shown + more
             + "\nIf this change follows a decision of the owner's, log it with ledger_add (kind proposal) and add "
-              "its ref at the end of each changed line (`[P95]`, or `[P35, P95]` beside an existing one). A typo "
-              "fix, or wording that changes no meaning, needs no proposal: nothing to do then.")
+              "the ref it returns at the end of each changed line (`[P95]`, or `[P35, P95]` beside an existing "
+              "one). A typo fix, or wording that changes no meaning, needs no proposal: nothing to do then. A "
+              "change of meaning the owner hasn't decided waits for their decision: ask first.")
 
 
 #: The refusal for a note named against its folder's `note_names: dated`.

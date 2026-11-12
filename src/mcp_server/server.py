@@ -407,13 +407,13 @@ async def create_note(
     so reordering is fine), and showing one in a code span or fenced code
     block are allowed.
 
-    **Rule edits carry their proposal.** In the vault's agent rules
-    (`_/agent/**` and the root `CLAUDE.md`), when a write adds or changes
-    lines (outside the frontmatter) and none of them gains a proposal ref
-    (`[P95]`), the result adds `rule_change_unlogged:` with those lines: log
-    an owner's decision with `ledger_add` (kind proposal) and cite it at the
-    end of each changed line; a typo fix or a change of wording only needs
-    nothing. Never a refusal.
+    **Rule edits carry their proposal.** In the notes this server is set to
+    treat as the vault's rules for agents, when a write adds or changes
+    lines (outside the frontmatter) and none of them carries a new proposal
+    ref (`[P95]`), the result adds `rule_change_unlogged:` with those lines:
+    log an owner's decision with `ledger_add` (kind proposal) and cite the
+    ref it returns at the end of each changed line; a typo fix or wording
+    that changes no meaning needs no proposal. Never a refusal.
 
     **No title heading.** Obsidian shows the file name as the note's title,
     so when the body's first non-blank line is a heading (`#` to `######`)
@@ -509,13 +509,13 @@ async def edit_note(
     so reordering is fine), and showing one in a code span or fenced code
     block are allowed.
 
-    **Rule edits carry their proposal.** In the vault's agent rules
-    (`_/agent/**` and the root `CLAUDE.md`), when a write adds or changes
-    lines (outside the frontmatter) and none of them gains a proposal ref
-    (`[P95]`), the result adds `rule_change_unlogged:` with those lines: log
-    an owner's decision with `ledger_add` (kind proposal) and cite it at the
-    end of each changed line; a typo fix or a change of wording only needs
-    nothing. Never a refusal.
+    **Rule edits carry their proposal.** In the notes this server is set to
+    treat as the vault's rules for agents, when a write adds or changes
+    lines (outside the frontmatter) and none of them carries a new proposal
+    ref (`[P95]`), the result adds `rule_change_unlogged:` with those lines:
+    log an owner's decision with `ledger_add` (kind proposal) and cite the
+    ref it returns at the end of each changed line; a typo fix or wording
+    that changes no meaning needs no proposal. Never a refusal.
 
     **No title heading.** Obsidian shows the file name as the note's title,
     so when the body's first non-blank line is a heading (`#` to `######`)

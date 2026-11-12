@@ -237,6 +237,10 @@ def rule_lines_unlogged(old: str | None, new: str, *, skip_leading: int = 0) -> 
     def same(line: str) -> str:
         return line.lstrip("﻿").strip()
 
+    def bare(line: str) -> str:
+        """The line without its bracketed refs: a change that only drops a ref is no rule change."""
+        return " ".join(_BRACKET_RE.sub(" ", same(line)).split())
+
     old_rows, new_rows = rows(old), rows(new)
     left = Counter(same(line) for _, line, _refs in old_rows)
     added = []
@@ -249,13 +253,20 @@ def rule_lines_unlogged(old: str | None, new: str, *, skip_leading: int = 0) -> 
     if not added:
         return []
     kept = Counter(same(line) for _, line, _refs in new_rows)
-    removed_refs = set()
+    removed_refs, removed_bare = set(), Counter()
     for _, line, refs in old_rows:
         key = same(line)
         if kept[key] > 0:
             kept[key] -= 1
         else:
             removed_refs |= refs
+            removed_bare[bare(line)] += 1
     if any(refs - removed_refs for _, _, refs in added):
         return []
-    return [(i + 1, line.strip()) for i, line, _refs in added]
+    out = []
+    for i, line, _refs in added:
+        if removed_bare[bare(line)] > 0 and not (_refs - removed_refs):
+            removed_bare[bare(line)] -= 1       # only refs dropped from a line the write kept otherwise
+            continue
+        out.append((i + 1, line.strip()))
+    return out

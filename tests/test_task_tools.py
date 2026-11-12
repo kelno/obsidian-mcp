@@ -835,11 +835,12 @@ def test_line_ending_review_cases(vault):
 
 
 
-def test_a_rule_edit_without_a_proposal_ref_is_nudged(vault):
+def test_a_rule_edit_without_a_proposal_ref_is_nudged(vault, monkeypatch):
+    monkeypatch.setattr(tools.settings, "rule_file_patterns", ["_/agent/*", "CLAUDE.md"])
     note(vault, "_/agent/Rules.md", "- Rule one. [P35]\n- Rule two.\n")
     dry = asyncio.run(tools.edit_note_impl("_/agent/Rules.md", "- Rule one, reworded. [P35]", find="- Rule one. [P35]",
                                            dry_run=True))
-    assert "rule_change_unlogged: these rule lines changed and none gained a proposal ref:" in dry
+    assert "rule_change_unlogged: these rule lines were added or changed" in dry
     assert "- line 1: - Rule one, reworded. [P35]" in dry and "ledger_add (kind proposal)" in dry
     logged = asyncio.run(tools.edit_note_impl("_/agent/Rules.md", "- Rule one, reworded. [P35, P95]",
                                               find="- Rule one. [P35]"))
@@ -848,3 +849,9 @@ def test_a_rule_edit_without_a_proposal_ref_is_nudged(vault):
     assert "rule_change_unlogged" not in elsewhere
     created = asyncio.run(tools.create_note_impl("_/agent/New.md", "- A new rule.\n"))
     assert "rule_change_unlogged" in created
+
+
+
+def test_no_rule_patterns_no_nudge(vault):
+    created = asyncio.run(tools.create_note_impl("_/agent/Unset.md", "- A new rule.\n"))
+    assert "rule_change_unlogged" not in created

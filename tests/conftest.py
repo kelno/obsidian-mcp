@@ -90,6 +90,7 @@ SETTINGS_ENV_KEYS = (
     # Task tools (fork).
     "TASKS_INBOX_PATH",
     "AREAS_INDEX_PATH",
+    "RULE_FILE_PATTERNS",
     "TASKS_TIMEZONE",
     "TASKS_PLUGIN_SETTINGS_PATH",
     # Agent ledger (fork).

@@ -184,3 +184,5 @@ def test_rule_lines_unlogged():
     assert lc.rule_lines_unlogged(None, "- New rule `[P95]`\n") == [(1, "- New rule `[P95]`")]
     # Line endings alone are no change.
     assert lc.rule_lines_unlogged("a\r\nb\r\n", "a\nb\n") == []
+    # Dropping a wrong citation, and nothing else, is no rule change.
+    assert lc.rule_lines_unlogged("- Rule one. [P35]\n", "- Rule one.\n") == []

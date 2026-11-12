@@ -203,7 +203,7 @@ Vaults that use the Tasks plugin keep tasks as checkbox lines in its emoji forma
 
 ## Agent rules (this server)
 
-The vault's agent rules (`_/agent/**` and the root `CLAUDE.md`) end each line with the refs of the proposals that shaped it (`[P54, P80]`). When a write there adds or changes lines and none gains a proposal ref, the note tools add `rule_change_unlogged:` to their result with those lines: if the change follows a decision of the owner's, log it with `ledger_add` (kind proposal) and add its ref at the end of each changed line; a typo fix or a change of wording only needs nothing.
+When this server is set up with the vault's rule notes (the notes holding its rules for agents, whose lines end with the refs of the proposals that shaped them, `[P54, P80]`), a write there that adds or changes lines with none of them carrying a new proposal ref gets `rule_change_unlogged:` in its result, with those lines. If the change follows a decision of the owner's, log it with `ledger_add` (kind proposal) and add the ref it returns at the end of each changed line; a typo fix or wording that changes no meaning needs nothing; a change of meaning the owner hasn't decided waits for their decision.
 
 ## Titles (this server)
 
