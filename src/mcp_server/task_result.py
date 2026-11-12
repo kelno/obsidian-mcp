@@ -19,13 +19,16 @@ class TaskItem(_OmitNone):
     ref: str                       # "path:line", 1-based
     path: str
     line: int
-    text: str                      # the exact line, as on disk
-    status_symbol: str
-    status_name: str
+    #: True for a task in a private folder listed by a query not scoped to
+    #: that folder: only `ref`, `path`, `line` and `status_type` are given.
+    private: bool | None = None
+    text: str | None = None        # the exact line, as on disk
+    status_symbol: str | None = None
+    status_name: str | None = None
     status_type: str
-    description: str
-    tags: list[str]
-    priority: str                  # highest, high, medium, none, low, lowest
+    description: str | None = None
+    tags: list[str] | None = None
+    priority: str | None = None    # highest, high, medium, none, low, lowest
     created: str | None = None
     start: str | None = None
     scheduled: str | None = None
@@ -38,18 +41,18 @@ class TaskItem(_OmitNone):
     on_completion: str | None = None
     id: str | None = None
     depends_on: list[str] | None = None
-    urgency: float
+    urgency: float | None = None
     #: invalid_date, unknown_on_completion, field_in_description.
     warnings: list[str] | None = None
     #: The note's current `content_hash`, to pass back as `expected_hash`.
-    content_hash: str
+    content_hash: str | None = None
 
 
 class TaskProblem(_OmitNone):
     ref: str
     path: str
     line: int
-    #: The line as written; left out for a note in a private folder.
+    #: The line as written; left out for a note in a private folder, as a task's text is.
     text: str | None = None
     reason: str
 
@@ -58,7 +61,8 @@ class StaleTask(_OmitNone):
     ref: str
     path: str
     line: int
-    indexed_text: str
+    #: Left out for a note in a private folder, as a task's text is.
+    indexed_text: str | None = None
     reason: str
 
 

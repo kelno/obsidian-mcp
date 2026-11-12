@@ -567,6 +567,33 @@ async def test_list_tasks_problems_in_a_private_folder_come_without_text(vault, 
     assert any("private folder" in n for n in result.notes)
 
 
+async def test_list_tasks_private_tasks_by_location_unless_the_path_names_the_folder(vault, monkeypatch):
+    note(vault, "People (private)/Sam.md", "# S\n- [ ] call Sam about the secret\n- [ ] old\n")
+    h = note(vault, "Areas/x.md", "- [ ] open thing\n")
+    rows = [
+        _row("People (private)/Sam.md", 2, "task", "- [ ] call Sam about the secret"),
+        _row("People (private)/Sam.md", 3, "task", "- [ ] stale secret line"),
+        _row("Areas/x.md", 1, "task", "- [ ] open thing"),
+    ]
+    monkeypatch.setattr(tools, "async_session", lambda: _FakeSession(rows))
+    result = await tools.list_tasks_impl()
+    assert result.error is None
+    by_ref = {t.ref: t for t in result.tasks}
+    hidden = by_ref["People (private)/Sam.md:2"]
+    assert hidden.private is True and hidden.status_type == "TODO"
+    assert hidden.text is None and hidden.description is None and hidden.content_hash is None
+    assert by_ref["Areas/x.md:1"].text == "- [ ] open thing" and by_ref["Areas/x.md:1"].content_hash == h
+    assert [s.ref for s in result.stale] == ["People (private)/Sam.md:3"] and result.stale[0].indexed_text is None
+    dumped = result.model_dump_json()
+    assert "secret" not in dumped and '"private":true' in dumped
+    assert any("location only" in n for n in result.notes)
+
+    scoped = await tools.list_tasks_impl(path="people (private)/")
+    assert [t.text for t in scoped.tasks] == ["- [ ] call Sam about the secret"]
+    assert scoped.tasks[0].private is None and scoped.stale[0].indexed_text == "- [ ] stale secret line"
+    assert not any("location only" in n for n in scoped.notes or [])
+
+
 async def test_list_tasks_refuses_an_unsupported_global_query(vault, monkeypatch):
     write_settings(vault, {**OWNER_SETTINGS, "globalQuery": "not done\ngroup by path"})
     result = await tools.list_tasks_impl()
