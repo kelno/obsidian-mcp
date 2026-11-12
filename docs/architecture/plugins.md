@@ -15,7 +15,8 @@ A plugin fills only the hooks it needs; every field of `Plugin` but `name` is op
 
 When the writers call them:
 
-- Only on a write that changes the note, and whose old and new text are readable UTF-8 (`write_file` with bytes that are not leaves the plugins out, as it leaves out the link rewrite). Not the task writers, `move_note` or `set_frontmatter`.
+- Only on a write that changes the note. Not the task writers, `move_note` or `set_frontmatter`.
+- `write_file` gives `check` the text decoded leniently (an undecodable byte becomes U+FFFD), as the core's task-line check reads it, so bytes that are not UTF-8 cannot switch a check off; it skips `check`, like that check, on an overwrite whose old bytes it could not read. It runs `rewrite` only when the old and new bytes are both UTF-8, as it does the link rewrite.
 - `check` runs right after the core's own refusals (task lines, note names) and before any rewrite, so every plugin's check sees the caller's own text. The first refusal, in plugin order, wins. A `check` is skipped where the core's `already_exists` answer will win (an existing note for `create_note`, an existing file without `overwrite` for `write_file`).
 - `rewrite` runs after the core's own rewrites (title heading, full-path links) and before the agent-edit stamp and the size cap. Each plugin gets the previous one's output; its `NoteWrite.old` stays the note's old text, so "the lines this write adds or changes" keeps meaning the caller's change. Two plugins rewriting one line: the later one sees the earlier one's result, and both reports are kept.
 - The reports go after the core's own blocks, in plugin order, then any `plugin_error:` lines. `shift` is the number of lines the stamp added above the body, so a report can give the written note's line numbers. A rewrite that adds or removes lines moves the line numbers of reports made before it: a plugin with several rewrites orders them itself, as the core runs the title heading before the links.
@@ -29,9 +30,12 @@ A plugin bug never fails a write. Each of these is set aside, the write goes ahe
 - a hook that raises;
 - a `check` that returns something other than None or a `Refusal` with a listed code;
 - a `rewrite` that returns something other than a `Rewrite`;
-- a `rewrite` that removes or alters a non-blank line the caller kept from the old note (lines compared as `link_paths.changed_lines` compares them), or changes the frontmatter block. This guards against the expensive failure here, a write that clobbers a note: a plugin may change the caller's own lines, add lines and drop blank ones, nothing else. Lines are compared as a multiset, so a rewrite that moves a kept line elsewhere is not caught (accepted: no plugin moves lines).
+- a report that raises or returns something other than a string (None means nothing to say);
+- a `rewrite` that removes or alters a non-blank line the caller kept from the old note, or changes the frontmatter block, adding one included. This guards against the expensive failure here, a write that clobbers a note: a plugin may change the caller's own lines, add lines and drop blank ones, nothing else. Which lines the caller kept is decided as `link_paths.changed_lines` decides it for the core's own rewrites; whether the rewrite kept them is exact, only the line ending aside, so re-indenting or trimming a kept line is caught. CRLF, LF and lone-CR notes are all read line by line. Lines are compared as a multiset, so a rewrite that moves a kept line elsewhere is not caught (accepted: no plugin moves lines).
 
-A name in `PLUGINS` that does not load (no module, an import error, no `plugin` of type `Plugin` named like its module, a repeated name) stops the server at startup (`main._load_plugins`, first in the lifespan, sandbox mode included): running without a vault's guards by accident is worse than not starting. `Settings` checks only that each name is an identifier, because the alembic init container imports the settings.
+Accepted, from the adversarial review (2026-11-13): a `plugin_error:` line is lost when the write then ends early (another plugin's refusal, the size cap, `edit_note`'s "No changes"), though it is still logged; a rewrite that undoes the caller's whole change is written (a no-op write that still stamps); hooks have no timeout.
+
+A name in `PLUGINS` that does not load (no module, any exception while importing it, no `plugin` of type `Plugin` named like its module, a repeated name) stops the server at startup (`main._load_plugins`, first in the lifespan, sandbox mode included): running without a vault's guards by accident is worse than not starting. `Settings` checks only that each name is an identifier, because the alembic init container imports the settings.
 
 ## The plugins here
 

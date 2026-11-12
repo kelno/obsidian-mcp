@@ -280,6 +280,5 @@ def render(report: LinkReport, *, dry_run: bool = False) -> str:
 #: The line comparison and frontmatter span, shared with `title_heading` and
 #: the plugin runner (`src/plugins`) so all pick a write's changed lines the
 #: same way.
-compare_key = _same
 changed_lines = _changed_lines
 frontmatter_lines = _frontmatter_lines

@@ -95,6 +95,8 @@ SETTINGS_ENV_KEYS = (
     "RULE_FILE_PATTERNS",
     "TASKS_TIMEZONE",
     "TASKS_PLUGIN_SETTINGS_PATH",
+    # Plugins (fork).
+    "PLUGINS",
     # Agent ledger (fork).
     "LEDGER_VIEW_HINT_MIN_QUIRKS",
     "LEDGER_QUERY_EMBED_TIMEOUT_SECONDS",

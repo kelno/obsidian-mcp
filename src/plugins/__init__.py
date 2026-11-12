@@ -82,7 +82,7 @@ class Refusal:
 
 #: A rewrite's block for the tool's result: called with the number of lines
 #: the core's later steps (the agent-edit stamp) added above the body, and
-#: whether this is a dry run; returns the text to append ("" for none).
+#: whether this is a dry run; returns the text to append ("" or None for none).
 ReportRender = Callable[[int, bool], str]
 
 
@@ -127,8 +127,9 @@ def load(names: tuple[str, ...]) -> tuple[Plugin, ...]:
             raise PluginLoadError(f"PLUGINS names {name!r} twice")
         try:
             module = importlib.import_module(f"{__name__}.{name}")
-        except ImportError as e:
-            raise PluginLoadError(f"PLUGINS names {name!r}, which could not be imported from src/plugins/: {e}") from e
+        except Exception as e:  # noqa: BLE001 - any import failure (a SyntaxError too) is the same refusal to start
+            raise PluginLoadError(f"PLUGINS names {name!r}, which could not be imported from src/plugins/: "
+                                  f"{type(e).__name__}: {e}") from e
         plugin = getattr(module, "plugin", None)
         if not isinstance(plugin, Plugin):
             raise PluginLoadError(f"src/plugins/{name} exposes no `plugin` of type Plugin")
@@ -154,22 +155,29 @@ def _error_line(plugin: Plugin, step: str, why: str) -> str:
             "ahead without it. Nothing for you to fix: it is logged for the server's maintainer.")
 
 
-def _kept_lines(old: str | None, before: str) -> Counter[str]:
-    """The non-blank lines of `before` that the caller kept from `old`, as `link_paths` compares lines."""
-    changed = link_paths.changed_lines(old, before)
-    return Counter(link_paths.compare_key(line) for i, line in enumerate(before.split("\n"))
-                   if i not in changed and line.strip())
+def _lines(text: str) -> list[str]:
+    """`text`'s lines, without their endings: CRLF, LF and lone-CR notes alike."""
+    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
 def _out_of_scope(old: str | None, before: str, after: str) -> bool:
-    """Whether a rewrite of `before` into `after` removed or altered a kept line, or touched the frontmatter."""
-    before_lines = before.split("\n")
-    after_lines = after.split("\n")
-    head = link_paths.frontmatter_lines(before_lines)
+    """Whether a rewrite of `before` into `after` removed or altered a kept line, or touched the frontmatter.
+
+    Which lines the caller kept is decided as `link_paths` decides it for the
+    core's own rewrites; whether the rewrite kept them is exact (only the line
+    ending may differ), so a rewrite that re-indents or trims a kept line is
+    caught. The frontmatter span is the larger of the two texts', so adding a
+    block counts as touching it.
+    """
+    before_lines, after_lines = _lines(before), _lines(after)
+    head = max(link_paths.frontmatter_lines(before_lines), link_paths.frontmatter_lines(after_lines))
     if after_lines[:head] != before_lines[:head]:
         return True
-    have = Counter(link_paths.compare_key(line) for line in after_lines)
-    return any(have[key] < count for key, count in _kept_lines(old, before).items())
+    old_lf = None if old is None else "\n".join(_lines(old))
+    changed = link_paths.changed_lines(old_lf, "\n".join(before_lines))
+    kept = Counter(line for i, line in enumerate(before_lines) if i not in changed and line.strip())
+    have = Counter(after_lines)
+    return any(have[line] < count for line, count in kept.items())
 
 
 @dataclass
@@ -204,7 +212,8 @@ class NoteWriteRun:
                 continue
             if refusal is None:
                 continue
-            if not isinstance(refusal, Refusal) or refusal.code not in refusals.BODY_CODES:
+            if not (isinstance(refusal, Refusal) and isinstance(refusal.code, str) and isinstance(refusal.message, str)
+                    and refusal.code in refusals.BODY_CODES):
                 logger.error("plugin %s: check returned %r on %s, not a Refusal with a code listed in "
                              "refusals.BODY_CODES", plugin.name, refusal, self.path)
                 self._errors.append(_error_line(plugin, "check", "returned something unusable"))
@@ -242,9 +251,16 @@ class NoteWriteRun:
         out = []
         for plugin_report in self._reports:
             try:
-                out.append(plugin_report(shift, dry_run))
+                block = plugin_report(shift, dry_run)
+                if block is None:
+                    block = ""   # nothing to say
+                elif not isinstance(block, str):
+                    logger.error("plugin report on %s (%s) returned %r, not a str", self.path, self.tool, type(block))
+                    block = None
             except Exception:  # noqa: BLE001 - a plugin bug must not fail the write; logged and reported
                 logger.exception("plugin report failed on %s (%s)", self.path, self.tool)
-                out.append("\n\nplugin_error: a server plugin's report on this write failed; the write itself is "
-                           "as described above. Nothing for you to fix: it is logged for the server's maintainer.")
+                block = None
+            out.append(block if block is not None else (
+                "\n\nplugin_error: a server plugin's report on this write failed; the write itself is "
+                "as described above. Nothing for you to fix: it is logged for the server's maintainer."))
         return "".join(out) + "".join(self._errors)

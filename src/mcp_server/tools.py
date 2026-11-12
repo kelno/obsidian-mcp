@@ -6688,9 +6688,16 @@ async def write_file_impl(
         if target.rel.lower().endswith(".md") and (overwrite or not exists) and not (
                 overwrite and exists and previous_note is None):
             old_note = previous_note.decode("utf-8", errors="replace") if previous_note is not None else None
-            if err := await _hand_written_task_error(
-                    uid, "write_file", target.rel, old_note, data.decode("utf-8", errors="replace")):
+            new_lenient = data.decode("utf-8", errors="replace")
+            if err := await _hand_written_task_error(uid, "write_file", target.rel, old_note, new_lenient):
                 return err
+            # The plugins' checks too, on the same lenient text, so bytes that
+            # are not UTF-8 cannot switch them off.
+            plugin_run = _plugins.NoteWriteRun("write_file", target.rel, old_note, dry_run=False, user_id=uid)
+            if new_lenient != old_note and (refusal := await plugin_run.check(new_lenient)):
+                return _body_refusal(refusal.message, refusal.code)
+        else:
+            plugin_run = None
         links_text = ""
         # Not when the old text could not be read: every line would look new.
         if target.rel.lower().endswith(".md") and not (overwrite and exists and previous_note is None):
@@ -6704,20 +6711,18 @@ async def write_file_impl(
                     readable = True
                 except UnicodeDecodeError:
                     readable = False   # every line would look new: links left as sent
-                if readable and new_note != old_text:
-                    plugin_run = _plugins.NoteWriteRun("write_file", target.rel, old_text, dry_run=False, user_id=uid)
-                    # An existing file the no-clobber publish refuses: `already_exists` wins.
-                    if (overwrite or not exists) and (refusal := await plugin_run.check(new_note)):
-                        return _body_refusal(refusal.message, refusal.code)
+                if readable:
                     rewritten, title_removed = _title_heading.strip(old_text, new_note, target.rel)
                     rewritten, links_report, links_failure = await _full_path_links(
                         uid, target.rel, old_text, rewritten)
-                    rewritten = await plugin_run.rewrite(rewritten)
+                    if plugin_run is not None and new_note != old_text:
+                        rewritten = await plugin_run.rewrite(rewritten)
                     if rewritten != new_note:
                         data = rewritten.encode("utf-8")
                     links_text = (await _rule_change_unlogged(target.rel, old_text, rewritten)
-                                  + _title_heading.render(title_removed) + _links_text(links_report, links_failure)
-                                  + plugin_run.render())
+                                  + _title_heading.render(title_removed) + _links_text(links_report, links_failure))
+            if plugin_run is not None:
+                links_text += plugin_run.render()
 
         # **The cap follows the NORMALISED name, not the caller's string.**
         # `open_mutable` drops empty and `.` components, so `"big.md/."` is

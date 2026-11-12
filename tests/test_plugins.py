@@ -228,6 +228,73 @@ def test_a_rewrite_outside_the_callers_change_is_set_aside(vault, monkeypatch, b
     assert "tried to change text the write did not touch" in result
 
 
+@pytest.mark.parametrize("bad", [
+    lambda new: new.replace("  - nested", "- nested"),       # re-indents a kept line
+    lambda new: new.replace("hard break  ", "hard break"),   # trims a kept line's trailing spaces
+])
+def test_the_guard_compares_kept_lines_exactly(vault, monkeypatch, bad):
+    async def overreach(write):
+        return plugins.Rewrite(bad(write.new))
+
+    use(monkeypatch, plugins.Plugin("p", rewrite=overreach))
+    before = "- top\n  - nested\nhard break  \nold\n"
+    note(vault, "b.md", before)
+    result = text_of(asyncio.run(tools.edit_note_impl("b.md", "new", find="old")))
+    assert read(vault, "b.md") == before.replace("old", "new") and "plugin_error" in result
+
+
+def test_the_guard_reads_a_lone_cr_note_line_by_line(vault, monkeypatch):
+    async def truncate(write):
+        return plugins.Rewrite(write.new.split("\r")[-2] + "\r")
+
+    use(monkeypatch, plugins.Plugin("p", rewrite=truncate))
+    note(vault, "b.md", "---\ra: 1\r---\rkept\rold\r")
+    result = text_of(asyncio.run(tools.edit_note_impl("b.md", "new", find="old")))
+    assert read(vault, "b.md") == "---\ra: 1\r---\rkept\rnew\r" and "plugin_error" in result
+
+
+def test_a_rewrite_adding_frontmatter_is_set_aside(vault, monkeypatch):
+    async def add_block(write):
+        return plugins.Rewrite("---\n" + write.new)
+
+    use(monkeypatch, plugins.Plugin("p", rewrite=add_block))
+    note(vault, "b.md", "kept\n---\nold\n")
+    result = text_of(asyncio.run(tools.edit_note_impl("b.md", "new", find="old")))
+    assert read(vault, "b.md") == "kept\n---\nnew\n" and "plugin_error" in result
+
+
+def test_bytes_that_are_not_utf8_do_not_switch_the_checks_off(vault, monkeypatch):
+    import base64
+
+    use(monkeypatch, plugins.Plugin("p", check=refuse_shouting))
+    payload = base64.b64encode(b"SHOUT \xff\n").decode()
+    assert code(asyncio.run(tools.write_file_impl("c.md", payload))) == "validation_failed"
+    assert not (vault / "c.md").exists()
+
+
+def test_a_report_returning_none_says_nothing_and_a_bad_one_does_not_fail_the_write(vault, monkeypatch):
+    async def quiet(write):
+        return plugins.Rewrite(write.new, lambda shift, dry: None)
+
+    async def odd(write):
+        return plugins.Rewrite(write.new, lambda shift, dry: 42)
+
+    use(monkeypatch, plugins.Plugin("q", rewrite=quiet))
+    assert "plugin" not in text_of(asyncio.run(tools.create_note_impl("a.md", "text\n")))
+    use(monkeypatch, plugins.Plugin("o", rewrite=odd))
+    result = text_of(asyncio.run(tools.create_note_impl("b.md", "text\n")))
+    assert read(vault, "b.md") == "text\n" and "report on this write failed" in result
+
+
+def test_a_refusal_with_a_code_of_the_wrong_type_lets_the_write_through(vault, monkeypatch):
+    async def odd(write):
+        return plugins.Refusal(["validation_failed"], "No.")
+
+    use(monkeypatch, plugins.Plugin("p", check=odd))
+    result = text_of(asyncio.run(tools.create_note_impl("a.md", "text\n")))
+    assert read(vault, "a.md") == "text\n" and "returned something unusable" in result
+
+
 def test_a_rewrite_may_change_the_callers_lines_and_drop_blank_ones(vault, monkeypatch):
     async def tidy(write):
         return plugins.Rewrite(write.new.replace("new", "NEW").replace("\n\n", "\n"))
