@@ -94,6 +94,14 @@ def test_the_setting_parses_like_the_other_glob_lists():
                     private_folder_names="* (private),Other").private_folder_names == ["* (private)", "Other"]
 
 
+def test_a_slash_in_a_name_is_trimmed_or_refused():
+    # Review: `Private/` used to match nothing at all, silently.
+    trimmed = Settings(_env_file=None, secret_key="x" * 40, private_folder_names='["Private/", "/Diary/"]')
+    assert trimmed.private_folder_names == ["Private", "Diary"]
+    with pytest.raises(ValueError, match="folder names, not paths"):
+        Settings(_env_file=None, secret_key="x" * 40, private_folder_names='["Areas/Health"]')
+
+
 def test_the_hidden_line_is_the_owner_s_wording():
     assert private_folders.hidden_line(2) == "2 matches in private folders not shown."
     assert private_folders.hidden_line(1) == "1 match in private folders not shown."

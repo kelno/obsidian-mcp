@@ -157,11 +157,13 @@ def _private_folders_named() -> str:
 
 
 _WHEN_PRIVATE = ("Set true only when the owner asked for something in a private folder, or a protocol the owner "
-                 "set up does.")
+                 "set up (a written procedure you were told to follow) reaches into one. A question private notes "
+                 "might answer is not enough: when they may matter, say how many were left out, and the owner decides.")
 _D_PRIVATE_SEARCH = Field(description=(
     f"Also return notes in private folders ({_private_folders_named()}). Default false: they are left out, "
     "and the result ends with how many would have been listed (\"2 matches in private folders not shown.\"). "
-    + _WHEN_PRIVATE))
+    "For find_related, a private source note works either way; this decides whether private neighbours are "
+    "listed. " + _WHEN_PRIVATE))
 _D_PRIVATE_TASKS = Field(description=(
     f"Show the text of tasks and problems in private folders ({_private_folders_named()}). Default false: "
     "they are listed by location only (`ref`, and a task's `status_type` with `private: true`). "

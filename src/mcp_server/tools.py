@@ -2621,12 +2621,21 @@ def _private_folders_guide() -> str:
     names = ", ".join(f"`{n}`" for n in private_folders.patterns())
     return (
         "\n\n## Private folders (this server)\n\n"
-        f"Folders named {names} (any case, at any depth) are private, with everything under them. "
-        "`keyword_search`, `semantic_search` and `find_related` leave their notes out and end with how many "
-        "they left out (\"2 matches in private folders not shown.\"); `list_tasks`, `ledger_get`, "
-        "`ledger_update` and `open_area` list their tasks and lines without the text. Pass "
-        "`include_private=true` only when the owner asked for something in a private folder, or a protocol "
-        "the owner set up does. Reading a private note by its path is not filtered."
+        f"Folders named {names} (any case, at any depth) are private, with everything under them: their "
+        "content stays out of what you come across, and you go there when asked.\n\n"
+        "- By default `keyword_search`, `semantic_search` and `find_related` leave private notes out and end "
+        "with how many would have been listed (\"2 matches in private folders not shown.\"). `list_tasks`, "
+        "`ledger_get` and `ledger_update` list private tasks and note lines by location only, without their "
+        "text, and so does `open_area`, which has no argument to show them (`list_tasks` does).\n"
+        "- `include_private=true` on those six tools (the three searches, `list_tasks`, `ledger_get` and "
+        "`ledger_update`) shows them in full. Set it only when the owner asked for "
+        "something in a private folder, or a protocol the owner set up (a written procedure you were told to "
+        "follow) reaches into one, and then only for what it covers.\n"
+        "- A question private notes might answer is not enough. When the count may matter to what the owner "
+        "asked, tell them how many were left out, and they decide.\n"
+        "- `read_note` on a path, and the listing and link tools (`list_notes`, `get_recent`, `get_backlinks`, "
+        "`get_links`, `get_neighborhood`, `find_orphans`), are not filtered: they show private paths and "
+        "titles. That is no leave to open a private note; the rule above decides when you read one."
     )
 
 
@@ -8221,9 +8230,9 @@ async def list_tasks_impl(
     ]
     if (any(t.private for t in tasks) or any(p.text is None for p in problem_items)
             or any(st.indexed_text is None for st in stale)):
-        notes.append("A task or problem listed by location only is in a private folder: leave it out of your "
-                     "checks unless the owner asked for it, or a protocol the owner set up does; then call again "
-                     "with include_private=true.")
+        notes.append("A task or problem listed by location only is in a private folder: mention it to the owner "
+                     "only as being in a private folder. If the owner asked for it, or a protocol the owner set up "
+                     "does, call again with include_private=true.")
     return TaskListResult(
         tasks=tasks,
         total_matched=total,
@@ -9524,9 +9533,9 @@ def _ledger_task_dict(task, include_private: bool = False) -> dict:
 
 
 #: The note a ledger result carries when it listed a citing line without its text.
-_LEDGER_PRIVATE_NOTE = ("A task or note line listed without its text is in a private folder: leave it out of your "
-                        "checks unless the owner asked for it, or a protocol the owner set up does; then call again "
-                        "with include_private=true.")
+_LEDGER_PRIVATE_NOTE = ("A task or note line listed without its text is in a private folder: mention it to the "
+                        "owner only as being in a private folder. If the owner asked for it, or a protocol the owner "
+                        "set up does, call again with include_private=true.")
 
 
 async def _ledger_dependants(uid, entry, notes: list[str], include_private: bool = False) -> dict | None:
@@ -9884,9 +9893,9 @@ async def _open_area_tasks(tag: str, uid, notes: list[str]) -> tuple[list[AreaTa
     if out and not any(t.next for t in out):
         notes.append("No open task of this area carries #next.")
     if any(t.text is None for t in out):
-        notes.append("A task listed without its text is in a private folder: leave it out of your checks unless "
-                     "the owner asked for it, or a protocol the owner set up does; then list_tasks(area=…, "
-                     "include_private=true) shows its text.")
+        notes.append("A task listed without its text is in a private folder: mention it to the owner only as "
+                     "being in a private folder. If the owner asked for it, or a protocol the owner set up does, "
+                     "list_tasks(area=…, include_private=true) shows its text.")
     return out, total
 
 

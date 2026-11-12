@@ -1309,6 +1309,21 @@ class Settings(BaseSettings):
                 raise ValueError(f"PLUGINS: {name!r} is not a plugin name (a module name under src/plugins/)")
         return names
 
+    @field_validator("private_folder_names")
+    @classmethod
+    def _private_folder_names_are_names(cls, v):
+        """One folder name each (review): `Private/` is read as `Private`, NFC
+        as Obsidian writes names; a name still holding `/` is refused, since it
+        would match no folder and leave everything private in view."""
+        import unicodedata
+
+        out = [unicodedata.normalize("NFC", n.strip("/").strip()) for n in v]
+        bad = [n for n in out if "/" in n]
+        if bad:
+            raise ValueError(
+                f"PRIVATE_FOLDER_NAMES holds folder names, not paths: {', '.join(bad)} contains '/'")
+        return [n for n in out if n]
+
     @field_validator("last_ai_edit_field", "archive_folder", mode="before")
     @classmethod
     def _blank_is_unset(cls, v):

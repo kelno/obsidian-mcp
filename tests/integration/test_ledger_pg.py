@@ -1040,7 +1040,8 @@ async def test_an_update_lists_what_cites_the_entry(sessionmaker, ctx, monkeypat
                            {"ref": "_/rules.md:1", "text": f"- A rule. [P1, {quirk.ref}]"}]
     assert changed.notes[0].startswith(
         f"These cite {quirk.ref} (cited_by): check each still holds after your change. A task or note line "
-        "listed without its text is in a private folder: leave it out of your checks unless the owner asked")
+        "listed without its text is in a private folder: mention it to the owner only as being in a private "
+        "folder. If the owner asked for it")
     assert any("without its text is in a private folder" in n for n in
                (await tools.ledger_get_impl([quirk.ref])).notes)
 
