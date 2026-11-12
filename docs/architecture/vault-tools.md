@@ -479,6 +479,18 @@ Every refusal is the shared shape from `src/services/refusals.py`: the tool's pr
 | L15 | A `rewrite_links=True` move whose own rewrite loses the in-call conflict reports **no** hash, so the agent must re-read the destination before guarding its next write there. | The destination holds a third writer's bytes this call never read; any hash the server could name would be one it cannot stand behind. |
 | L16 | A file over the tool's read cap cannot be guarded at all, and a successful call on one reports no `content_hash`. | Hashing is a linear read and the caps exist to bound exactly that. An **unguarded** call on such a file is unaffected — it behaves as it does today — so nothing that works now stops working. |
 
+## Open-note links (fork, owner's decision, 2026-11-12)
+
+Agents' replies often reach the user where only http(s) links are clickable, not `obsidian://` ones, and an agent percent-encoding a note path by hand gets it wrong. With `OPEN_NOTE_URL` set (a URL template, e.g. `https://notes.example.org/open?file={path}`), the tools that name a note for the agent to show the user carry a ready-made link (`src/services/open_note_url.py`):
+
+- `read_note`: `open_url`, a top-level field, on a successful read of a `.md` note;
+- `open_area`: `main_note_open_url`;
+- `create_note`, `keyword_search`, `semantic_search`, `find_related`, `list_notes`, `get_recent`, `find_orphans`: ` — open_url: <link>` at the end of each note's line (for `create_note`, its first line).
+
+`{path}` becomes the note's vault-relative path without `.md`, encoded with `urllib.parse.quote(path, safe="/")`: UTF-8, every reserved character but `/` percent-encoded (`?`, `#`, `&`, `%`, `+`, `=`, spaces), so the path can neither end the query parameter it sits in nor start a fragment. `..` segments are not touched: the paths come from the server's own resolved reads and from the index, which hold none, and the page behind the link decides what a path means. A path that is not a note (no `.md`, case-sensitive like the indexer) or holds a lone surrogate (an undecodable file name, with no UTF-8 form) gets no link; the field is simply absent. In the text results the link is the last thing on the note's line: a title is note text and could itself contain an `open_url:` label, so the one that ends the line is the server's (accepted: the vault is the user's own).
+
+The template is validated at startup: `{path}` exactly once, in the path or query (not the host), an http(s) scheme with a host, no whitespace or control characters; a blank value means unset. What serves the link (typically a page that redirects to `obsidian://open?vault=…&file=…`) is the deployment's, not this app's. Unset, the default: no field anywhere and every result as before. Tool descriptions and `get_vault_guide`'s primer tell agents to give this link when pointing the user to a note; inside notes, wikilinks stay the way to link.
+
 ## File-access tools (non-markdown)
 Raw read/write/browse of arbitrary vault files, distinct peers to the note tools (note tools stay markdown-only). Pure byte transport — no server-side PDF/text extraction, no embedding or indexing of non-markdown files.
 - `read_file(path, encoding="auto", offset=0, limit=None, hash_only=False)` — `auto` resolves text-like MIME → text, image → inline MCP image content block (renders in-client), everything else → base64 string. `text` forces UTF-8 decode (errors on non-UTF-8); `base64` forces raw-bytes base64. Capped by `MAX_FILE_READ_BYTES` (default 10 MB), checked against on-disk size before reading. Text results are additionally bounded by `MAX_READ_RESPONSE_CHARS` and page via `offset`; base64 and image results are not windowed. Base64 reads are token-heavy — check size with `list_files` first.

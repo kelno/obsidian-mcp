@@ -1138,6 +1138,7 @@ to multi-user later resumes where you left off without re-bootstrapping
 | `LAST_AI_EDIT_EXCLUDE` | empty | Comma-separated globs of vault paths never stamped (e.g. `_/*,CLAUDE.md`) |
 | `RULE_FILE_PATTERNS` | empty | Vault-relative globs of the vault's rule notes; a write there whose changed lines gain no proposal ref (`[P95]`) gets a `rule_change_unlogged:` nudge. Empty: no check |
 | `AREAS_INDEX_PATH` | `Areas/Areas.md` | The note listing every area in one table (columns "Related folders" and "Vault folder"); `open_area` reads it for related folders and to resolve `folder=` |
+| `OPEN_NOTE_URL` | unset | An http(s) link template with `{path}` exactly once (e.g. `https://notes.example.org/open?file={path}`): `read_note`, `open_area`, `create_note` and the search and listing tools then carry `open_url`, a link opening the note in Obsidian, with `{path}` the note's vault path without `.md`, percent-encoded (`/` kept). You serve the page behind it (e.g. a redirect to `obsidian://open`). Checked at startup. Unset: no links |
 | `ARCHIVE_FOLDER` | unset | A folder mirroring the tree (e.g. `Archive`); `move_note` says when the folder a note left has a counterpart there |
 | `TASKS_PLUGIN_SETTINGS_PATH` | `.obsidian/plugins/obsidian-tasks-plugin/data.json` | The Tasks plugin's settings file in the vault, read on every task call |
 | `VAULT_ALLOW_NAMED_STAGING_FALLBACK` | `false` | Accept named staging on filesystems without `O_TMPFILE`. One flag, both write paths. See [System requirements](#system-requirements). |

@@ -73,6 +73,7 @@ from src.services.search import full_text_search
 from src.services.usage_params import render_usage_params
 from src.services.usage_stats import OVER_QUOTA_PARAM
 from src.services import ai_edit_stamp, page_text, transfer, vault_fs
+from src.services import open_note_url as _open_note_url
 from src.services.vault import (
     MAX_PATH_CHARS,
     VAULT_ROOT_NOT_READY_ERROR,
@@ -2002,7 +2003,10 @@ async def search_notes_impl(
     lines = [f"Found {len(results)} results for '{query}':\n"]
     for r in results:
         tags_str = f" [{', '.join(r['tags'])}]" if r.get("tags") else ""
-        lines.append(f"- **{r['title']}** (`{r['path']}`){tags_str} — rank: {r['rank']:.3f}")
+        lines.append(
+            f"- **{r['title']}** (`{r['path']}`){tags_str} — rank: {r['rank']:.3f}"
+            f"{_open_note_url.text_suffix(r['path'])}"
+        )
     return "\n".join(lines)
 
 
@@ -2273,6 +2277,7 @@ async def read_note_impl(
         # successful read: whole-note, section, windowed and truncated alike,
         # and always the whole file's.
         content_hash=note["content_hash"],
+        open_url=_open_note_url.open_note_url(note["path"]),
         title=note["title"],
         tags=list(note["tags"]) or None,
         frontmatter_yaml=note["frontmatter_yaml"],
@@ -2348,7 +2353,7 @@ async def list_notes_impl(
         else:
             mod = "unknown"
         size = n.file_size or 0
-        lines.append(f"- `{n.file_path}` ({size:,}B, modified {mod})")
+        lines.append(f"- `{n.file_path}` ({size:,}B, modified {mod}){_open_note_url.text_suffix(n.file_path)}")
     return "\n".join(lines)
 
 
@@ -2427,7 +2432,10 @@ async def get_recent_impl(
             else "unknown"
         )
         tags_str = f" [{', '.join(n.tags)}]" if n.tags else ""
-        lines.append(f"- `{n.file_path}` — {n.title}{tags_str} (modified {mod})")
+        lines.append(
+            f"- `{n.file_path}` — {n.title}{tags_str} (modified {mod})"
+            f"{_open_note_url.text_suffix(n.file_path)}"
+        )
     return "\n".join(lines)
 
 
@@ -2518,6 +2526,7 @@ async def semantic_search_impl(
             f"- **{r['title']}** (`{r['path']}`){tags_str} — "
             f"similarity: {r['similarity']:.3f}"
             f"{_degradation_suffix(r['stale'], r['embedding_truncated'])}"
+            f"{_open_note_url.text_suffix(r['path'])}"
         )
         # `chunk` is `None` for a stale row — the service withholds it there,
         # so no caller can obtain the superseded text at all. The substitute is
@@ -3441,7 +3450,7 @@ async def create_note_impl(
             # encoded exactly this way.
             created = f"Created note: {path}" + _published_hash_clause(
                 content.encode("utf-8")
-            )
+            ) + _open_note_url.text_suffix(target.rel)
         except FileExistsError:
             # No-clobber `link` refuses a plain file, a directory *and* a
             # symlink identically, so the bare "already exists" would hide a
@@ -4038,6 +4047,7 @@ async def find_related_impl(path: str, limit: int = 10) -> str:
             f"- **{r['title']}** (`{r['path']}`){tags_str} — "
             f"sim: {1 - r['distance']:.3f}"
             f"{_degradation_suffix(r['stale'], r['embedding_truncated'])}"
+            f"{_open_note_url.text_suffix(r['path'])}"
         )
         if r["chunk"] is None:
             lines.append(f"  > {_STALE_PREVIEW_NOTICE}")
@@ -4106,7 +4116,10 @@ async def find_orphans_impl(folder: str | None = None, limit: int = 50) -> str:
     for n in notes:
         mod = n.modified_at.strftime("%Y-%m-%d") if n.modified_at else "unknown"
         tags_str = f" [{', '.join(n.tags)}]" if n.tags else ""
-        lines.append(f"- `{n.file_path}` — {n.title}{tags_str} (modified {mod})")
+        lines.append(
+            f"- `{n.file_path}` — {n.title}{tags_str} (modified {mod})"
+            f"{_open_note_url.text_suffix(n.file_path)}"
+        )
     return "\n".join(lines)
 
 
@@ -9783,6 +9796,10 @@ async def _open_area_tasks(tag: str, uid, notes: list[str]) -> tuple[list[AreaTa
     return out, total
 
 
+def _open_area_note_url(main_note: str | None) -> str | None:
+    return _open_note_url.open_note_url(main_note) if main_note else None
+
+
 @_tracked("open_area", ["area", "folder"], refusal_result=_open_area_refusal)
 async def open_area_impl(area: str | None = None, folder: str | None = None) -> OpenAreaResult:
     if (area is None) == (folder is None) or not (area or folder or "").strip():
@@ -9816,8 +9833,9 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
                    else f"its main note {row.main_note} declares no area_tag")
             return OpenAreaResult(
                 found=True, name=row.name, matched_folder=matched_folder, related_folders=row.folders or None,
-                main_note=row.main_note, notes=[f"{folder} belongs to the area {row.name!r}, but {why}: the "
-                                                f"list of areas says \"{row.vault_cell}\"."])
+                main_note=row.main_note, main_note_open_url=_open_area_note_url(row.main_note),
+                notes=[f"{folder} belongs to the area {row.name!r}, but {why}: the "
+                       f"list of areas says \"{row.vault_cell}\"."])
         tag, main_note, description = declared[row.main_note.casefold()]
     else:
         try:
@@ -9838,7 +9856,8 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
         notes.insert(0, "This area is archived: its work is finished. Tell the owner before starting new work in it.")
     return OpenAreaResult(
         found=True, area=tag, tag="#" + tag, name=row.name if row else None, description=description,
-        main_note=main_note, archived=archived, matched_folder=matched_folder, main_note_text=text_,
+        main_note=main_note, main_note_open_url=_open_area_note_url(main_note), archived=archived,
+        matched_folder=matched_folder, main_note_text=text_,
         main_note_chars=full_chars, related_folders=(row.folders or None) if row else None,
         entries=entries or None, entries_truncated=entries_truncated or None,
         tasks=tasks or None, tasks_total=tasks_total if tasks_total > len(tasks) else None,

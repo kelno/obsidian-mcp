@@ -592,6 +592,12 @@ class ReadNoteResult(_OmitNone):
     # terminators, has a digest the returned text cannot reproduce.
     content_hash: str | None = None
 
+    # The http(s) link that opens this note in the Obsidian app, set only when
+    # the server has `OPEN_NOTE_URL` (`src/services/open_note_url.py`). Server-
+    # controlled and bounded by the template plus the admitted path's encoding,
+    # so, like `path`, it is a fixed allocation outside the metadata budget.
+    open_url: str | None = None
+
     title: str | None = None
     tags: list[str] | None = None
 

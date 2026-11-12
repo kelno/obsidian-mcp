@@ -1130,6 +1130,17 @@ async def test_open_area_by_folder(sessionmaker, ctx, monkeypatch):
     assert archived.archived is True and archived.notes[0].startswith("This area is archived")
 
 
+async def test_open_area_links_the_main_note_only_when_the_setting_is_on(sessionmaker, ctx, monkeypatch):
+    await _open_area_vault(sessionmaker, ctx)
+    off = await tools.open_area_impl(area="home")
+    assert off.main_note == "projects/Home/Home.md" and off.main_note_open_url is None
+    monkeypatch.setattr(tools.settings, "open_note_url", "https://notes.example.org/open?file={path}")
+    on = await tools.open_area_impl(area="home")
+    assert on.main_note_open_url == "https://notes.example.org/open?file=projects/Home/Home"
+    village = await tools.open_area_impl(folder="D:\\work\\village")
+    assert village.main_note is None and village.main_note_open_url is None
+
+
 async def test_open_area_refuses_both_or_neither_and_an_unknown_area(ctx):
     assert code(await tools.open_area_impl()) == "invalid_argument"
     assert code(await tools.open_area_impl(area="home", folder="D:\\x")) == "invalid_argument"

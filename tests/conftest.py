@@ -48,6 +48,8 @@ SETTINGS_ENV_KEYS = (
     "LAST_AI_EDIT_FIELD",
     "LAST_AI_EDIT_EXCLUDE",
     "ARCHIVE_FOLDER",
+    # Open-note links (2026-11-12).
+    "OPEN_NOTE_URL",
     "INDEXER_DEGRADED_AFTER_FAILURES",
     "INDEXER_QUARANTINE_RETRIES_PER_TICK",
     # Stall detection and the embed stage's provider stop (fork).

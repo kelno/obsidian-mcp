@@ -43,6 +43,9 @@ class OpenAreaResult(_OmitNone):
     #: The main note's `description` frontmatter: what the area is for.
     description: str | None = None
     main_note: str | None = None
+    #: The http(s) link that opens the main note in the Obsidian app, when the
+    #: server sets `OPEN_NOTE_URL`: give it to the owner when pointing them to the note.
+    main_note_open_url: str | None = None
     #: True when the main note is under the archive folder: the area is finished.
     archived: bool | None = None
     #: `folder=`: the listed folder it matched (it, or a folder above it).

@@ -155,6 +155,11 @@ async def keyword_search(
 
     For conceptual or paraphrased queries, use semantic_search instead.
 
+    When the server sets `OPEN_NOTE_URL`, each note's line ends with
+    `— open_url: <link>`, an http(s) link that opens the note in Obsidian:
+    give it as is when pointing the owner to the note (inside notes,
+    wikilinks stay the way to link).
+
     Args:
         query: Keywords or phrase to match (websearch tsquery syntax: "foo bar", "foo OR bar", "-bar").
         folder: Optional folder prefix (e.g. "Cards/", "Projects/").
@@ -193,6 +198,10 @@ async def read_note(
       terminator. It is *not* part of `content`, and a section write must not
       be sent it — the heading line is never rewritten.
     - `path`, `title`, `tags` — metadata as data.
+    - `open_url` — only when the server sets `OPEN_NOTE_URL`: an http(s)
+      link that opens this note in Obsidian. Give it as is when pointing
+      the owner to the note (clickable where `obsidian://` isn't); inside
+      notes, wikilinks stay the way to link.
     - `frontmatter_yaml` — the frontmatter block's YAML source, fence lines
       excluded, LF-normalized (a CRLF or lone-CR block comes back with LF
       terminators — the same declared residual `content` carries, because this
@@ -276,6 +285,11 @@ async def list_notes(
     picked up by the indexer will not appear (lag is bounded by the index interval,
     typically up to 2 minutes).
 
+    When the server sets `OPEN_NOTE_URL`, each note's line ends with
+    `— open_url: <link>`, an http(s) link that opens the note in Obsidian:
+    give it as is when pointing the owner to the note (inside notes,
+    wikilinks stay the way to link).
+
     Args:
         folder: Vault-relative folder path (e.g. "Cards/", "Projects/"). Empty for vault root.
         limit: Maximum number of results (default 50).
@@ -309,6 +323,11 @@ async def get_recent(
     Each line shows the note's modification time in UTC, as
     "YYYY-MM-DD HH:MM UTC".
 
+    When the server sets `OPEN_NOTE_URL`, each note's line ends with
+    `— open_url: <link>`, an http(s) link that opens the note in Obsidian:
+    give it as is when pointing the owner to the note (inside notes,
+    wikilinks stay the way to link).
+
     Args:
         limit: Number of recent notes to return (default 20).
         folder: Optional folder prefix to filter (e.g. "Projects/").
@@ -337,6 +356,11 @@ async def semantic_search(
 
     Each result is one note (deduped) with its best-matching chunk as a ~200-character preview.
     Call `read_note` on a result's path to get the full note content.
+
+    When the server sets `OPEN_NOTE_URL`, each note's line ends with
+    `— open_url: <link>`, an http(s) link that opens the note in Obsidian:
+    give it as is when pointing the owner to the note (inside notes,
+    wikilinks stay the way to link).
 
     The header line carries a stale count and a truncated count, always —
     including when both are zero, so "nothing here is degraded" is
@@ -386,6 +410,10 @@ async def create_note(
 
     See `get_vault_guide` for Obsidian syntax and any vault-specific conventions
     (naming, folder placement, frontmatter, tags).
+
+    When the server sets `OPEN_NOTE_URL`, the result's first line ends with
+    `— open_url: <link>`, an http(s) link that opens the new note in
+    Obsidian: give it as is when pointing the owner to the note.
 
     **Dated note names.** Where a folder note (`<folder>/<folder>.md`)
     sets `note_names: dated` (for that folder and the folders below it at any
@@ -806,6 +834,11 @@ async def find_related(path: str, limit: int = 10) -> str:
     or when looking for thematic neighbors. For link-based exploration use
     `get_neighborhood`. For arbitrary topic queries use `semantic_search`.
 
+    When the server sets `OPEN_NOTE_URL`, each note's line ends with
+    `— open_url: <link>`, an http(s) link that opens the note in Obsidian:
+    give it as is when pointing the owner to the note (inside notes,
+    wikilinks stay the way to link).
+
     Carries `semantic_search`'s per-row markers and its header counts:
     `stale: true` means that neighbour changed after it was embedded, so it was
     ranked against its previous content and its preview is **withheld** —
@@ -839,6 +872,11 @@ async def find_related(path: str, limit: int = 10) -> str:
 async def find_orphans(folder: str | None = None, limit: int = 50) -> str:
     """Notes with zero incoming AND zero outgoing resolved links — useful for
     vault hygiene ("what's disconnected?") and cleanup decisions.
+
+    When the server sets `OPEN_NOTE_URL`, each note's line ends with
+    `— open_url: <link>`, an http(s) link that opens the note in Obsidian:
+    give it as is when pointing the owner to the note (inside notes,
+    wikilinks stay the way to link).
 
     Args:
         folder: Optional vault-relative folder prefix to scope the search
@@ -1832,6 +1870,9 @@ async def open_area(
     feedback whose citing tasks are all done (ticked in Obsidian, say). `instructions`
     then say what to do with it all. A folder no area lists comes back with
     `found: false`: ask the owner which area it belongs to.
+    When the server sets `OPEN_NOTE_URL`, `main_note_open_url` is an http(s)
+    link that opens the main note in Obsidian: give it as is when pointing
+    the owner to the note.
     """
     return await open_area_impl(area=area, folder=folder)
 

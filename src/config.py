@@ -621,6 +621,17 @@ class Settings(BaseSettings):
     # it; it never moves archive content. Unset: no hint.
     archive_folder: str | None = None
 
+    # ── Open-note links (fork) ───────────────────────────────────────────────
+    # A URL template with `{path}` exactly once, http(s) only, e.g.
+    # `https://notes.example.org/open?file={path}`. When set, results that
+    # name a note for the agent to show the user (read_note, open_area,
+    # create_note, the search and listing tools) carry `open_url`: the
+    # template with `{path}` replaced by the note's vault-relative path without
+    # `.md`, percent-encoded with `/` kept. The page behind it (typically a
+    # redirect to `obsidian://open?…`) is the deployment's, not this app's.
+    # Unset: no links anywhere. See src/services/open_note_url.py.
+    open_note_url: str | None = None
+
     # ── Agent ledger (fork) ──────────────────────────────────────────────────
     # A topic holding at least this many current quirks, more than half of
     # them cited by no summary-view line, makes `ledger_add` and
@@ -1282,6 +1293,28 @@ class Settings(BaseSettings):
             # a bool or None, so the stamp would never find its own key.
             if yaml.safe_load(f"{v}: 1") != {v: 1}:
                 raise ValueError(f"LAST_AI_EDIT_FIELD={v!r} is not read by YAML as a string key")
+        return v
+
+    @field_validator("open_note_url", mode="before")
+    @classmethod
+    def _open_note_url_template(cls, v):
+        """Blank means unset; otherwise an http(s) URL with a host and `{path}` exactly once."""
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("OPEN_NOTE_URL must be a string")
+        v = v.strip()
+        if not v:
+            return None
+        if v.count("{path}") != 1:
+            raise ValueError("OPEN_NOTE_URL must contain `{path}` exactly once, e.g. https://notes.example.org/open?file={path}")
+        if any(c.isspace() or not c.isprintable() for c in v):
+            raise ValueError("OPEN_NOTE_URL must not contain whitespace or control characters")
+        probe = urlsplit(v.replace("{path}", "omcp-path-marker"))
+        if probe.scheme.lower() not in ("http", "https") or not probe.hostname:
+            raise ValueError(f"OPEN_NOTE_URL must be an http(s) URL with a host (got {v!r})")
+        if "omcp-path-marker" in probe.netloc:
+            raise ValueError("OPEN_NOTE_URL's `{path}` must be in the URL's path or query, not its host")
         return v
 
     @field_validator("oauth_known_redirect_hosts", mode="before")

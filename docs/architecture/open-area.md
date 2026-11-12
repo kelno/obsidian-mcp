@@ -13,7 +13,7 @@ Exactly one of the two. A folder no row lists: `found: false` and a note to ask 
 
 ## Output, in order
 
-1. `area`, `tag`, `name` (the row's), `description` (frontmatter), `main_note`, `archived` (the main note is under `ARCHIVE_FOLDER`; unset: not reported), `matched_folder`.
+1. `area`, `tag`, `name` (the row's), `description` (frontmatter), `main_note`, `main_note_open_url` (a link opening the main note in Obsidian, with `OPEN_NOTE_URL` set; see "Open-note links" in [vault tools](vault-tools.md)), `archived` (the main note is under `ARCHIVE_FOLDER`; unset: not reported), `matched_folder`.
 2. `main_note_text`: the main note without its frontmatter and its `## Tasks` section (headings inside fenced code are not headings), so the agent rules at the top and `## Current position` reach the agent; cut at 15,000 characters with `main_note_chars` and a note.
 3. `related_folders`: from the area's row.
 4. `entries`: the active ledger entries as `ledger_search(area=…)` lists them without a query (the same helper, `_ledger_listed`), entries tied by a topic marked `via_topic`, each with its task state; at most 40, newest change first, with a note pointing to `ledger_search` for the rest.

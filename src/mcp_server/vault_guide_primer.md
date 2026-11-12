@@ -213,6 +213,10 @@ Obsidian shows a note's file name as its title, so don't start a note with a hea
 
 A folder note (`<folder>/<folder>.md`) can declare how its notes are named, in its frontmatter: `note_names: dated` or `note_names: undated`. It holds for that folder and the folders below it, at any depth. A folder under an area (`Areas/<area>/Log`) or anywhere under `Archive/` (`Archive/Areas/<area>/Log` too) whose name is a top-level folder's follows that top-level folder's setting, with no copy of its folder note needed, unless a nearer folder note sets its own. Where no folder note above sets anything, names are not checked. In a dated folder, `create_note`, `move_note` and `write_file` (a new `.md`) refuse a name that doesn't start with its date (the date the note is about), `YYYY-MM-DD Title` (an unknown part as `XX`, never `00`; one date only), with `note_name_date`, naming the folder note and the corrected name when it can be derived; nothing is written, so call again with the right name. A note with no date of its own belongs in an undated folder. In an undated folder, a name starting with a date is written and flagged (`note_name:`), not refused.
 
+## Links to notes for the owner (this server)
+
+When this server is set up with an open-note link (`OPEN_NOTE_URL`), the tools that name notes carry a ready-made http(s) link that opens the note in the Obsidian app: `open_url` in `read_note`'s result, `main_note_open_url` in `open_area`'s, and `— open_url: <link>` at the end of each note's line from `create_note`, `keyword_search`, `semantic_search`, `find_related`, `list_notes`, `get_recent` and `find_orphans`. When you point the owner to a note in a reply, give that link as it is: it is clickable where an `obsidian://` link isn't. Don't build or percent-encode one yourself; for a note no result linked, `read_note` returns its link. Inside notes, wikilinks stay the way to link. Without the setting there is no such field.
+
 ## Plugin syntax (Dataview, Templater, etc.)
 
 Notes may contain plugin syntax that looks executable:
