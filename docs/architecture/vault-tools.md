@@ -1301,7 +1301,9 @@ block **as recognised by the shared masker**" — still has a referent.
 `read_note` applies universal-newline translation, so callers send LF; a note written as CRLF (by a script on Windows, say) used to fail a multi-line `edit_note(find=…)` with `match_not_found` and got LF lines spliced into it by section and append writes. Now `edit_note` takes the note's most common line ending (`_dominant_eol`: CRLF, LF or a lone CR; LF on a tie or with none) and:
 
 - writes the caller's text with it in every mode but `replace_frontmatter=True` (section body, append and its separator, full replace and the metadata-only separator, the `find` replacement), so a CRLF note stays CRLF and an LF one LF, and a `read_note` → `edit_note` round trip is byte-identical unless the note mixes endings, where the written part takes the most common one;
-- matches `find` as sent, then with the note's endings, then with LF ones, first match wins;
-- leaves terminators outside the written text alone. `replace_frontmatter=True` stays byte-exact: the deliberate way to change a note's endings.
+- matches `find` with any line ending at each of its line breaks (`_eol_insensitive`: CRLF, CR or LF, and never the LF half of a CRLF, so no stray CR is left), and counts and replaces over those matches, so `match_ambiguous` and `replace_all` see every copy whatever its endings;
+- leaves terminators outside the written text alone; section separators take the note's ending too (`replace_section(…, eol)`). `replace_frontmatter=True` stays byte-exact: the deliberate way to change a note's endings.
+
+Accepted (adversarial review, 2026-11-12): a lone CR inside the caller's text is a line ending like any other, so `content` with an intentional CR, or a CRLF code sample in an LF note, is written with the note's ending (`replace_frontmatter=True` is the byte-exact way); a lone CR in `find` matches any line break. A full replace whose only difference is line endings rewrites identical bytes and says "Updated note" (a dry run says "No changes"), as before.
 
 The changed-line comparisons (task lines, links, title heading) and `edit_task` / `set_task_status`'s `expected_line` already ignore line endings. Pinned as bytes in `test_issue_140_section_round_trip.py` (`# A\r\nold\r\n# B\r\nkeep\r\n` round-trips unchanged) and the `#128` frontmatter tests.

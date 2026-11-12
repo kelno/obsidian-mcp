@@ -3943,7 +3943,7 @@ def extract_section_parts(
     ), None
 
 
-def replace_section(text: str, heading: str, new_body: str) -> tuple[str | None, str | None]:
+def replace_section(text: str, heading: str, new_body: str, eol: str = "\n") -> tuple[str | None, str | None]:
     """Replace the body under a named ATX heading.
 
     Returns `(new_text, error)`. On success: `error is None`. On failure:
@@ -3958,9 +3958,9 @@ def replace_section(text: str, heading: str, new_body: str) -> tuple[str | None,
     so anything `new_body` does not resend is deleted, a blank separator and a
     fenced block directly under the heading included (#140).
 
-    A separator newline is inserted around `new_body` only when it is
-    non-empty; replacing an empty body with an empty body leaves `text`
-    byte-identical.
+    A separator newline (`eol`: the note's own line ending, from the
+    caller) is inserted around `new_body` only when it is non-empty;
+    replacing an empty body with an empty body leaves `text` byte-identical.
     """
     headings = _scan_headings(text)
     idx, err = _resolve_section_index(headings, heading)
@@ -3989,9 +3989,9 @@ def replace_section(text: str, heading: str, new_body: str) -> tuple[str | None,
         # `tests/test_issue_5_replace_section_eof_heading.py`.
         prefix = text[:body_start]
         if prefix and not prefix.endswith(("\n", "\r")):
-            inserted = "\n" + inserted
+            inserted = eol + inserted
         if next_heading_line_start is not None and not inserted.endswith(("\n", "\r")):
-            inserted = inserted + "\n"
+            inserted = inserted + eol
 
     new_text = text[:body_start] + inserted + text[body_end:]
     return new_text, None

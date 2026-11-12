@@ -4366,7 +4366,7 @@ async def edit_note_impl(
             # block is (#150).
             if err := _unmatched_fence_error(path, scan_text, diagnosis):
                 return err
-            new_body, err = replace_section(scan_text, section, _to_eol(content, eol))
+            new_body, err = replace_section(scan_text, section, _to_eol(content, eol), eol)
             if err is not None:
                 return _body_refusal(err, "selector_unresolved")
             new_content = diagnosis.block + new_body
@@ -4376,13 +4376,14 @@ async def edit_note_impl(
                     _body_refusal("edit_note: find must be a non-empty string. "
                     "An empty find would match every position and corrupt the note.", "invalid_argument")
                 )
-            # Line endings don't matter for a match: the find text as sent,
-            # then with the note's own endings, then with LF ones.
-            for candidate in dict.fromkeys((find, _to_eol(find, eol), _to_eol(find, "\n"))):
-                count = existing.count(candidate)
-                if count:
-                    find = candidate
-                    break
+            # Line endings don't matter for a match: each line break in
+            # `find` matches any line ending in the note (CRLF, CR or LF),
+            # never the LF half of a CRLF; the count and `replace_all` run
+            # over those matches, and the replacement is written with the
+            # note's own ending.
+            find_re = _eol_insensitive(find)
+            matches = list(find_re.finditer(existing))
+            count = len(matches)
             content = _to_eol(content, eol)
             if count == 0:
                 preview = existing[:500]
@@ -4397,12 +4398,12 @@ async def edit_note_impl(
                     "or set replace_all=True.", "match_ambiguous")
                 )
             if replace_all:
-                new_content = existing.replace(find, content)
+                new_content = find_re.sub(lambda _m: content, existing)
                 success_message = (
                     f"Replaced {count} occurrence(s) in {path}"
                 )
             else:
-                new_content = existing.replace(find, content, 1)
+                new_content = find_re.sub(lambda _m: content, existing, count=1)
         elif append:
             new_content = existing + eol + _to_eol(content, eol)
         elif replace_frontmatter:
@@ -9204,6 +9205,19 @@ def _dominant_eol(text: str) -> str:
     if cr > lf and cr > crlf:
         return "\r"
     return "\n"
+
+
+def _eol_insensitive(find: str) -> "re.Pattern[str]":
+    """A pattern matching `find` with any line ending (CRLF, CR, LF) at each of its line breaks.
+
+    A match never begins on the LF half of a CRLF (`(?<!\\r)` before a
+    leading break), so a replacement never leaves a stray CR behind.
+    """
+    parts = _EOL_RE.split(find)
+    pattern = r"(?:\r\n|\r|\n)".join(re.escape(p) for p in parts)
+    if parts and parts[0] == "":
+        pattern = r"(?<!\r)" + pattern
+    return re.compile(pattern)
 
 
 def _to_eol(text: str, eol: str) -> str:

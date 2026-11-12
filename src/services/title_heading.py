@@ -37,6 +37,10 @@ def strip(old: str | None, new: str, path: str) -> tuple[str, str | None]:
     if not stem.lower().endswith(".md"):
         return new, None
     stem = stem[:-3].strip().lower()
+    if "\n" not in new and "\r" in new:
+        # A note with lone-CR line endings: work on LF and give its CRs back.
+        text, removed = strip(old.replace("\r", "\n") if old is not None else None, new.replace("\r", "\n"), path)
+        return text.replace("\n", "\r"), removed
     lines = new.split("\n")
     i = frontmatter_lines(lines)
     while i < len(lines) and not lines[i].strip():

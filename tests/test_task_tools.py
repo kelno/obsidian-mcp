@@ -806,3 +806,29 @@ def test_replace_frontmatter_stays_byte_exact(vault):
     note(vault, "e.md", "a\r\nb\r\n")
     asyncio.run(tools.edit_note_impl("e.md", "x\ny\n", replace_frontmatter=True))
     assert read(vault, "e.md") == "x\ny\n"
+
+
+
+def test_line_ending_review_cases(vault):
+    # A find starting with a line break takes the whole CRLF, not its LF half.
+    note(vault, "r1.md", "intro\r\n## B\r\nx\r\n")
+    asyncio.run(tools.edit_note_impl("r1.md", "\n## C", find="\n## B"))
+    assert read(vault, "r1.md") == "intro\r\n## C\r\nx\r\n"
+    # A find ending with a CR takes the whole CRLF.
+    note(vault, "r2.md", "one\r\ntwo\r\n")
+    asyncio.run(tools.edit_note_impl("r2.md", "ONE\r", find="one\r"))
+    assert read(vault, "r2.md") == "ONE\r\ntwo\r\n"
+    # Mixed endings: every copy counts, whatever its ending.
+    note(vault, "r3.md", "a\r\nb\r\nz\r\na\nb\n")
+    ambiguous = asyncio.run(tools.edit_note_impl("r3.md", "x", find="a\nb"))
+    assert '"code":"match_ambiguous"' in ambiguous
+    replaced = asyncio.run(tools.edit_note_impl("r3.md", "x", find="a\nb", replace_all=True))
+    assert replaced.startswith("Replaced 2 occurrence(s)")
+    # A section with no trailing newline keeps the note's CRLF around it.
+    note(vault, "r4.md", "## Tasks\r\nold\r\n## Next\r\nkeep\r\n")
+    asyncio.run(tools.edit_note_impl("r4.md", "new text", section="Tasks"))
+    assert read(vault, "r4.md") == "## Tasks\r\nnew text\r\n## Next\r\nkeep\r\n"
+    # A lone-CR note still loses a title heading the write adds.
+    note(vault, "g.md", "old\r")
+    asyncio.run(tools.edit_note_impl("g.md", "# g\nbody\n"))
+    assert read(vault, "g.md") == "body\r"
