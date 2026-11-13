@@ -401,6 +401,14 @@ async def name_junk(name):
     return "not a NameCheck"
 
 
+async def name_bad_code(name):
+    return plugins.NameCheck(refusal=plugins.Refusal("no_such_code", "Refused."))
+
+
+async def name_bad_note(name):
+    return plugins.NameCheck(note=42)
+
+
 def test_a_name_refusal_writes_nothing_and_a_note_reaches_the_result(vault, monkeypatch):
     use(monkeypatch, plugins.Plugin("names", check_name=refuse_shouted_names))
     refused = asyncio.run(tools.create_note_impl("SHOUT.md", "x\n"))
@@ -420,7 +428,7 @@ def test_a_name_check_is_not_asked_about_an_existing_note(vault, monkeypatch):
     assert text_of(overwritten).startswith("Wrote") and read(vault, "SHOUT.md") == "new\n"
 
 
-@pytest.mark.parametrize("hook", [name_boom, name_junk])
+@pytest.mark.parametrize("hook", [name_boom, name_junk, name_bad_code, name_bad_note])
 def test_a_broken_name_check_lets_the_note_through_and_says_so(vault, monkeypatch, hook):
     use(monkeypatch, plugins.Plugin("broken", check_name=hook))
     created = asyncio.run(tools.create_note_impl("n.md", "x\n"))

@@ -267,7 +267,7 @@ async def check_name(note: plugins.NoteName) -> plugins.NameCheck | None:
                " own, kept current, belongs in an undated folder (`Reference/`, say).")
         return plugins.NameCheck(refusal=plugins.Refusal(CODE, (
             f"{tool}: notes in {folder}/ are named with their date first ({where}), and in `{name}` "
-            f"{problem.message}{fix} Nothing was written.")))
+            f"{problem.message}{fix} Nothing was {'moved' if note.from_path is not None else 'written'}.")))
     if starts_with_date(stem):
         return plugins.NameCheck(note=(
             f"\n\nnote_name: the note was written, but `{name}` starts with a date, and notes in "

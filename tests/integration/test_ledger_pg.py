@@ -1371,7 +1371,7 @@ async def test_a_dated_folder_refuses_a_wrong_name_and_names_the_fix(sessionmake
     ok = await tools.create_note_impl("Log/2026-11-12 Call.md", "x\n")
     assert ok.startswith("Created note") and "note_name" not in ok
     moved = await tools.move_note_impl("Log/2026-11-12 Call.md", "Log/Call 2026-11-12.md")
-    assert code(_Text(moved)) == "note_name_date" and "Call again with `Log/2026-11-12 Call.md`" in moved
+    assert code(_Text(moved)) == "note_name_date" and "Call again with `Log/2026-11-12 Call.md`" in moved and "Nothing was moved." in moved
     assert (ctx / "Log" / "2026-11-12 Call.md").exists()
     written = await tools.write_file_impl("Log/notes.md", "x\n", encoding="text")
     assert code(_Text(written)) == "note_name_date"
