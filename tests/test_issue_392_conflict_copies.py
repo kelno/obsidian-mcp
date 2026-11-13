@@ -147,7 +147,6 @@ def test_setting_off_the_scan_is_unchanged(conflict_vault):
     }
 
 
-@pytest.mark.skip(reason="fork: the index walk always skips `*.sync-conflict-*` copies (FORK.md), so upstream's opt-in never sees them; which to keep is the owner's call")
 def test_excluded_copies_are_seen_not_indexable_and_never_skips(
     conflict_vault, caplog
 ):

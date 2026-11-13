@@ -1,44 +1,35 @@
-"""Syncthing conflict copies are not indexed (fork).
+"""Syncthing conflict copies (fork): upstream's opt-in covers this vault's.
 
-A conflict copy is a stale duplicate of a note; indexed, its checkboxes showed
-up as real tasks in `list_tasks` (seen in the live check, 2026-11-01). The walk
-skips it like a dot-file; the file stays on disk, readable by path.
+The fork used to skip `*.sync-conflict-*` in the walk itself; since the
+2026-11 resync it relies on upstream's `INDEX_EXCLUDE_CONFLICT_FILES` (#392),
+turned on in the deployment. These names are real ones from the vault (a
+conflict copy's checkboxes showed up as tasks in the live check, 2026-11-01).
 """
 
 from __future__ import annotations
 
 from src.services import indexer
+from src.services.conflict_copies import is_conflict_copy
 
 
-def test_the_walk_skips_conflict_copies_and_keeps_the_original(tmp_path):
+def test_upstreams_patterns_match_this_vaults_conflict_copies():
+    assert is_conflict_copy("Note.sync-conflict-20261028-181425-VRO24FG.md")
+    assert is_conflict_copy("_commands.sync-conflict-20260810-161522-LQB3B4E.md")
+    assert not is_conflict_copy("About sync-conflict files.md")
+    assert not is_conflict_copy("Note.sync-conflict-draft.md")
+    assert not is_conflict_copy("Note.md")
+
+
+def test_the_walk_leaves_the_decision_to_the_setting(tmp_path):
+    """The walk lists every note; the scan applies the setting (#392)."""
     vault = tmp_path / "vault"
     files = {
         "Note.md": "n\n",
         "Note.sync-conflict-20261028-181425-VRO24FG.md": "old n\n",
-        "sub/_commands.sync-conflict-20260810-161522-LQB3B4E.md": "c\n",
-        "sub/Keep.md": "k\n",
-        # Not Syncthing's pattern: kept.
-        "About sync-conflict files.md": "a\n",
-        "Note.sync-conflict-draft.md": "d\n",
     }
     for rel, text in files.items():
         path = vault / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
 
-    found = indexer.discover_markdown_files(vault)
-
-    assert sorted(found) == [
-        "About sync-conflict files.md",
-        "Note.md",
-        "Note.sync-conflict-draft.md",
-        "sub/Keep.md",
-    ]
-    assert (vault / "Note.sync-conflict-20261028-181425-VRO24FG.md").exists()
-
-
-def test_is_sync_conflict_copy():
-    assert indexer.is_sync_conflict_copy("A.sync-conflict-20261028-181425-VRO24FG.md")
-    assert indexer.is_sync_conflict_copy("tasks.sync-conflict-20260717-213650-LQB3B4E.json")
-    assert not indexer.is_sync_conflict_copy("A.md")
-    assert not indexer.is_sync_conflict_copy("A.sync-conflict-notes.md")
+    assert sorted(indexer.discover_markdown_files(vault)) == sorted(files)
