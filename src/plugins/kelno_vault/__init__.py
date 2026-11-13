@@ -4,7 +4,8 @@ Fully specific to that vault and not configurable: a different vault writes
 its own plugin rather than adapting this one. It holds conventions only (folder
 names, naming and linking rules), never the vault's content.
 
-What it does today: a new note's name, or a move's destination, is checked
+What it does today: it adds the tool `open_area` (`open_area`), opening one
+of the vault's areas. A new note's name, or a move's destination, is checked
 against its folder's `note_names` setting (`note_names`, the name check). On
 the lines a note write adds or changes: a task line written by hand is refused (`task_lines`, the check); a first heading
 repeating the note's name is dropped (`title_heading`), then bare-name
@@ -23,7 +24,7 @@ from sqlalchemy import select
 
 from src import database, plugins
 from src.models.db import NoteMetadata
-from src.plugins.kelno_vault import link_paths, note_names, rule_notes, task_lines, title_heading
+from src.plugins.kelno_vault import link_paths, note_names, open_area, rule_notes, task_lines, title_heading
 from src.services.filters import apply_note_filters
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,7 @@ plugin = plugins.Plugin(
     check=task_lines.check,
     rewrite=_rewrite,
     check_name=note_names.check_name,
+    tools=(open_area.TOOL,),
     tool_text={
         "create_note": "\n\n".join((note_names.TOOL_TEXT, task_lines.TOOL_TEXT, rule_notes.TOOL_TEXT,
                                      _TITLE_HEADING_TOOL_TEXT, _LINKS_TOOL_TEXT)),

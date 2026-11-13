@@ -10,7 +10,6 @@ from pydantic import ConfigDict, Field, create_model, model_validator
 
 from src import plugins as _plugins
 from src.config import settings
-from src.mcp_server.area_result import OpenAreaResult
 from src.mcp_server.index_status_result import IndexStatusResult
 from src.mcp_server.fetch_result import FetchPageResult
 from src.mcp_server.ledger_result import (
@@ -26,6 +25,7 @@ from src.mcp_server.read_result import ReadNoteResult
 from src.mcp_server.task_result import TaskListResult, TaskWriteResult
 from src.services import ledger as _ledger_rules
 from src.services import private_folders as _private_folders
+from src.mcp_server import tools as _tools_module
 from src.mcp_server.tools import (
     check_upload_impl,
     create_note_impl,
@@ -55,7 +55,6 @@ from src.mcp_server.tools import (
     ledger_topics_impl,
     ledger_update_impl,
     list_files_impl,
-    open_area_impl,
     list_notes_impl,
     list_tasks_impl,
     move_file_impl,
@@ -1775,40 +1774,6 @@ async def set_task_status(
     )
 
 
-# ── open_area (fork) ────────────────────────────────────────────────────────
-
-_A_AREA = Field(description="The area: its slug (voice-bridge), its tag (#area/voice-bridge), area/voice-bridge "
-                            "or its main note's name (Voice bridge). Give area or folder, not both.")
-_A_FOLDER = Field(description="Instead of area: an absolute path outside the vault, such as the repo or working "
-                              "directory a session runs in; matched against each area's related folders, a "
-                              "subfolder included.")
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
-async def open_area(
-    area: Annotated[str | None, _A_AREA] = None,
-    folder: Annotated[str | None, _A_FOLDER] = None,
-) -> OpenAreaResult:
-    """Open an area: its rules, current position, ledger entries and open tasks.
-
-    Read-only. Call it first when you start work in an area or answer a
-    question about one, and when a session works in a folder outside the
-    vault (`folder`), to find its area. One call returns the area's tag and
-    description, its main note's text (the agent rules at its top and
-    `## Current position`; without its Tasks section), its related folders
-    outside the vault, its active ledger entries (those filed under another
-    area but carrying one of its topics are marked `via_topic`), and its open
-    tasks from every note carrying its tag, `#next` first, then by urgency.
-    Both lists are capped; `notes` say where the rest is, and name open
-    feedback whose citing tasks are all done (ticked in Obsidian, say). `instructions`
-    then say what to do with it all. A folder no area lists comes back with
-    `found: false`: ask the owner which area it belongs to.
-    With `OPEN_NOTE_URL` set, `main_note_open_url`: give that link when
-    pointing the owner to the main note.
-    """
-    return await open_area_impl(area=area, folder=folder)
-
-
 # ── index_status ────────────────────────────────────────────────────────────
 
 _IS_FOLDER = Field(description="Optional: a vault-relative folder (\"Projects/Garden\"). Adds `folder_counts`, the "
@@ -2318,6 +2283,16 @@ def _ledger_details_hint(cls, data):
                 f"details={{\"{misplaced[0]}\": …}}. Nothing was written.")
     return data
 
+
+# The loaded plugins' tools (`Plugin.tools`), each wrapped in `_tracked` like
+# a core tool's body. A `PLUGINS` name that does not load registers nothing
+# here; the lifespan then refuses to start (`main._load_plugins`).
+try:
+    _plugin_tools = _tools_module.plugin_tool_impls()
+except _plugins.PluginLoadError:
+    _plugin_tools = []
+for _spec, _impl in _plugin_tools:
+    mcp.tool(name=_spec.name, annotations=_spec.annotations)(_impl)
 
 if not _private_folders.enabled():
     _drop_include_private(mcp)

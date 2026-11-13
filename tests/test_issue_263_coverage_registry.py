@@ -56,7 +56,12 @@ COVERAGE = {
 
 def test_every_registered_tool_has_inventory_and_live_behavioral_references():
     from src.mcp_server.server import mcp
+    from src import plugins
     registered = {tool.name for tool in mcp._tool_manager.list_tools()}
+    # The suite runs with PLUGINS empty: this vault's plugin tools are counted from the plugin.
+    plugin_tools = {tool.name for tool in plugins.load(("kelno_vault",))[0].tools}
+    assert not registered & plugin_tools
+    registered |= plugin_tools
     assert set(COVERAGE) == registered
     assert len(registered) == 42
     root = Path(__file__).resolve().parents[1]

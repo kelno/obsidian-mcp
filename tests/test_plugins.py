@@ -441,3 +441,41 @@ def test_without_this_vaults_plugin_names_are_not_checked(vault, monkeypatch):
     note(vault, "Log/Log.md", "---\nnote_names: dated\n---\n")
     created = asyncio.run(tools.create_note_impl("Log/no date.md", "x\n"))
     assert text_of(created).startswith("Created note") and (vault / "Log" / "no date.md").exists()
+
+
+# ── Plugin tools ─────────────────────────────────────────────────────────────
+
+async def a_tool(path: str) -> str:
+    """A plugin's tool."""
+    return f"ok {path}"
+
+
+def test_a_plugin_tool_is_wrapped_like_a_core_tool():
+    spec = plugins.PluginTool(name="open_area", fn=a_tool, logged_args=("path",))
+    ((got, tracked),) = tools.plugin_tool_impls((plugins.Plugin("p", tools=(spec,)),))
+    assert got is spec and tracked.__tracked_tool__ == "open_area" and tracked.__doc__ == "A plugin's tool."
+
+
+def test_this_vaults_plugin_adds_open_area_with_its_typed_result():
+    (loaded,) = plugins.load(("kelno_vault",))
+    (spec,) = loaded.tools
+    assert spec.name == "open_area" and spec.result_type is not None
+    tools.plugin_tool_impls((loaded,))
+    assert spec.result_type in tools._TYPED_OUTCOME_RESULTS
+
+
+def test_a_plugin_tool_needs_an_admission_class(monkeypatch):
+    import types
+
+    module = types.ModuleType("src.plugins.toolish")
+    module.plugin = plugins.Plugin("toolish", tools=(plugins.PluginTool(name="no_such_tool", fn=a_tool),))
+    monkeypatch.setitem(__import__("sys").modules, "src.plugins.toolish", module)
+    with pytest.raises(plugins.PluginLoadError, match="admission class"):
+        plugins.load(("toolish",))
+
+
+def test_without_this_vaults_plugin_open_area_is_not_served():
+    from src.mcp_server.server import mcp
+
+    assert "open_area" not in {tool.name for tool in mcp._tool_manager.list_tools()}
+

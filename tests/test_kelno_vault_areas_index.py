@@ -1,7 +1,7 @@
 """Reading the vault's list of areas for `open_area`: the table, folders, sections."""
 import pytest
 
-from src.services import areas_index as ai
+from src.plugins.kelno_vault import areas_index as ai
 
 TABLE = """Intro text with a | pipe.
 

@@ -34,6 +34,7 @@ from src.auth.session import current_user_id
 from src.config import settings
 from src.control_panel import users as panel_users
 from src import plugins
+from src.plugins.kelno_vault import open_area as kelno_open_area
 from src.mcp_server import tools
 from src.mcp_server.auth import current_permission
 from src.models.db import Base, LedgerEmbedding, LedgerEntry
@@ -1085,6 +1086,12 @@ AREAS_TABLE = """# Areas
 """
 
 
+def open_area_impl(**kwargs):
+    """`open_area`, a tool of the kelno_vault plugin, wrapped by the core as the server registers it."""
+    (tracked,) = [fn for spec, fn in tools.plugin_tool_impls(plugins.load(("kelno_vault",))) if spec.name == "open_area"]
+    return tracked(**kwargs)
+
+
 async def _open_area_vault(sessionmaker, root):
     (root / "Areas").mkdir()
     (root / "Areas" / "Areas.md").write_text(AREAS_TABLE, encoding="utf-8")
@@ -1111,7 +1118,7 @@ async def test_open_area_gathers_the_note_folders_entries_and_tasks(sessionmaker
     for r in (later, first, done, secret, elsewhere):
         assert r.error is None, r.error
 
-    result = await tools.open_area_impl(area="Home")
+    result = await open_area_impl(area="Home")
     assert result.error is None, result.error
     assert (result.found, result.area, result.tag, result.name) == (True, "area/home", "#area/home", "Home sweet home")
     assert result.main_note == "projects/Home/Home.md" and result.related_folders == ["D:\\work\\home-repo"]
@@ -1131,52 +1138,52 @@ async def test_open_area_gathers_the_note_folders_entries_and_tasks(sessionmaker
 
 async def test_open_area_by_folder(sessionmaker, ctx, monkeypatch):
     await _open_area_vault(sessionmaker, ctx)
-    by_folder = await tools.open_area_impl(folder="d:/WORK/home-repo/src")
+    by_folder = await open_area_impl(folder="d:/WORK/home-repo/src")
     assert by_folder.area == "area/home" and by_folder.matched_folder == "D:\\work\\home-repo"
 
-    nowhere = await tools.open_area_impl(folder="D:\\work\\unknown")
+    nowhere = await open_area_impl(folder="D:\\work\\unknown")
     assert nowhere.found is False and "Ask the owner which area it belongs to" in nowhere.notes[0]
-    shared = await tools.open_area_impl(folder="D:\\work\\shared")
+    shared = await open_area_impl(folder="D:\\work\\shared")
     assert shared.found is False and "several areas" in shared.notes[0]
-    village = await tools.open_area_impl(folder="D:\\work\\village")
+    village = await open_area_impl(folder="D:\\work\\village")
     assert village.found is True and village.area is None and village.name == "Village"
     assert "no main note yet" in village.notes[0]
 
     monkeypatch.setattr(tools.settings, "archive_folder", "projects")
-    archived = await tools.open_area_impl(area="home")
+    archived = await open_area_impl(area="home")
     assert archived.archived is True and archived.notes[0].startswith("This area is archived")
 
 
 async def test_open_area_links_the_main_note_only_when_the_setting_is_on(sessionmaker, ctx, monkeypatch):
     await _open_area_vault(sessionmaker, ctx)
-    off = await tools.open_area_impl(area="home")
+    off = await open_area_impl(area="home")
     assert off.main_note == "projects/Home/Home.md" and off.main_note_open_url is None
     monkeypatch.setattr(tools.settings, "open_note_url", "https://notes.example.org/open?file={path}")
-    on = await tools.open_area_impl(area="home")
+    on = await open_area_impl(area="home")
     assert on.main_note_open_url == "https://notes.example.org/open?file=projects/Home/Home"
-    village = await tools.open_area_impl(folder="D:\\work\\village")
+    village = await open_area_impl(folder="D:\\work\\village")
     assert village.main_note is None and village.main_note_open_url is None
 
 
 async def test_open_area_refuses_both_or_neither_and_an_unknown_area(ctx):
-    assert code(await tools.open_area_impl()) == "invalid_argument"
-    assert code(await tools.open_area_impl(area="home", folder="D:\\x")) == "invalid_argument"
-    assert code(await tools.open_area_impl(area="nowhere")) == "not_found"
+    assert code(await open_area_impl()) == "invalid_argument"
+    assert code(await open_area_impl(area="home", folder="D:\\x")) == "invalid_argument"
+    assert code(await open_area_impl(area="nowhere")) == "not_found"
 
 
 async def test_open_area_without_the_list_of_areas_still_answers(sessionmaker, ctx):
-    result = await tools.open_area_impl(area="home")
+    result = await open_area_impl(area="home")
     assert result.error is None and result.area == "area/home" and result.related_folders is None
     assert any("list of areas" in n and "was not found" in n for n in result.notes)
-    assert code(await tools.open_area_impl(folder="D:\\work\\home-repo")) == "not_found"
+    assert code(await open_area_impl(folder="D:\\work\\home-repo")) == "not_found"
 
 
 async def test_open_area_caps_tasks_and_points_to_list_tasks(sessionmaker, ctx, monkeypatch):
     await _open_area_vault(sessionmaker, ctx)
-    monkeypatch.setattr(tools, "OPEN_AREA_TASKS_MAX", 2)
+    monkeypatch.setattr(kelno_open_area, "OPEN_AREA_TASKS_MAX", 2)
     for i in range(3):
         await tools.create_task_impl(f"Step {i}", path="plans.md", areas=["home"])
-    result = await tools.open_area_impl(area="home")
+    result = await open_area_impl(area="home")
     assert len(result.tasks) == 2 and result.tasks_total == 3
     assert "No open task of this area carries #next." in result.notes
     assert any('list_tasks(area="area/home")' in n for n in result.notes)
@@ -1305,7 +1312,7 @@ async def test_open_area_flags_feedback_whose_tasks_the_owner_ticked(sessionmake
         f.write(f"- [x] #task Fixed it [{fb.ref}] ✅ 2026-11-11\n- [ ] #task Not yet [{other.ref}]\n")
     from src.services import task_index
     await task_index.reindex_note_tasks_now(None, "plans.md", (ctx / "plans.md").read_text(encoding="utf-8"))
-    result = await tools.open_area_impl(area="home")
+    result = await open_area_impl(area="home")
     flag = next(n for n in result.notes if n.startswith("Feedback of this area whose citing tasks are all done"))
     assert f"({fb.ref};" in flag and other.ref not in flag and 'status="handled"' in flag
 

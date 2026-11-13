@@ -591,12 +591,6 @@ class Settings(BaseSettings):
     tasks_plugin_settings_path: str = ".obsidian/plugins/obsidian-tasks-plugin/data.json"
 
     # ── open_area (fork) ─────────────────────────────────────────────────────
-    # The vault note listing every area in one Markdown table with a
-    # "Related folders" column (absolute paths in code spans) and a "Vault
-    # folder" column (a wikilink to the area's main note). `open_area` reads
-    # it for the area's related folders, and to resolve `folder=`.
-    # Vault-relative. See docs/architecture/open-area.md.
-    areas_index_path: str = "Areas/Areas.md"
 
     # ── Plugins (fork) ───────────────────────────────────────────────────────
     # The plugins this deployment loads, by module name under `src/plugins/`,

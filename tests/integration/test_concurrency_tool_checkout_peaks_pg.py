@@ -36,6 +36,7 @@ import _harness
 import src.database as database
 from src.auth.session import current_principal, current_user_id, current_vault_root
 from src.config import Settings, settings
+from src import plugins
 from src.mcp_server import auth, tools
 from src.models.db import APIKey, NoteEmbedding, NoteLink, NoteMetadata, User
 from src.services import concurrency, ledger_embed, quotas, rate_limits, transfer, vault_overlap
@@ -232,7 +233,7 @@ CALLS = [
     # The task tools: create_task makes the inbox, and the next two act on
     # the line it wrote, whose bytes (and so whose hash) are known up front.
     ('list_tasks', 'list_tasks_impl', lambda s: ((), {})),
-    ('open_area', 'open_area_impl', lambda s: ((), {'area': 'nowhere'})),
+    ('open_area', 'plugin:open_area', lambda s: ((), {'area': 'nowhere'})),
     ('index_status', 'index_status_impl', lambda s: ((), {})),
     ('create_task', 'create_task_impl', lambda s: (('peaks task',), {})),
     ('edit_task', 'edit_task_impl',
@@ -264,10 +265,20 @@ def _hash(text_: str) -> str:
     return 'sha256:' + hashlib.sha256(text_.encode('utf-8')).hexdigest()
 
 
+def _impl(name: str):
+    """A core tool's tracked body in `tools`, or a plugin tool as the server registers it (`plugin:<tool>`)."""
+    if name.startswith("plugin:"):
+        tool = name.removeprefix("plugin:")
+        loaded = plugins.load(("kelno_vault",))
+        (tracked,) = [fn for spec, fn in tools.plugin_tool_impls(loaded) if spec.name == tool]
+        return tracked
+    return getattr(tools, name)
+
+
 def test_the_call_table_covers_every_registered_tool():
     assert {name for name, _, _ in CALLS} == set(concurrency.TOOL_CLASSES)
     for name, impl, _ in CALLS:
-        assert getattr(tools, impl).__tracked_tool__ == name
+        assert _impl(impl).__tracked_tool__ == name
 
 
 async def test_every_registered_tool_stays_within_its_class_multiplier(env):
@@ -277,7 +288,7 @@ async def test_every_registered_tool_stays_within_its_class_multiplier(env):
             cls = concurrency.TOOL_CLASSES[name]
             positional, keywords = args(outputs)
             env.meter.reset()
-            result = await getattr(tools, impl)(*positional, **keywords)
+            result = await _impl(impl)(*positional, **keywords)
             outputs[name] = result if isinstance(result, str) else str(getattr(result, 'error', result))
             assert env.controller.tools.active == 0
             task_peak = max(env.meter.task_peaks.values(), default=0)

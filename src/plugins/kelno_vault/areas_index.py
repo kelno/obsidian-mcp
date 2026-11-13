@@ -1,4 +1,4 @@
-"""The vault's list of areas (`AREAS_INDEX_PATH`), read for `open_area`.
+"""The vault's list of areas (`open_area.AREAS_INDEX_PATH`, `Areas/Areas.md`), read for `open_area`.
 
 The list is one Markdown table: a row per area, with a column of related
 folders outside the vault (repos, working directories) and a column linking

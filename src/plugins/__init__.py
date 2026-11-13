@@ -18,6 +18,8 @@ A plugin fills only the hooks it needs:
 - `check_name(name)`: may refuse the name of a new note (`create_note`,
   `write_file` on a new `.md`) or a move's destination (`move_note`), or add
   a block to the result; runs before the write hooks.
+- `tools`: whole tools (`PluginTool`), registered by the core and wrapped in
+  `_tracked` like its own, so they pass the same gates.
 - `tool_text` and `guide_text`: what the plugin adds to tool descriptions and
   to `get_vault_guide`, so a deployment without it never describes what it
   does.
@@ -126,6 +128,36 @@ class NameCheck:
 
 
 @dataclass(frozen=True)
+class PluginTool:
+    """A whole tool a plugin adds. The core registers it, wrapped in `_tracked` like every core tool.
+
+    Attributes:
+        name: the tool's name. It must have an admission class in
+            `src/services/concurrency.py`'s `TOOL_CLASSES` (part of the
+            admission epoch, so the core lists every tool a plugin may add).
+        fn: the tool itself: an async function whose signature (with its
+            `Annotated` descriptions) and docstring are what agents see. Its
+            module must not use `from __future__ import annotations`: the
+            server reads the annotations through the core's wrapper.
+        logged_args: the arguments its usage row records.
+        annotations: its MCP tool annotations (read-only, …).
+        refusal_result: maps a pre-body refusal's message onto the tool's
+            result type, for a tool returning a structured result.
+        write_class: True for a tool that writes (the write rate bucket).
+        result_type: its structured result type, whose `_body_outcome`
+            decides the usage outcome.
+    """
+
+    name: str
+    fn: Callable[..., Awaitable[object]]
+    logged_args: tuple[str, ...] = ()
+    annotations: object = None
+    refusal_result: Callable[[str], object] | None = None
+    write_class: bool = False
+    result_type: type | None = None
+
+
+@dataclass(frozen=True)
 class Plugin:
     """What a plugin module exposes as `plugin`. Every hook is optional.
 
@@ -136,6 +168,7 @@ class Plugin:
         check_name: refuses a new note's name or a move's destination
             (`NameCheck.refusal`), or adds a block to the result
             (`NameCheck.note`); None when it has nothing to say.
+        tools: whole tools the plugin adds (`PluginTool`).
         tool_text: tool name → paragraphs the plugin adds to that tool's
             description, where its docstring has the `TOOL_TEXT_MARKER` line.
             One paragraph per line, unwrapped.
@@ -147,6 +180,7 @@ class Plugin:
     check: Callable[[NoteWrite], Awaitable[Refusal | None]] | None = None
     rewrite: Callable[[NoteWrite], Awaitable[Rewrite]] | None = None
     check_name: Callable[[NoteName], Awaitable[NameCheck | None]] | None = None
+    tools: tuple[PluginTool, ...] = ()
     tool_text: Mapping[str, str] = field(default_factory=dict)
     guide_text: str = ""
 
@@ -227,6 +261,14 @@ def load(names: tuple[str, ...]) -> tuple[Plugin, ...]:
             raise PluginLoadError(f"src/plugins/{name} exposes no `plugin` of type Plugin")
         if plugin.name != name:
             raise PluginLoadError(f"src/plugins/{name}'s plugin is named {plugin.name!r}; it must be named like its module")
+        from src.services.concurrency import TOOL_CLASSES
+
+        for tool in plugin.tools:
+            if not isinstance(tool, PluginTool) or tool.name not in TOOL_CLASSES:
+                raise PluginLoadError(f"src/plugins/{name} adds a tool {getattr(tool, 'name', tool)!r} that is not a "
+                                      "PluginTool with an admission class in concurrency.TOOL_CLASSES")
+            if any(tool.name == other.name for p in loaded for other in p.tools):
+                raise PluginLoadError(f"two plugins add a tool named {tool.name!r}")
         loaded.append(plugin)
     return tuple(loaded)
 

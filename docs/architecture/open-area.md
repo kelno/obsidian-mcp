@@ -1,13 +1,13 @@
 # open_area: the one call an agent makes when it opens an area
 
-> Read before touching `open_area` (`src/mcp_server/tools.py`, end; `server.py`; `area_result.py`) or `src/services/areas_index.py`. Fork-only (see `FORK.md`).
+> Read before touching `open_area` (`src/plugins/kelno_vault/open_area.py`, `area_result.py`, `areas_index.py` beside it). Fork-only (see `FORK.md`). Since 2026-11-13 it is a tool of the `kelno_vault` plugin (`Plugin.tools`, see [plugins](plugins.md)): the core registers it, wrapped in `_tracked` like its own tools, and serves it only when that plugin is loaded.
 
 An agent starting work in an area, or answering a question about one, used to make several calls (read the main note, `ledger_search(area=…)`, `list_tasks(area=…)`) and could skip any of them; one skipped call is how a postponed decision recorded elsewhere went unseen (ledger F60). `open_area` returns all of it in one result, with two lines saying what to do with it. Owner's design (2026-11-12), following the tenet that a tool should give an agent what it needs at the moment of choice rather than rely on the agent remembering a rule.
 
 ## Input
 
 - `area`: a slug, a tag (`#area/x`) or the main note's name, resolved like `list_tasks(area=…)` (`task_query.AreaIndex.lookup`): an area is a note whose frontmatter declares `area_tag`.
-- `folder`: an absolute path outside the vault (a repo, a working directory). Resolved through the vault's list of areas (`AREAS_INDEX_PATH`, default `Areas/Areas.md`): a Markdown table whose "Related folders" column lists absolute paths in code spans and whose "Vault folder" column links the main note. Paths compare case-insensitively with `\` and `/` alike, and a subfolder of a listed folder matches (the deepest listed folder wins). The list is the only link between a folder and an area: repos never point into the vault.
+- `folder`: an absolute path outside the vault (a repo, a working directory). Resolved through the vault's list of areas (`AREAS_INDEX_PATH`, a constant of the plugin: `Areas/Areas.md`; until 2026-11-13 a core setting, a leftover value is ignored): a Markdown table whose "Related folders" column lists absolute paths in code spans and whose "Vault folder" column links the main note. Paths compare case-insensitively with `\` and `/` alike, and a subfolder of a listed folder matches (the deepest listed folder wins). The list is the only link between a folder and an area: repos never point into the vault.
 
 Exactly one of the two. A folder no row lists: `found: false` and a note to ask the owner which area it belongs to. A folder listed under two areas at the same depth: `found: false`, naming both. A row whose area has no main note yet (or whose note declares no `area_tag`): `found: true` with the row's name and folders, and a note.
 

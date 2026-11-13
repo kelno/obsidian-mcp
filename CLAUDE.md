@@ -415,7 +415,8 @@ update it in the same change.** What stays here is the short list:
 
 ## MCP tools
 
-42 tools, all registered in `src/mcp_server/server.py` and all wrapped by
+42 tools (41 in the core, `open_area` from the `kelno_vault` plugin), all
+registered in `src/mcp_server/server.py` and all wrapped by
 `_tracked`, which resolves the caller's vault root *before* the tool body runs
 — that decorator is the whole enforcement of "this user has no vault"
 ([vault roots and tenancy](docs/architecture/vault-roots-and-tenancy.md)).
@@ -464,7 +465,7 @@ returned line on disk; the writers change one line through the same ladder as
 Recurring tasks are read, never changed. Read
 [task tools](docs/architecture/tasks.md) first.
 
-**`open_area`** (fork): the one call an agent makes when it opens an area (by name or by a folder outside the vault, through the list of areas `AREAS_INDEX_PATH`): the main note without its Tasks section, related folders, active ledger entries and open tasks, then two instruction lines. Class `scan`. Read [open_area](docs/architecture/open-area.md) first.
+**`open_area`** (fork; a tool of the `kelno_vault` plugin, served only with it loaded): the one call an agent makes when it opens an area (by name or by a folder outside the vault, through the list of areas `Areas/Areas.md`): the main note without its Tasks section, related folders, active ledger entries and open tasks, then two instruction lines. Class `scan`. Read [open_area](docs/architecture/open-area.md) first.
 
 **Agent ledger** (fork) — `ledger_search`, `ledger_get`, `ledger_add`,
 `ledger_update`, `ledger_digest`, `ledger_digest_edit`, `ledger_topics`,
@@ -493,7 +494,7 @@ summaries.
 | [schema-and-migrations.md](docs/architecture/schema-and-migrations.md) | any alembic migration; `alembic check` is the cheap gate, not the whole gate |
 | [oauth-and-grants.md](docs/architecture/oauth-and-grants.md) | `src/oauth/`, the consent page, anything minting/rotating/revoking a token |
 | [vault-roots-and-tenancy.md](docs/architecture/vault-roots-and-tenancy.md) | `APIKeyMiddleware`, `_vault_root`, owner predicates, publication confirmation, the vault-root overlap guard (`src/services/vault_overlap.py`, the snapshot, the five pass entry points) |
-| [open-area.md](docs/architecture/open-area.md) | `open_area`, `src/services/areas_index.py` (fork) |
+| [open-area.md](docs/architecture/open-area.md) | `open_area`, `src/plugins/kelno_vault/open_area.py` and `areas_index.py` (fork) |
 | [vault-tools.md](docs/architecture/vault-tools.md) | any note or file tool: frontmatter, symlinks, anchored writes, section addressing, size caps |
 | [file-transfer.md](docs/architecture/file-transfer.md) | `src/transfer/`, `src/services/vault_fs.py`, the publish gate, SSRF policy, the write-bucket charge at redemption |
 | [search.md](docs/architecture/search.md) | `semantic_search` / `keyword_search` / `find_related` and every `SET LOCAL` they issue |
