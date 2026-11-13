@@ -58,7 +58,12 @@ def strip(old: str | None, new: str, path: str) -> tuple[str, str | None]:
         end += 1
     # When the heading ran to the end, keep the line break after what precedes
     # it (a CRLF note would otherwise end on a bare CR).
-    return "\n".join(lines[:i] + (lines[end:] or [""])), line
+    kept = lines[:i] + (lines[end:] or [""])
+    if frontmatter_lines(kept) != frontmatter_lines(lines):
+        # Removing it would bring a later `---` line up to the top, turning
+        # the body above the next `---` into a frontmatter block: left alone.
+        return new, None
+    return "\n".join(kept), line
 
 
 def render(removed: str | None, *, dry_run: bool = False) -> str:

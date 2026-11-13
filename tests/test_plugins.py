@@ -327,6 +327,14 @@ def test_describe_without_text_leaves_no_trace(monkeypatch):
     assert plugins.describe("t", DOC) == "First line.\n\n    Para one.\n\n    Args:\n        x: y\n"
 
 
+def test_describe_with_a_plugin_that_does_not_load_leaves_the_refusal_to_the_lifespan(monkeypatch):
+    def broken():
+        raise plugins.PluginLoadError("no such plugin")
+
+    monkeypatch.setattr(plugins, "active", broken)
+    assert plugins.describe("t", DOC) == "First line.\n\n    Para one.\n\n    Args:\n        x: y\n"
+
+
 def test_describe_needs_exactly_one_marker():
     with pytest.raises(ValueError, match="exactly once"):
         plugins.describe("t", "No marker here.")

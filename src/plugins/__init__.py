@@ -131,9 +131,13 @@ TOOL_TEXT_MARKER = "{plugin_text}"
 def describe(tool_name: str, doc: str) -> str:
     """`doc` with the loaded plugins' `tool_text` for `tool_name` in place of its marker line.
 
+    Called while `src/mcp_server/server.py` is imported. A `PLUGINS` name that
+    does not load gives the tool no plugin text here rather than crashing the
+    import: the lifespan's `_load_plugins` then refuses to start with a clear
+    CRITICAL line, before anything is served.
+
     Raises:
         ValueError: `doc` has no marker line, or more than one.
-        PluginLoadError: see `load`.
     """
     lines = doc.split("\n")
     at = [i for i, line in enumerate(lines) if line.strip() == TOOL_TEXT_MARKER]
@@ -141,7 +145,11 @@ def describe(tool_name: str, doc: str) -> str:
         raise ValueError(f"{tool_name}'s docstring must hold the line {TOOL_TEXT_MARKER} exactly once")
     i = at[0]
     indent = lines[i][: len(lines[i]) - len(lines[i].lstrip())]
-    paragraphs = [p.strip() for plugin in active() if (p := plugin.tool_text.get(tool_name, "")).strip()]
+    try:
+        loaded = active()
+    except PluginLoadError:
+        loaded = ()   # the lifespan refuses to start on it (see above)
+    paragraphs = [p.strip() for plugin in loaded if (p := plugin.tool_text.get(tool_name, "")).strip()]
     if not paragraphs:
         # The marker and the blank line after it go, so no double blank remains.
         end = i + 2 if i + 1 < len(lines) and not lines[i + 1].strip() else i + 1

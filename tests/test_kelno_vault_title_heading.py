@@ -55,3 +55,8 @@ def test_review_cases():
     assert th.strip("---\r\na: 1\r\n---\r\nOld\r\n", "---\r\na: 1\r\n---\r\n# G", "G.md")[0] == "---\r\na: 1\r\n---\r\n"
     # A BOM before a new heading.
     assert th.strip(None, "﻿# Dog food\nBody\n", "Dog food.md")[1] is not None
+
+
+def test_a_heading_whose_removal_would_make_a_frontmatter_block_stays():
+    new = "# Dog food\n\n---\n\nIntro\n\n---\n\nMore\n"
+    assert th.strip(None, new, "Dog food.md") == (new, None)
