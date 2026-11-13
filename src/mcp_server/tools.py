@@ -2625,7 +2625,8 @@ def _private_folders_guide() -> str:
         "- By default `keyword_search`, `semantic_search` and `find_related` leave private notes out and end "
         "with how many would have been listed (\"2 matches in private folders not shown.\"). `list_tasks`, "
         "`ledger_get` and `ledger_update` list private tasks and note lines by location only, without their "
-        "text, and so does `open_area`, which has no argument to show them (`list_tasks` does).\n"
+        "text" + (", and so does `open_area`, which has no argument to show them (`list_tasks` does)"
+                  if any(t.name == "open_area" for p in _plugins.active() for t in p.tools) else "") + ".\n"
         "- `include_private=true` on those six tools (the three searches, `list_tasks`, `ledger_get` and "
         "`ledger_update`) shows them in full. Set it only when the owner asked for "
         "something in a private folder, or a protocol the owner set up (a written procedure you were told to "
@@ -9491,6 +9492,8 @@ def plugin_tool_impls(loaded: tuple | None = None) -> list[tuple[_plugins.Plugin
                 _TYPED_OUTCOME_RESULTS = (*_TYPED_OUTCOME_RESULTS, spec.result_type)
             tracked = _tracked(spec.name, list(spec.logged_args), refusal_result=spec.refusal_result,
                                write_class=spec.write_class)(spec.fn)
+            # FastMCP names the arguments model after the function: the tool's name, as for a core tool.
+            tracked.__name__ = tracked.__qualname__ = spec.name
             out.append((spec, tracked))
     return out
 

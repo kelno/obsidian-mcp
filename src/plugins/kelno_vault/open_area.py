@@ -323,7 +323,7 @@ _A_FOLDER = Field(description="Instead of area: an absolute path outside the vau
                               "subfolder included.")
 
 
-async def open_area_tool(
+async def open_area(
     area: Annotated[str | None, _A_AREA] = None,
     folder: Annotated[str | None, _A_FOLDER] = None,
 ) -> OpenAreaResult:
@@ -349,7 +349,7 @@ async def open_area_tool(
 
 TOOL = plugins.PluginTool(
     name="open_area",
-    fn=open_area_tool,
+    fn=open_area,
     logged_args=("area", "folder"),
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
     refusal_result=_open_area_refusal,

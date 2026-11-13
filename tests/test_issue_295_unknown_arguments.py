@@ -51,7 +51,8 @@ def test_setting_defaults_on():
 
 def test_every_tool_is_covered():
     # The registry the rest of this module iterates is the real one, not empty.
-    assert len(TOOLS) == 42
+    # The core's tools: the suite runs with PLUGINS empty (open_area is kelno_vault's).
+    assert len(TOOLS) == 41
 
 
 class _Sentinel:
@@ -194,7 +195,7 @@ _ROLLBACK_SCRIPT = textwrap.dedent(
 
     async def main():
         tools = mcp._tool_manager.list_tools()
-        assert len(tools) == 42
+        assert len(tools) == 41
         for tool in tools:
             assert "additionalProperties" not in tool.parameters, tool.name
             assert tool.fn_metadata.arg_model.model_config.get("extra") is None, tool.name

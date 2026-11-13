@@ -479,3 +479,17 @@ def test_without_this_vaults_plugin_open_area_is_not_served():
 
     assert "open_area" not in {tool.name for tool in mcp._tool_manager.list_tools()}
 
+
+def test_open_area_registered_as_the_server_does_keeps_its_schema():
+    from mcp.server.fastmcp import FastMCP
+
+    server = FastMCP("t")
+    for spec, tracked in tools.plugin_tool_impls(plugins.load(("kelno_vault",))):
+        server.tool(name=spec.name, annotations=spec.annotations)(tracked)
+    (tool,) = asyncio.run(server.list_tools())
+    assert tool.name == "open_area" and tool.inputSchema["title"] == "open_areaArguments"
+    assert set(tool.inputSchema["properties"]) == {"area", "folder"}
+    assert "slug" in tool.inputSchema["properties"]["area"]["description"]
+    assert tool.outputSchema is not None and tool.annotations.readOnlyHint is True
+    assert tool.description.startswith("Open an area")
+

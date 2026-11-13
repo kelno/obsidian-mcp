@@ -245,6 +245,13 @@ def test_every_registered_tool_class_matches_wrapper_and_write_class():
                 assert (cls=='write') is write
                 assert getattr(tools,node.name).__concurrency_class__==cls
                 seen[name]=cls
+    # The plugins' tools, wrapped by the core as the server registers them.
+    from src import plugins
+    for spec,tracked in tools.plugin_tool_impls(plugins.load(('kelno_vault',))):
+        cls=concurrency.TOOL_CLASSES[spec.name]
+        assert (cls=='write') is spec.write_class
+        assert tracked.__concurrency_class__==cls
+        seen[spec.name]=cls
     assert seen==concurrency.TOOL_CLASSES
 
 

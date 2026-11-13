@@ -590,8 +590,6 @@ class Settings(BaseSettings):
     # on every task tool call.
     tasks_plugin_settings_path: str = ".obsidian/plugins/obsidian-tasks-plugin/data.json"
 
-    # ── open_area (fork) ─────────────────────────────────────────────────────
-
     # ── Plugins (fork) ───────────────────────────────────────────────────────
     # The plugins this deployment loads, by module name under `src/plugins/`,
     # in the order they run: behaviour that follows one vault's conventions,
