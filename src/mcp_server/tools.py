@@ -3467,15 +3467,12 @@ async def create_note_impl(
         plugin_run = _plugins.NoteWriteRun("create_note", target.rel, None, dry_run=False, user_id=uid)
         if target.lstat() is None and (refusal := await plugin_run.check(content)):
             return _body_refusal(refusal.message, refusal.code)
-        # The plugins' rewrites first (one may drop lines), so the link
-        # report's line numbers are the written note's.
         content = await plugin_run.rewrite(content)
-        content, links_report, links_failure = await _full_path_links(uid, target.rel, None, content)
         # The agent-edit stamp, before the size check: the cap binds what is
         # written.
         unstamped_lines = _line_count(content)
         content = ai_edit_stamp.stamp(content, target.rel)
-        links_shift = _line_count(content) - unstamped_lines
+        stamp_shift = _line_count(content) - unstamped_lines
         if err := _note_size_error(content):
             return err
         # #88, immediately before the publication and after every refusal that
@@ -3510,7 +3507,7 @@ async def create_note_impl(
         except OSError as e:
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
     return created + name_flag + await _rule_change_unlogged(target.rel, None, content) + \
-        plugin_run.render(shift=links_shift) + _links_text(links_report, links_failure, shift=links_shift) + \
+        plugin_run.render(shift=stamp_shift) + \
         await _note_refs_report(uid, None, content)
 
 
@@ -4551,29 +4548,22 @@ async def edit_note_impl(
         if new_content != existing and (refusal := await plugin_run.check(new_content)):
             return _body_refusal(refusal.message, refusal.code)
 
-        # The plugins' rewrites, then bare-name wikilinks on the lines this
-        # write adds or changes get the note's full path (the vault's link
-        # rule), before the diff and the stamp. The plugins go first (one may
-        # drop lines), so the link report's line numbers are the written note's.
-        links_report, links_failure = None, ""
+        # The plugins' rewrites, before the diff and the stamp.
         if new_content != existing:
             new_content = await plugin_run.rewrite(new_content)
             if new_content == existing:
                 # A plugin's rewrite undid the whole change (a dropped title
                 # heading that was all of it): nothing to write, in a dry run or not.
                 return f"No changes for {path}" + plugin_run.render(dry_run=dry_run)
-        if new_content != existing:
-            new_content, links_report, links_failure = await _full_path_links(
-                uid, target.rel, existing, new_content)
 
         # The agent-edit stamp, on a write that changes something (a no-op
         # stays a no-op), before the size cap and the diff so both see the
         # bytes that would be written.
-        links_shift = 0
+        stamp_shift = 0
         if new_content != existing:
             unstamped_lines = _line_count(new_content)
             new_content = ai_edit_stamp.stamp(new_content, target.rel)
-            links_shift = _line_count(new_content) - unstamped_lines
+            stamp_shift = _line_count(new_content) - unstamped_lines
 
         # Bound the *result*, before the diff and before the atomic write, so an
         # over-cap edit is refused by the tool in every mode (including dry_run)
@@ -4596,8 +4586,7 @@ async def edit_note_impl(
             if not diff:
                 return f"No changes for {path}"
             return (diff + await _rule_change_unlogged(target.rel, existing, new_content)
-                    + plugin_run.render(shift=links_shift, dry_run=True)
-                    + _links_text(links_report, links_failure, dry_run=True, shift=links_shift)
+                    + plugin_run.render(shift=stamp_shift, dry_run=True)
                     + await _note_refs_report(uid, existing, new_content))
 
         # #88. Placed after the `dry_run` return above on purpose: a dry run
@@ -4626,8 +4615,8 @@ async def edit_note_impl(
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
         return success_message + _published_hash_clause(
             new_content.encode("utf-8")
-        ) + await _rule_change_unlogged(target.rel, existing, new_content) + plugin_run.render(shift=links_shift) + \
-            _links_text(links_report, links_failure, shift=links_shift) + await _note_refs_report(uid, existing, new_content)
+        ) + await _rule_change_unlogged(target.rel, existing, new_content) + plugin_run.render(shift=stamp_shift) + \
+            await _note_refs_report(uid, existing, new_content)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -6775,7 +6764,6 @@ async def write_file_impl(
         else:
             plugin_run = None
         links_text = ""
-        links_report, links_failure = None, ""
         # Not when the old text could not be read: every line would look new.
         if target.rel.lower().endswith(".md") and not (overwrite and exists and previous_note is None):
             try:
@@ -6789,22 +6777,16 @@ async def write_file_impl(
                 except UnicodeDecodeError:
                     readable = False   # every line would look new: links left as sent
                 if readable:
-                    # The plugins first (one may drop lines), so the link
-                    # report's line numbers are the written note's.
                     rewritten = new_note
                     if plugin_run is not None and new_note != old_text:
                         rewritten = await plugin_run.rewrite(rewritten)
-                    rewritten, links_report, links_failure = await _full_path_links(
-                        uid, target.rel, old_text, rewritten)
                     if rewritten != new_note:
                         data = rewritten.encode("utf-8")
                     links_text = await _rule_change_unlogged(target.rel, old_text, rewritten)
         if plugin_run is not None:
-            # The plugins' blocks (and any check error) even when the text
-            # could not be rewritten, then the link report.
+            # The plugins' blocks (and any check error), even when the text
+            # could not be rewritten.
             links_text += plugin_run.render()
-        if links_report is not None or links_failure:
-            links_text += _links_text(links_report, links_failure)
 
         # **The cap follows the NORMALISED name, not the caller's string.**
         # `open_mutable` drops empty and `.` components, so `"big.md/."` is
@@ -9361,7 +9343,7 @@ async def _rule_change_unlogged(rel: str, old: str | None, new: str) -> str:
     """
     import fnmatch
 
-    from src.services.link_paths import frontmatter_lines
+    from src.services.note_lines import frontmatter_lines
 
     if not rel.lower().endswith(".md") or not any(
             fnmatch.fnmatchcase(rel, pattern) for pattern in settings.rule_file_patterns):
@@ -9441,42 +9423,6 @@ async def _note_name_check(uid, tool: str, rel: str):
                       f"{folder}/ carry none ({where}): they describe the present. Rename it without the date "
                       "(move_note) unless the date is part of what it is.")
     return None, ""
-
-
-async def _full_path_links(uid, path: str, old: str | None, new: str) -> tuple[str, object | None, str]:
-    """`new` with its bare-name wikilinks given full paths (`link_paths`), the report, and a failure line.
-
-    Only lines the write adds or changes are touched. Never fails the write:
-    when the note list cannot be read, `new` is returned as is with a line
-    saying so.
-    """
-    from src.services import link_paths
-
-    if not link_paths.needs_check(old, new):
-        return new, None, ""
-    try:
-        from sqlalchemy import select
-
-        from src.models.db import NoteMetadata
-
-        async with async_session() as session:
-            paths = (await session.execute(
-                select(NoteMetadata.file_path).where(_note_owner_predicate(uid)))).scalars().all()
-        index = link_paths.NoteIndex([*paths, path])
-        rewritten, report = await asyncio.to_thread(link_paths.rewrite, old, new, index)
-        return rewritten, report, ""
-    except Exception as exc:  # noqa: BLE001 — the write goes ahead unchanged; the result says so
-        # debug, not warning: a caller drives this path (the D18 permit rule); the result tells the caller.
-        logger.debug("note write: bare-name links could not be checked", exc_info=True)
-        return new, None, (f"\n\nBare-name links in this write could not be checked ({type(exc).__name__}): "
-                           "write each link with the note's full path yourself.")
-
-
-def _links_text(report, failure: str, *, dry_run: bool = False, shift: int = 0) -> str:
-    """The result's link blocks; `shift`: lines the agent-edit stamp added above, so line numbers match the note."""
-    from src.services import link_paths
-
-    return failure or (link_paths.render(link_paths.shifted(report, shift), dry_run=dry_run) if report else "")
 
 
 async def _note_refs_report(uid, old: str | None, new: str | None, *, old_unread: bool = False) -> str:

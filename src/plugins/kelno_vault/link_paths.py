@@ -31,10 +31,10 @@ from __future__ import annotations
 
 import os
 import re
-from collections import Counter
 from dataclasses import dataclass, field
 
 from src.services.links import FULL_NOTE, mask_code
+from src.services.note_lines import changed_lines, frontmatter_lines
 
 #: A wikilink or embed: the move rewrite's grammar, target first.
 _WIKILINK_RE = re.compile(
@@ -80,34 +80,6 @@ class NoteIndex:
     def has_path(self, target: str) -> bool:
         t = target.lower()
         return (t if t.endswith(".md") else t + ".md") in self.paths
-
-
-def _same(line: str) -> str:
-    """A line as compared between old and new: its line ending, a BOM and surrounding spaces don't count."""
-    return line.rstrip("\r").lstrip("﻿").strip()
-
-
-def _changed_lines(old: str | None, new: str) -> set[int]:
-    """0-based indexes of `new`'s lines that `old` does not hold (compared as the task check compares)."""
-    left = Counter(_same(line) for line in old.split("\n")) if old is not None else Counter()
-    out = set()
-    for i, line in enumerate(new.split("\n")):
-        key = _same(line)
-        if left[key] > 0:
-            left[key] -= 1
-        else:
-            out.add(i)
-    return out
-
-
-def _frontmatter_lines(lines: list[str]) -> int:
-    """How many leading lines a YAML frontmatter block takes (links there are left alone)."""
-    if not lines or lines[0].lstrip("﻿").rstrip("\r") != "---":
-        return 0
-    for i, line in enumerate(lines[1:], start=1):
-        if line.rstrip("\r") in ("---", "..."):
-            return i + 1
-    return 0
 
 
 _QUOTE_PREFIX_RE = re.compile(r"^[ \t]*(?:>[ \t]?)+")
@@ -156,7 +128,7 @@ def needs_check(old: str | None, new: str) -> bool:
     if "[[" not in new:
         return False
     lines = new.split("\n")
-    return any("[[" in lines[i] for i in _changed_lines(old, new))
+    return any("[[" in lines[i] for i in changed_lines(old, new))
 
 
 #: A checkbox list item, quoted or not: a task's line is changed by the task tools only.
@@ -173,7 +145,7 @@ def rewrite(old: str | None, new: str, index: NoteIndex) -> tuple[str, LinkRepor
     if "[[" not in new:
         return new, report
     lines = new.split("\n")
-    changed = _changed_lines(old, new) - set(range(_frontmatter_lines(lines))) - _quoted_code_lines(lines)
+    changed = changed_lines(old, new) - set(range(frontmatter_lines(lines))) - _quoted_code_lines(lines)
     masked = mask_code(new, context=FULL_NOTE)
     # The masker blanks a fenced block whole, its line breaks included: put
     # them back so masked lines align with the note's.
@@ -275,10 +247,3 @@ def render(report: LinkReport, *, dry_run: bool = False) -> str:
                     "holds: drop it.")
         parts.append("links_flagged: left as written, check each:\n" + listed(flags, flag))
     return ("\n\n" + "\n\n".join(parts)) if parts else ""
-
-
-#: The line comparison and frontmatter span, shared with `title_heading` and
-#: the plugin runner (`src/plugins`) so all pick a write's changed lines the
-#: same way.
-changed_lines = _changed_lines
-frontmatter_lines = _frontmatter_lines

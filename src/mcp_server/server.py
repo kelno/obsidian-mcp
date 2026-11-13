@@ -474,19 +474,6 @@ async def create_note(
 
     {plugin_text}
 
-    **Wikilinks get the note's full path.** Write links with the full path
-    yourself (`[[Areas/Areas|Areas]]`); this is a safety net. On the lines a
-    write adds or changes (never on lines it leaves as they were, nor on
-    checkbox lines), a wikilink or note embed naming a note by bare name
-    (`[[Areas]]`) that exactly one note has, archived ones counted, gets that
-    note's full path; its display text is kept, or, when it had none, the
-    text Obsidian showed is added, so it reads the same. The published text
-    is then not byte for byte what you sent (the reported `content_hash` is
-    of what was written). The result lists each under `links_rewritten:`. A
-    bare name several notes have, or none, a full path to no note, and a path
-    in code formatting after a link are left as written and listed under
-    `links_flagged:`. The write is never refused for a link.
-
     **Agent-ledger refs.** When the note cites agent-ledger entries in
     brackets (`[Q14]`), the result ends with `cites:`, each entry as it stands
     now: check your wording matches them.
@@ -568,19 +555,6 @@ async def edit_note(
     that changes no meaning needs no proposal. Never a refusal.
 
     {plugin_text}
-
-    **Wikilinks get the note's full path.** Write links with the full path
-    yourself (`[[Areas/Areas|Areas]]`); this is a safety net. On the lines a
-    write adds or changes (never on lines it leaves as they were, nor on
-    checkbox lines), a wikilink or note embed naming a note by bare name
-    (`[[Areas]]`) that exactly one note has, archived ones counted, gets that
-    note's full path; its display text is kept, or, when it had none, the
-    text Obsidian showed is added, so it reads the same. The published text
-    is then not byte for byte what you sent (the reported `content_hash` is
-    of what was written). The result lists each under `links_rewritten:`. A
-    bare name several notes have, or none, a full path to no note, and a path
-    in code formatting after a link are left as written and listed under
-    `links_flagged:`. The write is never refused for a link.
 
     **Agent-ledger refs on the lines.** When the lines this write removes or
     rewrites cite agent-ledger entries in brackets (`[P54, P80]`), the result
@@ -1229,9 +1203,7 @@ async def write_file(
     `edit_note`'s (`changed_lines_cite:`, `cites:`), and a write that adds
     or changes a task line is refused like `edit_note`'s
     (`task_line_by_hand`): tasks go through the task tools. A new `.md`
-    note's name is checked like `create_note`'s (`note_name_date`). Bare-name
-    wikilinks get the note's full path as in `edit_note`
-    (`links_rewritten:`, `links_flagged:`). A rule note written with no new
+    note's name is checked like `create_note`'s (`note_name_date`). A rule note written with no new
     proposal ref gets `rule_change_unlogged:` as in `edit_note`.
 
     {plugin_text}

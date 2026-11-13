@@ -1,7 +1,7 @@
 """Bare-name wikilinks get the note's full path on the lines a write adds or changes."""
 import pytest
 
-from src.services import link_paths as lp
+from src.plugins.kelno_vault import link_paths as lp
 
 NOTES = [
     "Areas/Areas.md",

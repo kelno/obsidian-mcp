@@ -42,8 +42,6 @@ This paragraph can be linked to. ^my-block-id
 
 Block IDs are load-bearing references; don't rewrite or remove them.
 
-On this server, write links with the note's full path yourself (`[[Areas/Areas|Areas]]`). As a safety net, the note tools (`edit_note`, `create_note`, `write_file` to a `.md`) give a bare-name link or note embed you write (`[[Areas]]`) the note's full path when exactly one note has that name, archived notes counted (display text kept, or added when there was none), on the lines you add or change only, and list it under `links_rewritten:`. A name several notes share, or none has, is left as you wrote it and listed under `links_flagged:`: write the full path of the note you mean.
-
 ## Embeds (transclusion)
 
 Prefix any wikilink with `!` to inline the target's content where the

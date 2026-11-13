@@ -33,6 +33,7 @@ import src.database
 from src.auth.session import current_user_id
 from src.config import settings
 from src.control_panel import users as panel_users
+from src import plugins
 from src.mcp_server import tools
 from src.mcp_server.auth import current_permission
 from src.models.db import Base, LedgerEmbedding, LedgerEntry
@@ -1323,7 +1324,8 @@ async def test_a_delete_on_done_removal_still_points_to_closing_the_feedback(ses
 
 # ── Bare-name links get the note's full path on the lines a write changes ───
 
-async def test_note_writers_give_bare_name_links_their_full_path(sessionmaker, ctx):
+async def test_note_writers_give_bare_name_links_their_full_path(sessionmaker, ctx, monkeypatch):
+    monkeypatch.setattr(plugins, "active", lambda: plugins.load(("kelno_vault",)))   # the link rule is this vault's plugin
     (ctx / "projects" / "Home").mkdir(parents=True)
     (ctx / "projects" / "Home" / "Home.md").write_text("Home\n", encoding="utf-8")
     created = await tools.create_note_impl("links.md", "See [[Home]] and [[Nowhere]].\n")

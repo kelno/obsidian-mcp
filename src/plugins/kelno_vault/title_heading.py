@@ -10,7 +10,7 @@ they are about to write:
   closing `#`s of a closed heading are not part of its text) whose text
   equals the note's file name without `.md`, ignoring case and surrounding
   spaces, and when this write adds or changes that line (the lines are
-  compared as the link rewrite compares them: `link_paths.changed_lines`);
+  compared as the link rewrite compares them: `note_lines.changed_lines`);
 - and the blank lines right after it, so the body does not start blank.
 
 The text must equal the name exactly: no Markdown formatting is stripped
@@ -26,7 +26,7 @@ from __future__ import annotations
 import posixpath
 import re
 
-from src.services.link_paths import changed_lines, frontmatter_lines
+from src.services.note_lines import changed_lines, frontmatter_lines
 
 _ATX_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(?P<text>.*?))?(?:[ \t]+#+)?[ \t]*$")
 

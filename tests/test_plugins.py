@@ -352,14 +352,15 @@ def test_the_served_descriptions_hold_no_marker_and_no_plugin_rule_without_the_p
     for name in ("create_note", "edit_note", "write_file"):
         doc = getattr(server, name).__doc__ or ""
         assert plugins.TOOL_TEXT_MARKER not in doc and "title_heading_removed" not in doc, name
-    assert "Titles (this server)" not in tools._VAULT_GUIDE_PRIMER
+        assert "links_rewritten" not in doc, name
+    assert "Titles (this server)" not in tools._VAULT_GUIDE_PRIMER and "links_rewritten" not in tools._VAULT_GUIDE_PRIMER
 
 
 def test_this_vaults_plugin_describes_its_rule_on_every_writer():
     (loaded,) = plugins.load(("kelno_vault",))
     assert set(loaded.tool_text) == {"create_note", "edit_note", "write_file"}
-    assert all("title_heading_removed" in text for text in loaded.tool_text.values())
-    assert loaded.guide_text.startswith("## Titles (this server)")
+    assert all("title_heading_removed" in text and "links_rewritten" in text for text in loaded.tool_text.values())
+    assert loaded.guide_text.startswith("## Links (this server)") and "## Titles (this server)" in loaded.guide_text
 
 
 def test_without_this_vaults_plugin_a_title_heading_is_written_as_sent(vault, monkeypatch):

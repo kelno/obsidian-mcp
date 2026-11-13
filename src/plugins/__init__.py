@@ -43,7 +43,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
 from src.config import settings
-from src.services import link_paths, refusals
+from src.services import note_lines, refusals
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ def describe(tool_name: str, doc: str) -> str:
         # The marker and the blank line after it go, so no double blank remains.
         end = i + 2 if i + 1 < len(lines) and not lines[i + 1].strip() else i + 1
         return "\n".join(lines[:i] + lines[end:])
-    text = ("\n\n").join(indent + p.replace("\n", "\n" + indent) for p in paragraphs)
+    text = "\n\n".join("\n".join(indent + line if line.strip() else "" for line in p.split("\n")) for p in paragraphs)
     return "\n".join(lines[:i] + [text] + lines[i + 1:])
 
 
@@ -223,18 +223,18 @@ def _lines(text: str) -> list[str]:
 def _out_of_scope(old: str | None, before: str, after: str) -> bool:
     """Whether a rewrite of `before` into `after` removed or altered a kept line, or touched the frontmatter.
 
-    Which lines the caller kept is decided as `link_paths` decides it for the
+    Which lines the caller kept is decided as `note_lines` decides it for the
     core's own rewrites; whether the rewrite kept them is exact (only the line
     ending may differ), so a rewrite that re-indents or trims a kept line is
     caught. The frontmatter span is the larger of the two texts', so adding a
     block counts as touching it.
     """
     before_lines, after_lines = _lines(before), _lines(after)
-    head = max(link_paths.frontmatter_lines(before_lines), link_paths.frontmatter_lines(after_lines))
+    head = max(note_lines.frontmatter_lines(before_lines), note_lines.frontmatter_lines(after_lines))
     if after_lines[:head] != before_lines[:head]:
         return True
     old_lf = None if old is None else "\n".join(_lines(old))
-    changed = link_paths.changed_lines(old_lf, "\n".join(before_lines))
+    changed = note_lines.changed_lines(old_lf, "\n".join(before_lines))
     kept = Counter(line for i, line in enumerate(before_lines) if i not in changed and line.strip())
     have = Counter(after_lines)
     return any(have[line] < count for line, count in kept.items())

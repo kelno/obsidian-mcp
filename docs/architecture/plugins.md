@@ -23,7 +23,7 @@ When the writers call them:
 - `rewrite` runs before the core's link rewrite (so a plugin that drops lines leaves the link report's line numbers right) and before the agent-edit stamp and the size cap. When the rewrites undo `edit_note`'s whole change (a dropped title heading that was all of it), it answers "No changes" with the plugins' blocks. Each plugin gets the previous one's output; its `NoteWrite.old` stays the note's old text, so "the lines this write adds or changes" keeps meaning the caller's change. Two plugins rewriting one line: the later one sees the earlier one's result, and both reports are kept.
 - The reports go after `rule_change_unlogged:` and before the link report, in plugin order, then any `plugin_error:` lines. `shift` is the number of lines the stamp added above the body, so a report can give the written note's line numbers. A rewrite that adds or removes lines moves the line numbers of reports made before it: a plugin with several rewrites orders them itself.
 - A refusal's code must be in `src/services/refusals.py`'s `BODY_CODES`, the catalogue every refusal is checked against: a plugin's codes are listed there.
-- A hook may import the core's services (the database session, `link_paths`, the Tasks settings); there is no separate vault view.
+- A hook may import the core's services (the database session through `src.database`, `note_lines`, the Tasks settings); there is no separate vault view.
 
 ## Failure
 
@@ -33,7 +33,7 @@ A plugin bug never fails a write. Each of these is set aside, the write goes ahe
 - a `check` that returns something other than None or a `Refusal` with a listed code;
 - a `rewrite` that returns something other than a `Rewrite`;
 - a report that raises or returns something other than a string (None means nothing to say);
-- a `rewrite` that removes or alters a non-blank line the caller kept from the old note, or changes the frontmatter block, adding one included. This guards against the expensive failure here, a write that clobbers a note: a plugin may change the caller's own lines, add lines and drop blank ones, nothing else. Which lines the caller kept is decided as `link_paths.changed_lines` decides it for the core's own rewrites; whether the rewrite kept them is exact, only the line ending aside, so re-indenting or trimming a kept line is caught. CRLF, LF and lone-CR notes are all read line by line. Lines are compared as a multiset, so a rewrite that moves a kept line elsewhere is not caught (accepted: no plugin moves lines).
+- a `rewrite` that removes or alters a non-blank line the caller kept from the old note, or changes the frontmatter block, adding one included. This guards against the expensive failure here, a write that clobbers a note: a plugin may change the caller's own lines, add lines and drop blank ones, nothing else. Which lines the caller kept is decided as `note_lines.changed_lines` decides it for every rewrite; whether the rewrite kept them is exact, only the line ending aside, so re-indenting or trimming a kept line is caught. CRLF, LF and lone-CR notes are all read line by line. Lines are compared as a multiset, so a rewrite that moves a kept line elsewhere is not caught (accepted: no plugin moves lines).
 
 Accepted, from the adversarial review (2026-11-13): a `plugin_error:` line is lost when the write then ends early (another plugin's refusal, the size cap, `edit_note`'s "No changes"), though it is still logged; a rewrite that undoes the caller's whole change is written (a no-op write that still stamps); hooks have no timeout; a plugin's guide sections come after the whole primer, not next to the core's sections on the same tools.
 
@@ -41,8 +41,7 @@ A name in `PLUGINS` that does not load (no module, any exception while importing
 
 ## The plugins here
 
-- `kelno_vault`: the conventions of the fork owner's vault, fully specific to it and not configurable. It drops a first heading repeating the note's name (`rewrite`, `title_heading.py`; its description paragraphs and the guide's "Titles" section are its `tool_text` and `guide_text`). The behaviours below are still in the core and move into it one at a time:
-  - full-path link rewriting (`rewrite`, ordered after the title heading);
+- `kelno_vault`: the conventions of the fork owner's vault, fully specific to it and not configurable. Its `rewrite` drops a first heading repeating the note's name (`title_heading.py`), then gives bare-name wikilinks the note's full path (`link_paths.py`, reading the caller's note list through `src.database`), in that order so the link report's line numbers are the written note's. Their description paragraphs and the guide's "Links" and "Titles" sections are its `tool_text` and `guide_text`. The behaviours below are still in the core and move into it one at a time:
   - the hand-written task-line refusal (`check`);
   - `rule_change_unlogged`, with `RULE_FILE_PATTERNS` becoming its constant;
   - `note_names` (a name hook for `create_note`, `write_file` and `move_note`);
