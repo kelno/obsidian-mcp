@@ -178,6 +178,29 @@ async def test_list_tasks_answers_from_the_index_and_writes_reindex_at_once(sess
     assert json.loads(again.error.rsplit("\n", 1)[-1].removeprefix("MCP-REFUSAL "))["code"] == "stale_precondition"
 
 
+async def test_task_writes_record_attributed_feed_events_and_refresh_upstreams_rows(sessionmaker, vault):
+    """Like every other note writer (#351, #432): an event attributed to the
+    tool, so the next pass records nothing of its own, and upstream's
+    `note_tasks` rows refreshed at once."""
+    write(vault, "Feed.md", "- [ ] first\n")
+    await indexer.index_vault(user_id=None)
+    created = await tools.create_task_impl("second", path="Feed.md")
+    assert created.indexed is True, created
+    first = (await tools.fork_list_tasks_impl(path="Feed.md")).tasks[0]
+    done = await tools.set_task_status_impl(first.path, first.line, first.text, first.content_hash, status="done")
+    assert done.indexed is True, done
+    async with sessionmaker() as session:
+        events = (await session.execute(text(
+            "SELECT kind, tool, source FROM note_events WHERE path = 'Feed.md' AND tool IS NOT NULL ORDER BY seq"
+        ))).all()
+        upstream_rows = (await session.execute(text(
+            "SELECT t.text, t.status_char FROM note_tasks t JOIN notes_metadata n ON n.id = t.note_id "
+            "WHERE n.file_path = 'Feed.md' ORDER BY t.line"
+        ))).all()
+    assert [(e.kind, e.tool) for e in events] == [("modified", "create_task"), ("modified", "set_task_status")]
+    assert [(r.text.split()[0], r.status_char) for r in upstream_rows] == [("first", "x"), ("second", " ")]
+
+
 async def test_list_tasks_reports_a_line_changed_on_disk_as_stale(sessionmaker, vault):
     write(vault, "s.md", "- [ ] before\n")
     await indexer.index_vault(user_id=None)

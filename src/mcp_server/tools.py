@@ -10118,7 +10118,12 @@ async def _publish_task_text(uid, target, path: str, new_text: str, existing: by
 
 
 async def _publish_task_text_unstamped(uid, target, path: str, new_text: str, existing: bytes | None):
-    """Publish `new_text` over `existing` (no-clobber create when it is None)."""
+    """Publish `new_text` over `existing` (no-clobber create when it is None).
+
+    After a confirmed publication, the change feed's event and the #432 task
+    refresh of upstream's rows, as every other note writer does: both are
+    silent and never change the result.
+    """
     if err := _note_size_error(new_text):
         return err
     try:
@@ -10128,6 +10133,12 @@ async def _publish_task_text_unstamped(uid, target, path: str, new_text: str, ex
                 target, new_text, overwrite=existing is not None, expected=existing, confirmation=c
             ),
         )
+        if err is None:
+            published = new_text.encode("utf-8")
+            await _record_note_events(
+                uid, [_content_event("created" if existing is None else "modified", target.rel, published)]
+            )
+            await _refresh_after_write(uid, target, replaced=existing, published=published)
         return err
     except FileExistsError:
         return _leaf_state_error(target, path) or _body_refusal(

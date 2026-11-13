@@ -943,7 +943,7 @@ def test_fixture_pipeline_matches_expected_report(tmp_path):
     assert re.fullmatch(r"[0-9a-f]{40}", report["commit_sha"]) or (
         report["commit_sha"] == "unknown" and not (ROOT / ".git").exists())
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
-    assert report["commit_sha"] == head.stdout.strip()
+    assert report["commit_sha"] == (head.stdout.strip() or "unknown")
 
 
 def test_fixture_golden_numbers_by_hand(tmp_path):
