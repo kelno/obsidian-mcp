@@ -129,7 +129,8 @@ BODY_CODES = frozenset({
     # A general note writer asked to add or change a task line by hand: tasks
     # go through the task tools (the `kelno_vault` plugin's check).
     "task_line_by_hand",
-    # A note named against its folder's `note_names: dated` setting.
+    # A note named against its folder's `note_names: dated` setting (the
+    # `kelno_vault` plugin's name check).
     "note_name_date",
     # Agent ledger (fork): the entry, line or topic changed since the
     # revision the caller read; the result carries `current_revision`.

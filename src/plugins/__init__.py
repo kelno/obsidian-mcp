@@ -15,6 +15,9 @@ A plugin fills only the hooks it needs:
 - `rewrite(write)`: returns a `Rewrite`, the text to write and an optional
   block for the tool's result. Rewrites run in plugin order, each on the
   previous one's output. A rewrite that only reports returns the text as given.
+- `check_name(name)`: may refuse the name of a new note (`create_note`,
+  `write_file` on a new `.md`) or a move's destination (`move_note`), or add
+  a block to the result; runs before the write hooks.
 - `tool_text` and `guide_text`: what the plugin adds to tool descriptions and
   to `get_vault_guide`, so a deployment without it never describes what it
   does.
@@ -98,6 +101,31 @@ class Rewrite:
 
 
 @dataclass(frozen=True)
+class NoteName:
+    """A note about to get its name, as a plugin sees it. Read-only.
+
+    Attributes:
+        tool: `create_note`, `write_file` (a new `.md`) or `move_note`.
+        path: the note's vault-relative path, `.md` included.
+        from_path: `move_note`'s source path; None when the note is new.
+        user_id: the caller's user id; None in single-user mode.
+    """
+
+    tool: str
+    path: str
+    from_path: str | None
+    user_id: int | None
+
+
+@dataclass(frozen=True)
+class NameCheck:
+    """A plugin's answer on a note's name: a refusal (nothing written), or a block for the result."""
+
+    refusal: Refusal | None = None
+    note: str = ""
+
+
+@dataclass(frozen=True)
 class Plugin:
     """What a plugin module exposes as `plugin`. Every hook is optional.
 
@@ -105,6 +133,9 @@ class Plugin:
         name: the plugin's name, which is its module's name under `src/plugins/`.
         check: refuses a write (`Refusal`) or lets it through (None).
         rewrite: returns the text to write and its result block.
+        check_name: refuses a new note's name or a move's destination
+            (`NameCheck.refusal`), or adds a block to the result
+            (`NameCheck.note`); None when it has nothing to say.
         tool_text: tool name → paragraphs the plugin adds to that tool's
             description, where its docstring has the `TOOL_TEXT_MARKER` line.
             One paragraph per line, unwrapped.
@@ -115,6 +146,7 @@ class Plugin:
     name: str
     check: Callable[[NoteWrite], Awaitable[Refusal | None]] | None = None
     rewrite: Callable[[NoteWrite], Awaitable[Rewrite]] | None = None
+    check_name: Callable[[NoteName], Awaitable[NameCheck | None]] | None = None
     tool_text: Mapping[str, str] = field(default_factory=dict)
     guide_text: str = ""
 
@@ -210,9 +242,47 @@ def active() -> tuple[Plugin, ...]:
     return load(tuple(settings.plugins))
 
 
-def _error_line(plugin: Plugin, step: str, why: str) -> str:
-    return (f"\n\nplugin_error: the server's `{plugin.name}` plugin {why} in its {step} step, so this write went "
+def _error_line(plugin: Plugin, step: str, why: str, what: str = "write") -> str:
+    return (f"\n\nplugin_error: the server's `{plugin.name}` plugin {why} in its {step} step, so this {what} went "
             "ahead without it. Nothing for you to fix: it is logged for the server's maintainer.")
+
+
+def _usable_refusal(refusal: object) -> bool:
+    return (isinstance(refusal, Refusal) and isinstance(refusal.code, str) and isinstance(refusal.message, str)
+            and refusal.code in refusals.BODY_CODES)
+
+
+async def check_name(tool: str, path: str, from_path: str | None, user_id: int | None) -> tuple[Refusal | None, str]:
+    """`(the first plugin refusal of the name, or None; the plugins' blocks for the result)`.
+
+    For `create_note` and `write_file` on a new `.md` (`from_path` None) and
+    `move_note`'s destination. Fail-open like the write hooks: a hook that
+    raises or returns something unusable is set aside with a `plugin_error:`
+    line in the blocks, and the call goes ahead.
+    """
+    what = "move" if from_path is not None else "write"
+    blocks: list[str] = []
+    for plugin in active():
+        if plugin.check_name is None:
+            continue
+        try:
+            result = await plugin.check_name(NoteName(tool, path, from_path, user_id))
+        except Exception:  # noqa: BLE001 - a plugin bug must not fail the call; logged and reported
+            logger.exception("plugin %s: name check failed on %s (%s)", plugin.name, path, tool)
+            blocks.append(_error_line(plugin, "name check", "failed", what))
+            continue
+        if result is None:
+            continue
+        if not (isinstance(result, NameCheck) and isinstance(result.note, str)
+                and (result.refusal is None or _usable_refusal(result.refusal))):
+            logger.error("plugin %s: name check returned %r on %s, not a NameCheck with a usable refusal",
+                         plugin.name, result, path)
+            blocks.append(_error_line(plugin, "name check", "returned something unusable", what))
+            continue
+        if result.refusal is not None:
+            return result.refusal, ""
+        blocks.append(result.note)
+    return None, "".join(blocks)
 
 
 def _lines(text: str) -> list[str]:
@@ -272,8 +342,7 @@ class NoteWriteRun:
                 continue
             if refusal is None:
                 continue
-            if not (isinstance(refusal, Refusal) and isinstance(refusal.code, str) and isinstance(refusal.message, str)
-                    and refusal.code in refusals.BODY_CODES):
+            if not _usable_refusal(refusal):
                 logger.error("plugin %s: check returned %r on %s, not a Refusal with a code listed in "
                              "refusals.BODY_CODES", plugin.name, refusal, self.path)
                 self._errors.append(_error_line(plugin, "check", "returned something unusable"))

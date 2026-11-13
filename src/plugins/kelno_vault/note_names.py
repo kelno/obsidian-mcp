@@ -28,10 +28,20 @@ Not checked: a folder note itself (`Log/Log.md`), and a name starting with
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import posixpath
 import re
 from dataclasses import dataclass
 from typing import Callable
+
+from src import plugins
+from src.config import MAX_NOTE_BYTES
+
+logger = logging.getLogger(__name__)
+
+#: The refusal code (listed in `src/services/refusals.py`).
+CODE = "note_name_date"
 
 DATED, UNDATED = "dated", "undated"
 FIELD = "note_names"
@@ -210,3 +220,79 @@ def _check(stem: str) -> Problem | None:
 
 def starts_with_date(stem: str) -> bool:
     return bool(_ANY_DATE_START_RE.match(stem))
+
+
+async def check_name(note: plugins.NoteName) -> plugins.NameCheck | None:
+    """The `check_name` hook: a refusal in a dated folder, a flag in an undated one, else None.
+
+    The setting comes from the folder notes' `note_names` frontmatter, read
+    from disk walking up the path (a few small, bounded reads). A folder note
+    that cannot be read counts as setting nothing (logged at debug). Not
+    checked: a move into the archive that keeps the note's name (that records
+    it as it was).
+    """
+    from src.services.vault import parse_frontmatter_diagnose, read_bytes
+
+    rel, tool = note.path, note.tool
+    if not rel.lower().endswith(".md") or exempt(rel):
+        return None
+    if note.from_path is not None and archived_unchanged(note.from_path, rel):
+        return None
+
+    def lookup(path: str):
+        try:
+            raw = read_bytes(path, note.user_id, MAX_NOTE_BYTES).decode("utf-8")
+        except FileNotFoundError:
+            return None
+        except (ValueError, OSError, UnicodeDecodeError):
+            # debug, not warning: a caller drives this path (the D18 permit rule).
+            logger.debug("%s: folder note %s could not be read for note_names", tool, path, exc_info=True)
+            return None
+        frontmatter, _body, _diagnosis = parse_frontmatter_diagnose(raw)
+        return (frontmatter or {}).get(FIELD) if isinstance(frontmatter, dict) else None
+
+    folder, name = posixpath.split(rel)
+    setting = await asyncio.to_thread(Rules(lookup).resolve, folder)
+    if setting is None:
+        return None
+    stem = name[:-3]
+    where = (f"`{FIELD}: {setting.value}` in {setting.source}"
+             + (f", which {folder} follows as a mirror of {setting.mirrored}/" if setting.mirrored else ""))
+    if setting.value == DATED:
+        problem = check_dated(stem)
+        if problem is None:
+            return None
+        fix = (f" Call again with `{posixpath.join(folder, problem.corrected)}.md`." if problem.corrected else
+               " Start the name with the date the note is about (the day it happened); a note with no date of its"
+               " own, kept current, belongs in an undated folder (`Reference/`, say).")
+        return plugins.NameCheck(refusal=plugins.Refusal(CODE, (
+            f"{tool}: notes in {folder}/ are named with their date first ({where}), and in `{name}` "
+            f"{problem.message}{fix} Nothing was written.")))
+    if starts_with_date(stem):
+        return plugins.NameCheck(note=(
+            f"\n\nnote_name: the note was written, but `{name}` starts with a date, and notes in "
+            f"{folder}/ carry none ({where}): they describe the present. Rename it without the date "
+            "(move_note) unless the date is part of what it is."))
+    return None
+
+
+TOOL_TEXT = (
+    "**Dated note names.** Where a folder note (`<folder>/<folder>.md`) sets `note_names: dated` (for that folder "
+    "and the folders below it at any depth, and for a folder under an area or the archive named like a top-level "
+    "one, unless a nearer folder note says otherwise), a new note's name must start with the date it is about, "
+    "`YYYY-MM-DD Title` (an unknown part as XX, never 00; one date only): otherwise the call is refused with "
+    "`note_name_date`, writing nothing, naming the folder note and, when it can, the corrected name. Where it sets "
+    "`note_names: undated`, a name starting with a date is written and flagged (`note_name:`). No setting above: "
+    "no check."
+)
+
+MOVE_TEXT = (
+    "The new name is checked against its folder's `note_names` setting, as in `create_note`: in a dated folder a "
+    "name without its date first is refused with `note_name_date` (the corrected name given when it can be "
+    "derived), before anything moves; in an undated one a name starting with a date is moved and flagged "
+    "(`note_name:`). A move into `Archive/` that keeps the note's name is not checked."
+)
+
+WRITE_FILE_TEXT = "A new `.md` note's name is checked like `create_note`'s (`note_name_date`)."
+
+GUIDE = "## Note names (this server)\n\nA folder note (`<folder>/<folder>.md`) can declare how its notes are named, in its frontmatter: `note_names: dated` or `note_names: undated`. It holds for that folder and the folders below it, at any depth. A folder under an area (`Areas/<area>/Log`) or anywhere under `Archive/` (`Archive/Areas/<area>/Log` too) whose name is a top-level folder's follows that top-level folder's setting, with no copy of its folder note needed, unless a nearer folder note sets its own. Where no folder note above sets anything, names are not checked. In a dated folder, `create_note`, `move_note` and `write_file` (a new `.md`) refuse a name that doesn't start with its date (the date the note is about), `YYYY-MM-DD Title` (an unknown part as `XX`, never `00`; one date only), with `note_name_date`, naming the folder note and the corrected name when it can be derived; nothing is written, so call again with the right name. A note with no date of its own belongs in an undated folder. In an undated folder, a name starting with a date is written and flagged (`note_name:`), not refused."

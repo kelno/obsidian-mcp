@@ -4,8 +4,9 @@ Fully specific to that vault and not configurable: a different vault writes
 its own plugin rather than adapting this one. It holds conventions only (folder
 names, naming and linking rules), never the vault's content.
 
-What it does today, on the lines a note write adds or changes: a task line
-written by hand is refused (`task_lines`, the check); a first heading
+What it does today: a new note's name, or a move's destination, is checked
+against its folder's `note_names` setting (`note_names`, the name check). On
+the lines a note write adds or changes: a task line written by hand is refused (`task_lines`, the check); a first heading
 repeating the note's name is dropped (`title_heading`), then bare-name
 wikilinks get the note's full path (`link_paths`), in that order so the link
 report's line numbers are the written note's; last, a change to a rule note
@@ -22,7 +23,7 @@ from sqlalchemy import select
 
 from src import database, plugins
 from src.models.db import NoteMetadata
-from src.plugins.kelno_vault import link_paths, rule_notes, task_lines, title_heading
+from src.plugins.kelno_vault import link_paths, note_names, rule_notes, task_lines, title_heading
 from src.services.filters import apply_note_filters
 
 logger = logging.getLogger(__name__)
@@ -121,14 +122,18 @@ plugin = plugins.Plugin(
     name="kelno_vault",
     check=task_lines.check,
     rewrite=_rewrite,
+    check_name=note_names.check_name,
     tool_text={
-        "create_note": "\n\n".join((task_lines.TOOL_TEXT, rule_notes.TOOL_TEXT, _TITLE_HEADING_TOOL_TEXT,
-                                     _LINKS_TOOL_TEXT)),
+        "create_note": "\n\n".join((note_names.TOOL_TEXT, task_lines.TOOL_TEXT, rule_notes.TOOL_TEXT,
+                                     _TITLE_HEADING_TOOL_TEXT, _LINKS_TOOL_TEXT)),
         "edit_note": "\n\n".join((task_lines.TOOL_TEXT, rule_notes.TOOL_TEXT, _TITLE_HEADING_TOOL_TEXT,
                                    _LINKS_TOOL_TEXT)),
-        "write_file": task_lines.WRITE_FILE_TEXT + " " + rule_notes.WRITE_FILE_TEXT + " A first heading repeating the note's name is dropped as in `edit_note` "
+        "move_note": note_names.MOVE_TEXT,
+        "write_file": " ".join((note_names.WRITE_FILE_TEXT, task_lines.WRITE_FILE_TEXT, rule_notes.WRITE_FILE_TEXT))
+                      + " A first heading repeating the note's name is dropped as in `edit_note` "
                       "(`title_heading_removed:`), and bare-name wikilinks get the note's full path as in `edit_note` "
                       "(`links_rewritten:`, `links_flagged:`).",
     },
-    guide_text="\n\n".join((task_lines.GUIDE, rule_notes.GUIDE, _LINKS_GUIDE, _TITLE_HEADING_GUIDE)),
+    guide_text="\n\n".join((task_lines.GUIDE, rule_notes.GUIDE, note_names.GUIDE, _LINKS_GUIDE,
+                           _TITLE_HEADING_GUIDE)),
 )

@@ -1359,7 +1359,8 @@ async def _named_folders(sessionmaker, root):
     (root / "Areas" / "Champignons" / "Log").mkdir(parents=True, exist_ok=True)
 
 
-async def test_a_dated_folder_refuses_a_wrong_name_and_names_the_fix(sessionmaker, ctx):
+async def test_a_dated_folder_refuses_a_wrong_name_and_names_the_fix(sessionmaker, ctx, monkeypatch):
+    monkeypatch.setattr(plugins, "active", lambda: plugins.load(("kelno_vault",)))   # this vault's naming rule
     await _named_folders(sessionmaker, ctx)
     wrong = await tools.create_note_impl("Log/2025-10-00 Trip.md", "x\n")
     assert code(_Text(wrong)) == "note_name_date" and not (ctx / "Log" / "2025-10-00 Trip.md").exists()
@@ -1381,7 +1382,8 @@ async def test_a_dated_folder_refuses_a_wrong_name_and_names_the_fix(sessionmake
     assert archived.startswith("Moved"), archived                     # archived under its own name: not checked
 
 
-async def test_an_undated_folder_flags_a_dated_name_and_writes_it(sessionmaker, ctx):
+async def test_an_undated_folder_flags_a_dated_name_and_writes_it(sessionmaker, ctx, monkeypatch):
+    monkeypatch.setattr(plugins, "active", lambda: plugins.load(("kelno_vault",)))   # this vault's naming rule
     await _named_folders(sessionmaker, ctx)
     created = await tools.create_note_impl("Reference/2026-11-12 Server.md", "x\n")
     assert created.startswith("Created note")

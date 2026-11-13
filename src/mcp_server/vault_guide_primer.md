@@ -199,10 +199,6 @@ wikilink to a vault note titled `NodeName`.
 
 Vaults that use the Tasks plugin keep tasks as checkbox lines in its emoji format (`- [ ] Pay rent 📅 2026-11-05`). List them with `list_tasks`, and add or change them with `create_task`, `edit_task` and `set_task_status`: the tools follow the vault's own Tasks settings and re-index the note at once. If the vault sets a global filter (a marker every task carries, such as `#task`), the tools add it themselves; don't put it in the description. A checkbox without it is then an ordinary checkbox, not a task.
 
-## Note names (this server)
-
-A folder note (`<folder>/<folder>.md`) can declare how its notes are named, in its frontmatter: `note_names: dated` or `note_names: undated`. It holds for that folder and the folders below it, at any depth. A folder under an area (`Areas/<area>/Log`) or anywhere under `Archive/` (`Archive/Areas/<area>/Log` too) whose name is a top-level folder's follows that top-level folder's setting, with no copy of its folder note needed, unless a nearer folder note sets its own. Where no folder note above sets anything, names are not checked. In a dated folder, `create_note`, `move_note` and `write_file` (a new `.md`) refuse a name that doesn't start with its date (the date the note is about), `YYYY-MM-DD Title` (an unknown part as `XX`, never `00`; one date only), with `note_name_date`, naming the folder note and the corrected name when it can be derived; nothing is written, so call again with the right name. A note with no date of its own belongs in an undated folder. In an undated folder, a name starting with a date is written and flagged (`note_name:`), not refused.
-
 ## Links to notes for the owner (this server)
 
 Tools that name a note carry a ready-made http(s) link that opens it in the Obsidian app (`open_url`; `main_note_open_url` in `open_area`), when the server sets `OPEN_NOTE_URL`. When you point the owner to a note in a reply, give that link as is: it's clickable where `obsidian://` isn't.

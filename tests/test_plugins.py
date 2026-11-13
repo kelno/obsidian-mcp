@@ -355,20 +355,24 @@ def test_the_served_descriptions_hold_no_marker_and_no_plugin_rule_without_the_p
     """The suite runs with PLUGINS empty: the plain core describes no vault convention."""
     from src.mcp_server import server
 
-    for name in ("create_note", "edit_note", "write_file"):
+    for name in ("create_note", "edit_note", "write_file", "move_note"):
         doc = getattr(server, name).__doc__ or ""
         assert plugins.TOOL_TEXT_MARKER not in doc and "title_heading_removed" not in doc, name
         assert "links_rewritten" not in doc and "task_line_by_hand" not in doc, name
-        assert "rule_change_unlogged" not in doc, name
+        assert "rule_change_unlogged" not in doc and "note_name" not in doc, name
+    assert "note_names" not in tools._VAULT_GUIDE_PRIMER
     assert "Titles (this server)" not in tools._VAULT_GUIDE_PRIMER and "links_rewritten" not in tools._VAULT_GUIDE_PRIMER
     assert "task_line_by_hand" not in tools._VAULT_GUIDE_PRIMER and "rule_change_unlogged" not in tools._VAULT_GUIDE_PRIMER
 
 
 def test_this_vaults_plugin_describes_its_rule_on_every_writer():
     (loaded,) = plugins.load(("kelno_vault",))
-    assert set(loaded.tool_text) == {"create_note", "edit_note", "write_file"}
-    assert all("title_heading_removed" in text and "links_rewritten" in text and "task_line_by_hand" in text and "rule_change_unlogged" in text
-               for text in loaded.tool_text.values())
+    assert set(loaded.tool_text) == {"create_note", "edit_note", "write_file", "move_note"}
+    writers = [loaded.tool_text[name] for name in ("create_note", "edit_note", "write_file")]
+    assert all("title_heading_removed" in text and "links_rewritten" in text and "task_line_by_hand" in text
+               and "rule_change_unlogged" in text for text in writers)
+    assert all("note_name_date" in loaded.tool_text[name] for name in ("create_note", "write_file", "move_note"))
+    assert "## Note names (this server)" in loaded.guide_text and loaded.check_name is not None
     assert loaded.guide_text.startswith("## Task lines (this server)")
     assert "## Agent rules (this server)" in loaded.guide_text and "_/agent/" in loaded.guide_text
     assert "## Links (this server)" in loaded.guide_text and "## Titles (this server)" in loaded.guide_text
@@ -379,3 +383,53 @@ def test_without_this_vaults_plugin_a_title_heading_is_written_as_sent(vault, mo
     use(monkeypatch)
     asyncio.run(tools.create_note_impl("Dog food.md", "# Dog food\n\nKibble.\n"))
     assert read(vault, "Dog food.md") == "# Dog food\n\nKibble.\n"
+
+
+# ── The name hook ────────────────────────────────────────────────────────────
+
+async def refuse_shouted_names(name):
+    if "SHOUT" in name.path:
+        return plugins.NameCheck(refusal=plugins.Refusal("validation_failed", f"{name.tool}: no shouting in names."))
+    return plugins.NameCheck(note=f"\n\nnamed: {name.path} by {name.tool}, from {name.from_path}")
+
+
+async def name_boom(name):
+    raise RuntimeError("plugin bug")
+
+
+async def name_junk(name):
+    return "not a NameCheck"
+
+
+def test_a_name_refusal_writes_nothing_and_a_note_reaches_the_result(vault, monkeypatch):
+    use(monkeypatch, plugins.Plugin("names", check_name=refuse_shouted_names))
+    refused = asyncio.run(tools.create_note_impl("SHOUT.md", "x\n"))
+    assert code(refused) == "validation_failed" and not (vault / "SHOUT.md").exists()
+    written = asyncio.run(tools.write_file_impl("SHOUT.md", "x\n", encoding="text"))
+    assert code(written) == "validation_failed" and not (vault / "SHOUT.md").exists()
+    created = asyncio.run(tools.create_note_impl("calm.md", "x\n"))
+    assert "named: calm.md by create_note, from None" in text_of(created)
+    other = asyncio.run(tools.write_file_impl("SHOUT.txt", "x\n", encoding="text"))
+    assert text_of(other).startswith("Wrote")   # not a note: no name check
+
+
+def test_a_name_check_is_not_asked_about_an_existing_note(vault, monkeypatch):
+    use(monkeypatch, plugins.Plugin("names", check_name=refuse_shouted_names))
+    note(vault, "SHOUT.md", "old\n")
+    overwritten = asyncio.run(tools.write_file_impl("SHOUT.md", "new\n", encoding="text", overwrite=True))
+    assert text_of(overwritten).startswith("Wrote") and read(vault, "SHOUT.md") == "new\n"
+
+
+@pytest.mark.parametrize("hook", [name_boom, name_junk])
+def test_a_broken_name_check_lets_the_note_through_and_says_so(vault, monkeypatch, hook):
+    use(monkeypatch, plugins.Plugin("broken", check_name=hook))
+    created = asyncio.run(tools.create_note_impl("n.md", "x\n"))
+    assert (vault / "n.md").exists() and "plugin_error: the server's `broken` plugin" in text_of(created)
+    assert "name check" in text_of(created)
+
+
+def test_without_this_vaults_plugin_names_are_not_checked(vault, monkeypatch):
+    use(monkeypatch)
+    note(vault, "Log/Log.md", "---\nnote_names: dated\n---\n")
+    created = asyncio.run(tools.create_note_impl("Log/no date.md", "x\n"))
+    assert text_of(created).startswith("Created note") and (vault / "Log" / "no date.md").exists()

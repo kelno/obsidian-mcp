@@ -1,7 +1,7 @@
 """Dated note names: where the vault declares them (`note_names`), and what a right name is."""
 import pytest
 
-from src.services import note_names as nn
+from src.plugins.kelno_vault import note_names as nn
 
 DECLARED = {
     "Log/Log.md": "dated",

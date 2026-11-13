@@ -446,17 +446,6 @@ async def create_note(
     With `OPEN_NOTE_URL` set, the first line ends with `— open_url: <link>`:
     give that link when pointing the owner to the note.
 
-    **Dated note names.** Where a folder note (`<folder>/<folder>.md`)
-    sets `note_names: dated` (for that folder and the folders below it at any
-    depth, and for a folder under an area or the archive named like a
-    top-level one, unless a nearer folder note says otherwise), a new note's
-    name must start with the date it is about, `YYYY-MM-DD Title` (an unknown
-    part as XX, never 00; one date only): otherwise the call is refused with
-    `note_name_date`, writing nothing, naming the folder note and, when it
-    can, the corrected name. Where it sets `note_names: undated`, a name
-    starting with a date is written and flagged (`note_name:`). No setting
-    above: no check.
-
     {plugin_text}
 
     **Agent-ledger refs.** When the note cites agent-ledger entries in
@@ -841,6 +830,7 @@ async def find_orphans(folder: str | None = None, limit: int = 50) -> str:
 
 
 @mcp.tool()
+@_plugins.tool_text("move_note")
 async def move_note(
     from_path: str,
     to_path: str,
@@ -850,11 +840,7 @@ async def move_note(
     """Move or rename a note inside the vault. Requires write permission — a `readwrite` API key, or an OAuth token
     carrying the `readwrite` scope.
 
-    The new name is checked against its folder's `note_names` setting, as in
-    `create_note`: in a dated folder a name without its date first is
-    refused with `note_name_date` (the corrected name given when it can be
-    derived), before anything moves; in an undated one a name starting with
-    a date is moved and flagged (`note_name:`).
+    {plugin_text}
 
     Updates `notes_metadata.file_path` for the moved note and `note_links.target_path`
     rows whose stored target matched the old path. Backlinks via `target_note_id`
@@ -1168,8 +1154,7 @@ async def write_file(
     carrying the `readwrite` scope.
     Peer to `create_note`/`edit_note`, which stay markdown-only.
     Writing a `.md` note, the result lists agent-ledger refs like
-    `edit_note`'s (`changed_lines_cite:`, `cites:`). A new `.md`
-    note's name is checked like `create_note`'s (`note_name_date`).
+    `edit_note`'s (`changed_lines_cite:`, `cites:`).
 
     {plugin_text}
 
