@@ -457,15 +457,6 @@ async def create_note(
     starting with a date is written and flagged (`note_name:`). No setting
     above: no check.
 
-    **Task lines go through the task tools.** A write that adds or changes a
-    task line (a checkbox line the Tasks plugin reads as a task, with the
-    vault's global filter such as `#task`) is refused with
-    `task_line_by_hand`, naming the lines, and writes nothing: use
-    `create_task`, `edit_task` or `set_task_status`. Deleting a task line,
-    keeping one unchanged (the same text, wherever it now sits in the note,
-    so reordering is fine), and showing one in a code span or fenced code
-    block are allowed.
-
     **Rule edits carry their proposal.** In the notes this server is set to
     treat as the vault's rules for agents, when a write adds or changes
     lines (outside the frontmatter) and none of them carries a new proposal
@@ -538,15 +529,6 @@ async def edit_note(
 
     See `get_vault_guide` for Obsidian syntax and any vault-specific conventions
     (naming, folder placement, frontmatter, tags).
-
-    **Task lines go through the task tools.** A write that adds or changes a
-    task line (a checkbox line the Tasks plugin reads as a task, with the
-    vault's global filter such as `#task`) is refused with
-    `task_line_by_hand`, naming the lines, and writes nothing: use
-    `create_task`, `edit_task` or `set_task_status`. Deleting a task line,
-    keeping one unchanged (the same text, wherever it now sits in the note,
-    so reordering is fine), and showing one in a code span or fenced code
-    block are allowed.
 
     **Rule edits carry their proposal.** In the notes this server is set to
     treat as the vault's rules for agents, when a write adds or changes
@@ -1202,9 +1184,7 @@ async def write_file(
     carrying the `readwrite` scope.
     Peer to `create_note`/`edit_note`, which stay markdown-only.
     Writing a `.md` note, the result lists agent-ledger refs like
-    `edit_note`'s (`changed_lines_cite:`, `cites:`), and a write that adds
-    or changes a task line is refused like `edit_note`'s
-    (`task_line_by_hand`): tasks go through the task tools. A new `.md`
+    `edit_note`'s (`changed_lines_cite:`, `cites:`). A new `.md`
     note's name is checked like `create_note`'s (`note_name_date`). A rule note written with no new
     proposal ref gets `rule_change_unlogged:` as in `edit_note`.
 

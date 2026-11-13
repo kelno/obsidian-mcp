@@ -127,7 +127,7 @@ BODY_CODES = frozenset({
     # vault's Tasks plugin settings cannot be applied.
     "line_mismatch", "not_a_task", "recurring_task", "task_settings_invalid",
     # A general note writer asked to add or change a task line by hand: tasks
-    # go through the task tools.
+    # go through the task tools (the `kelno_vault` plugin's check).
     "task_line_by_hand",
     # A note named against its folder's `note_names: dated` setting.
     "note_name_date",

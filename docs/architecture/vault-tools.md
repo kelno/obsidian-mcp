@@ -394,7 +394,7 @@ The vault's rule (a dated note's name starts with its date, `YYYY-MM-DD Title`, 
 - **Undated:** a name starting with a date is written and flagged (`note_name:`), with the folder note.
 - **Not checked:** folder notes themselves (any case of `.md`), names starting with "Untitled", a `move_note` into `Archive/` that keeps the note's name (archiving records a note as it was), `write_file` over an existing note, `edit_note` (it never names a note), `import_from_url` and uploads (`request_upload`) to a `.md`. A folder note that cannot be read counts as setting nothing (logged at debug). `move_note` checks the name before the rename, so a misnamed move onto an existing note answers `note_name_date` where `create_note` answers `already_exists`.
 
-### The note writers refuse task lines written by hand (fork, owner's decision, 2026-11-12)
+### The note writers refuse task lines written by hand (fork, owner's decision, 2026-11-12; `kelno_vault` plugin)
 
 `edit_note`, `create_note` and `write_file` on a `.md` refuse a write that adds or changes a task line (`task_line_by_hand`, nothing written): tasks are created and changed only with the task tools. Deleting a task line, or moving one unchanged, passes. Where the check sits and what counts as a task line: "Task lines are written by the task tools only" in [task tools](tasks.md).
 

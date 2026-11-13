@@ -3460,9 +3460,6 @@ async def create_note_impl(
             if name_err:
                 return name_err
         # An existing note is refused as `already_exists` below: that answer wins.
-        if target.lstat() is None and (
-                err := await _hand_written_task_error(uid, "create_note", target.rel, None, content)):
-            return err
         plugin_run = _plugins.NoteWriteRun("create_note", target.rel, None, dry_run=False, user_id=uid)
         if target.lstat() is None and (refusal := await plugin_run.check(content)):
             return _body_refusal(refusal.message, refusal.code)
@@ -4538,11 +4535,8 @@ async def edit_note_impl(
                 )
                 new_content = block + separator + content
 
-        # Tasks are written by the task tools only: refused here, in every
-        # mode and on a dry run, before anything else is said about the write.
-        if new_content != existing and (
-                err := await _hand_written_task_error(uid, "edit_note", target.rel, existing, new_content)):
-            return err
+        # The plugins' checks, in every mode and on a dry run, before anything
+        # else is said about the write.
         plugin_run = _plugins.NoteWriteRun("edit_note", target.rel, existing, dry_run=dry_run, user_id=uid)
         if new_content != existing and (refusal := await plugin_run.check(new_content)):
             return _body_refusal(refusal.message, refusal.code)
@@ -6738,11 +6732,11 @@ async def write_file_impl(
         else:
             data = content.encode("utf-8")
 
-        # Task lines go through the task tools. Bytes that are not UTF-8 are
-        # read leniently, so they cannot switch the check off. Not checked: a
-        # write the no-clobber publish refuses as `already_exists` (that
-        # answer wins), and an overwrite whose old text could not be read
-        # (every task in it would look new).
+        # The plugins' checks. Bytes that are not UTF-8 are read leniently, so
+        # they cannot switch a check off. Not checked: a write the no-clobber
+        # publish refuses as `already_exists` (that answer wins), and an
+        # overwrite whose old text could not be read (every line in it would
+        # look new).
         exists = target.lstat() is not None
         name_flag = ""
         if not exists:
@@ -6753,10 +6747,6 @@ async def write_file_impl(
                 overwrite and exists and previous_note is None):
             old_note = previous_note.decode("utf-8", errors="replace") if previous_note is not None else None
             new_lenient = data.decode("utf-8", errors="replace")
-            if err := await _hand_written_task_error(uid, "write_file", target.rel, old_note, new_lenient):
-                return err
-            # The plugins' checks too, on the same lenient text, so bytes that
-            # are not UTF-8 cannot switch them off.
             plugin_run = _plugins.NoteWriteRun("write_file", target.rel, old_note, dry_run=False, user_id=uid)
             if new_lenient != old_note and (refusal := await plugin_run.check(new_lenient)):
                 return _body_refusal(refusal.message, refusal.code)
@@ -8361,77 +8351,6 @@ async def _task_written(uid, target, line_number, previous, written, new_text, t
         index_note=note,
         today=today.isoformat(),
         **extra,
-    )
-
-
-#: The refusal a general note writer gives for a task line written by hand.
-TASK_LINE_BY_HAND = "task_line_by_hand"
-#: Offending lines named in that refusal; past it, "and N more".
-TASK_LINE_BY_HAND_SHOWN = 10
-
-
-async def _hand_written_task_error(uid, tool: str, path: str, old: str | None, new: str):
-    """A refusal when `new` holds a task line `old` did not hold as it is; else None.
-
-    The vault's rule: tasks are created and changed only with the task tools
-    (`create_task`, `edit_task`, `set_task_status`), which write the Tasks
-    plugin's format and re-index the note at once. A task line is a line the
-    task scanner finds (outside code fences and frontmatter) that the
-    plugin, under the owner's settings and global filter, reads as a task.
-    The lines are compared as a multiset: deleting a task line, or moving one
-    unchanged within the note, is allowed; adding one, or changing one (its
-    old text gone, a new one in), is refused. When the Tasks settings cannot
-    be read the check cannot tell a task from a checkbox and lets the write
-    through (logged). A vault with no Tasks settings file is not checked:
-    without the plugin there, a checkbox is just a checkbox.
-    """
-    from collections import Counter
-
-    from src.services.task_scan import scan_note
-
-    try:
-        task_settings, registry, _today = await _task_context(uid)
-    except _task_ops.TaskOpError:
-        # debug, not warning: a caller drives this path (the D18 permit rule); list_tasks names the problem.
-        logger.debug("%s: the hand-written task check was skipped (Tasks settings unreadable)", tool)
-        return None
-    if task_settings.source != "file":
-        return None   # no Tasks plugin settings file: the vault may not use the plugin, a checkbox is a checkbox
-    if task_settings.global_filter and task_settings.global_filter not in new:
-        return None
-
-    def task_lines(text: str | None) -> list[tuple[int, str]]:
-        if not text:
-            return []
-        normalised = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
-        return [(s.line_number, s.text) for s in scan_note(normalised).lines
-                if s.kind == "task" and _task_ops.parse_line(s.text, path, task_settings, registry) is not None]
-
-    def check():
-        # Compared without surrounding whitespace: trailing spaces and the
-        # indentation's characters are not what a task says.
-        before = Counter(line.strip() for _n, line in task_lines(old))
-        offending = []
-        for number, line in task_lines(new):
-            if before[line.strip()] > 0:
-                before[line.strip()] -= 1
-            else:
-                offending.append((number, line))
-        return offending
-
-    offending = await asyncio.to_thread(check)
-    if not offending:
-        return None
-    shown = "\n".join(f"- line {n}: {line.strip()[:300]}" for n, line in offending[:TASK_LINE_BY_HAND_SHOWN])
-    more = len(offending) - TASK_LINE_BY_HAND_SHOWN
-    return _body_refusal(
-        f"{tool}: this write adds or changes task lines by hand, which the vault's rules leave to the task tools. "
-        f"Nothing was written.\n{shown}" + (f"\n- and {more} more" if more > 0 else "") + "\n"
-        "Create a task with create_task; change one with edit_task (its text or dates) or set_task_status (done, "
-        "cancelled), which write the Tasks plugin's format. Write the rest of your text without these lines. "
-        "Allowed: deleting a task line; keeping one unchanged (the same text, wherever it sits in the note, so "
-        "reordering is fine); showing one in a code span or fenced code block.",
-        TASK_LINE_BY_HAND,
     )
 
 

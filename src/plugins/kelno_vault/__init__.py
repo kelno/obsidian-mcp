@@ -4,7 +4,8 @@ Fully specific to that vault and not configurable: a different vault writes
 its own plugin rather than adapting this one. It holds conventions only (folder
 names, naming and linking rules), never the vault's content.
 
-What it does today, on the lines a note write adds or changes: a first heading
+What it does today, on the lines a note write adds or changes: a task line
+written by hand is refused (`task_lines`, the check); a first heading
 repeating the note's name is dropped (`title_heading`), then bare-name
 wikilinks get the note's full path (`link_paths`), in that order so the link
 report's line numbers are the written note's. The vault-specific behaviours
@@ -19,7 +20,7 @@ from sqlalchemy import select
 
 from src import database, plugins
 from src.models.db import NoteMetadata
-from src.plugins.kelno_vault import link_paths, title_heading
+from src.plugins.kelno_vault import link_paths, task_lines, title_heading
 from src.services.filters import apply_note_filters
 
 logger = logging.getLogger(__name__)
@@ -112,13 +113,14 @@ async def _rewrite(write: plugins.NoteWrite) -> plugins.Rewrite:
 
 plugin = plugins.Plugin(
     name="kelno_vault",
+    check=task_lines.check,
     rewrite=_rewrite,
     tool_text={
-        "create_note": _TITLE_HEADING_TOOL_TEXT + "\n\n" + _LINKS_TOOL_TEXT,
-        "edit_note": _TITLE_HEADING_TOOL_TEXT + "\n\n" + _LINKS_TOOL_TEXT,
-        "write_file": "A first heading repeating the note's name is dropped as in `edit_note` "
+        "create_note": task_lines.TOOL_TEXT + "\n\n" + _TITLE_HEADING_TOOL_TEXT + "\n\n" + _LINKS_TOOL_TEXT,
+        "edit_note": task_lines.TOOL_TEXT + "\n\n" + _TITLE_HEADING_TOOL_TEXT + "\n\n" + _LINKS_TOOL_TEXT,
+        "write_file": task_lines.WRITE_FILE_TEXT + " A first heading repeating the note's name is dropped as in `edit_note` "
                       "(`title_heading_removed:`), and bare-name wikilinks get the note's full path as in `edit_note` "
                       "(`links_rewritten:`, `links_flagged:`).",
     },
-    guide_text=_LINKS_GUIDE + "\n\n" + _TITLE_HEADING_GUIDE,
+    guide_text=task_lines.GUIDE + "\n\n" + _LINKS_GUIDE + "\n\n" + _TITLE_HEADING_GUIDE,
 )

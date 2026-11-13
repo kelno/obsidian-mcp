@@ -705,11 +705,23 @@ async def test_a_duplicate_field_is_refused_not_dropped(vault):
 
 
 # ── The note tools refuse task lines written by hand ─────────────────────────
+# The refusal is this vault's rule, the `kelno_vault` plugin's check.
 
 FILTERED = {**OWNER_SETTINGS, "globalFilter": "#task"}
 
 
-def test_edit_note_refuses_a_new_or_changed_task_line_and_writes_nothing(vault):
+@pytest.fixture
+def kelno_vault(monkeypatch):
+    monkeypatch.setattr(plugins, "active", lambda: plugins.load(("kelno_vault",)))
+
+
+def test_without_the_vault_plugin_the_note_tools_write_task_lines(vault):
+    write_settings(vault, FILTERED)
+    created = asyncio.run(tools.create_note_impl("c.md", "- [ ] #task Hand-written\n"))
+    assert created.startswith("Created note") and "task_line_by_hand" not in created
+
+
+def test_edit_note_refuses_a_new_or_changed_task_line_and_writes_nothing(vault, kelno_vault):
     write_settings(vault, FILTERED)
     h = note(vault, "n.md", "# N\n\n- [ ] #task Old one\n- [ ] plain checkbox\n")
     added = asyncio.run(tools.edit_note_impl("n.md", "- [ ] #task New one", append=True))
@@ -722,7 +734,7 @@ def test_edit_note_refuses_a_new_or_changed_task_line_and_writes_nothing(vault):
     assert content_hash_for_bytes((vault / "n.md").read_bytes()) == h
 
 
-def test_edit_note_allows_deleting_moving_mentioning_and_untouched_task_lines(vault):
+def test_edit_note_allows_deleting_moving_mentioning_and_untouched_task_lines(vault, kelno_vault):
     write_settings(vault, FILTERED)
     note(vault, "m.md", "# M\n\n- [ ] #task Keep\n- [ ] #task Drop\nText\n")
     ok = [
@@ -737,7 +749,7 @@ def test_edit_note_allows_deleting_moving_mentioning_and_untouched_task_lines(va
         assert result.startswith(("Updated note", "Replaced")), result
 
 
-def test_create_note_and_write_file_refuse_task_lines_but_not_other_checkboxes(vault):
+def test_create_note_and_write_file_refuse_task_lines_but_not_other_checkboxes(vault, kelno_vault):
     write_settings(vault, FILTERED)
     refused = asyncio.run(tools.create_note_impl("c.md", "- [ ] #task Hand-written\n"))
     assert code(_Refused(refused)) == "task_line_by_hand" and not (vault / "c.md").exists()
@@ -757,14 +769,14 @@ def test_create_note_and_write_file_refuse_task_lines_but_not_other_checkboxes(v
     assert code(_Refused(exists)) == "already_exists"
 
 
-def test_trailing_whitespace_and_indentation_are_not_a_change(vault):
+def test_trailing_whitespace_and_indentation_are_not_a_change(vault, kelno_vault):
     write_settings(vault, FILTERED)
     note(vault, "s.md", "## Next\n- [ ] #task Keep  \n\t- [ ] #task Sub\n")
     ok = asyncio.run(tools.edit_note_impl("s.md", "- [ ] #task Keep\n    - [ ] #task Sub\n", section="Next"))
     assert ok.startswith("Updated note"), ok
 
 
-def test_without_a_tasks_settings_file_checkboxes_are_not_checked(vault):
+def test_without_a_tasks_settings_file_checkboxes_are_not_checked(vault, kelno_vault):
     (vault / ".obsidian" / "plugins" / "obsidian-tasks-plugin" / "data.json").unlink()
     created = asyncio.run(tools.create_note_impl("x.md", "- [ ] #task anything\n"))
     assert created.startswith("Created note")
