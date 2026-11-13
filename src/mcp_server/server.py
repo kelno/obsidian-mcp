@@ -8,6 +8,7 @@ from typing import Annotated
 from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase
 from pydantic import ConfigDict, Field, create_model, model_validator
 
+from src import plugins as _plugins
 from src.config import settings
 from src.mcp_server.area_result import OpenAreaResult
 from src.mcp_server.fetch_result import FetchPageResult
@@ -440,6 +441,7 @@ async def semantic_search(
 
 
 @mcp.tool()
+@_plugins.tool_text("create_note")
 async def create_note(
     path: str, content: str, expected_hash: str | None = None
 ) -> str:
@@ -481,15 +483,7 @@ async def create_note(
     ref it returns at the end of each changed line; a typo fix or wording
     that changes no meaning needs no proposal. Never a refusal.
 
-    **No title heading.** Obsidian shows the file name as the note's title,
-    so when the body's first non-blank line is a heading (`#` to `######`)
-    whose text is exactly the note's name (its whole file name without
-    `.md`, a date included; case and surrounding spaces ignored, formatting
-    such as `**` not stripped) and this write adds or changes that line, it
-    is removed with the blank lines after it, and the result says so under
-    `title_heading_removed:`; the reported `content_hash` is of what was
-    written. Only exact repeats are caught: a near repeat is yours to avoid.
-    The write is never refused for it.
+    {plugin_text}
 
     **Wikilinks get the note's full path.** Write links with the full path
     yourself (`[[Areas/Areas|Areas]]`); this is a safety net. On the lines a
@@ -548,6 +542,7 @@ async def create_note(
 
 
 @mcp.tool()
+@_plugins.tool_text("edit_note")
 async def edit_note(
     path: str,
     content: str,
@@ -583,15 +578,7 @@ async def edit_note(
     ref it returns at the end of each changed line; a typo fix or wording
     that changes no meaning needs no proposal. Never a refusal.
 
-    **No title heading.** Obsidian shows the file name as the note's title,
-    so when the body's first non-blank line is a heading (`#` to `######`)
-    whose text is exactly the note's name (its whole file name without
-    `.md`, a date included; case and surrounding spaces ignored, formatting
-    such as `**` not stripped) and this write adds or changes that line, it
-    is removed with the blank lines after it, and the result says so under
-    `title_heading_removed:`; the reported `content_hash` is of what was
-    written. Only exact repeats are caught: a near repeat is yours to avoid.
-    The write is never refused for it.
+    {plugin_text}
 
     **Wikilinks get the note's full path.** Write links with the full path
     yourself (`[[Areas/Areas|Areas]]`); this is a safety net. On the lines a
@@ -1241,6 +1228,7 @@ async def read_file(
 
 
 @mcp.tool()
+@_plugins.tool_text("write_file")
 async def write_file(
     path: str,
     content: str,
@@ -1258,9 +1246,10 @@ async def write_file(
     (`task_line_by_hand`): tasks go through the task tools. A new `.md`
     note's name is checked like `create_note`'s (`note_name_date`). Bare-name
     wikilinks get the note's full path as in `edit_note`
-    (`links_rewritten:`, `links_flagged:`), and a first heading repeating the
-    note's name is dropped (`title_heading_removed:`). A rule note written
-    with no new proposal ref gets `rule_change_unlogged:` as in `edit_note`.
+    (`links_rewritten:`, `links_flagged:`). A rule note written with no new
+    proposal ref gets `rule_change_unlogged:` as in `edit_note`.
+
+    {plugin_text}
 
     `content` carries the bytes: with `encoding="base64"` (default) it is
     base64-decoded to raw bytes; with `encoding="text"` it is written verbatim

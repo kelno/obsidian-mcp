@@ -14,6 +14,7 @@ import pytest
 
 from src.auth.session import current_user_id
 from src.config import settings
+from src import plugins
 from src.mcp_server import tools
 from src.mcp_server.auth import current_permission
 from src.services import task_ops, task_query, vault as vault_service
@@ -779,7 +780,8 @@ class _Refused:
 
 # ── A first heading repeating the note's name ────────────────────────────────
 
-def test_the_note_tools_drop_a_title_heading_they_would_add(vault):
+def test_the_note_tools_drop_a_title_heading_they_would_add(vault, monkeypatch):
+    monkeypatch.setattr(plugins, "active", lambda: plugins.load(("kelno_vault",)))   # the title rule is this vault's plugin
     created = asyncio.run(tools.create_note_impl("Dog food.md", "# Dog food\n\nKibble.\n"))
     assert "title_heading_removed: the first line, `# Dog food`" in created
     assert read(vault, "Dog food.md") == "Kibble.\n"
@@ -793,7 +795,8 @@ def test_the_note_tools_drop_a_title_heading_they_would_add(vault):
     assert "title_heading_removed" in written and read(vault, "W.md") == "Text\n"
 
 
-def test_a_heading_that_is_the_whole_change_is_no_change_in_both_modes(vault):
+def test_a_heading_that_is_the_whole_change_is_no_change_in_both_modes(vault, monkeypatch):
+    monkeypatch.setattr(plugins, "active", lambda: plugins.load(("kelno_vault",)))   # the title rule is this vault's plugin
     h = note(vault, "Dog food.md", "Body\n")
     dry = asyncio.run(tools.edit_note_impl("Dog food.md", "# Dog food\nBody\n", dry_run=True))
     real = asyncio.run(tools.edit_note_impl("Dog food.md", "# Dog food\nBody\n"))
@@ -830,7 +833,7 @@ def test_replace_frontmatter_stays_byte_exact(vault):
 
 
 
-def test_line_ending_review_cases(vault):
+def test_line_ending_review_cases(vault, monkeypatch):
     # A find starting with a line break takes the whole CRLF, not its LF half.
     note(vault, "r1.md", "intro\r\n## B\r\nx\r\n")
     asyncio.run(tools.edit_note_impl("r1.md", "\n## C", find="\n## B"))
@@ -850,6 +853,7 @@ def test_line_ending_review_cases(vault):
     asyncio.run(tools.edit_note_impl("r4.md", "new text", section="Tasks"))
     assert read(vault, "r4.md") == "## Tasks\r\nnew text\r\n## Next\r\nkeep\r\n"
     # A lone-CR note still loses a title heading the write adds.
+    monkeypatch.setattr(plugins, "active", lambda: plugins.load(("kelno_vault",)))   # the title rule is this vault's plugin
     note(vault, "g.md", "old\r")
     asyncio.run(tools.edit_note_impl("g.md", "# g\nbody\n"))
     assert read(vault, "g.md") == "body\r"

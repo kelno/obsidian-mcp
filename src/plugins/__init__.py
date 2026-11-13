@@ -15,10 +15,13 @@ A plugin fills only the hooks it needs:
 - `rewrite(write)`: returns a `Rewrite`, the text to write and an optional
   block for the tool's result. Rewrites run in plugin order, each on the
   previous one's output. A rewrite that only reports returns the text as given.
+- `tool_text` and `guide_text`: what the plugin adds to tool descriptions and
+  to `get_vault_guide`, so a deployment without it never describes what it
+  does.
 
-Both run for `create_note`, `edit_note` (dry runs included) and `write_file` on
-a `.md`, on a write that changes the note and whose old and new text are
-readable UTF-8; not for the task writers or `move_note`.
+`check` and `rewrite` run for `create_note`, `edit_note` (dry runs included)
+and `write_file` on a `.md`, on a write that changes the note; not for the task
+writers or `move_note`. docs/architecture/plugins.md says exactly when.
 
 A plugin bug never fails a write: a hook that raises, or a rewrite that
 removes or alters a non-blank line the caller kept from the old note, or
@@ -36,7 +39,7 @@ import functools
 import importlib
 import logging
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
 from src.config import settings
@@ -102,15 +105,64 @@ class Plugin:
         name: the plugin's name, which is its module's name under `src/plugins/`.
         check: refuses a write (`Refusal`) or lets it through (None).
         rewrite: returns the text to write and its result block.
+        tool_text: tool name → paragraphs the plugin adds to that tool's
+            description, where its docstring has the `TOOL_TEXT_MARKER` line.
+            One paragraph per line, unwrapped.
+        guide_text: sections appended to `get_vault_guide`, each starting
+            with a `## … (this server)` heading.
     """
 
     name: str
     check: Callable[[NoteWrite], Awaitable[Refusal | None]] | None = None
     rewrite: Callable[[NoteWrite], Awaitable[Rewrite]] | None = None
+    tool_text: Mapping[str, str] = field(default_factory=dict)
+    guide_text: str = ""
 
 
 class PluginLoadError(RuntimeError):
     """A name in `PLUGINS` that names no loadable plugin."""
+
+
+#: The line, in a tool's docstring, where the plugins' `tool_text` for that
+#: tool goes; removed when no plugin has any.
+TOOL_TEXT_MARKER = "{plugin_text}"
+
+
+def describe(tool_name: str, doc: str) -> str:
+    """`doc` with the loaded plugins' `tool_text` for `tool_name` in place of its marker line.
+
+    Raises:
+        ValueError: `doc` has no marker line, or more than one.
+        PluginLoadError: see `load`.
+    """
+    lines = doc.split("\n")
+    at = [i for i, line in enumerate(lines) if line.strip() == TOOL_TEXT_MARKER]
+    if len(at) != 1:
+        raise ValueError(f"{tool_name}'s docstring must hold the line {TOOL_TEXT_MARKER} exactly once")
+    i = at[0]
+    indent = lines[i][: len(lines[i]) - len(lines[i].lstrip())]
+    paragraphs = [p.strip() for plugin in active() if (p := plugin.tool_text.get(tool_name, "")).strip()]
+    if not paragraphs:
+        # The marker and the blank line after it go, so no double blank remains.
+        end = i + 2 if i + 1 < len(lines) and not lines[i + 1].strip() else i + 1
+        return "\n".join(lines[:i] + lines[end:])
+    text = ("\n\n").join(indent + p.replace("\n", "\n" + indent) for p in paragraphs)
+    return "\n".join(lines[:i] + [text] + lines[i + 1:])
+
+
+def tool_text(tool_name: str) -> Callable[[Callable], Callable]:
+    """A decorator, under `@mcp.tool()`, putting the plugins' text into the tool's description."""
+
+    def apply(fn: Callable) -> Callable:
+        fn.__doc__ = describe(tool_name, fn.__doc__ or "")
+        return fn
+
+    return apply
+
+
+def guide_text() -> str:
+    """The loaded plugins' sections for `get_vault_guide`, in plugin order."""
+    return "".join("\n\n" + p.guide_text.strip() for p in active() if p.guide_text.strip())
 
 
 def load(names: tuple[str, ...]) -> tuple[Plugin, ...]:

@@ -1,7 +1,7 @@
 """A first heading repeating the note's name is dropped from what a write adds."""
 import pytest
 
-from src.services import title_heading as th
+from src.plugins.kelno_vault import title_heading as th
 
 
 @pytest.mark.parametrize("new,expected", [

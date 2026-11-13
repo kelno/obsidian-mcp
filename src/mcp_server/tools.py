@@ -2575,7 +2575,7 @@ async def get_vault_guide_impl() -> str:
     except ValueError as e:
         vault_section = f"# Vault-Specific Conventions\n\n{e}"
     ledger_section = await _ledger_guide(uid)
-    return (f"{_VAULT_GUIDE_PRIMER}{_agent_edit_stamp_guide()}{_private_folders_guide()}{ledger_section}"
+    return (f"{_VAULT_GUIDE_PRIMER}{_plugins.guide_text()}{_agent_edit_stamp_guide()}{_private_folders_guide()}{ledger_section}"
             f"\n\n---\n\n{vault_section}")
 
 
@@ -3467,10 +3467,10 @@ async def create_note_impl(
         plugin_run = _plugins.NoteWriteRun("create_note", target.rel, None, dry_run=False, user_id=uid)
         if target.lstat() is None and (refusal := await plugin_run.check(content)):
             return _body_refusal(refusal.message, refusal.code)
-        # The title heading first, so the link report's line numbers are the written note's.
-        content, title_removed = _title_heading.strip(None, content, target.rel)
-        content, links_report, links_failure = await _full_path_links(uid, target.rel, None, content)
+        # The plugins' rewrites first (one may drop lines), so the link
+        # report's line numbers are the written note's.
         content = await plugin_run.rewrite(content)
+        content, links_report, links_failure = await _full_path_links(uid, target.rel, None, content)
         # The agent-edit stamp, before the size check: the cap binds what is
         # written.
         unstamped_lines = _line_count(content)
@@ -3510,8 +3510,8 @@ async def create_note_impl(
         except OSError as e:
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
     return created + name_flag + await _rule_change_unlogged(target.rel, None, content) + \
-        _title_heading.render(title_removed) + _links_text(links_report, links_failure, shift=links_shift) + \
-        plugin_run.render(shift=links_shift) + await _note_refs_report(uid, None, content)
+        plugin_run.render(shift=links_shift) + _links_text(links_report, links_failure, shift=links_shift) + \
+        await _note_refs_report(uid, None, content)
 
 
 # Row-level excerpt bound for the graph tools. `link_text` is note text the
@@ -4551,20 +4551,20 @@ async def edit_note_impl(
         if new_content != existing and (refusal := await plugin_run.check(new_content)):
             return _body_refusal(refusal.message, refusal.code)
 
-        # Bare-name wikilinks on the lines this write adds or changes get the
-        # note's full path (the vault's link rule), before the diff and the stamp.
-        # A first heading repeating the note's name goes first, so the link
-        # report's line numbers are the written note's.
-        links_report, links_failure, title_removed = None, "", None
+        # The plugins' rewrites, then bare-name wikilinks on the lines this
+        # write adds or changes get the note's full path (the vault's link
+        # rule), before the diff and the stamp. The plugins go first (one may
+        # drop lines), so the link report's line numbers are the written note's.
+        links_report, links_failure = None, ""
         if new_content != existing:
-            new_content, title_removed = _title_heading.strip(existing, new_content, target.rel)
+            new_content = await plugin_run.rewrite(new_content)
             if new_content == existing:
-                # The heading was the whole change: nothing to write, in a dry run or not.
-                return f"No changes for {path}" + _title_heading.render(title_removed, dry_run=dry_run)
+                # A plugin's rewrite undid the whole change (a dropped title
+                # heading that was all of it): nothing to write, in a dry run or not.
+                return f"No changes for {path}" + plugin_run.render(dry_run=dry_run)
         if new_content != existing:
             new_content, links_report, links_failure = await _full_path_links(
                 uid, target.rel, existing, new_content)
-            new_content = await plugin_run.rewrite(new_content)
 
         # The agent-edit stamp, on a write that changes something (a no-op
         # stays a no-op), before the size cap and the diff so both see the
@@ -4596,9 +4596,8 @@ async def edit_note_impl(
             if not diff:
                 return f"No changes for {path}"
             return (diff + await _rule_change_unlogged(target.rel, existing, new_content)
-                    + _title_heading.render(title_removed, dry_run=True)
-                    + _links_text(links_report, links_failure, dry_run=True, shift=links_shift)
                     + plugin_run.render(shift=links_shift, dry_run=True)
+                    + _links_text(links_report, links_failure, dry_run=True, shift=links_shift)
                     + await _note_refs_report(uid, existing, new_content))
 
         # #88. Placed after the `dry_run` return above on purpose: a dry run
@@ -4627,9 +4626,8 @@ async def edit_note_impl(
             return _body_refusal(f"Failed to write {path}: {e}", "io_failure")
         return success_message + _published_hash_clause(
             new_content.encode("utf-8")
-        ) + await _rule_change_unlogged(target.rel, existing, new_content) + _title_heading.render(title_removed) + \
-            _links_text(links_report, links_failure, shift=links_shift) + plugin_run.render(shift=links_shift) + \
-            await _note_refs_report(uid, existing, new_content)
+        ) + await _rule_change_unlogged(target.rel, existing, new_content) + plugin_run.render(shift=links_shift) + \
+            _links_text(links_report, links_failure, shift=links_shift) + await _note_refs_report(uid, existing, new_content)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -6777,6 +6775,7 @@ async def write_file_impl(
         else:
             plugin_run = None
         links_text = ""
+        links_report, links_failure = None, ""
         # Not when the old text could not be read: every line would look new.
         if target.rel.lower().endswith(".md") and not (overwrite and exists and previous_note is None):
             try:
@@ -6790,17 +6789,22 @@ async def write_file_impl(
                 except UnicodeDecodeError:
                     readable = False   # every line would look new: links left as sent
                 if readable:
-                    rewritten, title_removed = _title_heading.strip(old_text, new_note, target.rel)
-                    rewritten, links_report, links_failure = await _full_path_links(
-                        uid, target.rel, old_text, rewritten)
+                    # The plugins first (one may drop lines), so the link
+                    # report's line numbers are the written note's.
+                    rewritten = new_note
                     if plugin_run is not None and new_note != old_text:
                         rewritten = await plugin_run.rewrite(rewritten)
+                    rewritten, links_report, links_failure = await _full_path_links(
+                        uid, target.rel, old_text, rewritten)
                     if rewritten != new_note:
                         data = rewritten.encode("utf-8")
-                    links_text = (await _rule_change_unlogged(target.rel, old_text, rewritten)
-                                  + _title_heading.render(title_removed) + _links_text(links_report, links_failure))
-            if plugin_run is not None:
-                links_text += plugin_run.render()
+                    links_text = await _rule_change_unlogged(target.rel, old_text, rewritten)
+        if plugin_run is not None:
+            # The plugins' blocks (and any check error) even when the text
+            # could not be rewritten, then the link report.
+            links_text += plugin_run.render()
+        if links_report is not None or links_failure:
+            links_text += _links_text(links_report, links_failure)
 
         # **The cap follows the NORMALISED name, not the caller's string.**
         # `open_mutable` drops empty and `.` components, so `"big.md/."` is
@@ -9309,7 +9313,6 @@ def _ledger_state_line(state: dict) -> str:
     return f"- {state['ref']} ({', '.join(facts)}): \"{state['title']}\""
 
 
-from src.services import title_heading as _title_heading  # noqa: E402
 
 _EOL_RE = re.compile(r"\r\n|\r|\n")
 

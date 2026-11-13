@@ -83,9 +83,9 @@ async def boom(write):
 # --- loading ------------------------------------------------------------------
 
 
-def test_this_vaults_plugin_loads_and_holds_no_hook_yet():
+def test_this_vaults_plugin_loads():
     (loaded,) = plugins.load(("kelno_vault",))
-    assert loaded.name == "kelno_vault" and loaded.check is None and loaded.rewrite is None
+    assert loaded.name == "kelno_vault" and loaded.rewrite is not None
 
 
 @pytest.mark.parametrize("names,message", [
@@ -309,3 +309,52 @@ def test_without_plugins_nothing_changes(vault, monkeypatch):
     use(monkeypatch)
     result = text_of(asyncio.run(tools.create_note_impl("a.md", "text\n")))
     assert read(vault, "a.md") == "text\n" and "plugin" not in result
+
+
+# --- text: tool descriptions and the guide ---------------------------------------
+
+
+DOC = "First line.\n\n    Para one.\n\n    {plugin_text}\n\n    Args:\n        x: y\n"
+
+
+def test_describe_puts_each_plugins_text_in_place_of_the_marker(monkeypatch):
+    use(monkeypatch, plugins.Plugin("a", tool_text={"t": "From a."}), plugins.Plugin("b", tool_text={"t": "From b."}))
+    assert plugins.describe("t", DOC) == "First line.\n\n    Para one.\n\n    From a.\n\n    From b.\n\n    Args:\n        x: y\n"
+
+
+def test_describe_without_text_leaves_no_trace(monkeypatch):
+    use(monkeypatch, plugins.Plugin("a", tool_text={"other": "Elsewhere."}))
+    assert plugins.describe("t", DOC) == "First line.\n\n    Para one.\n\n    Args:\n        x: y\n"
+
+
+def test_describe_needs_exactly_one_marker():
+    with pytest.raises(ValueError, match="exactly once"):
+        plugins.describe("t", "No marker here.")
+
+
+def test_guide_text_joins_the_plugins_sections(monkeypatch):
+    use(monkeypatch, plugins.Plugin("a", guide_text="## A (this server)\n\nText."), plugins.Plugin("b"))
+    assert plugins.guide_text() == "\n\n## A (this server)\n\nText."
+
+
+def test_the_served_descriptions_hold_no_marker_and_no_plugin_rule_without_the_plugin():
+    """The suite runs with PLUGINS empty: the plain core describes no vault convention."""
+    from src.mcp_server import server
+
+    for name in ("create_note", "edit_note", "write_file"):
+        doc = getattr(server, name).__doc__ or ""
+        assert plugins.TOOL_TEXT_MARKER not in doc and "title_heading_removed" not in doc, name
+    assert "Titles (this server)" not in tools._VAULT_GUIDE_PRIMER
+
+
+def test_this_vaults_plugin_describes_its_rule_on_every_writer():
+    (loaded,) = plugins.load(("kelno_vault",))
+    assert set(loaded.tool_text) == {"create_note", "edit_note", "write_file"}
+    assert all("title_heading_removed" in text for text in loaded.tool_text.values())
+    assert loaded.guide_text.startswith("## Titles (this server)")
+
+
+def test_without_this_vaults_plugin_a_title_heading_is_written_as_sent(vault, monkeypatch):
+    use(monkeypatch)
+    asyncio.run(tools.create_note_impl("Dog food.md", "# Dog food\n\nKibble.\n"))
+    assert read(vault, "Dog food.md") == "# Dog food\n\nKibble.\n"

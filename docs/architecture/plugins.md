@@ -12,14 +12,16 @@ A plugin fills only the hooks it needs; every field of `Plugin` but `name` is op
 | --- | --- | --- | --- |
 | `check` | `create_note`, `edit_note` (dry runs too), `write_file` on a `.md` | a `NoteWrite`: tool, vault path, old text (None for a new note), new text, dry run, user id | None, or a `Refusal(code, message)`: nothing is written |
 | `rewrite` | the same writers | a `NoteWrite` whose `new` is the text so far | a `Rewrite(text, report)`; `report(shift, dry_run)` renders the plugin's block for the result |
+| `tool_text` | `@plugins.tool_text(name)` under `@mcp.tool()`, at import | (a mapping, not a call) | tool name → paragraphs that replace the `{plugin_text}` line of that tool's docstring; with none, the line goes |
+| `guide_text` | `get_vault_guide` | (a string) | sections appended after the primer, each under a `## … (this server)` heading |
 
 When the writers call them:
 
 - Only on a write that changes the note. Not the task writers, `move_note` or `set_frontmatter`.
 - `write_file` gives `check` the text decoded leniently (an undecodable byte becomes U+FFFD), as the core's task-line check reads it, so bytes that are not UTF-8 cannot switch a check off; it skips `check`, like that check, on an overwrite whose old bytes it could not read. It runs `rewrite` only when the old and new bytes are both UTF-8, as it does the link rewrite.
 - `check` runs right after the core's own refusals (task lines, note names) and before any rewrite, so every plugin's check sees the caller's own text. The first refusal, in plugin order, wins. A `check` is skipped where the core's `already_exists` answer will win (an existing note for `create_note`, an existing file without `overwrite` for `write_file`).
-- `rewrite` runs after the core's own rewrites (title heading, full-path links) and before the agent-edit stamp and the size cap. Each plugin gets the previous one's output; its `NoteWrite.old` stays the note's old text, so "the lines this write adds or changes" keeps meaning the caller's change. Two plugins rewriting one line: the later one sees the earlier one's result, and both reports are kept.
-- The reports go after the core's own blocks, in plugin order, then any `plugin_error:` lines. `shift` is the number of lines the stamp added above the body, so a report can give the written note's line numbers. A rewrite that adds or removes lines moves the line numbers of reports made before it: a plugin with several rewrites orders them itself, as the core runs the title heading before the links.
+- `rewrite` runs before the core's link rewrite (so a plugin that drops lines leaves the link report's line numbers right) and before the agent-edit stamp and the size cap. When the rewrites undo `edit_note`'s whole change (a dropped title heading that was all of it), it answers "No changes" with the plugins' blocks. Each plugin gets the previous one's output; its `NoteWrite.old` stays the note's old text, so "the lines this write adds or changes" keeps meaning the caller's change. Two plugins rewriting one line: the later one sees the earlier one's result, and both reports are kept.
+- The reports go after `rule_change_unlogged:` and before the link report, in plugin order, then any `plugin_error:` lines. `shift` is the number of lines the stamp added above the body, so a report can give the written note's line numbers. A rewrite that adds or removes lines moves the line numbers of reports made before it: a plugin with several rewrites orders them itself.
 - A refusal's code must be in `src/services/refusals.py`'s `BODY_CODES`, the catalogue every refusal is checked against: a plugin's codes are listed there.
 - A hook may import the core's services (the database session, `link_paths`, the Tasks settings); there is no separate vault view.
 
@@ -39,14 +41,14 @@ A name in `PLUGINS` that does not load (no module, any exception while importing
 
 ## The plugins here
 
-- `kelno_vault`: the conventions of the fork owner's vault, fully specific to it and not configurable. It holds no hook yet; the behaviours below are still in the core and move into it one at a time:
-  - title-heading removal and full-path link rewriting (`rewrite`);
+- `kelno_vault`: the conventions of the fork owner's vault, fully specific to it and not configurable. It drops a first heading repeating the note's name (`rewrite`, `title_heading.py`; its description paragraphs and the guide's "Titles" section are its `tool_text` and `guide_text`). The behaviours below are still in the core and move into it one at a time:
+  - full-path link rewriting (`rewrite`, ordered after the title heading);
   - the hand-written task-line refusal (`check`);
   - `rule_change_unlogged`, with `RULE_FILE_PATTERNS` becoming its constant;
   - `note_names` (a name hook for `create_note`, `write_file` and `move_note`);
   - private folders (` (private)`), through an `is_private(path)` hook;
   - `open_area` and the task tools' area handling (a hook adding tools, wrapped by the core in `_tracked`);
-  - the "(this server)" sections of the guide and the tool descriptions about these behaviours (a text hook), so a deployment without the plugin does not describe them.
+  - with each, its "(this server)" section of the guide and its paragraphs in the tool descriptions.
 - The agent ledger moves last into a built-in plugin, `ledger`; its tables stay in the core's migration chain.
 
 New hooks are added with the first behaviour that needs them.
