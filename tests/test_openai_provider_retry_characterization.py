@@ -63,7 +63,9 @@ async def test_three_transport_errors_propagate_the_third_object(slept):
         route = mock.post("/embeddings")
         route.side_effect = [
             httpx.ConnectError("first"),
-            httpx.ReadTimeout("second"),
+            # Fork: a read timeout is never retried for OpenAI (`retry_read_timeout`),
+            # so the middle transport error here is another kind.
+            httpx.RemoteProtocolError("second"),
             third,
         ]
         with pytest.raises(httpx.ConnectError) as excinfo:

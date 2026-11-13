@@ -166,8 +166,16 @@ def fetchval(url: str, statement: str, *args):
     return asyncio.run(_run(url, lambda c: c.fetchval(statement, *args)))
 
 
-def alembic_version(url: str) -> str:
-    return fetchval(url, "SELECT version_num FROM alembic_version")
+def alembic_version(url: str, fork: bool = False) -> str:
+    """The recorded revision. Below the merge revision 1003 the fork's own
+    branch (1001, 1002) can be recorded beside upstream's (CLAUDE.md, "Fork
+    migrations"): then upstream's row, or with `fork=True` the fork's."""
+    rows = [r["version_num"] for r in fetch(url, "SELECT version_num FROM alembic_version")]
+    if len(rows) == 1:
+        return rows[0]
+    picked = [r for r in rows if (len(r) == 4) == fork]
+    assert len(picked) == 1, rows
+    return picked[0]
 
 
 def constraint_row(url: str):
@@ -9852,7 +9860,7 @@ def test_1002_refuses_a_pre_existing_ledger_table():
         result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
         assert result.returncode != 0
         assert "will not adopt pre-existing tables (ledger_topics)" in (result.stdout + result.stderr)
-        assert alembic_version(url) == "1001"
+        assert alembic_version(url, fork=True) == "1001"
 
 
 def test_1002_stamp_back_rerun_adopts_its_own_ledger_and_keeps_the_entries():
@@ -9896,7 +9904,7 @@ def test_1002_stamp_back_rerun_refuses_an_altered_ledger(label, ddl, fragment):
         assert result.returncode != 0
         assert "will not adopt pre-existing ledger objects that differ" in (result.stdout + result.stderr)
         assert fragment in (result.stdout + result.stderr)
-        assert alembic_version(url) == "1001"
+        assert alembic_version(url, fork=True) == "1001"
 
 
 def test_downgrade_1002_refuses_while_an_entry_exists_and_drops_an_empty_ledger():

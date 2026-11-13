@@ -122,7 +122,7 @@ An area's tag is declared once, in its main note's frontmatter: `area_tag: area/
 
 ## The index
 
-`fork_note_tasks` (migration 1001): one row per task line or problem of an indexed note — `note_id` (cascades with the note), `line_number` (1-based over the whole file), `kind`, the exact `line`, `reason`. The pass writes a changed or moved note's rows next to its links, in the same transaction, each note's insert in its own poison savepoint (site `tasks`), a skip withholding the re-derive stamp exactly as a link skip does. `CURRENT_EXTRACTION_VERSION` 4 derived every existing note's rows once; it shares the version-3 cleaner, so nothing was re-embedded. Owner scoping is through `notes_metadata.user_id`, as for `note_links`.
+`fork_note_tasks` (migration 1001): one row per task line or problem of an indexed note — `note_id` (cascades with the note), `line_number` (1-based over the whole file), `kind`, the exact `line`, `reason`. The pass writes a changed or moved note's rows next to its links, in the same transaction, each note's insert in its own poison savepoint (site `fork-tasks`), a skip withholding the re-derive stamp exactly as a link skip does. `CURRENT_EXTRACTION_VERSION` 4 derived every existing note's rows once; it shares the version-3 cleaner, so nothing was re-embedded. Owner scoping is through `notes_metadata.user_id`, as for `note_links`.
 
 ## Choices made by the agent that built this (not requirements)
 

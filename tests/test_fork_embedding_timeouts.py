@@ -122,7 +122,7 @@ async def test_ollama_wait_for_uses_the_setting_once_per_slice(ollama, monkeypat
 
     monkeypatch.setattr(embeddings.asyncio, "wait_for", _spy)
 
-    out = await provider.embed_batch([f"c{i}" for i in range(5)])
+    out = await provider.embed_batch([f"c{i}" for i in range(5)], kind="document")
 
     assert len(out) == 5
     # Three requests (2 + 2 + 1), each under the full setting: the bound is
@@ -136,7 +136,7 @@ async def test_ollama_http_request_carries_the_setting(ollama, monkeypatch):
         route = mock.post("/api/embed").mock(
             return_value=Response(200, json={"embeddings": [[0.1]]})
         )
-        await OllamaProvider().embed_one("q")
+        await OllamaProvider().embed_one("q", kind="query")
     assert route.calls[0].request.extensions["timeout"]["read"] == 600.0
     assert embeddings._ollama_client().timeout == httpx.Timeout(600.0)
     await embeddings.close_provider_client()
@@ -151,7 +151,7 @@ async def test_a_hung_ollama_request_fails_at_the_setting(ollama, monkeypatch):
 
     monkeypatch.setattr(provider, "_embed_inputs", _hangs)
     with pytest.raises((asyncio.TimeoutError, TimeoutError)):
-        await provider.embed_batch(["a"])
+        await provider.embed_batch(["a"], kind="document")
 
 
 # ── OpenAI: batch size, timeout, no retry on a read timeout ─────────────────
@@ -163,7 +163,7 @@ async def test_openai_batches_at_the_configured_size(openai, monkeypatch):
         route = mock.post("https://api.example.test/v1/embeddings").mock(
             side_effect=_openai_answer
         )
-        out = await OpenAIProvider().embed_batch(["a", "b", "c", "d", "e"])
+        out = await OpenAIProvider().embed_batch(["a", "b", "c", "d", "e"], kind="document")
     sent = [json.loads(c.request.read())["input"] for c in route.calls]
     assert sent == [["a", "b"], ["c", "d"], ["e"]]
     assert len(out) == 5
@@ -175,7 +175,7 @@ async def test_openai_request_carries_the_setting(openai, monkeypatch):
         route = mock.post("https://api.example.test/v1/embeddings").mock(
             side_effect=_openai_answer
         )
-        await OpenAIProvider().embed_one("q")
+        await OpenAIProvider().embed_one("q", kind="query")
     assert route.calls[0].request.extensions["timeout"]["read"] == 900.0
 
 
@@ -189,7 +189,7 @@ async def test_openai_read_timeout_is_not_retried(openai, monkeypatch):
             side_effect=httpx.ReadTimeout("")
         )
         with pytest.raises(httpx.ReadTimeout):
-            await OpenAIProvider().embed_one("q")
+            await OpenAIProvider().embed_one("q", kind="query")
     assert route.call_count == 1
 
 
@@ -201,6 +201,6 @@ async def test_openai_connect_error_is_still_retried(openai, monkeypatch):
     with respx.mock() as mock:
         route = mock.post("https://api.example.test/v1/embeddings")
         route.side_effect = [httpx.ConnectError("refused"), _openai_answer]
-        out = await OpenAIProvider().embed_one("q")
+        out = await OpenAIProvider().embed_one("q", kind="query")
     assert out == [0.1]
     assert route.call_count == 2

@@ -49,6 +49,19 @@ WRITE_REQUIRED_TOOLS: frozenset[str] = frozenset(
         "complete_task",
         "update_task",
         "add_task",
+        # Fork: its write-bucket tools. The vault writers `move_file`,
+        # `delete_folder` and the task tools change vault bytes; the four
+        # agent-ledger writers change no vault byte but write the ledger,
+        # which a read-only grant must not either.
+        "move_file",
+        "delete_folder",
+        "create_task",
+        "edit_task",
+        "set_task_status",
+        "ledger_add",
+        "ledger_update",
+        "ledger_digest_edit",
+        "ledger_topic_edit",
     }
 )
 

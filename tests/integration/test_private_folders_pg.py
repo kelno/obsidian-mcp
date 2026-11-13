@@ -66,13 +66,14 @@ def migrated_url():
 async def sessionmaker(migrated_url):
     engine = create_async_engine(migrated_url, poolclass=None)
     maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    fragment, cfg_params = index_tsvector_sql()
+    fragment, cfg_params = index_tsvector_sql(tags_bind=None)
     async with maker() as session:
         for path, body, vec in NOTES:
             note_id = (await session.execute(text(
                 "INSERT INTO notes_metadata (user_id, file_path, title, tags, frontmatter, content_hash, "
                 f"embedded_content_hash, content_tsvector) VALUES (NULL, :p, :t, '{{}}', '{{}}', :h, :h, {fragment}) "
-                "RETURNING id"), {"p": path, "t": path.rsplit("/", 1)[-1], "h": path, "content": body, **cfg_params},
+                "RETURNING id"), {"p": path, "t": path.rsplit("/", 1)[-1], "h": path, "content": body,
+                                  "title": path.rsplit("/", 1)[-1], "aliases": "", **cfg_params},
             )).scalar_one()
             session.add(NoteEmbedding(note_id=note_id, chunk_index=0, chunk_text=body, embedding=vec))
         await session.commit()

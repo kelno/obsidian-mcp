@@ -233,7 +233,7 @@ def test_the_cap_is_declared_on_the_search_tools_and_the_ledger_search():
     import inspect
 
     source = inspect.getsource(tools)
-    assert source.count('arg_char_caps={"query": MAX_SEARCH_QUERY_CHARS}') == 3
+    assert source.count('arg_char_caps={"query": MAX_SEARCH_QUERY_CHARS}') == 4
 
 
 # ── the provider's own limit ────────────────────────────────────────────────

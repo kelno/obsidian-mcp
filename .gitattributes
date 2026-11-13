@@ -2,3 +2,8 @@
 # the command. Keep them LF in every checkout, including Windows ones with
 # core.autocrlf=true.
 *.sh text eol=lf
+
+# Byte-compared fixtures (golden pages, the tools/list oracles): the tests
+# compare them byte for byte with what the server renders, which is LF.
+tests/golden/** text eol=lf
+tests/fixtures/** text eol=lf

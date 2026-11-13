@@ -58,7 +58,7 @@ data:
     # pass rebuilds the rows from the vault.
     exclude=()
     if [ "${BACKUP_FULL:-0}" = 0 ]; then
-      for t in notes_metadata note_embeddings note_links note_tasks indexer_runs indexer_state; do
+      for t in notes_metadata note_embeddings note_links note_tasks fork_note_tasks indexer_runs indexer_state; do
         exclude+=("--exclude-table-data=$t")
       done
     fi

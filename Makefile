@@ -390,7 +390,7 @@ BACKUP_RETAIN_MIN ?= 7
 # dumped. The same list is written out
 # in deploy/kubernetes/components/db-backup/configmap.yaml, and
 # tests/test_backup_derived_tables.py pins both against src/models/db.py.
-BACKUP_DERIVED_TABLES := notes_metadata note_embeddings note_links note_tasks indexer_runs indexer_state
+BACKUP_DERIVED_TABLES := notes_metadata note_embeddings note_links note_tasks fork_note_tasks indexer_runs indexer_state
 BACKUP_EXCLUDE_DATA = $(if $(filter-out 0,$(BACKUP_FULL)),,$(foreach t,$(BACKUP_DERIVED_TABLES),--exclude-table-data=$(t)))
 BACKUP_MODE_NOTE = $(if $(filter-out 0,$(BACKUP_FULL)),$(YELLOW)Full dump (BACKUP_FULL set): derived index tables included$(NC),Derived index tables ($(BACKUP_DERIVED_TABLES)) dumped schema-only; the indexer rebuilds them after a restore. BACKUP_FULL=1 dumps their rows too.)
 

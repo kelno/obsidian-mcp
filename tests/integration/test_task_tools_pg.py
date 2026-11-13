@@ -194,7 +194,7 @@ async def scalar(sessionmaker, sql: str, **params):
 async def test_list_complete_list_needs_no_pass(sessionmaker, vault):
     put(vault, "Projects/Alpha.md", "# Inbox\n- [ ] Send invoice 📅 2026-11-10\n- [ ] Call Bob\n")
     await index()
-    first = await call("list_tasks")
+    first = await call("upstream_list_tasks")
     ids = ids_by_text(first)
     assert set(ids) == {"Send invoice 📅 2026-11-10", "Call Bob"}
 
@@ -206,15 +206,15 @@ async def test_list_complete_list_needs_no_pass(sessionmaker, vault):
         "# Inbox\n- [x] Send invoice 📅 2026-11-10 ✅ 2026-11-10\n- [ ] Call Bob\n".encode())
 
     # No pass in between: the listing already reflects the write.
-    assert set(ids_by_text(await call("list_tasks"))) == {"Call Bob"}
-    every = ids_by_text(await call("list_tasks", status="all"))
+    assert set(ids_by_text(await call("upstream_list_tasks"))) == {"Call Bob"}
+    every = ids_by_text(await call("upstream_list_tasks", status="all"))
     assert every["Send invoice 📅 2026-11-10 ✅ 2026-11-10"] == done_id
-    row = [r for r in rows(await call("list_tasks", status="done"))]
+    row = [r for r in rows(await call("upstream_list_tasks", status="done"))]
     assert len(row) == 1 and row[0].startswith("- [x] `Projects/Alpha.md`:2 — id " + done_id)
 
     # And the next pass converges onto the same rows.
     await index()
-    assert ids_by_text(await call("list_tasks", status="all")) == every
+    assert ids_by_text(await call("upstream_list_tasks", status="all")) == every
     assert await scalar(
         sessionmaker,
         "SELECT tasks_source_hash = content_hash FROM notes_metadata WHERE file_path = :p",
@@ -224,14 +224,14 @@ async def test_list_complete_list_needs_no_pass(sessionmaker, vault):
 async def test_a_recurring_completion_lists_both_lines(sessionmaker, vault):
     put(vault, "r.md", "- [ ] Pay rent 🔁 every month 📅 2026-11-01\n")
     await index()
-    (tid,) = ids_by_text(await call("list_tasks")).values()
+    (tid,) = ids_by_text(await call("upstream_list_tasks")).values()
     out = await call("complete_task", path="r.md", id=tid)
     assert code(out) is None, out
     assert "next occurrence, line 1 (above): - [ ] Pay rent 🔁 every month 📅 2026-12-01" in out
     assert disk(vault, "r.md") == (
         "- [ ] Pay rent 🔁 every month 📅 2026-12-01\n"
         "- [x] Pay rent 🔁 every month 📅 2026-11-01 ✅ 2026-11-10\n").encode()
-    listing = await call("list_tasks", status="all", order_by="path")
+    listing = await call("upstream_list_tasks", status="all", order_by="path")
     assert rows(listing)[0].startswith("- [ ] `r.md`:1 — id " + new_id(out, "next id"))
     assert rows(listing)[1].startswith("- [x] `r.md`:2 — id " + new_id(out))
 
@@ -240,7 +240,7 @@ async def test_every_write_tool_and_its_dry_run(sessionmaker, vault):
     body = "# Today\n- [ ] Pay 🔁 every month 📅 2026-11-05\n\n# Later\n"
     put(vault, "w.md", body)
     await index()
-    (tid,) = ids_by_text(await call("list_tasks")).values()
+    (tid,) = ids_by_text(await call("upstream_list_tasks")).values()
 
     for name, args in (
         ("complete_task", dict(id=tid)),
@@ -269,7 +269,7 @@ async def test_every_write_tool_and_its_dry_run(sessionmaker, vault):
     assert disk(vault, "w.md").decode() == (
         "# Today\n- [ ] Pay 🔁 every month ⏳ 2026-11-03 📅 2026-11-05\n"
         "- [ ] New thing 📅 2026-11-11\n\n# Later\n")
-    listed = ids_by_text(await call("list_tasks", path="w.md"))
+    listed = ids_by_text(await call("upstream_list_tasks", path="w.md"))
     assert listed["New thing 📅 2026-11-11"] == new_id(out)
     assert listed["Pay 🔁 every month ⏳ 2026-11-03 📅 2026-11-05"] == tid
 
@@ -283,7 +283,7 @@ async def test_identical_lines_suffixed_ids_and_swaps(sessionmaker, vault):
     body = "- [ ] Call\n    - about the lease\n- [ ] Call\n    - about the car\n"
     put(vault, "dup.md", body)
     await index()
-    listing = await call("list_tasks", path="dup.md")
+    listing = await call("upstream_list_tasks", path="dup.md")
     k = key("- [ ] Call")
     assert [ROW_ID.search(r).group(2) for r in rows(listing)] == [f"{k}.1of2", f"{k}.2of2"]
 
@@ -310,7 +310,7 @@ async def test_identical_lines_suffixed_ids_and_swaps(sessionmaker, vault):
 async def test_a_count_change_and_an_edited_line(sessionmaker, vault):
     put(vault, "c.md", "- [ ] Ping\n- [ ] Ping\n- [ ] Ping\n- [ ] Pay rent\n")
     await index()
-    listing = await call("list_tasks", path="c.md")
+    listing = await call("upstream_list_tasks", path="c.md")
     k = key("- [ ] Ping")
     pay = ids_by_text(listing)["Pay rent"]
     # One identical line removed after the listing: `.1of3` no longer counts.
@@ -327,7 +327,7 @@ async def test_a_count_change_and_an_edited_line(sessionmaker, vault):
 async def test_a_short_text_never_matches_inside_a_longer_one(sessionmaker, vault):
     put(vault, "s.md", "- [ ] Call Bob\n- [ ] Call Bob about the lease\n")
     await index()
-    ids = ids_by_text(await call("list_tasks", path="s.md"))
+    ids = ids_by_text(await call("upstream_list_tasks", path="s.md"))
     out = await call("complete_task", path="s.md", id=ids["Call Bob"])
     assert code(out) is None, out
     assert disk(vault, "s.md").decode() == f"- [x] Call Bob ✅ {TODAY}\n- [ ] Call Bob about the lease\n"
@@ -337,12 +337,12 @@ async def test_crlf_blockquote_fence_and_frontmatter_lookalikes(sessionmaker, va
     put(vault, "crlf.md", b"- [ ] one\r\n> \t1. [ ] Ship it  \r\n- [ ] three\n")
     put(vault, "shapes.md", "---\ntodo: |\n  - [ ] yaml\n---\n```\n- [ ] fenced\n```\n- [ ] real\n")
     await index()
-    ids = ids_by_text(await call("list_tasks", path="crlf.md"))
+    ids = ids_by_text(await call("upstream_list_tasks", path="crlf.md"))
     out = await call("complete_task", path="crlf.md", id=ids["Ship it"])
     assert code(out) is None, out
     assert disk(vault, "crlf.md") == f"- [ ] one\r\n> \t1. [x] Ship it ✅ {TODAY}  \r\n- [ ] three\n".encode()
 
-    assert list(ids_by_text(await call("list_tasks", path="shapes.md"))) == ["real"]
+    assert list(ids_by_text(await call("upstream_list_tasks", path="shapes.md"))) == ["real"]
     before = disk(vault, "shapes.md")
     for ghost in ("- [ ] yaml", "- [ ] fenced"):
         out = await call("complete_task", path="shapes.md", id=key(ghost))
@@ -354,7 +354,7 @@ async def test_required_mode_is_satisfied_by_a_bare_id(sessionmaker, vault, monk
     monkeypatch.setattr(settings, "write_precondition_required", True)
     put(vault, "req.md", "- [ ] a\n- [ ] b\n")
     await index()
-    ids = ids_by_text(await call("list_tasks", path="req.md"))
+    ids = ids_by_text(await call("upstream_list_tasks", path="req.md"))
     out = await call("complete_task", path="req.md", id=ids["a"])
     assert code(out) is None, out
     out = await call("update_task", path="req.md", id=ids["b"], priority="high",
@@ -385,7 +385,7 @@ async def test_a_read_only_grant_neither_lists_nor_runs_the_write_tools(sessionm
         for name, args in (("add_task", dict(text="b")), ("complete_task", dict(id=tid)),
                            ("update_task", dict(id=tid, due="today"))):
             assert code(await call(name, path="ro.md", **args)) == "permission_denied", name
-        assert code(await call("list_tasks")) is None
+        assert code(await call("upstream_list_tasks")) is None
     finally:
         current_permission.reset(q)
         current_principal.reset(p)
@@ -395,7 +395,7 @@ async def test_a_read_only_grant_neither_lists_nor_runs_the_write_tools(sessionm
 async def test_the_event_is_attributed_and_recorded_after_the_refresh(sessionmaker, vault):
     put(vault, "ev.md", "- [ ] a\n")
     await index()
-    (tid,) = ids_by_text(await call("list_tasks", path="ev.md")).values()
+    (tid,) = ids_by_text(await call("upstream_list_tasks", path="ev.md")).values()
     out = await call("complete_task", path="ev.md", id=tid)
     assert code(out) is None and "index: refreshed" in out
     async with sessionmaker() as session:
@@ -417,7 +417,7 @@ async def test_usage_params_hold_no_task_text(sessionmaker, vault):
     out = await call("add_task", path="u.md", text="Call the bank about the mortgage",
                      context="ref 1234")
     assert code(out) is None, out
-    (tid,) = [v for k, v in ids_by_text(await call("list_tasks", path="u.md")).items()
+    (tid,) = [v for k, v in ids_by_text(await call("upstream_list_tasks", path="u.md")).items()
               if k.startswith("Call the bank")]
     out = await call("update_task", path="u.md", id=tid, text="Phone the bank",
                      append_context="left a message")
@@ -478,9 +478,9 @@ async def test_two_users_with_the_same_path_never_cross(sessionmaker, vault, mon
         put(roots[uid], "Projects/Alpha.md", body)
         await index(uid)
     with As(8, roots[8]):
-        eight_before = await call("list_tasks", status="all")
+        eight_before = await call("upstream_list_tasks", status="all")
     with As(7, roots[7]):
-        ids = ids_by_text(await call("list_tasks"))
+        ids = ids_by_text(await call("upstream_list_tasks"))
         out = await call("complete_task", path="Projects/Alpha.md", id=ids["Water plants"])
         assert code(out) is None and "index: refreshed" in out
         # User 8 holds an identical open task: not a duplicate for user 7,
@@ -494,7 +494,7 @@ async def test_two_users_with_the_same_path_never_cross(sessionmaker, vault, mon
                          allow_duplicate=True)
         assert code(out) is None, out
     with As(8, roots[8]):
-        assert await call("list_tasks", status="all") == eight_before
+        assert await call("upstream_list_tasks", status="all") == eight_before
         out = await call("add_task", path="Projects/Alpha.md", text="Water plants")
         assert code(out) == "duplicate_task"  # its own still-open line, in the note's bytes
     assert disk(roots[8], "Projects/Alpha.md") == body.encode()
@@ -525,7 +525,7 @@ async def test_three_parallel_completions_of_different_tasks_all_succeed(session
     body = "# Today\n- [ ] one\n- [ ] two\nprose between\n- [ ] three\n- [ ] four\n"
     put(vault, "par.md", body)
     await index()
-    ids = ids_by_text(await call("list_tasks", path="par.md"))
+    ids = ids_by_text(await call("upstream_list_tasks", path="par.md"))
     outs = await asyncio.gather(*(
         call("complete_task", path="par.md", id=ids[name]) for name in ("one", "two", "three")
     ))
@@ -535,13 +535,13 @@ async def test_three_parallel_completions_of_different_tasks_all_succeed(session
         f"- [x] three ✅ {TODAY}\n- [ ] four\n")
     assert await scalar(sessionmaker,
                         "SELECT count(*) FROM note_events WHERE path = 'par.md' AND source = 'mcp'") == 3
-    assert set(ids_by_text(await call("list_tasks", path="par.md"))) == {"four"}
+    assert set(ids_by_text(await call("upstream_list_tasks", path="par.md"))) == {"four"}
 
 
 async def test_two_parallel_completions_of_one_task_succeed_once(sessionmaker, vault):
     put(vault, "once.md", "- [ ] only\n- [ ] other\n")
     await index()
-    tid = ids_by_text(await call("list_tasks", path="once.md"))["only"]
+    tid = ids_by_text(await call("upstream_list_tasks", path="once.md"))["only"]
     outs = await asyncio.gather(*(call("complete_task", path="once.md", id=tid) for _ in range(2)))
     codes = sorted(str(code(o)) for o in outs)
     assert codes[0] == "None" and codes[1] in {"already_completed", "task_not_found"}, outs
@@ -551,7 +551,7 @@ async def test_two_parallel_completions_of_one_task_succeed_once(sessionmaker, v
 async def test_a_held_row_lock_lags_the_listing_not_the_write(sessionmaker, vault):
     put(vault, "lock.md", "- [ ] a\n")
     await index()
-    tid = ids_by_text(await call("list_tasks", path="lock.md"))["a"]
+    tid = ids_by_text(await call("upstream_list_tasks", path="lock.md"))["a"]
     async with sessionmaker() as holder:
         await holder.execute(text(
             "SELECT id FROM notes_metadata WHERE file_path = 'lock.md' FOR UPDATE"))
@@ -560,9 +560,9 @@ async def test_a_held_row_lock_lags_the_listing_not_the_write(sessionmaker, vaul
     assert code(out) is None, out
     assert "index: may lag (lock_timeout)" in out
     assert disk(vault, "lock.md") == "- [ ] a ⏫\n".encode()
-    assert "a" in ids_by_text(await call("list_tasks", path="lock.md"))  # stale until a pass
+    assert "a" in ids_by_text(await call("upstream_list_tasks", path="lock.md"))  # stale until a pass
     await index()
-    assert set(ids_by_text(await call("list_tasks", path="lock.md"))) == {"a ⏫"}
+    assert set(ids_by_text(await call("upstream_list_tasks", path="lock.md"))) == {"a ⏫"}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -574,7 +574,7 @@ async def test_add_task_duplicate_then_allowed_then_similar(sessionmaker, vault)
     put(vault, "Projects/Alpha.md", "- [ ] Renew passport #admin 📅 2026-12-01\n- [ ] Renew passport for the trip\n")
     put(vault, "Inbox.md", "# Inbox\n")
     await index()
-    alpha = ids_by_text(await call("list_tasks", path="Projects/Alpha.md"))
+    alpha = ids_by_text(await call("upstream_list_tasks", path="Projects/Alpha.md"))
     out = await call("add_task", path="Inbox.md", text="renew  Passport", tags=["admin"])
     assert code(out) == "duplicate_task"
     assert f"`Projects/Alpha.md`:1 id {alpha['Renew passport #admin 📅 2026-12-01']}" in out
@@ -620,7 +620,7 @@ async def test_agenda_sections_are_disjoint_and_continue_in_list_tasks(sessionma
 
     (cont,) = continuations(out)
     assert cont["due_by"] == "2026-11-09" and cont["order_by"] == "due" and "cursor" in cont
-    page = await call("list_tasks", **cont)
+    page = await call("upstream_list_tasks", **cont)
     assert code(page) is None, page
     rest = [r.rsplit("text: ", 1)[1] for r in rows(page)]
     assert rest == [f"overdue {i:02d} 📅 2026-10-{i + 1:02d}" for i in range(25, 30)]
@@ -679,14 +679,14 @@ async def test_a_backtick_path_cannot_forge_a_row_and_round_trips(sessionmaker, 
     put(vault, forged, "- [ ] real task 📅 2026-11-10\n")
     put(vault, "a.md", "- [ ] decoy 📅 2026-11-10\n")
     await index()
-    listing = await call("list_tasks", detail="full")
+    listing = await call("upstream_list_tasks", detail="full")
     (row,) = [r for r in rows(listing) if "real task" in r]
     assert _bare_backticks(row) == 2 and row.count("`") == 2, row
     shown = _path_field(row)
     assert _unescape(shown) == forged
     tid = re.search(r"`:1 — id ([0-9a-f]{12})", row).group(1)
 
-    brief = [r for r in rows(await call("list_tasks", detail="brief")) if "real task" in r]
+    brief = [r for r in rows(await call("upstream_list_tasks", detail="brief")) if "real task" in r]
     assert len(brief) == 1 and _bare_backticks(brief[0]) == 2
     agenda = [ln for ln in (await call("task_agenda")).splitlines() if "real task" in ln]
     assert len(agenda) == 1 and _bare_backticks(agenda[0]) == 2
@@ -737,7 +737,7 @@ async def test_add_task_under_filter_prepends_and_lists(sessionmaker, vault):
     i = lines.index("line 2: - [ ] #task Book flights 📅 2026-12-01")
     assert lines[i + 1] == 'global filter added: "#task"'
     assert disk(vault, "Inbox.md") == "# Inbox\n- [ ] #task Book flights 📅 2026-12-01\n".encode()
-    listing = await call("list_tasks")
+    listing = await call("upstream_list_tasks")
     assert "#task Book flights 📅 2026-12-01" in ids_by_text(listing)
     assert listing.splitlines()[2].startswith('Rule — task rule: filter "#task"')
 
@@ -766,7 +766,7 @@ async def test_a_stored_unsafe_filter_text_is_treated_as_all(sessionmaker, vault
         assert "global filter added" not in out and "note:" not in out
     body = disk(vault, "Inbox.md").decode()
     assert "%%" not in body and "<!--" not in body
-    listing = await call("list_tasks")
+    listing = await call("upstream_list_tasks")
     assert "the configured rule cannot be applied: filter text not allowed" in listing
 
 
@@ -788,8 +788,8 @@ async def test_add_task_under_fields_states_a_non_task(sessionmaker, vault):
     assert code(out) is None and "note:" not in out and "➕ 2026-11-10" in out, out
     # The non-task is not listed by default, is listed by scope="all", and
     # an id from that listing completes it: the rule never blocks a write.
-    assert "Read the report" not in ids_by_text(await call("list_tasks"))
-    ids = ids_by_text(await call("list_tasks", scope="all"))
+    assert "Read the report" not in ids_by_text(await call("upstream_list_tasks"))
+    ids = ids_by_text(await call("upstream_list_tasks", scope="all"))
     out = await call("complete_task", path="Inbox.md", id=ids["Read the report"])
     assert code(out) is None and "note:" not in out, out
     assert "- [x] Read the report ✅ 2026-11-10\n" in disk(vault, "Inbox.md").decode()
@@ -799,7 +799,7 @@ async def test_update_task_states_a_non_task_and_never_re_adds_the_filter(sessio
     put(vault, "Inbox.md", "- [ ] Renew passport 📅 2026-12-01\n- [ ] TODO Call the bank\n")
     await index()
     await set_rule(sessionmaker, "fields")
-    ids = ids_by_text(await call("list_tasks", scope="all"))
+    ids = ids_by_text(await call("upstream_list_tasks", scope="all"))
     out = await call("update_task", path="Inbox.md", id=ids["Renew passport 📅 2026-12-01"],
                      clear=["due"])
     assert code(out) is None, out
@@ -807,7 +807,7 @@ async def test_update_task_states_a_non_task_and_never_re_adds_the_filter(sessio
     assert lines[lines.index("line 1: - [ ] Renew passport") + 1] == FIELDS_NOTE
 
     await set_rule(sessionmaker, "filter", filt="TODO")
-    ids = ids_by_text(await call("list_tasks"))
+    ids = ids_by_text(await call("upstream_list_tasks"))
     for dry_run in (True, False):
         out = await call("update_task", path="Inbox.md", id=ids["TODO Call the bank"],
                          text="Call the bank today", dry_run=dry_run)

@@ -494,8 +494,11 @@ def test_version_four_shares_the_version_three_cleaner(body):
     from src.services import indexer
     from src.services.embeddings import clean_at_version
 
-    assert indexer.CURRENT_EXTRACTION_VERSION == 4
+    # 4 (the task rows, the fork's and upstream's) and 5 (upstream's task ids)
+    # share the version-3 cleaner.
+    assert indexer.CURRENT_EXTRACTION_VERSION == 5
     assert clean_at_version(4, body) == clean_at_version(3, body)
+    assert clean_at_version(5, body) == clean_at_version(3, body)
     assert indexer._grammar_changed_the_embedding_text(3, body) is False
 
 

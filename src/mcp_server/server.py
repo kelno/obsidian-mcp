@@ -543,8 +543,8 @@ async def semantic_search(
     Each result is one note (deduped) with its closest-matching chunk as a ~200-character preview.
     Call `read_note` on a result's path to get the full note content.
 
-    With `OPEN_NOTE_URL` set, each note's line ends with `— open_url: <link>`:
-    give that link when pointing the owner to the note.
+    With `OPEN_NOTE_URL` set, each line ends with `— open_url: <link>`, the
+    link to give the owner.
 
     The header line carries a stale count and a truncated count, always —
     including when both are zero, so "nothing here is degraded" is
@@ -943,22 +943,16 @@ async def move_note(
     the aggregate memory bound, the whole move is refused before any file is touched, naming the source or the
     count.
 
-    Before rewriting, the move brings the link index up to date (an index pass over your notes, re-reading
-    only the ones that changed), so links written moments ago are found too. If it cannot (another index
-    pass busy past the wait limit, indexing paused, or a folder the index cannot list or a note it set
-    aside, named in the refusal), the move is refused with `index_not_ready` and nothing is moved or
-    rewritten: retry shortly, fix the named note, or move with `rewrite_links=False`.
+    First the move refreshes the link index, so links written moments ago are found; when it cannot (indexing
+    busy or paused, a note it cannot read, named) it is refused `index_not_ready`, nothing moved.
 
-    **The same preflight refuses the whole move, before the rename, when any source it would rewrite — the
-    moved note's own body included — contains a fence opener indented by one to three spaces that nothing below
-    it closes.** The refusal names each such source and where its opener sits. Move with `rewrite_links=False`
-    (unaffected by this refusal) and fix the links yourself, or close the fences first.
+    **The same preflight checks every source, the moved note's own body included, and refuses the whole move
+    before the rename when one has a fence opener indented by one to three spaces that nothing closes**,
+    naming each. Move with `rewrite_links=False` and fix the links yourself, or close the fences first.
 
-    **A rewrite can still fail after the move has committed.** The move is one rename and the rewrites follow
-    it, so an I/O failure or a lost vault assignment stops the remaining rewrites and the result reads `partial
-    success: …`, naming the sources that still link to the old path. The move is **not** rolled back; treat the
-    link graph as agreeing with the vault bytes only on plain success, and fix the named sources with
-    `edit_note`.
+    **A rewrite can still fail after the move has committed** (an I/O failure, a lost vault assignment): the
+    result reads `partial success: …`, naming the sources still linking to the old path. The move is **not**
+    rolled back; fix the named sources with `edit_note`.
 
     Success reports the `content_hash` of the bytes actually published at `to_path` — the moved bytes for a
     plain move, the post-rewrite bytes when the moved note's own body was rewritten — and that value binds a
@@ -1523,7 +1517,7 @@ async def delete_file(
     return await delete_file_impl(path, permanent=permanent, expected_hash=expected_hash)
 
 
-@mcp.tool()
+@mcp.tool(title="Move file", annotations=_DESTRUCTIVE)
 async def move_file(
     from_path: str, to_path: str, expected_hash: str | None = None
 ) -> str:
@@ -1559,7 +1553,7 @@ async def move_file(
     return await move_file_impl(from_path, to_path, expected_hash=expected_hash)
 
 
-@mcp.tool()
+@mcp.tool(title="Delete folder", annotations=_DESTRUCTIVE)
 async def delete_folder(path: str) -> str:
     """Delete an empty folder from the vault. Requires write permission — a
     `readwrite` API key, or an OAuth token carrying the `readwrite` scope.
@@ -1584,7 +1578,7 @@ async def delete_folder(path: str) -> str:
     return await delete_folder_impl(path)
 
 
-@mcp.tool()
+@mcp.tool(title="List tasks", annotations=_READ_ONLY)
 async def list_tasks(
     path: str | None = None,
     status: str = "not_done",
@@ -1660,7 +1654,7 @@ async def list_tasks(
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Create task", annotations=_ADDITIVE)
 async def create_task(
     description: str,
     path: str | None = None,
@@ -1716,7 +1710,7 @@ async def create_task(
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Edit task", annotations=_DESTRUCTIVE)
 async def edit_task(
     path: str,
     line: int,
@@ -1764,7 +1758,7 @@ async def edit_task(
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Set task status", annotations=_DESTRUCTIVE)
 async def set_task_status(
     path: str,
     line: int,
@@ -1812,7 +1806,7 @@ _IS_FOLDER = Field(description="Optional: a vault-relative folder (\"Projects/Ga
                                "stay vault-wide).")
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+@mcp.tool(title="Index status", annotations=_READ_ONLY)
 async def index_status(
     folder: Annotated[str | None, _IS_FOLDER] = None,
 ) -> IndexStatusResult:
@@ -1845,7 +1839,7 @@ async def index_status(
 # Descriptions are generic on purpose (the repo is public): what an agent
 # needs to use the ledger goes here first, then in the vault guide's primer.
 
-_LEDGER_READ = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+_LEDGER_READ = _READ_ONLY
 # Nothing a ledger write does is lost: every change keeps the previous
 # version in the history, and no tool deletes.
 _LEDGER_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False,
@@ -1874,7 +1868,7 @@ _S_TASKS = Field(description="Feedback only, by the state of the vault tasks cit
 _S_LIMIT = Field(description="1-100 per list (default 20).")
 
 
-@mcp.tool(annotations=_LEDGER_READ)
+@mcp.tool(title="Ledger search", annotations=_LEDGER_READ)
 async def ledger_search(
     query: Annotated[str | None, _S_QUERY] = None,
     mode: Annotated[str, _S_MODE] = "both",
@@ -1913,7 +1907,7 @@ async def ledger_search(
     )
 
 
-@mcp.tool(annotations=_LEDGER_READ)
+@mcp.tool(title="Ledger get", annotations=_LEDGER_READ)
 async def ledger_get(
     refs: list[str], history: bool = False, include_private: Annotated[bool, _D_PRIVATE_LEDGER_GET] = False,
 ) -> LedgerGetResult:
@@ -2028,7 +2022,7 @@ _D_CHALLENGES = Field(description="Summary-view line ids (ledger_digest with_ids
                                   "get flagged for review.")
 
 
-@mcp.tool(annotations=_LEDGER_WRITE)
+@mcp.tool(title="Ledger add", annotations=_LEDGER_WRITE)
 async def ledger_add(
     kind: Annotated[str, _D_KIND],
     title: Annotated[str, _D_TITLE],
@@ -2095,7 +2089,7 @@ _D_REFS = Field(description="To mark several feedback entries seen at once: refs
                                "change, reason or revision. One entry with other changes: use ref.")
 
 
-@mcp.tool(annotations=_LEDGER_WRITE)
+@mcp.tool(title="Ledger update", annotations=_LEDGER_WRITE)
 async def ledger_update(
     ref: Annotated[str | None, _D_REF] = None,
     expected_revision: Annotated[int | None, _D_REVISION] = None,
@@ -2143,7 +2137,7 @@ async def ledger_update(
     )
 
 
-@mcp.tool(annotations=_LEDGER_READ)
+@mcp.tool(title="Ledger summary view", annotations=_LEDGER_READ)
 async def ledger_digest(slug: str | None = None, with_ids: bool = False) -> LedgerDigestResult:
     """Read an agent-ledger summary view, or list the views.
 
@@ -2160,7 +2154,7 @@ async def ledger_digest(slug: str | None = None, with_ids: bool = False) -> Ledg
     return await ledger_digest_impl(slug=slug, with_ids=with_ids)
 
 
-@mcp.tool(annotations=_LEDGER_WRITE)
+@mcp.tool(title="Edit ledger summary view", annotations=_LEDGER_WRITE)
 async def ledger_digest_edit(
     slug: str, reason: str, operations: list[dict], author: str | None = None,
 ) -> LedgerDigestEditResult:
@@ -2190,7 +2184,7 @@ async def ledger_digest_edit(
     return await ledger_digest_edit_impl(slug, reason, operations, author=author)
 
 
-@mcp.tool(annotations=_LEDGER_READ)
+@mcp.tool(title="Ledger topics", annotations=_LEDGER_READ)
 async def ledger_topics() -> LedgerTopicsResult:
     """List agent-ledger areas and topics, with descriptions and entry counts.
 
@@ -2203,7 +2197,7 @@ async def ledger_topics() -> LedgerTopicsResult:
     return await ledger_topics_impl()
 
 
-@mcp.tool(annotations=_LEDGER_WRITE)
+@mcp.tool(title="Edit ledger topic", annotations=_LEDGER_WRITE)
 async def ledger_topic_edit(
     action: str,
     slug: str,
@@ -2905,10 +2899,10 @@ _SWITCHED_OFF_TOOLS: dict = {}
 
 def _switch_off(server: FastMCP, names) -> None:
     tools = server._tool_manager._tools
-    for name in names:
-        tool = tools.pop(name, None)
-        if tool is not None:
-            _SWITCHED_OFF_TOOLS[name] = tool
+    # In registration order, never the set's, so `switch_on` restores the
+    # same order in every process.
+    for name in [n for n in tools if n in names]:
+        _SWITCHED_OFF_TOOLS[name] = tools.pop(name)
 
 
 def switch_on(names=None) -> None:

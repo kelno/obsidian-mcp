@@ -987,6 +987,10 @@ async def save_single_user_task_settings(
 
 # --- Dashboard ------------------------------------------------------------
 
+#: The one definition of "pending" (`index_status.vectors_not_current`, fork),
+#: under the name upstream's dashboard code and tests use.
+_vectors_not_current = index_status.vectors_not_current
+
 
 async def _graph_stats(session: AsyncSession, user_id: int | None) -> dict:
     """Return totals + top hub notes for the dashboard's Graph widget.

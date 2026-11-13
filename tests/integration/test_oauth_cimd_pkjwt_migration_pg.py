@@ -19,7 +19,8 @@ DIM = 64
 # head. Bump this with every new migration: it is a literal on purpose (the
 # test must notice a head it was not written for), and the full integration
 # suite is what catches a stale value.
-HEAD_REVISION = "040"
+# Fork: 1003 joins upstream's 040 with the fork's own branch ("Fork migrations").
+HEAD_REVISION = "1003"
 URL = "https://chatgpt.com/oauth/client.json"
 JWKS_URI = "https://chatgpt.com/oauth/jwks.json"
 SNAPSHOT = '{"keys": [{"kty": "RSA", "kid": "k1", "n": "AQAB", "e": "AQAB"}]}'

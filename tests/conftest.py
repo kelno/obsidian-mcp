@@ -477,6 +477,13 @@ def _reset_empty_prune():
 
 
 def pytest_configure(config):
+    # Upstream's tools the fork switches off (`server.SWITCHED_OFF`) run their
+    # tests switched on (CLAUDE.md, "Following upstream"), from before
+    # collection, since test modules list the tools at import. Production keeps
+    # them off, which `tests/test_switched_off_tools.py` checks.
+    from src.mcp_server import server
+
+    server.switch_on()
     config.addinivalue_line(
         "markers",
         "transport_defaults: run without the suite-wide "

@@ -197,7 +197,7 @@ wikilink to a vault note titled `NodeName`.
   - [ ] Subtask
 ```
 
-Vaults that use the Tasks plugin keep tasks as checkbox lines in its emoji format (`- [ ] Pay rent 📅 2026-11-05`). List them with `list_tasks`, and add or change them with `create_task`, `edit_task` and `set_task_status`: the tools follow the vault's own Tasks settings and re-index the note at once. If the vault sets a global filter (a marker every task carries, such as `#task`), the tools add it themselves; don't put it in the description. A checkbox without it is then an ordinary checkbox, not a task.
+Vaults that use the Tasks plugin keep tasks as checkbox lines in its emoji format (`- [ ] Pay rent 📅 2026-11-05`). List them with `list_tasks`, and add or change them with `create_task`, `edit_task` and `set_task_status`: the tools follow the vault's own Tasks settings and re-index the note at once. If the vault sets a global filter (a marker every task carries, such as `#task`), the tools add it themselves; don't put it in the description. A checkbox without it is then an ordinary checkbox, not a task. Tasks-plugin query blocks (` ```tasks ... ``` `) are literal text this server does not evaluate.
 
 ## Links to notes for the owner (this server)
 

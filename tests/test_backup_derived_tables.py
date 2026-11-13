@@ -33,6 +33,8 @@ DERIVED = {
     "note_embeddings",
     "note_links",
     "note_tasks",
+    # Fork: the fork's task lines (migration 1001), re-derived by the pass.
+    "fork_note_tasks",
     "indexer_runs",
     "indexer_state",
 }
@@ -60,6 +62,22 @@ DURABLE = {
     # typed into the panel by a person; nothing in the vault can rebuild them.
     # (`note_tasks`, including 039's new columns, stays derived.)
     "task_settings",
+    # Fork: the agent ledger (migration 1002) is primary data that nothing
+    # rebuilds (docs/architecture/agent-ledger.md): never dumped schema-only.
+    "ledger_ref_counters",
+    "ledger_entries",
+    "ledger_revisions",
+    "ledger_entry_links",
+    "ledger_topics",
+    "ledger_entry_topics",
+    # Derived, but kept with its entries: each entry's `embedded_hash` says its
+    # vectors are current, so a schema-only dump would leave entries claiming
+    # vectors they lack.
+    "ledger_embeddings",
+    "ledger_digests",
+    "ledger_digest_columns",
+    "ledger_digest_lines",
+    "ledger_digest_sources",
 }
 
 

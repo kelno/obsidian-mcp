@@ -3342,9 +3342,7 @@ def _input_digest_mismatches(rows, candidates: dict, exclude_patterns) -> list[i
     for row in rows:
         rel_path, text_in_hand, is_raw = candidates[row.id]
         body = parse_frontmatter(text_in_hand)[1] if is_raw else text_in_hand
-        excluded = any(
-            fnmatch.fnmatch(row.file_path, pat) for pat in exclude_patterns
-        )
+        excluded = index_status.embedding_excluded(row.file_path, exclude_patterns)
         expected = input_digest(
             note_provider_inputs(body, row.title, row.tags, excluded=excluded)
         )
@@ -4456,7 +4454,7 @@ async def _index_vault_attempt(
             )
             if poisoned_tasks:
                 raise PoisonNote([
-                    PoisonCandidate(path, upsert_hash[path], code, "tasks")
+                    PoisonCandidate(path, upsert_hash[path], code, "fork-tasks")
                     for path, code in poisoned_tasks
                 ])
             skips.extend(task_skips)
@@ -5051,7 +5049,7 @@ async def _update_fork_tasks_for_changed(
 
         exc = await _savepoint_poison(session, _insert)
         if exc is not None:
-            code = await _confirm_poison(session, _insert, exc, site="tasks")
+            code = await _confirm_poison(session, _insert, exc, site="fork-tasks")
             poisoned.append((path, code))
 
 

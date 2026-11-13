@@ -605,7 +605,10 @@ def test_to_tsvector_is_composed_only_by_the_builders_and_031():
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
-    allowed = {root / "src/services/fts.py"} | set((root / "alembic/versions").glob("031_*.py"))
+    # Fork: the agent ledger's own word search builds its vectors in ledger.py
+    # (ledger_entries, never notes_metadata).
+    allowed = ({root / "src/services/fts.py", root / "src/services/ledger.py"}
+               | set((root / "alembic/versions").glob("031_*.py")))
     offenders = [
         str(path.relative_to(root))
         for base in ("src", "alembic")

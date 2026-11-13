@@ -203,19 +203,19 @@ TASKS = "# List\n\n- [ ] Buy milk\n- [ ] Call bank\n"
 async def test_list_edit_list_needs_no_pass(sessionmaker, vault):
     put(vault, "Home.md", TASKS)
     await index()
-    assert texts(await call("list_tasks")) == ["Buy milk", "Call bank"]
+    assert texts(await call("upstream_list_tasks")) == ["Buy milk", "Call bank"]
     out = await call("edit_note", path="Home.md", find="- [ ] Buy milk", content="- [x] Buy milk")
     assert code(out) is None, out
     data = (vault / "Home.md").read_bytes()
     # Silent: exactly the response edit_note gave before #432.
     assert out == f"Updated note: Home.md — content_hash: {content_hash_for_bytes(data)}"
-    assert texts(await call("list_tasks")) == ["Call bank"]
-    assert texts(await call("list_tasks", status="done")) == ["Buy milk"]
+    assert texts(await call("upstream_list_tasks")) == ["Call bank"]
+    assert texts(await call("upstream_list_tasks", status="done")) == ["Buy milk"]
     assert (await usage(sessionmaker, "edit_note"))["task_refresh"] == "refreshed"
     assert await events(sessionmaker, "edit_note") == 1
     await index()
     assert await converged(sessionmaker, vault, "Home.md")
-    assert texts(await call("list_tasks", status="done")) == ["Buy milk"]
+    assert texts(await call("upstream_list_tasks", status="done")) == ["Buy milk"]
 
 
 async def test_removing_the_last_checkbox_removes_the_rows(sessionmaker, vault):
@@ -223,17 +223,17 @@ async def test_removing_the_last_checkbox_removes_the_rows(sessionmaker, vault):
     await index()
     out = await call("edit_note", path="r.md", content="# Nothing left\n", replace_frontmatter=True)
     assert code(out) is None, out
-    assert texts(await call("list_tasks", status="all")) == []
+    assert texts(await call("upstream_list_tasks", status="all")) == []
     assert await scalar(sessionmaker, "SELECT count(*) FROM note_tasks") == 0
 
 
 async def test_set_frontmatter_keeps_line_numbers_true(sessionmaker, vault):
     put(vault, "f.md", "---\na: 1\nb: 2\nc: 3\n---\n- [ ] the task\n")
     await index()
-    assert lines_of(await call("list_tasks")) == [6]
+    assert lines_of(await call("upstream_list_tasks")) == [6]
     out = await call("set_frontmatter", path="f.md", updates={"d": 4, "e": 5})
     assert code(out) is None, out
-    assert lines_of(await call("list_tasks")) == [8]
+    assert lines_of(await call("upstream_list_tasks")) == [8]
     assert (await usage(sessionmaker, "set_frontmatter"))["task_refresh"] == "refreshed"
 
 
@@ -243,7 +243,7 @@ async def test_write_file_overwrite_replaces_the_tasks(sessionmaker, vault):
     out = await call("write_file", path="w.md", content="- [ ] Only this\n",
                      encoding="text", overwrite=True)
     assert code(out) is None, out
-    assert texts(await call("list_tasks")) == ["Only this"]
+    assert texts(await call("upstream_list_tasks")) == ["Only this"]
 
 
 async def test_a_maximal_note_is_stored_truncated(sessionmaker, vault):
@@ -280,7 +280,7 @@ async def test_a_deleted_note_leaves_the_listing(sessionmaker, vault, permanent)
     await index()
     out = await call("delete_note", path="Done.md", permanent=permanent)
     assert code(out) is None, out
-    assert texts(await call("list_tasks")) == ["stays"]
+    assert texts(await call("upstream_list_tasks")) == ["stays"]
     assert (await usage(sessionmaker, "delete_note"))["task_refresh"] == "refreshed"
     assert await events(sessionmaker, "delete_note") == 1
     assert await scalar(
@@ -307,7 +307,7 @@ async def test_a_task_added_between_the_deletes_read_and_the_delete_is_cleared(
             uid=None, root=vault, target=target, rel="x.md", published=newer)).refreshed
     finally:
         target.close()
-    assert texts(await call("list_tasks")) == ["added in between"]
+    assert texts(await call("upstream_list_tasks")) == ["added in between"]
     real = tools._read_incumbent
 
     def read_before_the_second_writer(target, path, cap):
@@ -318,7 +318,7 @@ async def test_a_task_added_between_the_deletes_read_and_the_delete_is_cleared(
     out = await call("delete_note", path="x.md", expected_hash=content_hash_for_bytes(plain))
     assert code(out) is None, out
     assert not (vault / "x.md").exists()
-    assert texts(await call("list_tasks")) == []
+    assert texts(await call("upstream_list_tasks")) == []
 
 
 async def test_a_path_recreated_before_the_clear_is_not_cleared(sessionmaker, vault, monkeypatch):
@@ -336,7 +336,7 @@ async def test_a_path_recreated_before_the_clear_is_not_cleared(sessionmaker, va
     assert (await usage(sessionmaker, "delete_note"))["task_refresh"] == "lagged:superseded"
     monkeypatch.setattr(tools, "_record_note_events", real)
     await index()
-    assert texts(await call("list_tasks")) == ["recreated"]
+    assert texts(await call("upstream_list_tasks")) == ["recreated"]
     assert await converged(sessionmaker, vault, "re.md")
 
 
@@ -359,9 +359,9 @@ async def test_a_held_row_lock_leaves_response_and_event_unchanged(sessionmaker,
     assert b"- [x] Buy milk" in data
     assert (await usage(sessionmaker, "edit_note"))["task_refresh"] == "lagged:lock_timeout"
     assert await events(sessionmaker, "edit_note") == 1
-    assert "Buy milk" in texts(await call("list_tasks"))  # stale until the pass
+    assert "Buy milk" in texts(await call("upstream_list_tasks"))  # stale until the pass
     await index()
-    assert "Buy milk" not in texts(await call("list_tasks"))
+    assert "Buy milk" not in texts(await call("upstream_list_tasks"))
     assert await converged(sessionmaker, vault, "l.md")
 
 
@@ -413,7 +413,7 @@ async def test_write_file_creating_a_note_is_a_no_op_refresh(sessionmaker, vault
     assert (await usage(sessionmaker, "write_file"))["task_refresh"] == "lagged:not_indexed"
     assert await scalar(sessionmaker, "SELECT count(*) FROM notes_metadata") == 0
     await index()
-    assert texts(await call("list_tasks")) == ["new"]
+    assert texts(await call("upstream_list_tasks")) == ["new"]
 
 
 async def test_an_edit_refresh_finishing_after_a_task_write_is_superseded(
@@ -422,7 +422,7 @@ async def test_an_edit_refresh_finishing_after_a_task_write_is_superseded(
     put(vault, "o.md", TASKS)
     await index()
     ids = {t: i for t, i in re.findall(r"— id (\S+).*text: (.+)$",
-                                       await call("list_tasks"), re.M)}
+                                       await call("upstream_list_tasks"), re.M)}
     ids = {v: k for k, v in ids.items()}
     real = task_index.refresh_note_tasks
     paused = asyncio.Event()
@@ -446,7 +446,7 @@ async def test_an_edit_refresh_finishing_after_a_task_write_is_superseded(
     release.set()
     assert code(await edit) is None
     assert (await usage(sessionmaker, "edit_note"))["task_refresh"] == "lagged:superseded"
-    assert texts(await call("list_tasks", status="done"))[0].startswith("Call bank")
+    assert texts(await call("upstream_list_tasks", status="done"))[0].startswith("Call bank")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -464,10 +464,10 @@ async def test_a_pass_that_scanned_before_the_edit_keeps_the_refresh(sessionmake
 
     # D7.1: the pass buffered the old bytes; the edit lands after its scan.
     await index(between=edit)
-    assert texts(await call("list_tasks")) == ["Call bank"]
+    assert texts(await call("upstream_list_tasks")) == ["Call bank"]
     await index()
     assert await converged(sessionmaker, vault, "c.md")
-    assert texts(await call("list_tasks")) == ["Call bank"]
+    assert texts(await call("upstream_list_tasks")) == ["Call bank"]
 
 
 async def test_a_pass_that_scanned_before_the_delete_keeps_the_clear(sessionmaker, vault):
@@ -480,7 +480,7 @@ async def test_a_pass_that_scanned_before_the_delete_keeps_the_clear(sessionmake
 
     # D7.9.
     await index(between=delete)
-    assert texts(await call("list_tasks")) == []
+    assert texts(await call("upstream_list_tasks")) == []
     await index()
     assert await scalar(
         sessionmaker, "SELECT count(*) FROM notes_metadata WHERE file_path = 'd.md'") == 0
@@ -527,9 +527,9 @@ async def test_another_users_note_at_the_same_path_is_untouched(sessionmaker, va
         out = await call("edit_note", path="Notes/a.md", find="- [ ] Buy milk",
                          content="- [x] Buy milk")
         assert code(out) is None, out
-        assert texts(await call("list_tasks")) == ["Call bank"]
+        assert texts(await call("upstream_list_tasks")) == ["Call bank"]
         assert code(await call("delete_note", path="Notes/a.md")) is None
-        assert texts(await call("list_tasks", status="all")) == []
+        assert texts(await call("upstream_list_tasks", status="all")) == []
     finally:
         for var, token in reversed(tokens):
             var.reset(token)
