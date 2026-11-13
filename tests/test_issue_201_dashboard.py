@@ -16,7 +16,7 @@ provider outage and a tenant repeatedly stopped at its per-pass embedding
 budget both surface here and nowhere else on this page.
 
 The predicate behind the new count is written **once**
-(`routes._vectors_not_current`) and called from the dashboard and from
+(`index_status.vectors_not_current`) and called from the dashboard and from
 `/settings/reset-embeddings/progress`, because a second copy is exactly how the
 page and the poller come to disagree about what "pending" means. The two
 callers differ in *scope* on purpose and in nothing else: the dashboard scopes
@@ -60,6 +60,7 @@ from starlette.templating import Jinja2Templates  # noqa: E402
 from src.control_panel import routes  # noqa: E402
 from src.control_panel.flash import FLASH_SESSION_KEY  # noqa: E402
 from src.models.db import NoteMetadata  # noqa: E402
+from src.services import index_status  # noqa: E402
 from src.services.index_state import (  # noqa: E402
     KEY_EMBEDDING_FINGERPRINT,
     embedding_fingerprint,
@@ -121,7 +122,7 @@ def _run(conn, stmt) -> int:
 
 def _pending_stmt(uid=None):
     """Exactly the query `dashboard()` builds."""
-    q = select(func.count(NoteMetadata.id)).where(routes._vectors_not_current())
+    q = select(func.count(NoteMetadata.id)).where(index_status.vectors_not_current())
     if uid is not None:
         q = q.where(NoteMetadata.user_id == uid)
     return q

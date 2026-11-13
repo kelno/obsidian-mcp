@@ -850,15 +850,15 @@ action is how an administrator says it was on purpose.
   coverage figure an operator has ever read on this page meant. So the page
   shows both, and `embedding_pct` / `notes_with_embeddings` are untouched.
 
-- **`_vectors_not_current()` is written once and called twice.** The predicate
+- **`vectors_not_current()` (`src/services/index_status.py`) is written once.** The predicate
   is `embedded_content_hash IS NULL OR embedded_content_hash IS DISTINCT FROM
   content_hash`. `IS DISTINCT FROM`, not `!=`: under `!=` a NULL
   `embedded_content_hash` yields NULL, a `WHERE` reads that as false, and every
   never-embedded note would count as *current* — the exact inversion of what
-  the count is for. Its two callers are `dashboard()` and
-  `/settings/reset-embeddings/progress`, and a second copy of the expression is
-  precisely how the page and the poller come to disagree about what "pending"
-  means.
+  the count is for. Its callers are `dashboard()`,
+  `/settings/reset-embeddings/progress` and the `index_status` MCP tool, and a
+  second copy of the expression is precisely how the page, the poller and the
+  tool come to disagree about what "pending" means.
 
 - **The two callers differ in scope, deliberately, and only in scope.**
   `dashboard()` scopes both new counts by `_scope_user_id(user)` exactly as the

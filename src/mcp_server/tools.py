@@ -4,7 +4,6 @@ import binascii
 import copy
 import enum
 import errno
-import fnmatch
 import inspect
 import json
 import logging
@@ -74,6 +73,7 @@ from src.services.usage_params import render_usage_params
 from src.services.usage_stats import OVER_QUOTA_PARAM
 from src import plugins as _plugins
 from src.services import ai_edit_stamp, page_text, private_folders, transfer, vault_fs
+from src.services import index_status as _index_status
 from src.services import open_note_url as _open_note_url
 from src.services.vault import (
     MAX_PATH_CHARS,
@@ -670,8 +670,7 @@ def _not_embedded_message(path: str, file_path: str, stale: bool) -> str:
     neighbours = (
         "For its neighbours, use get_links, get_backlinks or get_neighborhood."
     )
-    patterns = settings.embedding_exclude_patterns or []
-    if any(fnmatch.fnmatch(file_path, pat) for pat in patterns):
+    if _index_status.embedding_excluded(file_path):
         return (
             f"`{path}` is excluded from search by meaning by the server's "
             "settings (EMBEDDING_EXCLUDE_PATTERNS), so it has no embeddings and "
@@ -9914,4 +9913,125 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
         entries=entries or None, entries_truncated=entries_truncated or None,
         tasks=tasks or None, tasks_total=tasks_total if tasks_total > len(tasks) else None,
         instructions=list(OPEN_AREA_INSTRUCTIONS), notes=notes or None,
+    )
+
+
+# ── index_status ────────────────────────────────────────────────────────────
+
+from dataclasses import asdict as _asdict  # noqa: E402
+
+from src.mcp_server.index_status_result import (  # noqa: E402
+    Health as _ISHealth,
+    IndexStatusResult,
+    LedgerCounts as _ISLedgerCounts,
+    NoteCounts as _ISNoteCounts,
+    Progress as _ISProgress,
+)
+from src.services import indexer_health as _indexer_health  # noqa: E402
+
+
+def _index_status_refusal(message: str) -> IndexStatusResult:
+    return IndexStatusResult(error=message)
+
+
+def _duration_words(minutes: int) -> str:
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, rest = divmod(minutes, 60)
+    return f"{hours} h {rest} min" if rest else f"{hours} h"
+
+
+def _index_status_summary(vault: _ISNoteCounts, ledger_: _ISLedgerCounts, progress: _ISProgress) -> str:
+    never = vault.excluded + vault.no_text
+    parts = [f"{vault.notes:,} notes indexed: {vault.embedded:,} embedded, {vault.pending:,} pending"]
+    if never:
+        parts.append(f", {never:,} never embedded (excluded or empty)")
+    text_ = "".join(parts) + "."
+    if vault.pending:
+        if progress.paused:
+            text_ += " Indexing is paused."
+        elif progress.estimated_minutes_left is None:
+            text_ += " Nothing was embedded in the last hour."
+        else:
+            text_ += (f" {progress.embedded_last_hour:,} embedded in the last hour; about "
+                      f"{_duration_words(progress.estimated_minutes_left)} to go at that rate.")
+    else:
+        text_ += " Every note that can be embedded is up to date."
+    if ledger_.pending:
+        text_ += f" Agent ledger: {ledger_.pending:,} of {ledger_.entries:,} entries pending."
+    return text_
+
+
+def _index_status_notes(vault: _ISNoteCounts, progress: _ISProgress, health: _ISHealth) -> list[str]:
+    notes: list[str] = []
+    if progress.paused:
+        notes.append("Indexing is paused from the control panel: nothing is indexed or embedded until someone with "
+                     "access to the panel resumes it. Tell the owner.")
+    if not health.task_running and health.status != "disabled":
+        notes.append("The indexer's background task is not running: nothing is indexed or embedded until the "
+                     "server restarts. Tell the owner.")
+    if health.embedding_failing:
+        notes.append("The embedding server has failed repeatedly (for this vault or another on this server): "
+                     "it may be down. Tell the owner.")
+    elif vault.pending and progress.estimated_minutes_left is None and not progress.paused:
+        notes.append("Notes are pending but none was embedded in the last hour: the embedding server may be down "
+                     "or very slow, or the embedding stage has not run yet. Call again in a few minutes; if it "
+                     "still doesn't move, tell the owner.")
+    if health.embedding_stalled:
+        notes.append("No embedding stage has finished for a long time (embedding_stalled). Tell the owner.")
+    if health.index_stalled:
+        notes.append("No indexing stage has finished for a long time (index_stalled): new and edited notes are "
+                     "not picked up. Tell the owner.")
+    if health.quarantined_notes:
+        notes.append(f"{health.quarantined_notes} note(s) are left out of the index because the database refused "
+                     "them; the control panel's health page names them (an administrator's view).")
+    if vault.pending:
+        notes.append("Pending notes are found by keyword_search and read_note as usual; only semantic_search and "
+                     "find_related miss them, or match them on what they said before their last change.")
+    return notes
+
+
+@_tracked("index_status", ["folder"], refusal_result=_index_status_refusal)
+async def index_status_impl(folder: str | None = None) -> IndexStatusResult:
+    from src.services import indexer as _indexer
+
+    uid = current_user_id.get()
+    prefix = (folder or "").strip().strip("/")
+    async with async_session() as session:
+        vault = await _index_status.note_counts(session, uid)
+        under = await _index_status.note_counts(session, uid, folder=prefix + "/") if prefix else None
+        private = (await _index_status.note_counts(session, uid, private_only=True)
+                   if private_folders.enabled() and not prefix else None)
+        ledger_ = await _index_status.ledger_counts(session, uid)
+        activity = await _index_status.embed_activity(session, uid)
+        await session.rollback()
+
+    progress = _ISProgress(
+        embedded_last_hour=activity.embedded_last_hour,
+        estimated_minutes_left=_index_status.minutes_left(vault.pending, activity.embedded_last_hour),
+        last_embedded_at=activity.last_embedded_at.isoformat() if activity.last_embedded_at else None,
+        embedding_now=_indexer.embed_pass_lock.locked(),
+        paused=_indexer._is_paused(),
+        embed_interval_seconds=int(settings.embed_interval_seconds),
+    )
+    snap = _indexer_health.snapshot()
+    health = _ISHealth(
+        status=snap["status"], task_running=snap["task_running"],
+        embedding_failing=snap["embedding_failing_scopes"] > 0, embedding_stalled=snap["embedding_stalled"],
+        index_stalled=snap["index_stalled"], quarantined_notes=snap["quarantined_notes"],
+    )
+    vault_counts = _ISNoteCounts(**_asdict(vault))
+    ledger_counts = _ISLedgerCounts(**_asdict(ledger_))
+    notes = _index_status_notes(vault_counts, progress, health)
+    if under is not None and under.notes == 0:
+        notes.insert(0, f"No indexed note under {prefix}/: check the folder's path (vault-relative, as list_notes "
+                        "shows it).")
+    return IndexStatusResult(
+        summary=_index_status_summary(vault_counts, ledger_counts, progress),
+        vault=vault_counts,
+        folder=prefix + "/" if prefix else None,
+        folder_counts=_ISNoteCounts(**_asdict(under)) if under is not None else None,
+        private_folders=_ISNoteCounts(**_asdict(private)) if private is not None else None,
+        ledger=ledger_counts, progress=progress, health=health, notes=notes or None,
+        checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
     )

@@ -58,7 +58,7 @@ from src.oauth.scope import (
     has_vault_scope,
     token_has_write,
 )
-from src.services import ledger_embed, panel_csp, security_events, vault_overlap
+from src.services import index_status, ledger_embed, panel_csp, security_events, vault_overlap
 from src.services.index_state import (
     KEY_EMBEDDING_FINGERPRINT,
     acquire_generation_lock_unbounded,
@@ -773,42 +773,6 @@ async def change_password(
 # --- Dashboard ------------------------------------------------------------
 
 
-def _vectors_not_current():
-    """The one expression for "this note's stored vectors are not current".
-
-    ``embedded_content_hash IS NULL OR embedded_content_hash IS DISTINCT FROM
-    content_hash`` — a note never embedded, a note whose certification was
-    invalidated (a move, a grammar bump), or a note edited since it was last
-    embedded.
-
-    **`IS DISTINCT FROM`, not `!=`.** A NULL `embedded_content_hash` under `!=`
-    yields NULL, which a `WHERE` reads as false, so every never-embedded note
-    would silently count as current — the exact inversion of what the count is
-    for. The explicit `IS NULL` arm is kept beside it because it is the arm a
-    reader checks first, and the two together say the predicate out loud.
-
-    It lives in one place because two call sites consume it and they answer to
-    different audiences:
-
-    * `dashboard()` — **scoped** by `_scope_user_id(user)`, exactly as the
-      coverage numbers beside it are, so a non-admin never reads another
-      tenant's backlog as their own;
-    * `reset_progress()` — **unscoped and admin-only**, because it is the
-      poller behind a whole-database reset.
-
-    Those two scopes are deliberate and different; the *definition of pending*
-    must not be. A second copy of this predicate is how the page and the poller
-    come to disagree about what "pending" means, which is the failure this
-    helper exists to make impossible (design D8).
-    """
-    return or_(
-        NoteMetadata.embedded_content_hash.is_(None),
-        NoteMetadata.embedded_content_hash.is_distinct_from(
-            NoteMetadata.content_hash
-        ),
-    )
-
-
 async def _graph_stats(session: AsyncSession, user_id: int | None) -> dict:
     """Return totals + top hub notes for the dashboard's Graph widget.
 
@@ -962,7 +926,7 @@ async def dashboard(
     # embedding is repeatedly stopped at its per-pass budget, which is
     # deliberately not recorded as a pass failure. A backlog that does not
     # shrink across passes is the signal.
-    pending_q = select(func.count(NoteMetadata.id)).where(_vectors_not_current())
+    pending_q = select(func.count(NoteMetadata.id)).where(index_status.vectors_not_current())
     truncated_q = select(func.count(NoteMetadata.id)).where(
         NoteMetadata.chunks_truncated.is_(True)
     )
@@ -3146,7 +3110,7 @@ async def reset_progress(
     whole-database reset, so "how much is left" is a question about the whole
     table; the dashboard's counterpart is scoped to the viewer instead. The two
     scopes differ on purpose — the *definition* of pending must not, so the
-    predicate comes from `_vectors_not_current()` and is written down once.
+    predicate comes from `index_status.vectors_not_current()` and is written down once.
 
     The response keys and their values are unchanged. `pending` is now counted
     directly rather than derived, and `embedded` derived from it rather than
@@ -3158,7 +3122,7 @@ async def reset_progress(
     """
     total = (await session.execute(select(func.count(NoteMetadata.id)))).scalar() or 0
     pending = (await session.execute(
-        select(func.count(NoteMetadata.id)).where(_vectors_not_current())
+        select(func.count(NoteMetadata.id)).where(index_status.vectors_not_current())
     )).scalar() or 0
     pending = max(0, min(int(total), int(pending)))
     embedded = max(0, int(total) - pending)

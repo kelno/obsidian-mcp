@@ -4,7 +4,6 @@ import ctypes
 import dataclasses
 import enum
 import errno
-import fnmatch
 import hashlib
 import json
 import logging
@@ -55,7 +54,7 @@ from src.services.embeddings import (
     embed_note,
 )
 from src.services.fts import index_tsvector_sql
-from src.services import empty_prune, indexer_health, ledger_embed, refusals
+from src.services import empty_prune, index_status, indexer_health, ledger_embed, refusals
 from src.services.rate_limits import flush_expired
 from src.services.index_state import (
     KEY_EMBEDDING_FINGERPRINT,
@@ -5569,7 +5568,7 @@ async def _embed_vault_pinned(
                 # embeddings (in case the file was indexed before exclusion was
                 # configured) and stamp embedded_content_hash so the indexer
                 # doesn't keep re-checking it.
-                if any(fnmatch.fnmatch(row.file_path, pat) for pat in exclude_patterns):
+                if index_status.embedding_excluded(row.file_path, exclude_patterns):
                     # **Certified exactly like the embedding path, and for the
                     # same reason.** This branch used to stamp by `id` alone,
                     # which made it the one way to mark a row embedded without
@@ -6006,9 +6005,7 @@ async def _reconcile_exclusions(
             clean = False
             break
 
-        excluded = any(
-            fnmatch.fnmatch(row.file_path, pat) for pat in exclude_patterns
-        )
+        excluded = index_status.embedding_excluded(row.file_path, exclude_patterns)
         # Agreement, in both directions: excluded with no vectors, or included
         # with vectors. Nothing to decide and nothing written — which is the
         # overwhelmingly common case, so it is the cheap one.

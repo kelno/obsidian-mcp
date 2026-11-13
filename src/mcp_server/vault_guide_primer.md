@@ -211,6 +211,10 @@ A folder note (`<folder>/<folder>.md`) can declare how its notes are named, in i
 
 Tools that name a note carry a ready-made http(s) link that opens it in the Obsidian app (`open_url`; `main_note_open_url` in `open_area`), when the server sets `OPEN_NOTE_URL`. When you point the owner to a note in a reply, give that link as is: it's clickable where `obsidian://` isn't.
 
+## Index and embedding state (this server)
+
+The server indexes notes on its own, a few minutes behind the disk, and embeds them (for `semantic_search` and `find_related`) after that, which can take hours after many notes change. When the owner asks how far that has got, or search by meaning seems to miss recent changes, call `index_status`: how many notes are embedded and pending, the estimated time left, and whether something needs the owner's attention.
+
 ## Plugin syntax (Dataview, Templater, etc.)
 
 Notes may contain plugin syntax that looks executable:

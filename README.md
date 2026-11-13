@@ -235,7 +235,7 @@ looks the way it does.
 
 ## What's in the box
 
-The server exposes 40 MCP tools, plus the auth
+The server exposes 42 MCP tools, plus the auth
 and ops layer around them.
 
 ### Search and discovery
@@ -251,6 +251,12 @@ and ops layer around them.
 - `get_tags(limit=50)`, tag and count
 - `get_vault_guide()`, the Obsidian primer plus this vault's
   `CLAUDE.md`, served live
+- `index_status(folder?)`, how far indexing and embedding have got for
+  the caller's vault: notes embedded, pending (never embedded or changed
+  since), excluded or empty; the same for a folder and for private
+  folders; agent-ledger entries still to embed; notes embedded in the
+  last hour and the estimated time left; the indexer's health. Counts
+  only, never paths
 
 ### Read and write
 - `read_note(path, section?, offset=0, limit?)` returns a **structured

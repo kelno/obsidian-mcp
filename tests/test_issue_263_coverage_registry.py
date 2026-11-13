@@ -49,6 +49,7 @@ COVERAGE = {
     'ledger_digest_edit': [('refused', 'integration/test_ledger_pg.py::test_views_cite_entries_and_are_flagged_when_one_changes'), ('success', 'integration/test_ledger_pg.py::test_views_cite_entries_and_are_flagged_when_one_changes')],
     'ledger_topics': [('success', 'integration/test_ledger_pg.py::test_topics_create_merge_and_count')],
     'open_area': [('refused', 'integration/test_ledger_pg.py::test_open_area_refuses_both_or_neither_and_an_unknown_area'), ('success', 'integration/test_ledger_pg.py::test_open_area_gathers_the_note_folders_entries_and_tasks')],
+    'index_status': [('success', 'integration/test_index_status_pg.py::test_counts_every_state_and_the_rate'), ('success', 'test_index_status.py::test_summary_and_notes_follow_the_state')],
     'ledger_topic_edit': [('refused', 'test_ledger_tools.py::test_writes_refuse_a_read_only_credential'), ('success', 'integration/test_ledger_pg.py::test_topics_create_merge_and_count')],
 }
 
@@ -57,7 +58,7 @@ def test_every_registered_tool_has_inventory_and_live_behavioral_references():
     from src.mcp_server.server import mcp
     registered = {tool.name for tool in mcp._tool_manager.list_tools()}
     assert set(COVERAGE) == registered
-    assert len(registered) == 41
+    assert len(registered) == 42
     root = Path(__file__).resolve().parents[1]
     inventory = (root / 'openspec/changes/archive/2026-09-06-typed-tool-outcomes/inventory.md').read_text()
     for tool, references in COVERAGE.items():

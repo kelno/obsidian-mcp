@@ -71,7 +71,12 @@ See [agent ledger](agent-ledger.md).
 
 `open_area` (fork) is class `scan`: it reads every task line carrying the
 area's tag and the area's ledger entries. Adding it moved `TOOL_CLASSES`, so
-`CLASS_MAPPING_VERSION` is 5. See [open_area](open-area.md).
+`CLASS_MAPPING_VERSION` was 5. See [open_area](open-area.md).
+
+`index_status` (fork) is class `scan`: it counts every note row of the
+caller's vault, several times. Adding it moved `TOOL_CLASSES`, so
+`CLASS_MAPPING_VERSION` is 6. See [indexing and embeddings](indexing-and-embeddings.md),
+"Reporting progress to agents".
 
 ## The principal is the grant, not the token, and not (client, user)
 

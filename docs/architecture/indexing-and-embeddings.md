@@ -2489,3 +2489,14 @@ and (span-diff-scoped, direction-aware) its embeddings, under the restored
 grammar, without touching `content_hash`. Comparing legacy-to-legacy instead —
 which is what a registry without the frozen v1 entry would do — would certify
 the stale vectors for ever.
+
+
+## Reporting progress to agents (fork, 2026-11-13)
+
+`index_status` is the agent's view of what the dashboard and `/health` show an operator: the owner asks agents how far an embedding run has got (a newly embedded folder, a model change), and no tool could say. It lives in the core because any vault has the question. Its counts come from `src/services/index_status.py`:
+
+- **Note states.** Every note row is in exactly one of four: *embedded* (current, has vectors), *pending* (`vectors_not_current()`, the dashboard's predicate, now defined there and imported by the panel), *excluded* and *no text* (current with no vectors: the embed stage certifies both that way). The two last are told apart by the embed stage's own pattern test, `embedding_excluded()`, which the stage and `find_related`'s message now call too. `beginning_only` is the embedded notes with `chunks_truncated`. A note edited since the index stage's last scan is not pending yet: the counts are what the index has committed.
+- **Rate and estimate.** `embedded_last_hour` sums `indexer_runs.notes_embedded` over the caller's runs that *finished* in the last hour (`RATE_WINDOW`), so a stage that started earlier counts whole: a rough rate, which the estimate (`pending ÷ rate`, at least one minute while anything is pending) inherits. No rate, no estimate, and a note saying so. The run history is pruned to 500 rows, far more than an hour.
+- **The ledger** counts entries whose `embedded_hash` differs from `content_hash`, the sweep's own selection; the estimate leaves them out (the sweep embeds them after the notes, a few at most).
+- **Health** is `indexer_health.snapshot()`, which is server-wide (the same object `/health` publishes unauthenticated), so `embedding_failing` can be another tenant's provider trouble; the note says so. `embedding_now` is `embed_pass_lock.locked()`, also held by a panel reset and the search pre-warm.
+- **Scope and privacy.** Every count is scoped to the caller's owner slice (`apply_note_filters`' total mapping, `owner_key` for the ledger, `user_id` for runs). The result carries counts only, never paths, so private folders get their own counts (`private_folders`) without `include_private`.

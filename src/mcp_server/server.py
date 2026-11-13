@@ -11,6 +11,7 @@ from pydantic import ConfigDict, Field, create_model, model_validator
 from src import plugins as _plugins
 from src.config import settings
 from src.mcp_server.area_result import OpenAreaResult
+from src.mcp_server.index_status_result import IndexStatusResult
 from src.mcp_server.fetch_result import FetchPageResult
 from src.mcp_server.ledger_result import (
     LedgerDigestEditResult,
@@ -44,6 +45,7 @@ from src.mcp_server.tools import (
     get_tags_impl,
     get_vault_guide_impl,
     import_from_url_impl,
+    index_status_impl,
     ledger_add_impl,
     ledger_digest_edit_impl,
     ledger_digest_impl,
@@ -1857,6 +1859,42 @@ async def open_area(
     pointing the owner to the main note.
     """
     return await open_area_impl(area=area, folder=folder)
+
+
+# ── index_status ────────────────────────────────────────────────────────────
+
+_IS_FOLDER = Field(description="Optional: a vault-relative folder (\"Projects/Garden\"). Adds `folder_counts`, the "
+                               "same counts as `vault` for the notes under it (the progress and the estimate "
+                               "stay vault-wide).")
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+async def index_status(
+    folder: Annotated[str | None, _IS_FOLDER] = None,
+) -> IndexStatusResult:
+    """How far indexing and embedding have got: notes embedded, pending, time left.
+
+    Read-only. Call it when the owner asks whether the index or the
+    embeddings are up to date, how far an embedding run has got, or when
+    search by meaning seems to miss recent changes. Counts only, never note
+    paths.
+
+    `summary` says it in a sentence or two, ready to repeat. Then:
+    `vault`, the notes by state: `embedded`, `pending` (never embedded, or
+    changed since), and the two that will never be embedded, `excluded` (by
+    the server's settings) and `no_text`; `private_folders`, the same counts
+    for the part of `vault` in private folders, present only when the server
+    has private folders; `ledger`, agent-ledger entries still to embed;
+    `progress`, the notes embedded in the last hour, `estimated_minutes_left`
+    for all of the vault's pending notes at that rate (there is no estimate
+    per folder), and whether embedding is running now or paused; `health`,
+    the indexer's state; `notes`, what needs attention and when to tell the
+    owner; `checked_at`, the server's time (UTC) to compare
+    `last_embedded_at` with. A note edited moments ago counts as pending only
+    once the indexer's next scan (every few minutes) has seen the change; for
+    one note, `find_related(path)` says whether it has been embedded yet.
+    """
+    return await index_status_impl(folder=folder)
 
 
 # ── Agent ledger (fork) ─────────────────────────────────────────────────────

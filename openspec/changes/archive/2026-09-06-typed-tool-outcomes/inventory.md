@@ -355,6 +355,9 @@ Each entry identifies every direct return branch. PROPAGATE means classify at th
 - **REFUSE invalid_argument** (neither or both of `area` and `folder`), **not_found** (an unknown area; a folder when the list of areas cannot be read).
 - **SUCCESS — no outcome marker**: the area with its main note, folders, entries and tasks; `found: false` for a folder no area lists. A part that cannot be read is a note, never a refusal.
 
+### index_status_impl — src/mcp_server/tools.py (index_status, fork)
+- **SUCCESS — no outcome marker** only: counts, progress, health and notes. A folder with no indexed note is a note, not a refusal.
+
 ## Shared/nested helper inventory
 
 ### _confirmed_publication — tools.py:706

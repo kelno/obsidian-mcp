@@ -415,13 +415,15 @@ update it in the same change.** What stays here is the short list:
 
 ## MCP tools
 
-40 tools, all registered in `src/mcp_server/server.py` and all wrapped by
+42 tools, all registered in `src/mcp_server/server.py` and all wrapped by
 `_tracked`, which resolves the caller's vault root *before* the tool body runs
 — that decorator is the whole enforcement of "this user has no vault"
 ([vault roots and tenancy](docs/architecture/vault-roots-and-tenancy.md)).
 
 **Search and read** — `keyword_search`, `semantic_search`, `read_note`,
 `list_notes`, `get_tags`, `get_recent`, `get_vault_guide`.
+
+**`index_status`** — how far indexing and embedding have got for the caller's vault (embedded, pending, excluded, no text; a folder, private folders, the ledger; the last hour's rate and time left; the indexer's health), counted by `src/services/index_status.py`, which also holds the one definition of "pending" the panel uses. Class `scan`. See [indexing and embeddings](docs/architecture/indexing-and-embeddings.md), "Reporting progress to agents".
 
 **Graph**
 - `get_backlinks(path, limit)` — notes that link TO `path` (resolved links only).
@@ -495,7 +497,7 @@ summaries.
 | [vault-tools.md](docs/architecture/vault-tools.md) | any note or file tool: frontmatter, symlinks, anchored writes, section addressing, size caps |
 | [file-transfer.md](docs/architecture/file-transfer.md) | `src/transfer/`, `src/services/vault_fs.py`, the publish gate, SSRF policy, the write-bucket charge at redemption |
 | [search.md](docs/architecture/search.md) | `semantic_search` / `keyword_search` / `find_related` and every `SET LOCAL` they issue |
-| [indexing-and-embeddings.md](docs/architecture/indexing-and-embeddings.md) | the indexer loop, the embed pass, tsvector writers, provider abstraction |
+| [indexing-and-embeddings.md](docs/architecture/indexing-and-embeddings.md) | the indexer loop, the embed pass, tsvector writers, provider abstraction, `index_status` |
 | [security-event-logging.md](docs/architecture/security-event-logging.md) | `src/logging_setup.py`, `src/services/security_events.py`, and any call site that logs a refusal: the field allow-list, the event catalogue, the suppressor |
 | [rate-limits.md](docs/architecture/rate-limits.md) | `src/services/rate_limits.py`, `src/services/concurrency.py`, `src/services/pool_budget.py`, `src/services/concurrency_counters.py`, `src/services/concurrency_readiness.py`, `src/services/refusals.py`, the pool subclass in `src/database.py`, the failed-auth budget in `APIKeyMiddleware`, the gate order in `_tracked`, the worker count, the key-creation budget and active-key cap (`src/services/api_keys.py`), and every `MCP_RATE_LIMIT_*` / `MCP_AUTH_FAILURE_*` / `MCP_CONCURRENCY_*` / `KEY_CREATION_*` / `KEY_MAX_ACTIVE_PER_ACCOUNT` / `DEFAULT_DAILY_REQUEST_LIMIT` setting |
 | [usage-attribution.md](docs/architecture/usage-attribution.md) | `usage_logs`, `_log_usage`, actor columns |

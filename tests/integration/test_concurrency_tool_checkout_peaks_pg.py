@@ -233,6 +233,7 @@ CALLS = [
     # the line it wrote, whose bytes (and so whose hash) are known up front.
     ('list_tasks', 'list_tasks_impl', lambda s: ((), {})),
     ('open_area', 'open_area_impl', lambda s: ((), {'area': 'nowhere'})),
+    ('index_status', 'index_status_impl', lambda s: ((), {})),
     ('create_task', 'create_task_impl', lambda s: (('peaks task',), {})),
     ('edit_task', 'edit_task_impl',
      lambda s: (('Tasks inbox.md', 1, '- [ ] peaks task', _hash('- [ ] peaks task\n')),
