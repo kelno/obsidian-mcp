@@ -12,6 +12,7 @@ import asyncio
 import sys
 import contextlib
 import json
+from datetime import timedelta
 import logging
 
 import httpx
@@ -147,6 +148,8 @@ EXPECTED_KEYS = {
     "seconds_since_progress",
     "embedding_stalled",
     "seconds_since_embedding_progress",
+    "embedding_stuck_scopes",
+    "seconds_embedding_stuck",
 }
 
 
@@ -191,6 +194,80 @@ def test_degraded_by_embedding_failures(threshold):
     assert (code, body["status"]) == (200, "degraded")
     assert body["indexer"]["embedding_failing_scopes"] == 1
     assert body["indexer"]["failing_scopes"] == 0
+
+
+def test_degraded_by_embedding_without_progress(threshold, monkeypatch):
+    """Owner's report, 2026-11-13: notes stayed pending, nothing was embedded,
+    no failure was counted, and `/health` said ok. Stages that end with notes
+    pending and none embedded are no progress, whatever the cause."""
+    monkeypatch.setattr(indexer_health.settings, "embed_stuck_after_seconds", 900)
+    start = indexer_health._now()
+    clock = [start]
+    monkeypatch.setattr(indexer_health, "_now", lambda: clock[0])
+    indexer_health.record_embed(None, 0)  # a clean stage: no failure counted
+    indexer_health.record_embed_progress(None, 0, 2)
+    clock[0] = start + timedelta(seconds=899)
+    indexer_health.record_embed_progress(None, 0, 2)  # the clock keeps its start
+    code, body, _ = _health()
+    assert (code, body["status"]) == (200, "ok")
+    assert body["indexer"]["seconds_embedding_stuck"] == 899
+
+    clock[0] = start + timedelta(seconds=900)
+    code, body, _ = _health()
+    assert (code, body["status"]) == (200, "degraded")
+    assert body["indexer"]["embedding_stuck_scopes"] == 1
+    assert body["indexer"]["embedding_failing_scopes"] == 0
+
+    # One note embedded is progress: ok at once.
+    indexer_health.record_embed_progress(None, 1, 2)
+    code, body, _ = _health()
+    assert (code, body["status"]) == (200, "ok")
+    assert body["indexer"]["seconds_embedding_stuck"] == 0
+
+
+def test_embedding_without_progress_rules(monkeypatch):
+    monkeypatch.setattr(indexer_health.settings, "embed_stuck_after_seconds", 60)
+    start = indexer_health._now()
+    clock = [start]
+    monkeypatch.setattr(indexer_health, "_now", lambda: clock[0])
+    later = start + timedelta(seconds=61)
+
+    # Nothing pending is progress, even with nothing embedded.
+    indexer_health.record_embed_progress(None, 0, 2)
+    indexer_health.record_embed_progress(None, 0, 0)
+    clock[0] = later
+    assert indexer_health.snapshot()["embedding_stuck_scopes"] == 0
+
+    # A raised stage (backlog unknown) is not.
+    clock[0] = start
+    indexer_health.record_embed_progress(None, 0, None)
+    clock[0] = later
+    assert indexer_health.snapshot()["embedding_stuck_scopes"] == 1
+
+    # A paused tick clears the clock: the pause is reported on its own.
+    indexer_health.record_embed_paused()
+    assert indexer_health.snapshot()["embedding_stuck_scopes"] == 0
+
+    # 0 disables the check.
+    clock[0] = start
+    indexer_health.record_embed_progress(None, 0, 3)
+    clock[0] = later
+    monkeypatch.setattr(indexer_health.settings, "embed_stuck_after_seconds", 0)
+    assert indexer_health.snapshot()["embedding_stuck_scopes"] == 0
+
+
+def test_embedding_without_progress_logs_critical_once(monkeypatch, caplog):
+    monkeypatch.setattr(indexer_health.settings, "embed_stuck_after_seconds", 60)
+    start = indexer_health._now()
+    clock = [start]
+    monkeypatch.setattr(indexer_health, "_now", lambda: clock[0])
+    indexer_health.record_embed_progress(5, 0, 1)
+    clock[0] = start + timedelta(seconds=120)
+    with caplog.at_level(logging.CRITICAL, logger="src.services.indexer_health"):
+        indexer_health.snapshot()
+        indexer_health.snapshot()
+    lines = [r for r in caplog.records if "no progress" in r.getMessage()]
+    assert len(lines) == 1 and "user_id=5" in lines[0].getMessage()
 
 
 def test_degraded_by_dead_task():

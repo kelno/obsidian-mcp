@@ -901,11 +901,14 @@ async def health():
     (`ok` | `degraded` | `disabled`), `task_running`, `failing_scopes`,
     `embedding_failing_scopes`, `max_consecutive_failures`,
     `quarantined_notes`, `last_success_at`, `index_stalled`,
-    `seconds_since_progress`, `embedding_stalled` and
-    `seconds_since_embedding_progress`. When it is `degraded` — the indexer task is
+    `seconds_since_progress`, `embedding_stalled`,
+    `seconds_since_embedding_progress`, `embedding_stuck_scopes` and
+    `seconds_embedding_stuck`. When it is `degraded` — the indexer task is
     dead, any index / embedding / incomplete-re-derive / enumeration counter
-    has reached `INDEXER_DEGRADED_AFTER_FAILURES`, a note is quarantined, or
-    no index stage or tick has finished for `INDEXER_STALLED_AFTER_SECONDS` —
+    has reached `INDEXER_DEGRADED_AFTER_FAILURES`, a note is quarantined,
+    no index stage or tick has finished for `INDEXER_STALLED_AFTER_SECONDS`,
+    or a scope's embed stages have ended with notes pending and none
+    embedded for `EMBED_STUCK_AFTER_SECONDS` —
     the top-level `status` is `degraded` too.
     `disabled` (`MCP_SANDBOX_MODE`) does not by itself degrade the top level.
 

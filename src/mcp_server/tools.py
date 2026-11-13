@@ -9523,7 +9523,8 @@ def _duration_words(minutes: int) -> str:
     return f"{hours} h {rest} min" if rest else f"{hours} h"
 
 
-def _index_status_summary(vault: _ISNoteCounts, ledger_: _ISLedgerCounts, progress: _ISProgress) -> str:
+def _index_status_summary(vault: _ISNoteCounts, ledger_: _ISLedgerCounts, progress: _ISProgress,
+                          health: _ISHealth | None = None) -> str:
     never = vault.excluded + vault.no_text
     parts = [f"{vault.notes:,} notes indexed: {vault.embedded:,} embedded, {vault.pending:,} pending"]
     if never:
@@ -9541,10 +9542,13 @@ def _index_status_summary(vault: _ISNoteCounts, ledger_: _ISLedgerCounts, progre
         text_ += " Every note that can be embedded is up to date."
     if ledger_.pending:
         text_ += f" Agent ledger: {ledger_.pending:,} of {ledger_.entries:,} entries pending."
+    if health is not None and (health.embedding_failing or health.embedding_stuck):
+        text_ += " Embedding is failing: tell the owner."
     return text_
 
 
-def _index_status_notes(vault: _ISNoteCounts, progress: _ISProgress, health: _ISHealth) -> list[str]:
+def _index_status_notes(vault: _ISNoteCounts, progress: _ISProgress, health: _ISHealth,
+                        stuck_minutes: int = 0) -> list[str]:
     notes: list[str] = []
     if progress.paused:
         notes.append("Indexing is paused from the control panel: nothing is indexed or embedded until someone with "
@@ -9553,9 +9557,14 @@ def _index_status_notes(vault: _ISNoteCounts, progress: _ISProgress, health: _IS
         notes.append("The indexer's background task is not running: nothing is indexed or embedded until the "
                      "server restarts. Tell the owner.")
     if health.embedding_failing:
-        notes.append("The embedding server has failed repeatedly (for this vault or another on this server): "
-                     "it may be down. Tell the owner.")
-    elif vault.pending and progress.estimated_minutes_left is None and not progress.paused:
+        notes.append("Embedding is failing: the embedding server has failed repeatedly (for this vault or another "
+                     "on this server), so it may be down. Tell the owner.")
+    if health.embedding_stuck:
+        notes.append(f"Embedding is failing: notes have been pending for {_duration_words(max(1, stuck_minutes))} "
+                     "and no embedding stage has embedded one (for this vault or another on this server). "
+                     "Tell the owner.")
+    if (not health.embedding_failing and not health.embedding_stuck and vault.pending
+            and progress.estimated_minutes_left is None and not progress.paused):
         notes.append("Notes are pending but none was embedded in the last hour: the embedding server may be down "
                      "or very slow, or the embedding stage has not run yet. Call again in a few minutes; if it "
                      "still doesn't move, tell the owner.")
@@ -9601,15 +9610,16 @@ async def index_status_impl(folder: str | None = None) -> IndexStatusResult:
         status=snap["status"], task_running=snap["task_running"],
         embedding_failing=snap["embedding_failing_scopes"] > 0, embedding_stalled=snap["embedding_stalled"],
         index_stalled=snap["index_stalled"], quarantined_notes=snap["quarantined_notes"],
+        embedding_stuck=snap["embedding_stuck_scopes"] > 0,
     )
     vault_counts = _ISNoteCounts(**_asdict(vault))
     ledger_counts = _ISLedgerCounts(**_asdict(ledger_))
-    notes = _index_status_notes(vault_counts, progress, health)
+    notes = _index_status_notes(vault_counts, progress, health, snap["seconds_embedding_stuck"] // 60)
     if under is not None and under.notes == 0:
         notes.insert(0, f"No indexed note under {prefix}/: check the folder's path (vault-relative, as list_notes "
                         "shows it).")
     return IndexStatusResult(
-        summary=_index_status_summary(vault_counts, ledger_counts, progress),
+        summary=_index_status_summary(vault_counts, ledger_counts, progress, health),
         vault=vault_counts,
         folder=prefix + "/" if prefix else None,
         folder_counts=_ISNoteCounts(**_asdict(under)) if under is not None else None,

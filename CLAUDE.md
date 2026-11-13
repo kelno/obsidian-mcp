@@ -334,8 +334,11 @@ update it in the same change.** What stays here is the short list:
   failures and incomplete re-derives, a tick-level enumeration counter and
   "task not running", updated from **every** entrypoint (startup, periodic in
   both modes, panel Reindex). Any counter at `INDEXER_DEGRADED_AFTER_FAILURES`
-  (3), a dead task, a quarantined note or a stalled loop (no index stage or
-  tick finished for `INDEXER_STALLED_AFTER_SECONDS`, 1800, fork) makes
+  (3), a dead task, a quarantined note, a stalled loop (no index stage or
+  tick finished for `INDEXER_STALLED_AFTER_SECONDS`, 1800, fork) or embedding
+  without progress (a scope's embed stages ending with notes pending and none
+  embedded for `EMBED_STUCK_AFTER_SECONDS`, 900, whatever the cause; fork,
+  2026-11-13) makes
   `/health` `status: "degraded"` — counts only, no path/error/user id — and
   logs one CRITICAL, re-armed on reset. Never turn it into a non-200: `/health` is the liveness probe, and a
   restart cannot fix vault content. In single-user mode an index failure no

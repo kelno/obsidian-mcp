@@ -228,6 +228,9 @@ class EmbedPassResult:
     #: non-zero streak does not re-tick promptly: the provider was failing
     #: when the clock ran out.
     provider_failure_streak: int = 0
+    #: Notes pending (vectors missing or not current) when the stage began,
+    #: for `indexer_health.record_embed_progress`; `None` when unknown.
+    pending_at_start: int | None = None
 
     def record_attempt(self) -> None:
         """One note issued a provider call. The only writer of `attempted`."""
@@ -5479,7 +5482,19 @@ async def _embed_vault_pinned(
         # certification the lock will refuse. It records nothing: a skipped
         # stage did no work and had no failure.
         if not await _embedding_generation_current(session, log_suffix):
-            return EmbedPassResult()
+            # Nothing attempted, but the pending notes still count against
+            # the stage's progress (`indexer_health.record_embed_progress`):
+            # a configuration that skips every stage leaves them pending.
+            pending = (await session.execute(
+                select(func.count(NoteMetadata.id)).where(
+                    NoteMetadata.user_id.is_(None)
+                    if user_id is None
+                    else NoteMetadata.user_id == user_id,
+                    index_status.vectors_not_current(),
+                )
+            )).scalar()
+            await session.rollback()
+            return EmbedPassResult(pending_at_start=int(pending or 0))
 
         # Find notes without embeddings or with stale embeddings, scoped
         # to this user when set. We bind the user_id parameter even in
@@ -5531,7 +5546,7 @@ async def _embed_vault_pinned(
         # lands, so a note whose certification was rolled back is not reported
         # as embedded. `attempted` starts at zero and rises with each provider
         # call — never from `len(unembedded)`, which counts work contemplated.
-        outcome = EmbedPassResult()
+        outcome = EmbedPassResult(pending_at_start=len(unembedded))
         # One accountant for this user's whole embed stage — the backlog loop
         # below and the reconciliation sweep after it — so the attempt and the
         # chunk debit are recorded where the provider call is *issued* rather
@@ -7883,10 +7898,19 @@ def record_embed_outcome(
     """Record one embed stage's outcome for `indexer_health` (#308, D4).
 
     A stage that raised counts as one failed embed pass; one that returned
-    counts its `EmbedPassResult.failures`. A stage that stopped at its budget
+    counts its `EmbedPassResult.failures`. Either also feeds the scope's
+    progress clock (`indexer_health.record_embed_progress`): a raised stage
+    as no progress, a returned one by what it embedded against what was
+    pending when it began. A stage that stopped at its budget
     is noted for the loop's re-tick decision.
     """
     indexer_health.record_embed(user_id, 1 if raised else _embed_failures(result))
+    if raised:
+        indexer_health.record_embed_progress(user_id, 0, None)
+    elif isinstance(result, EmbedPassResult):
+        indexer_health.record_embed_progress(
+            user_id, result.embedded, result.pending_at_start
+        )
     if (
         isinstance(result, EmbedPassResult)
         and result.stopped is EmbedStop.BUDGET
@@ -8400,6 +8424,7 @@ async def run_embed_loop() -> None:
         this_trigger, trigger = trigger, "scheduled"
         if _is_paused():
             logger.info("Embedding tick skipped (paused)")
+            indexer_health.record_embed_paused()
             continue
         try:
             if settings.multi_user_mode:
