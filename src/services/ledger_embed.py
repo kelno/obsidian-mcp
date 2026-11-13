@@ -122,7 +122,7 @@ async def embed_entry(entry_id: int, sessions=None) -> EntryEmbedResult:
     chunks = chunk_text(text_, chunk_size=settings.chunk_size, overlap=settings.chunk_overlap) or [text_]
     result = EntryEmbedResult(chunks_submitted=len(chunks))
     try:
-        vectors = await get_embeddings_batch(chunks)
+        vectors = await get_embeddings_batch(chunks, kind="document")
     except Exception as exc:  # noqa: BLE001 - re-raised with the chunk count the budget needs
         raise ProviderFailed(len(chunks), exc) from exc
     if len(vectors) != len(chunks):
@@ -333,7 +333,7 @@ async def meaning_search(session: AsyncSession, uid: int | None, query: str, fil
         return (await session.execute(unembedded)).scalar_one()
 
     try:
-        vector = await asyncio.wait_for(get_embedding(query), timeout=float(settings.ledger_query_embed_timeout_seconds))
+        vector = await asyncio.wait_for(get_embedding(query, kind="query"), timeout=float(settings.ledger_query_embed_timeout_seconds))
     except asyncio.TimeoutError:
         return MeaningResult([], await count_unembedded(), error=(
             f"the embedding provider did not answer within {settings.ledger_query_embed_timeout_seconds:g} s, "

@@ -148,7 +148,7 @@ async def test_the_version_bump_backfills_an_unchanged_note_without_reembedding(
     assert await task_rows(sessionmaker) == [("n.md", 2, "task", "- [ ] backfilled", None)]
     async with sessionmaker() as session:
         row = (await session.execute(select(NoteMetadata).where(NoteMetadata.file_path == "n.md"))).scalar_one()
-    assert row.extraction_version == indexer.CURRENT_EXTRACTION_VERSION == 4
+    assert row.extraction_version == indexer.CURRENT_EXTRACTION_VERSION == 5
     assert row.embedded_content_hash == row.content_hash == h
 
 

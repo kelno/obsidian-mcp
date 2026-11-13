@@ -11,6 +11,8 @@ Skipped unless `PGVECTOR_TEST_ADMIN_URL` is set — see `_harness.py`.
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
+from src.services.embeddings import CHUNKING_VERSION
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -87,8 +89,12 @@ async def vault(sessionmaker, monkeypatch, tmp_path):
             frontmatter = '{"area_tag": "area/home"}' if path == "Home.md" else "{}"
             note_id = (await session.execute(text(
                 "INSERT INTO notes_metadata (user_id, file_path, title, tags, frontmatter, content_hash, "
-                "embedded_content_hash, chunks_truncated) VALUES (NULL, :p, 't', '{}', CAST(:fm AS jsonb), :h, :eh, :t) "
-                "RETURNING id"), {"p": path, "fm": frontmatter, "h": h, "eh": eh, "t": truncated})).scalar()
+                "embedded_content_hash, chunks_truncated, embedded_chunking_version) "
+                "VALUES (NULL, :p, 't', '{}', CAST(:fm AS jsonb), :h, :eh, :t, :cv) "
+                "RETURNING id"), {"p": path, "fm": frontmatter, "h": h, "eh": eh, "t": truncated,
+                                  # Embedded under the running chunking version (#355), so only
+                                  # the hash decides pending here.
+                                  "cv": CHUNKING_VERSION if eh is not None else None})).scalar()
             for i in range(vectors):
                 await session.execute(text(
                     "INSERT INTO note_embeddings (note_id, chunk_index, chunk_text, embedding) "

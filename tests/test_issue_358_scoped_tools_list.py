@@ -58,7 +58,14 @@ TWELVE = {
     "create_note", "edit_note", "move_note", "delete_note", "set_frontmatter",
     "write_file", "delete_file", "import_from_url", "request_upload",
     "complete_task", "update_task", "add_task",  # #428
+    # Fork: its own write tools (the name stays upstream's; 21 in this fork).
+    "move_file", "delete_folder", "create_task", "edit_task", "set_task_status",
+    "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit",
 }
+#: Fork: the full list is the fork's 41 core tools and upstream's seven it
+#: switches off (switched on for the tests); a read-only grant lists 27.
+FULL = 48
+READ_ONLY_COUNT = 27
 #: The four tools the task-tools change (#428) appended, in order.
 TASK_TOOLS = ("task_agenda", "complete_task", "update_task", "add_task")
 
@@ -113,7 +120,7 @@ async def test_oracle_capture(vault_root):
 def test_the_oracle_is_the_complete_32_tool_result():
     result = oracle()
     names = [t["name"] for t in result["tools"]]
-    assert len(names) == 32 and len(set(names)) == 32
+    assert len(names) == FULL and len(set(names)) == FULL
     assert tuple(names[-4:]) == TASK_TOOLS
     assert "nextCursor" not in result
     for tool in result["tools"]:
@@ -134,6 +141,7 @@ async def test_the_full_list_is_byte_identical_to_the_oracle(cred, vault_root):
 # ══════════════════════════════════════════════════════════════════════════
 
 
+@pytest.mark.skip(reason="fork: v2 is the fork's surface (48 tools), which upstream's 1.0 freeze cannot derive from")
 def test_v1_derives_from_v2():
     """The 1.0 oracle is kept unedited (#428 D15): v2 minus the four task-tools
     entries equals v1, except `list_tasks`'s description and its added
@@ -167,7 +175,7 @@ def test_v1_derives_from_v2():
 def test_the_readonly_fixture_is_the_oracle_minus_the_twelve():
     expected = [t["name"] for t in oracle()["tools"] if t["name"] not in TWELVE]
     assert readonly_names() == expected
-    assert len(expected) == 20
+    assert len(expected) == READ_ONLY_COUNT
 
 
 @pytest.mark.parametrize("cred", [h.READ_GRANT, h.READ_GRANT_2], ids=lambda c: c.bearer)
@@ -183,7 +191,7 @@ async def test_a_readonly_grant_lists_20_entries_identical_to_the_oracle(cred, v
 
 @pytest.mark.parametrize(
     "cred,count",
-    [(h.READ_GRANT, 20), (h.READ_KEY, 32), (h.READWRITE_KEY, 32), (h.READWRITE_GRANT, 32)],
+    [(h.READ_GRANT, READ_ONLY_COUNT), (h.READ_KEY, FULL), (h.READWRITE_KEY, FULL), (h.READWRITE_GRANT, FULL)],
     ids=lambda v: getattr(v, "bearer", str(v)),
 )
 async def test_a_cursor_does_not_change_the_result(cred, count, vault_root):
@@ -208,12 +216,12 @@ def _reset(tokens):
 @pytest.mark.parametrize(
     "principal,permission,count",
     [
-        (("oauth", "g"), "read", 20),
-        (("oauth", "g"), "readwrite", 32),
-        (("api_key", 1), "read", 32),
-        (("api_key", 1), "readwrite", 32),
-        (None, "read", 32),
-        (None, "readwrite", 32),
+        (("oauth", "g"), "read", READ_ONLY_COUNT),
+        (("oauth", "g"), "readwrite", FULL),
+        (("api_key", 1), "read", FULL),
+        (("api_key", 1), "readwrite", FULL),
+        (None, "read", FULL),
+        (None, "readwrite", FULL),
     ],
 )
 async def test_in_process_listing_per_principal(principal, permission, count):
@@ -223,7 +231,7 @@ async def test_in_process_listing_per_principal(principal, permission, count):
     finally:
         _reset(tokens)
     assert len(listed) == count
-    if count == 32:
+    if count == FULL:
         # The same order and schemas as the oracle and the #343 fixtures.
         assert [t.name for t in listed] == [t["name"] for t in oracle()["tools"]]
         for tool, row in zip(listed, oracle()["tools"]):
@@ -279,7 +287,7 @@ async def test_the_list_follows_a_scope_change_on_the_next_request(vault_root):
             after = await h.list_result(client, upgraded)
     finally:
         h.ALL.pop(upgraded.bearer, None)
-    assert len(before["tools"]) == 20
+    assert len(before["tools"]) == READ_ONLY_COUNT
     assert h.canonical(after) == h.canonical(oracle())
 
 
@@ -647,9 +655,10 @@ def test_every_in_body_write_check_belongs_to_a_registry_member():
                 sites.append((node.name, _tracked_name(node)))
     owners = {name for _, name in sites if name is not None}
     helpers = {fn for fn, name in sites if name is None}
-    # The gate in `_tracked`'s wrapper, and `_mint_preflight`'s own check.
-    assert helpers == {"wrapper", "_mint_preflight"}, helpers
-    assert owners == tool_permissions.WRITE_REQUIRED_TOOLS
+    # The gate in `_tracked`'s wrapper, and `_mint_preflight`'s own check; and
+    # the fork's two structured-result gates, whose tools refuse in their body.
+    assert helpers == {"wrapper", "_mint_preflight", "_task_write_parameters", "_ledger_write_gate"}, helpers
+    assert owners | tools._STRUCTURED_WRITE_REFUSERS == tool_permissions.WRITE_REQUIRED_TOOLS
 
 
 def test_the_rule_and_registry_import_no_sdk_even_when_invoked():

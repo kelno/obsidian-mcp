@@ -211,7 +211,7 @@ CALLS = [
     ('get_neighborhood', 'get_neighborhood_impl', lambda s: (('a.md',), {})),
     ('find_related', 'find_related_impl', lambda s: (('a.md',), {})),
     ('find_orphans', 'find_orphans_impl', lambda s: ((), {})),
-    ('list_tasks', 'list_tasks_impl', lambda s: ((), {})),  # #350
+    ('upstream_list_tasks', 'list_tasks_impl', lambda s: ((), {})),  # #350, renamed in the fork
     ('get_changes', 'get_changes_impl', lambda s: (('ev:0',), {})),  # #351
     ('hybrid_search', 'hybrid_search_impl', lambda s: (('quartzite',), {'limit': 5})),  # #354
     ('create_note', 'create_note_impl', lambda s: (('new.md', 'first\n'), {})),
@@ -242,7 +242,7 @@ CALLS = [
     ('fetch_page', 'fetch_page_impl', lambda s: (('https://fixture.example/source',), {})),
     # The task tools: create_task makes the inbox, and the next two act on
     # the line it wrote, whose bytes (and so whose hash) are known up front.
-    ('list_tasks', 'list_tasks_impl', lambda s: ((), {})),
+    ('list_tasks', 'fork_list_tasks_impl', lambda s: ((), {})),
     ('open_area', 'plugin:open_area', lambda s: ((), {'area': 'nowhere'})),
     ('index_status', 'index_status_impl', lambda s: ((), {})),
     ('create_task', 'create_task_impl', lambda s: (('peaks task',), {})),

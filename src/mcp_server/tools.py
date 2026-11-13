@@ -2057,6 +2057,7 @@ def _tracked(
                         gate = (
                             _require_write()
                             if tool_name in tool_permissions.WRITE_REQUIRED_TOOLS
+                            and tool_name not in _STRUCTURED_WRITE_REFUSERS
                             else None
                         )
                         result = gate if gate is not None else await fn(*args, **kwargs)
@@ -2179,6 +2180,17 @@ def _tracked(
         wrapper.__write_class__ = write_class
         return wrapper
     return decorator
+
+
+#: Fork: write tools with a structured result, whose bodies refuse a
+#: read-only caller in their own result shape as their first step
+#: (`_task_write_parameters`, `_ledger_write_gate`). The body-boundary gate
+#: would hand them a plain `BodyOutcome`, which their callers cannot read; they
+#: stay in `WRITE_REQUIRED_TOOLS`, so a read-only grant still does not list them.
+_STRUCTURED_WRITE_REFUSERS = frozenset({
+    "create_task", "edit_task", "set_task_status",
+    "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit",
+})
 
 
 def production_write_bucket_tools() -> frozenset[str]:

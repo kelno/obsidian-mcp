@@ -114,7 +114,7 @@ async def test_a_panel_upgrade_lists_28_on_the_next_request_and_notifies_nothing
             after = await tools_list(client)
 
     assert len(before) == 1 and len(after) == 1, "one result message, nothing else on the wire"
-    assert len(before[0]["result"]["tools"]) == 20  # 19 → 20: `task_agenda` (#428)
+    assert len(before[0]["result"]["tools"]) == 27  # fork: 48 minus the 21 write-required tools
     assert len(after[0]["result"]["tools"]) == 32  # 28 → 32: the task tools (#428)
     for message in before + after:
         assert message.get("method") != "notifications/tools/list_changed"

@@ -75,7 +75,11 @@ def fetchval(url, statement, *args):
 
 
 def version(url):
-    return fetchval(url, "SELECT version_num FROM alembic_version")
+    """Upstream's recorded revision: below the fork's merge revision 1003 the
+    fork's own branch (1001, 1002) can be recorded beside it."""
+    rows = [r for (r,) in [(v,) for v in [fetchval(url, "SELECT string_agg(version_num, ',') FROM alembic_version")]]]
+    found = [v for v in rows[0].split(",") if len(v) != 4] or rows[0].split(",")
+    return found[0]
 
 
 def insert_legacy(url, client_id, method, secret=None, metadata_url=None):

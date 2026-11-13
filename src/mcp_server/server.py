@@ -695,13 +695,9 @@ async def edit_note(
 
     {plugin_text}
 
-    **Agent-ledger refs on the lines.** When the lines this write removes or
-    rewrites cite agent-ledger entries in brackets (`[P54, P80]`), the result
-    ends with `changed_lines_cite:`, each entry as it stands now: they record
-    what shaped those lines. Read them (`ledger_get`) and check your change
-    doesn't undo what they decided. To see them before writing, call with
-    `dry_run=true`: it shows both lists after the diff. Refs your new text
-    adds (not ones it keeps) come after `cites:`, as they stand now.
+    **Agent-ledger refs** (`[P54, P80]`) on the lines this write removes or rewrites come back under
+    `changed_lines_cite:`, those your text adds under `cites:`, each entry as it stands now: check your
+    change doesn't undo what they decided (`ledger_get`). `dry_run=true` shows both lists first.
 
     Modes (mutually exclusive):
     1. **Full replace** (default): `content` becomes the note's **body**; an existing valid line-1 YAML
@@ -737,8 +733,7 @@ async def edit_note(
     that `content`. Byte-identity holds for notes whose body newlines are LF: non-LF terminators inside the
     selected body come back as LF. `#N` ordinals agree with `read_note`; a heading inside a fenced code block is
     not a heading.
-    A write keeps the note's line endings: in every mode but `replace_frontmatter=True` (written byte for
-    byte), your text takes the note's own most common ending, so a CRLF note stays CRLF.
+    A write keeps the note's line endings (a CRLF note stays CRLF); `replace_frontmatter=True` writes bytes as sent.
 
     **Two shapes refuse a section write outright, naming the problem and writing nothing:** a malformed
     frontmatter block, whose refusal names the `replace_frontmatter=True` repair; and a fence opener indented by
@@ -1671,7 +1666,7 @@ async def create_task(
 ) -> TaskWriteResult:
     """Add a task, written exactly as the Tasks plugin's "Create task" dialog writes it.
 
-    Requires write permission. Counterpart: Tasks API `createTaskLineModal()`.
+    Requires write permission. Counterpart: the Tasks plugin's "create task" dialog.
     Writes one new line `- [ ] description #area/… <fields>` in the plugin's
     field order, adding the plugin's created date if its settings say so.
     Changes no other line. The line is read back before writing and the call
@@ -1727,7 +1722,7 @@ async def edit_task(
 ) -> TaskWriteResult:
     """Change one task's description or fields, as the Tasks plugin's "Edit task" dialog does.
 
-    Requires write permission. Counterpart: Tasks API `editTaskLineModal(line)`.
+    Requires write permission. Counterpart: the Tasks plugin's "edit task" dialog.
     Postpone a task by setting `scheduled` (⏳). Only that line changes; it
     is written back in the plugin's field order, as the plugin itself does on
     any edit. Status changes go through `set_task_status`. Recurring tasks

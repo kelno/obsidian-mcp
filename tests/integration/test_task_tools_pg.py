@@ -380,7 +380,7 @@ async def test_a_read_only_grant_neither_lists_nor_runs_the_write_tools(sessionm
     q = current_permission.set("read")
     try:
         listed = [t.name for t in await mcp.list_tools()]
-        assert len(listed) == 20 and "task_agenda" in listed
+        assert len(listed) == 27 and "task_agenda" in listed  # fork: 48 minus 21 write tools
         assert not WRITE_TOOLS & set(listed)
         for name, args in (("add_task", dict(text="b")), ("complete_task", dict(id=tid)),
                            ("update_task", dict(id=tid, due="today"))):

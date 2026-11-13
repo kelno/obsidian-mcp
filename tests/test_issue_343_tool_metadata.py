@@ -89,6 +89,10 @@ AMENDMENTS = Path(__file__).resolve().parent / "fixtures" / "tools_list_schema_a
 NOTE_WINDOW_PROPERTIES = {"since", "until", "order_by", "cursor"}
 
 DESCRIPTION_CAP = 4_000
+#: Fork: `edit_note` carries the fork's ledger-refs and line-endings paragraphs
+#: on top of upstream's text (and a deployment's plugins add their own), so
+#: its core description gets this much instead.
+FORK_DESCRIPTION_CAPS = {"edit_note": 4_400}
 LEAD_CHARS = 1_500
 INSTRUCTIONS_CAP = 2_000
 INSTRUCTIONS_LEAD = 512
@@ -100,11 +104,22 @@ READ_TOOLS = frozenset({
     "keyword_search", "semantic_search", "read_note", "list_notes", "get_tags",
     "get_recent", "get_vault_guide", "read_file", "list_files", "get_backlinks",
     "get_links", "get_neighborhood", "find_related", "find_orphans", "check_upload",
-    "list_tasks",  # #350
+    "upstream_list_tasks",  # #350 (upstream's `list_tasks`, renamed in the fork)
     "get_changes",  # #351
     "hybrid_search",  # #354
     "task_agenda",  # #428
+    # Fork's read tools.
+    "list_tasks", "index_status", "ledger_search", "ledger_get", "ledger_digest", "ledger_topics",
 })
+#: Fork: `fetch_page` reads a third party's page: read-only, open-world.
+FORK_OPEN_READS = frozenset({"fetch_page"})
+#: Fork: its write-bucket tools, and those of them that remove no byte (a task
+#: line added; ledger writes keep every previous version).
+FORK_WRITERS = frozenset({
+    "move_file", "delete_folder", "create_task", "edit_task", "set_task_status",
+    "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit",
+})
+FORK_ADDITIVE = frozenset({"create_task", "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit"})
 #: The task write tools (#428 D15): in the write bucket; `add_task` is
 #: additive (it removes no byte), the other two destructive.
 TASK_WRITE_TOOLS = ("complete_task", "update_task", "add_task")
@@ -206,7 +221,8 @@ def test_exactly_32_tools():
     # 25 → 26: `list_tasks` (#350); 26 → 27: `get_changes` (#351);
     # 27 → 28: `hybrid_search` (#354); 28 → 32: `task_agenda`,
     # `complete_task`, `update_task`, `add_task` (#428).
-    assert len(listed()) == 32
+    # Fork: its 41 core tools and upstream's seven it switches off (on in tests).
+    assert len(listed()) == 48
 
 
 @pytest.mark.parametrize("tool", listed(), ids=lambda t: t.name)
@@ -237,29 +253,30 @@ def test_the_read_tools_are_read_only_idempotent_and_closed():
         assert (a.readOnlyHint, a.destructiveHint, a.idempotentHint, a.openWorldHint) == (
             True, False, True, False
         ), name
-    assert _set(lambda a: a.readOnlyHint) == READ_TOOLS
+    assert _set(lambda a: a.readOnlyHint) == READ_TOOLS | FORK_OPEN_READS
 
 
 def test_the_write_bucket_set_is_the_production_one():
     w = tools.production_write_bucket_tools()
     assert w == frozenset(t for t, c in concurrency.TOOL_CLASSES.items() if c == "write")
     assert w <= registered_names()
-    assert len(w) == 11
+    assert len(w) == 11 + len(FORK_WRITERS)
 
 
 def test_destructive_is_the_write_bucket_minus_the_additive_writers_plus_request_upload():
     """#428 D15: `add_task` joins `create_note` as an additive writer — it
     inserts one line and removes no byte."""
     w = tools.production_write_bucket_tools()
-    assert _set(lambda a: a.destructiveHint) == (w - {"create_note", "add_task"}) | {"request_upload"}
+    assert _set(lambda a: a.destructiveHint) == (w - {"create_note", "add_task"} - FORK_ADDITIVE) | {"request_upload"}
     assert _set(lambda a: a.destructiveHint) == {
         "edit_note", "move_note", "delete_note", "set_frontmatter", "write_file",
         "delete_file", "import_from_url", "complete_task", "update_task", "request_upload",
+        "move_file", "delete_folder", "edit_task", "set_task_status",  # fork
     }
     assert _set(lambda a: not a.readOnlyHint) == w | {"request_upload", "request_download"}
-    assert _set(lambda a: a.openWorldHint) == {"import_from_url"}
+    assert _set(lambda a: a.openWorldHint) == {"import_from_url"} | FORK_OPEN_READS
     assert _set(lambda a: a.idempotentHint) == _set(lambda a: a.readOnlyHint)
-    for name in ("create_note", "add_task", "request_download"):
+    for name in ("create_note", "add_task", "request_download", *sorted(FORK_ADDITIVE)):
         a = registered(name).annotations
         assert (a.readOnlyHint, a.destructiveHint) == (False, False), name
     a = registered("import_from_url").annotations
@@ -280,7 +297,7 @@ def test_a_test_probe_cannot_pollute_the_write_bucket_set():
         "create_note", "edit_note", "move_note", "delete_note", "set_frontmatter",
         "write_file", "delete_file", "import_from_url",
         "complete_task", "update_task", "add_task",  # #428
-    })
+    }) | FORK_WRITERS
 
 
 # ── 3. instructions ──────────────────────────────────────────────────────────
@@ -328,7 +345,7 @@ LEAD_BEFORE_428 = (
     "`expected_hash` is a read's `content_hash`; a deployment that requires "
     "it refuses an unguarded edit (`precondition_required`). Round trips: only `content` from a complete whole-note `read_note` "
 )
-TASK_TOOL_NAMES = ("list_tasks", "task_agenda", "complete_task", "update_task", "add_task")
+TASK_TOOL_NAMES = ("upstream_list_tasks", "task_agenda", "complete_task", "update_task", "add_task")
 
 
 def test_the_instructions_name_the_task_tools_in_one_sentence_outside_the_lead():
@@ -367,7 +384,7 @@ def test_the_instructions_name_only_registered_tools():
 
 @pytest.mark.parametrize("tool", listed(), ids=lambda t: t.name)
 def test_no_description_exceeds_the_cap(tool):
-    assert len(tool.description or "") <= DESCRIPTION_CAP, (
+    assert len(tool.description or "") <= FORK_DESCRIPTION_CAPS.get(tool.name, DESCRIPTION_CAP), (
         f"{tool.name}: {len(tool.description or '')} characters on the wire"
     )
 
@@ -437,7 +454,8 @@ def test_the_guardable_set_is_every_expected_hash_tool_but_create_note():
     accepting = {
         t.name for t in listed() if "expected_hash" in t.parameters["properties"]
     }
-    assert accepting == set(GUARDABLE_WRITE_TOOLS) | {"create_note"} | set(TASK_WRITE_TOOLS)
+    # Fork: `move_file` takes the same optional precondition as `move_note`.
+    assert accepting == set(GUARDABLE_WRITE_TOOLS) | {"create_note"} | set(TASK_WRITE_TOOLS) | {"move_file"}
 
 
 @pytest.mark.parametrize("name", TASK_WRITE_TOOLS)
@@ -524,6 +542,8 @@ def test_read_note_leads_with_its_fields():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="fork: its own tools sit among upstream's first 25 (fetch_page, move_file, ...), "
+                         "so upstream's frozen order cannot hold; tools_list_full_v2.json pins the fork's surface")
 async def test_names_order_and_schemas_match_the_5a391ca_fixture():
     frozen = json.loads(FIXTURE.read_text(encoding="utf-8"))
     additions = json.loads(ADDITIONS.read_text(encoding="utf-8"))
@@ -697,7 +717,8 @@ def test_the_task_descriptions_are_written_for_a_cold_public_reader(name):
 
 
 def test_list_tasks_and_task_agenda_point_at_each_other():
-    assert "`task_agenda`" in description("list_tasks")
+    # Upstream's `list_tasks` is `upstream_list_tasks` in the fork; its text keeps upstream's name.
+    assert "`task_agenda`" in description("upstream_list_tasks")
     assert "`list_tasks`" in description("task_agenda")
 
 
