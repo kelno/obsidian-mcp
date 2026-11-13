@@ -62,7 +62,7 @@ def render(lines: list[tuple[int, str]], shift: int) -> str:
 
 
 TOOL_TEXT = (
-    "**Rule edits carry their proposal.** In this vault's rules for agents (`_/agent/` and `CLAUDE.md`), when a "
+    "**Rule edits carry their proposal.** In this vault's rules for agents (the notes under `_/agent/` and the root `CLAUDE.md`), when a "
     "write adds or changes lines (outside the frontmatter) and none of them carries a new proposal ref (`[P95]`), "
     "the result adds `rule_change_unlogged:` with those lines: log an owner's decision with `ledger_add` (kind "
     "proposal) and cite the ref it returns at the end of each changed line; a typo fix or wording that changes no "
@@ -73,7 +73,7 @@ WRITE_FILE_TEXT = "A rule note written with no new proposal ref gets `rule_chang
 
 GUIDE = (
     "## Agent rules (this server)\n\n"
-    "This vault's rules for agents are the notes under `_/agent/` and `CLAUDE.md`; their lines end with the refs "
+    "This vault's rules for agents are the notes under `_/agent/` and the vault's root `CLAUDE.md`; their lines end with the refs "
     "of the proposals that shaped them (`[P54, P80]`). A write there that adds or changes lines with none of them "
     "carrying a new proposal ref gets `rule_change_unlogged:` in its result, with those lines. If the change "
     "follows a decision of the owner's, log it with `ledger_add` (kind proposal) and add the ref it returns at the "

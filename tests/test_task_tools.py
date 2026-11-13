@@ -897,6 +897,16 @@ def test_a_rule_edit_without_a_proposal_ref_is_nudged(vault, kelno_vault):
 
 
 
+def test_the_rule_nudge_numbers_lines_as_written_when_the_stamp_adds_a_block(vault, kelno_vault, monkeypatch):
+    monkeypatch.setattr(tools.settings, "last_ai_edit_field", "last_ai_edit")
+    monkeypatch.setattr(tools.settings, "last_ai_edit_exclude", [])
+    note(vault, "_/agent/Stamped.md", "- Rule one. [P35]\n")
+    result = asyncio.run(tools.edit_note_impl("_/agent/Stamped.md", "- Rule two.", append=True))
+    written = read(vault, "_/agent/Stamped.md").split("\n")
+    line = written.index("- Rule two.") + 1
+    assert line > 2 and f"- line {line}: - Rule two." in result, result
+
+
 def test_without_the_vault_plugin_no_rule_nudge(vault):
     created = asyncio.run(tools.create_note_impl("_/agent/Unset.md", "- A new rule.\n"))
     assert "rule_change_unlogged" not in created
