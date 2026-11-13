@@ -1831,8 +1831,8 @@ async def index_status(
     `vault`, the notes by state: `embedded`, `pending` (never embedded, or
     changed since), and the two that will never be embedded, `excluded` (by
     the server's settings) and `no_text`; `private_folders`, the same counts
-    for the part of `vault` in private folders, present only when the server
-    has private folders; `ledger`, agent-ledger entries still to embed;
+    for the part of `vault` in private folders, present when the server has
+    private folders and no `folder` is given; `ledger`, agent-ledger entries still to embed;
     `progress`, the notes embedded in the last hour, `estimated_minutes_left`
     for all of the vault's pending notes at that rate (there is no estimate
     per folder), and whether embedding is running now or paused; `health`,

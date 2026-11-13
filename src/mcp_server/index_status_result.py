@@ -78,7 +78,7 @@ class IndexStatusResult(_OmitNone):
     folder: str | None = None
     #: The notes under `folder`.
     folder_counts: NoteCounts | None = None
-    #: The part of `vault` in private folders, counted only (no paths); present when the server has private folders.
+    #: The part of `vault` in private folders, counted only (no paths); present when the server has private folders and no `folder` is given.
     private_folders: NoteCounts | None = None
     ledger: LedgerCounts | None = None
     progress: Progress | None = None
