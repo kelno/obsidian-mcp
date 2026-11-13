@@ -186,8 +186,13 @@ def _listings(monkeypatch):
     async def sem(*_a, **_k):
         return [dict(_HIT)]
 
+    async def no_rechunk_pending(*_a, **_k):
+        return 0
+
     monkeypatch.setattr(tools, "full_text_search", fts)
     monkeypatch.setattr(tools, "semantic_search", sem)
+    # The vector tools count notes not yet re-chunked (#355) on the session.
+    monkeypatch.setattr(tools, "rechunk_pending_count", no_rechunk_pending)
     return {
         "keyword_search": lambda: tools.search_notes_impl("call"),
         "semantic_search": lambda: tools.semantic_search_impl("call"),

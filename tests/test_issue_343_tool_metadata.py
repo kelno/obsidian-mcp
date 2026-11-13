@@ -331,11 +331,12 @@ def test_the_instructions_state_the_round_trip_with_its_conditions():
 
 
 #: The instructions' lead as it stood before #428, which must not move: only
-#: the `list_tasks` sentence after it is replaced (D15).
+#: the `list_tasks` sentence after it is replaced (D15). Fork: without
+#: `hybrid_search`, which is switched off.
 LEAD_BEFORE_428 = (
     "Agent memory in a markdown Obsidian vault. Search with `keyword_search` "
-    "(identifiers), `semantic_search` (paraphrase) or `hybrid_search` "
-    "(unsure); read with `read_note`; write with `create_note` or "
+    "(identifiers) or `semantic_search` (paraphrase); read with "
+    "`read_note`; write with `create_note` or "
     "`edit_note` (`dry_run=true` first). `get_vault_guide` describes this "
     "vault's conventions (one call per session). `create_note` never "
     "overwrites. Edits take `expected_hash` and refuse, writing nothing, if "
@@ -346,6 +347,9 @@ LEAD_BEFORE_428 = (
     "it refuses an unguarded edit (`precondition_required`). Round trips: only `content` from a complete whole-note `read_note` "
 )
 TASK_TOOL_NAMES = ("upstream_list_tasks", "task_agenda", "complete_task", "update_task", "add_task")
+#: Fork: the instructions name the fork's task tools; upstream's are switched off and not named.
+FORK_TASK_TOOL_NAMES = ("list_tasks", "create_task", "edit_task", "set_task_status")
+UPSTREAM_TASK_TOOLS = ("task_agenda", "complete_task", "update_task", "add_task")
 
 
 def test_the_instructions_name_the_task_tools_in_one_sentence_outside_the_lead():
@@ -358,11 +362,13 @@ def test_the_instructions_name_the_task_tools_in_one_sentence_outside_the_lead()
     assert start >= INSTRUCTIONS_LEAD
     sentence = text[start:]
     assert sentence.endswith(".") and sentence.count(". ") == 0, sentence
-    for name in TASK_TOOL_NAMES:
+    for name in FORK_TASK_TOOL_NAMES:
         assert f"`{name}`" in sentence, name
         assert name not in text[:INSTRUCTIONS_LEAD], name
-    assert "`path`" in sentence and "task id" in sentence
-    assert "query blocks are text" in sentence
+    for name in UPSTREAM_TASK_TOOLS:
+        assert name not in text, name
+    assert "`path`" in sentence and "line number" in sentence
+    assert "query blocks in notes are text" in sentence
     assert len(text) <= INSTRUCTIONS_CAP
 
 
@@ -454,8 +460,10 @@ def test_the_guardable_set_is_every_expected_hash_tool_but_create_note():
     accepting = {
         t.name for t in listed() if "expected_hash" in t.parameters["properties"]
     }
-    # Fork: `move_file` takes the same optional precondition as `move_note`.
-    assert accepting == set(GUARDABLE_WRITE_TOOLS) | {"create_note"} | set(TASK_WRITE_TOOLS) | {"move_file"}
+    # Fork: `move_file` takes the same optional precondition as `move_note`; the
+    # fork's task writers take the note's hash under their own rule (tasks.md).
+    assert accepting == (set(GUARDABLE_WRITE_TOOLS) | {"create_note"} | set(TASK_WRITE_TOOLS)
+                         | {"move_file", "create_task", "edit_task", "set_task_status"})
 
 
 @pytest.mark.parametrize("name", TASK_WRITE_TOOLS)

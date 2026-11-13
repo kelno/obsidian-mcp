@@ -39,6 +39,12 @@ ROUTING = (
     "Conceptual or paraphrased questions: `semantic_search`. Unsure which: "
     "`hybrid_search`."
 )
+#: Fork: `hybrid_search` is switched off, so the two live search tools route
+#: between themselves only; `hybrid_search`'s own text keeps upstream's line.
+FORK_ROUTING = (
+    "Exact identifiers, code symbols, titles or known phrases: `keyword_search`. "
+    "Conceptual or paraphrased questions: `semantic_search`."
+)
 
 
 # ── the scripted session ────────────────────────────────────────────────────
@@ -773,7 +779,11 @@ def _description(name):
 def test_the_routing_sentence_is_in_all_three_descriptions():
     for name in ("keyword_search", "semantic_search", "hybrid_search"):
         doc = _description(name)
-        assert ROUTING in " ".join(doc.split()), name
+        flat = " ".join(doc.split())
+        if name == "hybrid_search":
+            assert ROUTING in flat, name
+        else:
+            assert FORK_ROUTING in flat and "`hybrid_search`" not in flat, name
         lowered = doc.lower()
         assert "primary" not in lowered and "default search" not in lowered
         assert "best" not in lowered, name
@@ -801,13 +811,16 @@ def test_hybrid_search_is_registered_after_get_changes_with_read_only_annotation
         True, False, True, False)
 
 
-def test_the_instructions_lead_names_the_three_peers():
+def test_the_instructions_lead_names_the_live_search_peers():
+    """Fork: `hybrid_search` is switched off, so the lead names the two live
+    search tools and nothing routes to it."""
     text = server.SERVER_INSTRUCTIONS
     lead = text.split("\n\n")[0]
     assert len(lead) <= 512 and len(text) <= 2000
-    for name in ("`keyword_search`", "`semantic_search`", "`hybrid_search`"):
+    for name in ("`keyword_search`", "`semantic_search`"):
         assert name in lead
-    assert "(identifiers)" in lead and "(paraphrase)" in lead and "(unsure)" in lead
+    assert "hybrid_search" not in text
+    assert "(identifiers)" in lead and "(paraphrase)" in lead
     assert "primary" not in lead.lower() and "default" not in lead.lower().replace(
         "optional by default", "")
     rest = text[len(lead):]

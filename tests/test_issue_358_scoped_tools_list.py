@@ -537,7 +537,9 @@ def test_the_registry_is_the_write_bucket_plus_request_upload():
 
 def test_the_registry_is_the_destructive_set_plus_the_additive_writers():
     destructive = {t["name"] for t in oracle()["tools"] if t["annotations"]["destructiveHint"]}
-    assert tool_permissions.WRITE_REQUIRED_TOOLS == destructive | {"create_note", "add_task"}
+    # Fork: its additive writers (a task line added; ledger writes keep every version).
+    fork_additive = {"create_task", "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit"}
+    assert tool_permissions.WRITE_REQUIRED_TOOLS == destructive | {"create_note", "add_task"} | fork_additive
     assert "request_download" not in tool_permissions.WRITE_REQUIRED_TOOLS
     assert "check_upload" not in tool_permissions.WRITE_REQUIRED_TOOLS
     registered = {t.name for t in mcp._tool_manager.list_tools()}
@@ -582,7 +584,8 @@ async def test_every_tool_under_a_readonly_grant_is_refused_iff_in_the_registry(
             continue
         blocks = content[0] if isinstance(content, tuple) else content
         text = "".join(getattr(b, "text", "") for b in blocks)
-        if '"code":"permission_denied"' in text.replace(" ", ""):
+        # Fork: a structured result carries the refusal line inside a JSON string.
+        if '"code":"permission_denied"' in text.replace(" ", "").replace('\\"', '"'):
             denied.add(tool.name)
     assert denied == tool_permissions.WRITE_REQUIRED_TOOLS
 

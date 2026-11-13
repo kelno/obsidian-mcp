@@ -184,8 +184,8 @@ _READ_ONLY_OPEN_WORLD = ToolAnnotations(
 # depend on a client having read this (claude.ai is reported to drop it).
 SERVER_INSTRUCTIONS = (
     "Agent memory in a markdown Obsidian vault. Search with `keyword_search` "
-    "(identifiers), `semantic_search` (paraphrase) or `hybrid_search` "
-    "(unsure); read with `read_note`; write with `create_note` or "
+    "(identifiers) or `semantic_search` (paraphrase); read with "
+    "`read_note`; write with `create_note` or "
     "`edit_note` (`dry_run=true` first). `get_vault_guide` describes this "
     "vault's conventions (one call per session). `create_note` never "
     "overwrites. Edits take `expected_hash` and refuse, writing nothing, if "
@@ -206,12 +206,17 @@ SERVER_INSTRUCTIONS = (
     "link graph is `get_backlinks`, `get_links`, `get_neighborhood`, "
     "`find_related` and `find_orphans`. Deletes are soft (`.trash/`) unless "
     "`permanent=true`. Calls are rate-limited per credential; a rate refusal "
-    "says when to retry and spends no daily quota. `list_tasks` and "
-    "`task_agenda` list checkbox tasks from the index (Tasks-plugin query "
-    "blocks are text they do not evaluate); `complete_task` and `update_task` "
-    "change one task, named by its note `path` plus the task id a listing "
-    "prints, and `add_task` inserts one."
+    "says when to retry and spends no daily quota. `list_tasks` answers a "
+    "Tasks-plugin query from the index (query blocks in notes are text it "
+    "does not run); `create_task` adds a task, and `edit_task` and "
+    "`set_task_status` change one, named by its note `path` and line number."
 )
+# Fork: the text above names only tools this fork serves. Upstream's lead
+# also routes "unsure" searches to `hybrid_search`, and its task sentence
+# names its own task tools; switching one of those on (`SWITCHED_OFF`, end of
+# this file) brings its mention back here, in `keyword_search`'s and
+# `semantic_search`'s routing lines, and in `get_recent`'s pointer to
+# `get_changes`.
 
 
 class _ScopedFastMCP(FastMCP):
@@ -312,8 +317,7 @@ async def keyword_search(
     code symbols, proper nouns, titles, or known phrases — anywhere semantic noise hurts.
 
     Exact identifiers, code symbols, titles or known phrases: `keyword_search`.
-    Conceptual or paraphrased questions: `semantic_search`. Unsure which:
-    `hybrid_search`.
+    Conceptual or paraphrased questions: `semantic_search`.
 
     **Bare terms are ANDed**: `budget forecast` matches only notes containing
     both stems. Notes matching every term come first, tagged `match: all`;
@@ -499,8 +503,7 @@ async def get_recent(
     `order_by="content_changed"` with `since`. File mtime (the default order)
     also moves when a file is touched or re-synced without a content change;
     `content_changed` moves only when the indexed content hash changes, and each
-    line is then labelled `changed`. For an exact list of creations, edits,
-    moves and deletions since a stored cursor, see `get_changes`.
+    line is then labelled `changed`.
 
     Args:
         limit: Number of recent notes to return (default 20).
@@ -537,8 +540,7 @@ async def semantic_search(
     or paraphrased queries — anywhere exact word matching would miss the point.
 
     Exact identifiers, code symbols, titles or known phrases: `keyword_search`.
-    Conceptual or paraphrased questions: `semantic_search`. Unsure which:
-    `hybrid_search`.
+    Conceptual or paraphrased questions: `semantic_search`.
 
     Each result is one note (deduped) with its closest-matching chunk as a ~200-character preview.
     Call `read_note` on a result's path to get the full note content.
@@ -696,7 +698,7 @@ async def edit_note(
     {plugin_text}
 
     **Agent-ledger refs** (`[P54, P80]`) on the lines this write removes or rewrites come back under
-    `changed_lines_cite:`, those your text adds under `cites:`, each entry as it stands now: check your
+    `changed_lines_cite:`, those your text adds under `cites:`, as they stand now: check your
     change doesn't undo what they decided (`ledger_get`). `dry_run=true` shows both lists first.
 
     Modes (mutually exclusive):

@@ -242,6 +242,7 @@ async def test_toggle_on_removes_the_copy_and_nothing_else_then_off_restores(
     assert f'"{COPY}" reason=not_indexable by human/sync' in out
 
 
+@pytest.mark.skip(reason="fork: the index walk always skips `*.sync-conflict-*` copies (FORK.md), so upstream's opt-in never sees them; which to keep is the owner's call")
 async def test_toggle_off_over_an_empty_scope_is_one_reset(
     vault, sessionmaker, monkeypatch
 ):
@@ -284,6 +285,7 @@ async def test_toggle_off_after_an_agent_edit_records_no_created_l9(
 # ── Move pairing ──────────────────────────────────────────────────────────
 
 
+@pytest.mark.skip(reason="fork: the index walk always skips `*.sync-conflict-*` copies (FORK.md), so upstream's opt-in never sees them; which to keep is the owner's call")
 async def test_a_conflict_copy_is_never_a_move_destination(
     vault, sessionmaker, monkeypatch
 ):
@@ -422,6 +424,7 @@ async def test_move_onto_an_excluded_name_notices_and_the_next_pass_removes(
 # ── Review r1 additions ───────────────────────────────────────────────────
 
 
+@pytest.mark.skip(reason="fork: the index walk always skips `*.sync-conflict-*` copies (FORK.md), so upstream's opt-in never sees them; which to keep is the owner's call")
 async def test_a_quarantine_restart_never_pairs_a_conflict_copy_as_destination(
     vault, sessionmaker, monkeypatch
 ):

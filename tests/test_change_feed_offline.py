@@ -69,7 +69,7 @@ def test_an_offset_datetime_is_normalised_to_utc(value, expected):
     ("2026-10-25T09:00:00", "has no UTC offset"),
     ("yesterday", "is not a date or datetime"),
     ("2026-02-30", "is not a valid date"),
-    ("ev:12", "cursors are for `get_changes`"),
+    ("ev:12", "it takes no cursor"),  # fork: `get_changes` is switched off
     ("", "must be a UTC date"),
     ("2026-10-25T99:00:00Z", "is not an ISO 8601 datetime"),
 ])
@@ -163,7 +163,7 @@ class _NoSession:
 @pytest.mark.parametrize("impl", ["list_notes_impl", "get_recent_impl"])
 @pytest.mark.parametrize("kw,fragment", [
     (dict(since="2026-10-25T09:00:00"), "offset"),
-    (dict(until="ev:3"), "get_changes"),
+    (dict(until="ev:3"), "it takes no cursor"),  # fork: `get_changes` is switched off
     (dict(order_by="title"), "`order_by` must be"),
     (dict(cursor="garbage"), "does not belong to this query"),
     (dict(since="2026-10-26", until="2026-10-25"), "earlier than"),
@@ -432,6 +432,8 @@ def test_one_definition_of_the_note_hash():
 # ── 6.4 the guide line ───────────────────────────────────────────────────────
 
 
+@pytest.mark.skip(reason="fork: `get_changes` is switched off (SWITCHED_OFF in server.py), so the fork's "
+                         "primer does not name it; restore when the owner switches it on")
 def test_the_primer_names_the_feed_neutrally():
     primer = (ROOT / "src/mcp_server/vault_guide_primer.md").read_text()
     summary = primer[primer.index("## Summary for agents"):]

@@ -679,7 +679,8 @@ def parse_utc_bound(value: str, role: str, *, tool: str = "get_recent") -> _dt.d
     raw = value.strip()
     if CURSOR_RE.fullmatch(raw):
         raise BoundError(f"{tool}: `{role}` got a change-feed cursor ({raw}); "
-                         "cursors are for `get_changes`. Pass a date or datetime.")
+                         # Fork: upstream names `get_changes` here, which is switched off.
+                         "it takes no cursor. Pass a date or datetime.")
     if _DATE_RE.fullmatch(raw):
         try:
             day = _dt.date.fromisoformat(raw)

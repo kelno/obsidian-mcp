@@ -582,18 +582,23 @@ async def _empty_agenda(real, args, settings, now):
 
 def test_descriptions_and_instructions_are_within_their_bounds():
     listed = {t.name: t for t in server.mcp._tool_manager.list_tools()}
-    for name in ("list_tasks", "task_agenda", "complete_task", "update_task", "add_task"):
+    for name in ("upstream_list_tasks", "task_agenda", "complete_task", "update_task", "add_task"):
         assert len(listed[name].description) <= 4000, name
     assert len(server.SERVER_INSTRUCTIONS) <= 2000
     lead = server.SERVER_INSTRUCTIONS[:512]
     assert "task" not in lead
-    assert re.search(r"`list_tasks` and\s+`task_agenda`", server.SERVER_INSTRUCTIONS)
+    # Fork: these tools are switched off, so the instructions name the fork's
+    # task tools instead (`list_tasks` there is the fork's).
+    for name in ("task_agenda", "complete_task", "update_task", "add_task"):
+        assert f"`{name}`" not in server.SERVER_INSTRUCTIONS, name
 
 
 def test_registration_order_titles_and_annotations():
     names = [t.name for t in server.mcp._tool_manager.list_tools()]
-    assert names[-7:] == ["list_tasks", "get_changes", "hybrid_search", "task_agenda",
-                          "complete_task", "update_task", "add_task"]
+    # Fork: upstream's seven keep their relative order among the fork's tools.
+    upstream = ["upstream_list_tasks", "get_changes", "hybrid_search", "task_agenda",
+                "complete_task", "update_task", "add_task"]
+    assert [n for n in names if n in upstream] == upstream
     listed = {t.name: t for t in server.mcp._tool_manager.list_tools()}
     assert listed["task_agenda"].title == "Task agenda"
     assert listed["task_agenda"].annotations == server._READ_ONLY
@@ -613,6 +618,8 @@ def test_every_new_refusal_code_is_produced_by_the_wiring():
         assert payload_of(out)["nothing_written"] is True
 
 
+@pytest.mark.skip(reason="fork: upstream's task tools are switched off; the primer's Tasks section "
+                         "describes the fork's task tools (tests/test_fork_task_tools.py)")
 def test_the_primer_names_the_task_tools_neutrally(world):
     """`vault-guide` delta (#428): the Tasks section names the five tools,
     says the writes take a path plus a task id, that plain checkboxes work
@@ -889,7 +896,7 @@ def test_the_write_descriptions_list_content_unsafe_and_malformed_precondition(n
 
 def test_the_list_tasks_description_states_the_path_escapes():
     listed = {t.name: t for t in server.mcp._tool_manager.list_tools()}
-    text = " ".join(listed["list_tasks"].description.split())
+    text = " ".join(listed["upstream_list_tasks"].description.split())  # fork: renamed
     assert "a backtick is `\\u0060`" in text
     assert "the write tools take the unescaped path" in text
 

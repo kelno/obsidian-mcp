@@ -938,7 +938,10 @@ def test_fixture_pipeline_matches_expected_report(tmp_path):
     assert report["provenance"]["users"] == "multi" and report["attachable"] is False
     assert res.table.splitlines()[0] == NOT_ATTACHABLE_LINE
     assert json.loads((d / "report.json").read_text()) == report
-    assert re.fullmatch(r"[0-9a-f]{40}", report["commit_sha"])
+    # Fork: the container run copies the tree without `.git` (FORK.md), where
+    # the runner reports "unknown".
+    assert re.fullmatch(r"[0-9a-f]{40}", report["commit_sha"]) or (
+        report["commit_sha"] == "unknown" and not (ROOT / ".git").exists())
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
     assert report["commit_sha"] == head.stdout.strip()
 

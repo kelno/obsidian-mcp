@@ -196,7 +196,8 @@ _ROLLBACK_SCRIPT = textwrap.dedent(
 
     async def main():
         tools = mcp._tool_manager.list_tools()
-        assert len(tools) == 48
+        # Fork: no conftest here, so upstream's seven switched-off tools stay off.
+        assert len(tools) == 41
         for tool in tools:
             assert "additionalProperties" not in tool.parameters, tool.name
             assert tool.fn_metadata.arg_model.model_config.get("extra") is None, tool.name

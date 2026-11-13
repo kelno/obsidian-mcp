@@ -504,9 +504,8 @@ def test_the_two_search_tools_remain_symmetric_peers():
     # lines; it names every peer and ranks none.
     routing = (
         "Exact identifiers, code symbols, titles or known phrases: `keyword_search`. "
-        "Conceptual or paraphrased questions: `semantic_search`. Unsure which: "
-        "`hybrid_search`."
-    )
+        "Conceptual or paraphrased questions: `semantic_search`."
+    )  # fork: `hybrid_search` is switched off, so neither routes to it
     assert routing in " ".join(keyword.split())
     assert routing in " ".join(semantic.split())
     for doc in (keyword, semantic):

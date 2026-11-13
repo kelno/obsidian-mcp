@@ -89,7 +89,7 @@ async def wired(sessionmaker, monkeypatch):
     async def noop(*args, **kwargs):
         return None
 
-    async def fake_get_embedding(text_: str):
+    async def fake_get_embedding(text_: str, **_kw):
         return QUERY
 
     monkeypatch.setattr(tools, "_log_usage", noop)

@@ -380,9 +380,9 @@ async def test_an_entry_embedded_during_the_query_call_is_not_also_called_unembe
     added = await add_quirk("Smoke test of the ledger tools")
     real = ledger_embed.get_embedding
 
-    async def slow_query_embedding(text_):
+    async def slow_query_embedding(text_, **kw):
         await embed_all(sessionmaker)  # the queue's worker, finishing meanwhile
-        return await real(text_)
+        return await real(text_, **kw)
 
     monkeypatch.setattr(ledger_embed, "get_embedding", slow_query_embedding)
     result = await tools.ledger_search_impl(query="Smoke test of the ledger tools", mode="meaning")
@@ -393,7 +393,7 @@ async def test_an_entry_embedded_during_the_query_call_is_not_also_called_unembe
 async def test_meaning_list_says_when_the_provider_is_down(ctx, monkeypatch):
     await add_quirk("Something")
 
-    async def down(text_):
+    async def down(text_, **_kw):
         raise ConnectionError("refused")
 
     monkeypatch.setattr(ledger_embed, "get_embedding", down)
@@ -512,9 +512,9 @@ async def test_a_vector_for_text_that_changed_meanwhile_is_discarded(sessionmake
     entry_id = (await _entry(sessionmaker, q.ref)).id
     real = ledger_embed.get_embeddings_batch
 
-    async def edit_during_the_call(chunks):
+    async def edit_during_the_call(chunks, **kw):
         await tools.ledger_update_impl(ref=q.ref, expected_revision=1, reason="r", title="After")
-        return await real(chunks)
+        return await real(chunks, **kw)
 
     monkeypatch.setattr(ledger_embed, "get_embeddings_batch", edit_during_the_call)
     result = await ledger_embed.embed_entry(entry_id)
@@ -717,10 +717,10 @@ async def test_entries_failing_at_the_provider_are_tried_last(sessionmaker, ctx,
     good = [await add_quirk(f"Fine {i}") for i in range(2)]
     real = ledger_embed.get_embeddings_batch
 
-    async def picky(chunks):
+    async def picky(chunks, **kw):
         if any(c.startswith("Rejected") for c in chunks):
             raise ConnectionError("the provider rejects this one")
-        return await real(chunks)
+        return await real(chunks, **kw)
 
     monkeypatch.setattr(ledger_embed, "get_embeddings_batch", picky)
     ledger_embed._failed_entries.clear()

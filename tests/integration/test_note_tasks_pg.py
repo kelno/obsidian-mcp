@@ -389,8 +389,10 @@ async def test_the_startup_pass_applies_the_same_isolation(sessionmaker, vault, 
             await task
     await assert_isolated(sessionmaker, "Bad.md", others={"Good.md": ["good"]})
     async with sessionmaker() as session:
-        run = (await session.execute(text("SELECT trigger, error FROM indexer_runs"))).one()
-    assert run.trigger == "startup" and run.error is None
+        runs = (await session.execute(text("SELECT trigger, error FROM indexer_runs ORDER BY id"))).all()
+    # Fork: the index loop may record a further pass after the startup one
+    # (separate index and embed loops); each must have run clean.
+    assert runs[0].trigger == "startup" and all(r.error is None for r in runs), runs
 
 
 async def test_the_manual_reindex_applies_the_same_isolation(sessionmaker, vault, monkeypatch):

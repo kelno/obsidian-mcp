@@ -212,7 +212,7 @@ async def test_a_version_1_note_reuses_only_what_its_v1_input_allows(
     assert await versions(sessionmaker) == {CHUNKING_VERSION}
     (line,) = [r.getMessage() for r in caplog.records
                if r.getMessage().startswith("Embedding complete")]
-    assert "1 notes, 2 chunks (1 submitted, 1 reused)" in line, line
+    assert "1 notes selected, 1 embedded, 2 chunks (1 submitted, 1 reused)" in line, line
 
     # A NULL stamp reuses nothing.
     await stamp(sessionmaker, None)
@@ -250,4 +250,4 @@ async def test_the_completion_line_counts_a_reused_note_and_a_fresh_one(
     assert len(provider.documents) == 2
     (line,) = [r.getMessage() for r in caplog.records
                if r.getMessage().startswith("Embedding complete")]
-    assert ": 2 notes, 3 chunks (2 submitted, 1 reused)" in line, line
+    assert ": 2 notes selected, 2 embedded, 3 chunks (2 submitted, 1 reused)" in line, line
