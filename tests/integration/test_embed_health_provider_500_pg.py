@@ -166,3 +166,49 @@ async def test_pending_notes_that_never_embed_degrade_health_whatever_the_cause(
     assert await indexer._embed_stage_once(None)
     assert await _pending(sessionmaker) == 0
     assert indexer_health.snapshot()["embedding_stuck_scopes"] == 0
+
+
+def _stuck_since():
+    return indexer_health._scope(None).embed_stuck_since
+
+
+async def test_an_empty_note_is_not_progress_while_the_provider_is_down(world, sessionmaker):
+    """Adversarial review: a new empty note (a template, a daily note) is
+    certified with no provider call. Counted as progress, every one would
+    reset the clock through a whole outage."""
+    assert await indexer._embed_stage_once(None)
+    started = _stuck_since()
+    assert started is not None
+
+    import src.config
+    root = src.config.settings.vault_path
+    open(f"{root}/Daily.md", "w", encoding="utf-8").write("")
+    assert await indexer._index_stage_once(None)
+    assert await indexer._embed_stage_once(None)
+    assert _stuck_since() == started, "an empty note reset the clock"
+
+
+async def test_a_note_being_edited_is_not_a_failure(world, sessionmaker, monkeypatch):
+    """Adversarial review: a note typed into is skipped stage after stage
+    (its bytes are newer than its row) while the provider is fine. A row
+    skipped twice unchanged still counts."""
+    world.down = False
+    import src.config
+    root = src.config.settings.vault_path
+    assert await indexer._embed_stage_once(None)
+    assert await _pending(sessionmaker) == 0
+
+    # Edited and indexed, then edited again before the embed stage: skipped.
+    path = f"{root}/Champignons.md"
+    for i in range(3):
+        open(path, "w", encoding="utf-8").write(f"# Champignons\n\nedit {i}\n")
+        assert await indexer._index_stage_once(None)
+        open(path, "w", encoding="utf-8").write(f"# Champignons\n\nedit {i} more\n")
+        assert await indexer._embed_stage_once(None)
+        assert await _pending(sessionmaker) == 1
+        assert _stuck_since() is None, f"edit {i}: a note in flux started the clock"
+
+    # The same row skipped again, unchanged: no longer in flux.
+    assert await indexer._embed_stage_once(None)
+    assert _stuck_since() is not None
+

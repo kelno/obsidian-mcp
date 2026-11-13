@@ -54,6 +54,7 @@ SETTINGS_ENV_KEYS = (
     "INDEXER_QUARANTINE_RETRIES_PER_TICK",
     # Stall detection and the embed stage's provider stop (fork).
     "INDEXER_STALLED_AFTER_SECONDS",
+    "EMBED_STUCK_AFTER_SECONDS",
     "EMBED_STOP_AFTER_PROVIDER_FAILURES",
     # The scan's stat shortcut and its backstop (#282).
     "INDEX_STAT_SHORTCUT",
