@@ -122,6 +122,12 @@ def test_plugins_setting_refuses_a_name_that_is_no_module_name():
         Settings(plugins="kelno-vault", secret_key=SECRET, _env_file=None)
 
 
+def test_a_leftover_rule_file_patterns_variable_is_ignored(monkeypatch):
+    """The setting moved into kelno_vault as a constant; a deployment still setting it must start."""
+    monkeypatch.setenv("RULE_FILE_PATTERNS", "_/agent/*,CLAUDE.md")
+    assert not hasattr(Settings(secret_key=SECRET, _env_file=None), "rule_file_patterns")
+
+
 # --- check ---------------------------------------------------------------------
 
 
@@ -353,16 +359,18 @@ def test_the_served_descriptions_hold_no_marker_and_no_plugin_rule_without_the_p
         doc = getattr(server, name).__doc__ or ""
         assert plugins.TOOL_TEXT_MARKER not in doc and "title_heading_removed" not in doc, name
         assert "links_rewritten" not in doc and "task_line_by_hand" not in doc, name
+        assert "rule_change_unlogged" not in doc, name
     assert "Titles (this server)" not in tools._VAULT_GUIDE_PRIMER and "links_rewritten" not in tools._VAULT_GUIDE_PRIMER
-    assert "task_line_by_hand" not in tools._VAULT_GUIDE_PRIMER
+    assert "task_line_by_hand" not in tools._VAULT_GUIDE_PRIMER and "rule_change_unlogged" not in tools._VAULT_GUIDE_PRIMER
 
 
 def test_this_vaults_plugin_describes_its_rule_on_every_writer():
     (loaded,) = plugins.load(("kelno_vault",))
     assert set(loaded.tool_text) == {"create_note", "edit_note", "write_file"}
-    assert all("title_heading_removed" in text and "links_rewritten" in text and "task_line_by_hand" in text
+    assert all("title_heading_removed" in text and "links_rewritten" in text and "task_line_by_hand" in text and "rule_change_unlogged" in text
                for text in loaded.tool_text.values())
     assert loaded.guide_text.startswith("## Task lines (this server)")
+    assert "## Agent rules (this server)" in loaded.guide_text and "_/agent/" in loaded.guide_text
     assert "## Links (this server)" in loaded.guide_text and "## Titles (this server)" in loaded.guide_text
     assert loaded.check is not None
 

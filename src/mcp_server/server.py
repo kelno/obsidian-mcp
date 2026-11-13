@@ -457,14 +457,6 @@ async def create_note(
     starting with a date is written and flagged (`note_name:`). No setting
     above: no check.
 
-    **Rule edits carry their proposal.** In the notes this server is set to
-    treat as the vault's rules for agents, when a write adds or changes
-    lines (outside the frontmatter) and none of them carries a new proposal
-    ref (`[P95]`), the result adds `rule_change_unlogged:` with those lines:
-    log an owner's decision with `ledger_add` (kind proposal) and cite the
-    ref it returns at the end of each changed line; a typo fix or wording
-    that changes no meaning needs no proposal. Never a refusal.
-
     {plugin_text}
 
     **Agent-ledger refs.** When the note cites agent-ledger entries in
@@ -529,14 +521,6 @@ async def edit_note(
 
     See `get_vault_guide` for Obsidian syntax and any vault-specific conventions
     (naming, folder placement, frontmatter, tags).
-
-    **Rule edits carry their proposal.** In the notes this server is set to
-    treat as the vault's rules for agents, when a write adds or changes
-    lines (outside the frontmatter) and none of them carries a new proposal
-    ref (`[P95]`), the result adds `rule_change_unlogged:` with those lines:
-    log an owner's decision with `ledger_add` (kind proposal) and cite the
-    ref it returns at the end of each changed line; a typo fix or wording
-    that changes no meaning needs no proposal. Never a refusal.
 
     {plugin_text}
 
@@ -1185,8 +1169,7 @@ async def write_file(
     Peer to `create_note`/`edit_note`, which stay markdown-only.
     Writing a `.md` note, the result lists agent-ledger refs like
     `edit_note`'s (`changed_lines_cite:`, `cites:`). A new `.md`
-    note's name is checked like `create_note`'s (`note_name_date`). A rule note written with no new
-    proposal ref gets `rule_change_unlogged:` as in `edit_note`.
+    note's name is checked like `create_note`'s (`note_name_date`).
 
     {plugin_text}
 

@@ -879,8 +879,7 @@ def test_line_ending_review_cases(vault, monkeypatch):
 
 
 
-def test_a_rule_edit_without_a_proposal_ref_is_nudged(vault, monkeypatch):
-    monkeypatch.setattr(tools.settings, "rule_file_patterns", ["_/agent/*", "CLAUDE.md"])
+def test_a_rule_edit_without_a_proposal_ref_is_nudged(vault, kelno_vault):
     note(vault, "_/agent/Rules.md", "- Rule one. [P35]\n- Rule two.\n")
     dry = asyncio.run(tools.edit_note_impl("_/agent/Rules.md", "- Rule one, reworded. [P35]", find="- Rule one. [P35]",
                                            dry_run=True))
@@ -893,9 +892,11 @@ def test_a_rule_edit_without_a_proposal_ref_is_nudged(vault, monkeypatch):
     assert "rule_change_unlogged" not in elsewhere
     created = asyncio.run(tools.create_note_impl("_/agent/New.md", "- A new rule.\n"))
     assert "rule_change_unlogged" in created
+    root = asyncio.run(tools.write_file_impl("CLAUDE.md", "- A root rule.\n", encoding="text"))
+    assert "rule_change_unlogged" in root and "- line 1: - A root rule." in root
 
 
 
-def test_no_rule_patterns_no_nudge(vault):
+def test_without_the_vault_plugin_no_rule_nudge(vault):
     created = asyncio.run(tools.create_note_impl("_/agent/Unset.md", "- A new rule.\n"))
     assert "rule_change_unlogged" not in created

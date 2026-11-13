@@ -617,13 +617,6 @@ class Settings(BaseSettings):
     # Vault-relative glob patterns (fnmatch, `*` crosses `/`) of notes never
     # stamped. JSON list or comma-separated.
     last_ai_edit_exclude: Annotated[list[str], NoDecode] = []
-    # Vault-relative glob patterns (fnmatch, `*` crosses `/`) of the notes
-    # holding the vault's rules for agents, whose lines cite the proposals
-    # that shaped them (`[P95]`). A write to one that adds or changes lines
-    # and gives none of them a new proposal ref gets a `rule_change_unlogged:`
-    # nudge in its result. JSON list or comma-separated. Empty (the default):
-    # no check. See docs/architecture/vault-tools.md.
-    rule_file_patterns: Annotated[list[str], NoDecode] = []
     # Folder names that make a folder private, as globs over one folder name
     # (`*`, `?`; any case), matched against every folder in a note's path:
     # everything under such a folder is private. keyword_search,
@@ -1267,7 +1260,7 @@ class Settings(BaseSettings):
             raise ValueError("FTS_CONFIGS must contain at least one config name")
         return out
 
-    @field_validator("last_ai_edit_exclude", "rule_file_patterns", "private_folder_names", mode="before")
+    @field_validator("last_ai_edit_exclude", "private_folder_names", mode="before")
     @classmethod
     def _parse_last_ai_edit_exclude(cls, v):
         """A JSON list, a comma-separated string, or a list of glob patterns;
@@ -1283,7 +1276,7 @@ class Settings(BaseSettings):
                 v = s.split(",")
         if not isinstance(v, (list, tuple)):
             raise ValueError(
-                "LAST_AI_EDIT_EXCLUDE, RULE_FILE_PATTERNS and PRIVATE_FOLDER_NAMES must be lists of glob patterns")
+                "LAST_AI_EDIT_EXCLUDE and PRIVATE_FOLDER_NAMES must be lists of glob patterns")
         return [p for p in (str(i).strip().lstrip("/") for i in v) if p]
 
     @field_validator("plugins", mode="before")

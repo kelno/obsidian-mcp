@@ -8,7 +8,9 @@ What it does today, on the lines a note write adds or changes: a task line
 written by hand is refused (`task_lines`, the check); a first heading
 repeating the note's name is dropped (`title_heading`), then bare-name
 wikilinks get the note's full path (`link_paths`), in that order so the link
-report's line numbers are the written note's. The vault-specific behaviours
+report's line numbers are the written note's; last, a change to a rule note
+whose lines gain no proposal ref is pointed out (`rule_notes`, on the text
+as written). The vault-specific behaviours
 still in the core, and the order they move here in, are in
 docs/architecture/plugins.md.
 """
@@ -20,7 +22,7 @@ from sqlalchemy import select
 
 from src import database, plugins
 from src.models.db import NoteMetadata
-from src.plugins.kelno_vault import link_paths, task_lines, title_heading
+from src.plugins.kelno_vault import link_paths, rule_notes, task_lines, title_heading
 from src.services.filters import apply_note_filters
 
 logger = logging.getLogger(__name__)
@@ -99,14 +101,18 @@ _TITLE_HEADING_GUIDE = (
 
 
 async def _rewrite(write: plugins.NoteWrite) -> plugins.Rewrite:
-    """The title heading, then the links: the heading may drop lines, so the link report is made on the result."""
+    """The title heading, then the links: the heading may drop lines, so the link report is made on the result.
+
+    The rule-edit nudge only reports, on the text as written.
+    """
     text, removed = title_heading.strip(write.old, write.new, write.path)
     text, links_report, links_failure = await _full_path_links(write, text)
+    rule_lines = await rule_notes.unlogged_lines(write.path, write.old, text)
 
     def report(shift: int, dry_run: bool) -> str:
         links = links_failure or (
             link_paths.render(link_paths.shifted(links_report, shift), dry_run=dry_run) if links_report else "")
-        return title_heading.render(removed, dry_run=dry_run) + links
+        return rule_notes.render(rule_lines, shift) + title_heading.render(removed, dry_run=dry_run) + links
 
     return plugins.Rewrite(text, report)
 
@@ -116,11 +122,13 @@ plugin = plugins.Plugin(
     check=task_lines.check,
     rewrite=_rewrite,
     tool_text={
-        "create_note": task_lines.TOOL_TEXT + "\n\n" + _TITLE_HEADING_TOOL_TEXT + "\n\n" + _LINKS_TOOL_TEXT,
-        "edit_note": task_lines.TOOL_TEXT + "\n\n" + _TITLE_HEADING_TOOL_TEXT + "\n\n" + _LINKS_TOOL_TEXT,
-        "write_file": task_lines.WRITE_FILE_TEXT + " A first heading repeating the note's name is dropped as in `edit_note` "
+        "create_note": "\n\n".join((task_lines.TOOL_TEXT, rule_notes.TOOL_TEXT, _TITLE_HEADING_TOOL_TEXT,
+                                     _LINKS_TOOL_TEXT)),
+        "edit_note": "\n\n".join((task_lines.TOOL_TEXT, rule_notes.TOOL_TEXT, _TITLE_HEADING_TOOL_TEXT,
+                                   _LINKS_TOOL_TEXT)),
+        "write_file": task_lines.WRITE_FILE_TEXT + " " + rule_notes.WRITE_FILE_TEXT + " A first heading repeating the note's name is dropped as in `edit_note` "
                       "(`title_heading_removed:`), and bare-name wikilinks get the note's full path as in `edit_note` "
                       "(`links_rewritten:`, `links_flagged:`).",
     },
-    guide_text=task_lines.GUIDE + "\n\n" + _LINKS_GUIDE + "\n\n" + _TITLE_HEADING_GUIDE,
+    guide_text="\n\n".join((task_lines.GUIDE, rule_notes.GUIDE, _LINKS_GUIDE, _TITLE_HEADING_GUIDE)),
 )
