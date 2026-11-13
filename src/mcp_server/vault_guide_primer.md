@@ -211,7 +211,7 @@ A folder note (`<folder>/<folder>.md`) can declare how its notes are named, in i
 
 ## Links to notes for the owner (this server)
 
-When this server is set up with an open-note link (`OPEN_NOTE_URL`), the tools that name notes carry a ready-made http(s) link that opens the note in the Obsidian app: `open_url` in `read_note`'s result, `main_note_open_url` in `open_area`'s, and `— open_url: <link>` at the end of each note's line from `create_note`, `keyword_search`, `semantic_search`, `find_related`, `list_notes`, `get_recent` and `find_orphans`. When you point the owner to a note in a reply, give that link as it is: it is clickable where an `obsidian://` link isn't. Don't build or percent-encode one yourself; for a note no result linked, `read_note` returns its link. Inside notes, wikilinks stay the way to link. Without the setting there is no such field.
+Tools that name a note carry a ready-made http(s) link that opens it in the Obsidian app (`open_url`; `main_note_open_url` in `open_area`), when the server sets `OPEN_NOTE_URL`. When you point the owner to a note in a reply, give that link as is: it's clickable where `obsidian://` isn't.
 
 ## Plugin syntax (Dataview, Templater, etc.)
 
