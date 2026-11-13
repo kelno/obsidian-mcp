@@ -44,9 +44,10 @@ A name in `PLUGINS` that does not load (no module, any exception while importing
 ## The plugins here
 
 - `kelno_vault`: the conventions of the fork owner's vault, fully specific to it and not configurable. Its `check_name` checks a new note's name, or a move's destination, against its folder's `note_names` setting (`note_names.py`, `note_name_date`, folder notes read from disk). Its `check` refuses a task line written by hand (`task_lines.py`, `task_line_by_hand`, reading the Tasks settings from the caller's vault root). Its `rewrite` drops a first heading repeating the note's name (`title_heading.py`), then gives bare-name wikilinks the note's full path (`link_paths.py`, reading the caller's note list through `src.database`), in that order so the link report's line numbers are the written note's. Last, on the text as written, its `rewrite` points out a rule-note change whose lines gain no proposal ref (`rule_notes.py`, `rule_change_unlogged:`, the rule notes a constant there); it only reports. Their description paragraphs and the guide's "Task lines", "Agent rules", "Note names", "Links" and "Titles" sections are its `tool_text` and `guide_text`. The behaviours below are still in the core and move into it one at a time:
-  - private folders (` (private)`), through an `is_private(path)` hook;
   - `open_area` and the task tools' area handling (a hook adding tools, wrapped by the core in `_tracked`);
   - with each, its "(this server)" section of the guide and its paragraphs in the tool descriptions.
+
+  Private folders stay in the core (decided 2026-11-13, step 7 of the plan): `PRIVATE_FOLDER_NAMES` is already a setting, empty by default, that holds this vault's naming (` (private)`) outside the code, and the searches filter by it inside their own queries so the limit fills, which an `is_private(path)` hook could not do.
 - The agent ledger moves last into a built-in plugin, `ledger`; its tables stay in the core's migration chain.
 
 New hooks are added with the first behaviour that needs them.
