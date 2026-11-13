@@ -26,8 +26,13 @@ from src.mcp_server.task_result import TaskListResult, TaskWriteResult
 from src.services import ledger as _ledger_rules
 from src.services import private_folders as _private_folders
 from src.mcp_server import tools as _tools_module
+from src.auth.session import current_principal
+from src.mcp_server.auth import current_permission
+from src.mcp_server.tool_permissions import visible
 from src.mcp_server.tools import (
+    add_task_impl,
     check_upload_impl,
+    complete_task_impl,
     create_note_impl,
     create_task_impl,
     delete_file_impl,
@@ -38,12 +43,15 @@ from src.mcp_server.tools import (
     fetch_page_impl,
     find_orphans_impl,
     find_related_impl,
+    fork_list_tasks_impl,
     get_backlinks_impl,
+    get_changes_impl,
     get_links_impl,
     get_neighborhood_impl,
     get_recent_impl,
     get_tags_impl,
     get_vault_guide_impl,
+    hybrid_search_impl,
     import_from_url_impl,
     index_status_impl,
     ledger_add_impl,
@@ -67,6 +75,8 @@ from src.mcp_server.tools import (
     semantic_search_impl,
     set_frontmatter_impl,
     set_task_status_impl,
+    task_agenda_impl,
+    update_task_impl,
     write_file_impl,
 )
 
@@ -125,8 +135,119 @@ def _origin_patterns(origins) -> list[str]:
     return out
 
 
-mcp = FastMCP(
+# ── Tool metadata (#343) ────────────────────────────────────────────────────
+#
+# Every registration below carries a `title` and one of these four
+# `ToolAnnotations` shapes, with all four hints set explicitly — an absent hint
+# is read by clients as the protocol's worst case (not read-only, destructive,
+# open-world). The hints are a *client-side* signal (auto-approve read-only
+# calls, prompt on destructive ones, run read-only tools in parallel); nothing
+# server-side consults them. Enforcement is unchanged: `_tracked` resolves the
+# vault root and runs the admission gates before any body, and `_require_write`
+# refuses a read-only credential inside every write body.
+#
+# The classification, pinned by `tests/test_issue_343_tool_metadata.py`
+# against the code rather than a list:
+#   read-only   = the nineteen tools that neither change vault bytes nor mint
+#                 a capability (idempotent, closed-world)
+#   destructive = the write-bucket set (`_tracked(write_class=True)`) minus
+#                 `create_note` (no-clobber, additive) and `add_task` (inserts
+#                 one line, removes no byte; #428) plus `request_upload` (its
+#                 `overwrite=True` capability overwrites on redemption)
+#   open-world  = `import_from_url` only
+# A `.trash/` undo path does not make a delete non-destructive, and the hints
+# are per tool, not per call: `edit_note(dry_run=True)` is still "destructive".
+# See docs/architecture/vault-tools.md, "Tool metadata".
+_READ_ONLY = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
+_ADDITIVE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+)
+_DESTRUCTIVE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
+)
+_DESTRUCTIVE_OPEN_WORLD = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True
+)
+# `fetch_page` (fork): reads a public page, writes nothing.
+_READ_ONLY_OPEN_WORLD = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+)
+
+# Published in the `initialize` result. Some clients load only tool names and
+# this text at session start, so the first paragraph (≤ 512 characters) is the
+# whole contract; the total stays ≤ 2,000. Every sentence must be true of the
+# server (#131) — the round trip is stated with its conditions and
+# `expected_hash` as optional, because an unqualified "pass `content` back"
+# after a truncated read replaces the note with the fragment. Nothing may
+# depend on a client having read this (claude.ai is reported to drop it).
+SERVER_INSTRUCTIONS = (
+    "Agent memory in a markdown Obsidian vault. Search with `keyword_search` "
+    "(identifiers), `semantic_search` (paraphrase) or `hybrid_search` "
+    "(unsure); read with `read_note`; write with `create_note` or "
+    "`edit_note` (`dry_run=true` first). `get_vault_guide` describes this "
+    "vault's conventions (one call per session). `create_note` never "
+    "overwrites. Edits take `expected_hash` and refuse, writing nothing, if "
+    "it changed; optional by default (an unguarded stale edit overwrites) "
+    "unless the deployment requires it."
+    "\n\n"
+    "`expected_hash` is a read's `content_hash`; a deployment that requires "
+    "it refuses an unguarded edit (`precondition_required`). Round trips: only `content` from a complete whole-note `read_note` "
+    "(`offset=0`, `truncated=false`) may go back as a full replacement; a "
+    "section's `content` goes back only with the same `section=` selector; "
+    "finish a truncated read before writing, or the rest of the note is lost. "
+    "Server refusals end with one machine-readable line, "
+    '`MCP-REFUSAL {"code":…}`; act on the code, not the prose '
+    "(protocol-layer argument errors do not carry it). Non-markdown files use "
+    "`read_file`, `write_file`, `list_files` and `delete_file`. "
+    "`request_upload` and `request_download` mint short-lived links for a "
+    "person; `import_from_url` fetches a public https URL into the vault. The "
+    "link graph is `get_backlinks`, `get_links`, `get_neighborhood`, "
+    "`find_related` and `find_orphans`. Deletes are soft (`.trash/`) unless "
+    "`permanent=true`. Calls are rate-limited per credential; a rate refusal "
+    "says when to retry and spends no daily quota. `list_tasks` and "
+    "`task_agenda` list checkbox tasks from the index (Tasks-plugin query "
+    "blocks are text they do not evaluate); `complete_task` and `update_task` "
+    "change one task, named by its note `path` plus the task id a listing "
+    "prints, and `add_task` inserts one."
+)
+
+
+class _ScopedFastMCP(FastMCP):
+    """`FastMCP` whose `tools/list` follows the authorization presented (#358).
+
+    The override seam is the **public** `list_tools()`: SDK 1.30 registers it
+    as the `tools/list` handler in `FastMCP._setup_handlers`, and SDK 2.x's
+    `MCPServer._handle_list_tools` awaits `self.list_tools()` — so the 2.x
+    migration (#365) changes only the base class. That migration must keep the
+    2026-07-28 `cacheScope` of `tools/list` `"private"` (the list varies by
+    credential; 2.x's default) and, if it ever paginates, page the filtered
+    list.
+
+    The rule (`tool_permissions.visible`) reads only this request's
+    `current_principal` and `current_permission` — the value `_require_write`
+    reads — so the result depends on the presented credential and nothing
+    else: no earlier request, no cache. Called in-process with no principal
+    (tests, stdio, `MCP_SANDBOX_MODE`) it returns the full list. The return
+    type is unchanged (`list[MCPTool]`); the SDK's cursor handling is untouched
+    (the complete list, no `nextCursor`). This hides tools, it does not guard
+    them: a hidden tool called by name is refused by `_tracked`'s write gate
+    exactly as before. Never touch `self._mcp_server._tool_cache` from here.
+    """
+
+    async def list_tools(self):
+        tools = await super().list_tools()
+        return visible(
+            tools,
+            principal=current_principal.get(),
+            permission=current_permission.get(),
+        )
+
+
+mcp = _ScopedFastMCP(
     "obsidian-vault",
+    instructions=SERVER_INSTRUCTIONS,
     stateless_http=True,
     streamable_http_path="/",
     # Derived from the write caps rather than the SDK's 4 MiB default, which
@@ -178,7 +299,7 @@ _D_PRIVATE_LEDGER_UPDATE = Field(description=(
     "that `cited_by` lists. Default false: they are listed without their text. " + _WHEN_PRIVATE))
 
 
-@mcp.tool()
+@mcp.tool(title="Keyword search", annotations=_READ_ONLY)
 async def keyword_search(
     query: str,
     folder: str | None = None,
@@ -188,9 +309,39 @@ async def keyword_search(
     include_private: Annotated[bool, _D_PRIVATE_SEARCH] = False,
 ) -> str:
     """Full-text keyword search via PostgreSQL tsvector. Use this for exact identifiers,
-    code symbols, proper nouns, or known phrases — anywhere semantic noise hurts.
+    code symbols, proper nouns, titles, or known phrases — anywhere semantic noise hurts.
 
-    For conceptual or paraphrased queries, use semantic_search instead.
+    Exact identifiers, code symbols, titles or known phrases: `keyword_search`.
+    Conceptual or paraphrased questions: `semantic_search`. Unsure which:
+    `hybrid_search`.
+
+    **Bare terms are ANDed**: `budget forecast` matches only notes containing
+    both stems. Notes matching every term come first, tagged `match: all`;
+    when they do not fill the page, notes matching some of the terms follow,
+    tagged `match: any`, in their own rank order. The operators:
+    `"exact phrase"` (adjacent words), `budget OR forecast` (either), `-draft`
+    (exclude; honoured in the `any` block too). A note's title and frontmatter
+    `aliases` are indexed above its body, so a query that is a note's title
+    ranks that note first. A note's tags (frontmatter and inline `#tags`; a
+    nested `#a/b` also as `a` and `b`) are indexed below its title and
+    aliases and above its body.
+
+    Each result carries `rank` (a relative score: a body-only match scores in
+    the thousandths, a title match near 1, and an `any` row is scored against
+    the fallback query, so ranks compare only within one block of one page),
+    `match`, `matched_in` (the parts that alone match: `title` — title or
+    aliases — `tags`, `body`, comma-joined; or, when the terms are split
+    between parts, the first of `title+tags`, `title+body`, `tags+body`,
+    `title+tags+body` that matches), `terms` (`k/n`: how many of the query's
+    terms the note contains), and a second line: `snippet:` — the matching
+    body text with the matches in `«»` — or `head:` — the note's opening
+    words when the body alone does not match or the match is beyond the
+    stored excerpt (a note with no body has no second line). Snippets are
+    computed for the first rows of the page (the header says
+    `snippets: first N` when the page is longer). The header always carries the `all`/`any` counts and how many
+    rows have no stored excerpt yet (notes indexed before this version; the
+    footer names the one-time rebuild). Call `read_note` on a result's path
+    for the full note.
 
     With `OPEN_NOTE_URL` set, each note's line ends with `— open_url: <link>`:
     give that link when pointing the owner to the note.
@@ -211,7 +362,7 @@ async def keyword_search(
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Read note", annotations=_READ_ONLY)
 async def read_note(
     path: str,
     section: str | None = None,
@@ -220,98 +371,65 @@ async def read_note(
 ) -> ReadNoteResult:
     """Read a note from the Obsidian vault by its relative path.
 
-    Returns a **structured result**, not a rendered document. Metadata and note
-    content sit in separate fields, so there is no envelope to parse and no
-    textual procedure to get wrong — read the fields:
+    Arguments: `path`, an optional `section` (an ATX heading), and `offset` / `limit` for paging. Returns a
+    **structured result**, not a rendered document — read the fields:
 
-    - `content` — the selected note text. Whole-note reads: the body with a
-      valid YAML frontmatter block stripped, which is exactly what
-      `edit_note(path, content)` full replacement accepts. Section reads: the
-      section's **body only**, which is exactly what
-      `edit_note(path, content, section=...)` accepts. Pass it straight back;
-      do not add, strip or split anything.
-    - `heading` — section reads only: the matched heading line, with no line
-      terminator. It is *not* part of `content`, and a section write must not
-      be sent it — the heading line is never rewritten.
+    - `content` — the selected note text. Whole-note reads: the body with a valid YAML frontmatter block
+      stripped, which is byte-exact input for `edit_note(path, content)` full replacement only when the read is
+      complete and unwindowed (`offset=0` and `truncated` false). Section reads: the section's **body only**,
+      byte-exact input for `edit_note(path, content, section=...)` under the same condition. Pass it straight
+      back; do not add, strip or split anything. Page a truncated read to the end before writing it back, or
+      full replacement replaces the whole body with the fragment.
+    - `heading` — section reads only: the matched heading line, with no line terminator. It is *not* part of
+      `content`; a section write never rewrites the heading line.
+    - `error` — set when the read failed (missing note, bad `offset`/`limit`, unknown section). A normal
+      result, not a transport error; the content-bearing fields are absent beside it.
+    - `content_hash` — the **whole file's** digest, `sha256:<64 lowercase hex>`, in every mode (a section or
+      truncated read returns the value a whole-note read would), and the token the write tools take as
+      `expected_hash`. It is not a hash of `content`: never compute it yourself, hand it back verbatim.
     - `path`, `title`, `tags` — metadata as data.
     - `open_url` — with `OPEN_NOTE_URL` set: give that link when pointing
       the owner to the note.
-    - `frontmatter_yaml` — the frontmatter block's YAML source, fence lines
-      excluded, LF-normalized (a CRLF or lone-CR block comes back with LF
-      terminators — the same declared residual `content` carries, because this
-      tool normalises and the write tools work on raw bytes; `edit_note` still
-      reattaches the original block byte-identically). This is the
-      authoritative copy. `frontmatter` is a best-effort JSON view of the same
-      block for convenience and may be absent — dates, non-string keys,
-      recursive aliases and unpaired-surrogate escapes have no faithful JSON
-      form, and `metadata_omissions` then says which and why. To change
-      frontmatter use `set_frontmatter`, or edit the raw block with
-      `edit_note(find=...)`; never write back a round trip of the JSON view.
-    - `truncated`, `offset`, `next_offset`, `total_chars` — truncation as data.
-      `outline` (whole-note reads that were truncated) lists every section with
-      its `#N` ordinal so you can fetch the one you want directly, and `notice`
-      carries the guidance in prose.
-    - `metadata_omissions` — any metadata field this response had to drop, and
-      why. Nothing is ever signalled by a marker inside a field.
-    - `content_hash` — this note's file digest, `sha256:<64 lowercase hex>`,
-      and the token the write tools accept as `expected_hash` to bind a write
-      to the bytes you actually read. Three things about it:
-      it is the **whole file's** hash in every mode — a section read and a
-      truncated read return the same value a whole-note read of the unchanged
-      file returns, so a section write guarded with it is refused when
-      *anything* in the file changed (that is the trade, and it is why the
-      argument is optional: bind when you reasoned about what you read, omit
-      when you are appending to a log); it comes from the same read that built
-      this response, never a second one; and it is **not** a hash of `content`
-      — a note with frontmatter, or with CRLF terminators, has a digest the
-      returned text cannot reproduce, so never compute it yourself, hand this
-      value back verbatim. `read_file` on the same path is the byte-exact
-      route to the file itself, `frontmatter_yaml` here being authoritative
-      but LF-normalized.
-    - `error` — set when the read failed (missing note, bad `offset`/`limit`,
-      unknown section). It is a normal result, not a transport error, and the
-      content-bearing fields are absent beside it.
+    - `frontmatter_yaml` — the frontmatter block's YAML source, fence lines excluded, LF-normalized (a CRLF
+      block comes back with LF terminators — the same declared residual `content` carries, because this tool
+      normalises and the write tools work on raw bytes; `edit_note` still reattaches the original block
+      byte-identically). This is the authoritative copy. `frontmatter` is a best-effort JSON view of the same
+      block and may be absent; `metadata_omissions` then says which fields were dropped and why. To change
+      frontmatter use `set_frontmatter`, or edit the raw block with `edit_note(find=...)`; never write back a
+      round trip of the JSON view.
+    - `truncated`, `offset`, `next_offset`, `total_chars` — truncation as data. `outline` (truncated whole-note
+      reads) lists every section with its `#N` ordinal so you can fetch the one you want directly, and `notice`
+      carries the guidance in prose. Read the one section you need with `section=` rather than paging a large
+      note; `content`, the outline and the metadata fields each have their own budget.
+    - `metadata_omissions` — any metadata field this response had to drop, and why. Nothing is ever signalled
+      by a marker inside a field.
 
-    Budgets are per field, not per response: `content` is bounded by the
-    server's response cap, the outline by its own equal budget, and the
-    metadata fields by a third — so a truncated whole-note read can carry
-    several capped components. Read the one section you need with `section=`
-    rather than paging a large note.
-
-    **Round trips.** A whole-note `content` is byte-exact input for
-    `edit_note(path, content)` only when the read is complete and unwindowed
-    (`offset=0` and `truncated` false); a truncated read must be paged to the
-    end first, or full replacement replaces the whole body with the fragment.
-    A section `content` is byte-exact input for `edit_note(section=...)` under
-    the same completeness condition. Byte-identity holds for notes whose body
-    newlines use one ending: the content comes back as LF, and `edit_note`
-    writes text with the note's own most common ending.
+    Byte-identity holds for notes whose body newlines are LF: terminators inside the selected content come back
+    as LF. `read_file` on the same path is the byte-exact route to the file itself.
 
     Args:
         path: Vault-relative path to the note (e.g. "Cards/My Note.md")
-        section: Optional ATX heading to read instead of the whole note. Plain
-            text ("Balance Sheet"), a path-style chain ("Parent/Child") when the
-            heading appears under different parents, or a "#N" ordinal ("#7",
-            1-based document order) — the ordinal is the only form that can
-            address duplicate headings sharing the same parent. The outline
-            returned with a truncated note carries the ordinal for every
-            section. A bare "#N" always selects by position and is never
-            shadowed by a heading whose text happens to be "#N"; use
-            "Parent/#N" to reach such a heading by title.
-        offset: Character offset to start reading from (default 0). Use the
-            `next_offset` the response reports to continue.
-        limit: Maximum characters of `content` to return. Only lowers the
-            server cap; it cannot raise it.
+        section: Optional ATX heading to read instead of the whole note. Plain text ("Balance Sheet"), a
+            path-style chain ("Parent/Child") when the heading appears under different parents, or a "#N"
+            ordinal ("#7", 1-based document order) — the only form that can address duplicate headings
+            sharing the same parent; the outline of a truncated note carries the ordinal for every section.
+            A bare "#N" always selects by position; use "Parent/#N" to reach a heading titled "#N".
+        offset: Character offset to start reading from (default 0); continue from the reported `next_offset`.
+        limit: Maximum characters of `content` to return. Only lowers the server cap; it cannot raise it.
     """
     return await read_note_impl(path, section=section, offset=offset, limit=limit)
 
 
-@mcp.tool()
+@mcp.tool(title="List notes", annotations=_READ_ONLY)
 async def list_notes(
     folder: str = "",
     limit: int = 50,
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    order_by: str | None = None,
+    cursor: str | None = None,
 ) -> str:
     """List notes in a vault folder, sorted by most recently modified.
 
@@ -322,6 +440,11 @@ async def list_notes(
     With `OPEN_NOTE_URL` set, each note's line ends with `— open_url: <link>`:
     give that link when pointing the owner to the note.
 
+    Notes whose content changed in a window: `order_by="content_changed"` with
+    `since` (and optionally `until`). File mtime (the default order) also moves
+    when a file is merely touched or re-synced; `content_changed` moves only when
+    the indexed content hash changes.
+
     Args:
         folder: Vault-relative folder path (e.g. "Cards/", "Projects/"). Empty for vault root.
         limit: Maximum number of results (default 50).
@@ -329,11 +452,21 @@ async def list_notes(
             (e.g. ["idea"]).
         frontmatter: Optional dict of frontmatter key/value pairs; strict type match
             (e.g. {"status": "active"}).
+        since: Optional UTC lower bound, inclusive: `YYYY-MM-DD` (that whole UTC
+            day) or an ISO 8601 datetime with `Z` or `±HH:MM` (no offset is refused).
+        until: Optional UTC upper bound, exclusive; a date includes that whole day.
+        order_by: `"mtime"` (default) or `"content_changed"`; the bounds apply to it.
+        cursor: The `more: cursor=…` value from the previous page of the same call.
+            When any of since/until/order_by/cursor is given, a full page ends with
+            that footer.
     """
-    return await list_notes_impl(folder, limit=limit, tags=tags, frontmatter=frontmatter)
+    return await list_notes_impl(
+        folder, limit=limit, tags=tags, frontmatter=frontmatter,
+        since=since, until=until, order_by=order_by, cursor=cursor,
+    )
 
 
-@mcp.tool()
+@mcp.tool(title="List tags", annotations=_READ_ONLY)
 async def get_tags(limit: int = 50) -> str:
     """List all tags used across the vault with note counts.
 
@@ -343,12 +476,16 @@ async def get_tags(limit: int = 50) -> str:
     return await get_tags_impl(limit=limit)
 
 
-@mcp.tool()
+@mcp.tool(title="Recent notes", annotations=_READ_ONLY)
 async def get_recent(
     limit: int = 20,
     folder: str | None = None,
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    order_by: str | None = None,
+    cursor: str | None = None,
 ) -> str:
     """Get recently modified notes, newest first.
 
@@ -358,6 +495,13 @@ async def get_recent(
     With `OPEN_NOTE_URL` set, each note's line ends with `— open_url: <link>`:
     give that link when pointing the owner to the note.
 
+    Notes whose content changed since a point in time:
+    `order_by="content_changed"` with `since`. File mtime (the default order)
+    also moves when a file is touched or re-synced without a content change;
+    `content_changed` moves only when the indexed content hash changes, and each
+    line is then labelled `changed`. For an exact list of creations, edits,
+    moves and deletions since a stored cursor, see `get_changes`.
+
     Args:
         limit: Number of recent notes to return (default 20).
         folder: Optional folder prefix to filter (e.g. "Projects/").
@@ -365,13 +509,21 @@ async def get_recent(
             (e.g. ["meeting"]).
         frontmatter: Optional dict of frontmatter key/value pairs; strict type match
             (e.g. {"status": "active"}).
+        since: Optional UTC lower bound, inclusive: `YYYY-MM-DD` (that whole UTC
+            day) or an ISO 8601 datetime with `Z` or `±HH:MM` (no offset is refused).
+        until: Optional UTC upper bound, exclusive; a date includes that whole day.
+        order_by: `"mtime"` (default) or `"content_changed"`; the bounds apply to it.
+        cursor: The `more: cursor=…` value from the previous page of the same call.
+            When any of since/until/order_by/cursor is given, a full page ends with
+            that footer.
     """
     return await get_recent_impl(
-        limit=limit, folder=folder, tags=tags, frontmatter=frontmatter
+        limit=limit, folder=folder, tags=tags, frontmatter=frontmatter,
+        since=since, until=until, order_by=order_by, cursor=cursor,
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Semantic search", annotations=_READ_ONLY)
 async def semantic_search(
     query: str,
     limit: int = 15,
@@ -379,13 +531,16 @@ async def semantic_search(
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
     include_private: Annotated[bool, _D_PRIVATE_SEARCH] = False,
+    rerank: bool = False,
 ) -> str:
     """Vector similarity search over the vault's chunk embeddings. Use this for conceptual
     or paraphrased queries — anywhere exact word matching would miss the point.
 
-    For exact identifiers, code symbols, proper nouns, or known phrases, use keyword_search instead.
+    Exact identifiers, code symbols, titles or known phrases: `keyword_search`.
+    Conceptual or paraphrased questions: `semantic_search`. Unsure which:
+    `hybrid_search`.
 
-    Each result is one note (deduped) with its best-matching chunk as a ~200-character preview.
+    Each result is one note (deduped) with its closest-matching chunk as a ~200-character preview.
     Call `read_note` on a result's path to get the full note content.
 
     With `OPEN_NOTE_URL` set, each note's line ends with `— open_url: <link>`:
@@ -409,12 +564,34 @@ async def semantic_search(
     note is a match against its head; its tail is not reachable by semantic
     search at all, though `keyword_search` still covers the whole note.
 
+    **Section locator.** A fresh row names the section it matched on its
+    result line: `§ "<heading path>" (#N)` for a heading's section, or
+    `§ (top of note)` for text before the first heading.
+    `read_note(path, section="#N")` reads exactly that section. The quoted
+    path is note text; the `(#N)` after it is the server's. The locator is
+    omitted on stale rows and on rows not yet re-embedded since heading-aware
+    chunking. While any of your notes is not yet re-chunked, the line after
+    the header reads `index_transition: N notes not yet re-chunked; …`:
+    ranking across the two generations is approximate, so re-run once it is
+    gone. Previews are one line.
+
     **The bound on the staleness signal, stated so it is not over-read:** it
     reports what the index has *committed*. An edit that the indexer has not
     yet scanned is not marked, so a note edited in the last few minutes may
     come back unmarked with a superseded preview. The guarantee is "no result
     presents text the index knows to be superseded", not "no result is ever
     out of date".
+
+    `rerank=true` asks the deployment's reranker to reorder the candidates
+    this call already fetched; it can add up to the configured timeout. Its
+    rows are one-line quoted objects followed by server fields (with
+    `rerank_score` when reranked). The header says `reranked: true` or
+    `reranked: false (<reason>)`, and an unreranked page keeps the unreranked
+    order; `reranked: false (not_configured)` means this deployment has no
+    reranker.
+
+    The header also carries `confidence: ok` or `confidence: low` (the
+    closest match is under the deployment's threshold; `ok` when none is set).
 
     Args:
         query: Natural language description of what you're looking for.
@@ -424,14 +601,17 @@ async def semantic_search(
             (e.g. ["product"]).
         frontmatter: Optional dict of frontmatter key/value pairs; strict type matching —
             string "0" does not match integer 0 (e.g. {"status": "active"}).
+        rerank: Reorder the fetched candidates with the deployment's reranker
+            (default false).
     """
     return await semantic_search_impl(
         query, limit=limit, folder=folder, tags=tags, frontmatter=frontmatter,
         include_private=include_private,
+        rerank=rerank,
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Create note", annotations=_ADDITIVE)
 @_plugins.tool_text("create_note")
 async def create_note(
     path: str, content: str, expected_hash: str | None = None
@@ -469,8 +649,9 @@ async def create_note(
     file's** hash, never a hash of the text you received. Two windows, both
     live: `expected_hash` covers your read → this call's read, the server's own
     pre-publication compare covers this call's read → its publication, and a
-    match on the first does not exempt the second. Every refusal ends with one
-    machine-readable `MCP-REFUSAL {"code":…}` line — `stale_precondition` (with
+    match on the first does not exempt the second. Every refusal the server raises ends with one
+    machine-readable `MCP-REFUSAL {"code":…}` line (an undeclared or mistyped argument is rejected by
+    protocol validation before the tool runs and carries no such line) — `stale_precondition` (with
     the file's current hash, ready to resend), `concurrent_write`,
     `no_incumbent`, `malformed_precondition`, `precondition_unavailable`,
     `precondition_required` — and each states what resolves it.
@@ -490,7 +671,7 @@ async def create_note(
     return await create_note_impl(path, content, expected_hash=expected_hash)
 
 
-@mcp.tool()
+@mcp.tool(title="Edit note", annotations=_DESTRUCTIVE)
 @_plugins.tool_text("edit_note")
 async def edit_note(
     path: str,
@@ -504,11 +685,13 @@ async def edit_note(
     replace_frontmatter: bool = False,
     expected_hash: str | None = None,
 ) -> str:
-    """Edit an existing note in the Obsidian vault. Requires write permission — a `readwrite` API key, or an OAuth token
-    carrying the `readwrite` scope.
+    """Edit an existing note in the Obsidian vault. Requires write permission (a `readwrite` API key or OAuth scope).
 
-    See `get_vault_guide` for Obsidian syntax and any vault-specific conventions
-    (naming, folder placement, frontmatter, tags).
+    Arguments: `path`, `content`, at most one mode flag — `append`, `find` or `section` (`operation` is a
+    legacy alias) — plus `replace_all`, `dry_run`, `replace_frontmatter`, and the `expected_hash`
+    precondition. Every refusal the server raises ends with one machine-readable `MCP-REFUSAL {"code":…}`
+    line; an undeclared or mistyped argument is rejected by protocol validation before the tool runs and
+    carries no such line. See `get_vault_guide` for vault conventions.
 
     {plugin_text}
 
@@ -520,164 +703,48 @@ async def edit_note(
     `dry_run=true`: it shows both lists after the diff. Refs your new text
     adds (not ones it keeps) come after `cites:`, as they stand now.
 
-    Four mutually exclusive modes (set at most one of append/find/section):
-    1. **Full replace** (default): provide only `content`. `content` becomes the
-       note's **body**; an existing valid line-1 YAML frontmatter block is
-       **preserved byte-identically** ahead of it. Pass
-       `replace_frontmatter=True` to overwrite the entire file, frontmatter
-       included.
-    2. **Append**: `append=True`; `content` is added at the end (preceded by a single newline).
-    3. **Find & replace**: `find=<exact text>`; replaced with `content`. Must match
-       exactly once unless `replace_all=True`. Line endings don't matter for
-       the match (an LF `find` matches a CRLF note). This mode operates on the
-       raw file, so it is the one mode that can edit frontmatter text in place.
-    4. **Section**: `section=<heading>`; replaces the **whole body** under the
-       named ATX heading — see "Section mode: what `content` replaces" below.
-       Use the path-style form `Parent/Child` to disambiguate when the same heading
-       appears more than once, or the `#N` ordinal form ("#7", 1-based document
-       order) — the ordinal is the only form that can address duplicate headings
-       sharing one parent, and it is the selector the outline of a truncated
-       `read_note` advertises. A bare "#N" always selects by position and is
-       never shadowed by a heading whose text happens to be "#N"; reach such a
-       heading by title with "Parent/#N". A selector resolves to the same
-       section in `read_note` as in this tool **on any write this tool
-       admits** — that parity is about resolution, not about admission: see
-       the two section-mode refusals below, where a section that reads fine is
-       deliberately not writable. Setext (`====`/`----`) headings are not
-       matched.
+    Modes (mutually exclusive):
+    1. **Full replace** (default): `content` becomes the note's **body**; an existing valid line-1 YAML
+       frontmatter block is **preserved byte-identically** ahead of it. `replace_frontmatter=True` overwrites
+       the entire file, frontmatter included. A note with no valid block is replaced wholesale.
+       Change frontmatter with `set_frontmatter` or `find=`; never write back `read_note`'s `frontmatter` JSON
+       view. The round-trip guarantee covers a complete, unwindowed whole-note read only — no `section`,
+       `offset=0`, `truncated` false; page a truncated read to the end first, or full replacement replaces the
+       whole body with the fragment. A section response belongs to section mode.
+    2. **Append**: `append=True`; `content` is added at the end, after one newline.
+    3. **Find & replace**: `find=<exact text>` is replaced with `content`; it must match exactly once unless
+       `replace_all=True`.
+    4. **Section**: `section=<heading>` replaces the **whole body** under the named ATX heading. `Parent/Child`
+       disambiguates repeated headings; a `#N` ordinal ("#7", 1-based document order) is the only form that
+       addresses duplicate siblings. A selector resolves to the same section here as in `read_note` on any
+       write this tool admits — parity is about resolution, not admission.
 
-    **Frontmatter and the round trip.** Read a note, edit the `content` field
-    of the response, pass it straight back to full replacement: the frontmatter
-    survives. No property of `content`'s shape changes that — a body whose
-    first line is a thematic break `---`, or which itself begins with a
-    complete mapping-shaped fenced block, is body. A note with no valid block
-    (no line-1 fence, or a malformed one) is replaced wholesale by default,
-    which is the repair path and needs no flag. To change the frontmatter
-    itself use `set_frontmatter`, or edit the raw block through `find=`; a
-    `read_note` response's `frontmatter` JSON view is a lossy convenience and
-    must never be written back.
+    `dry_run=True` returns a unified diff and writes nothing.
 
-    **The round-trip guarantee covers a complete, unwindowed whole-note read
-    only** — `read_note(path)` with no `section`, `offset=0` and `truncated`
-    false in the response. A truncated read must be paged to the end before it
-    is written back, or full replacement will replace the whole body with the
-    fragment.
+    **`expected_hash`**: pass the `content_hash` a read returned, verbatim, and the call is refused with
+    nothing written if the file changed since — in every mode, `dry_run` included. It is the **whole file's**
+    hash, never a hash of the text you received. Optional by default — omitted, a stale edit overwrites —
+    unless the deployment requires it, when an omitted hash is refused `precondition_required`. Codes:
+    `stale_precondition`, `concurrent_write`, `no_incumbent`, `malformed_precondition`,
+    `precondition_unavailable`, `precondition_required`. Success reports the `content_hash` of the bytes
+    **this call wrote**, not what is on disk when you read it; `dry_run` reports none.
 
-    **Section mode: what `content` replaces.**
-    - In section mode `content` is the section's **body**: the text beginning
-      on the line immediately after the matched heading line, running to the
-      next heading of equal-or-shallower depth or to end of note. The heading
-      line itself is never removed or rewritten.
-    - A section write replaces that body **whole**. Anything `content` does not
-      resend is **deleted** — a blank line, a list, and a **fenced code block
-      sitting directly under the heading** included. There is no third region
-      between the heading line and the body that survives a write.
-    - So a blank line you want between the heading and its content belongs in
-      `content` (send `"\\ntext"`, not `"text"`).
-    - `read_note(path, section=...)` is the matching read: its response carries
-      the heading line in the `heading` field and the body in the `content`
-      field, and this tool takes exactly that `content`. Pass the field
-      through unchanged — there is nothing to split off and nothing to strip.
-    - The note keeps its line endings: in every mode but
-      `replace_frontmatter=True` (which writes `content` byte for byte), the
-      text you send is written with the note's own most common ending (CRLF,
-      LF or a lone CR), so a CRLF note stays CRLF and an LF one LF. A
-      `read_note` → `edit_note` round trip is byte-identical unless the note
-      mixes endings, where the written part takes the most common one.
+    **Section mode.** `content` is the section's **body**: the text beginning on the line immediately after the
+    matched heading line; the heading line is never rewritten. The body is replaced **whole** — anything
+    `content` does not resend, a fenced code block under the heading included, is deleted — so a blank
+    line you want after the heading belongs in `content`. `read_note(path, section=...)` is the matching read:
+    its `heading` field carries the heading line and its `content` field the body, and this tool takes exactly
+    that `content`. Byte-identity holds for notes whose body newlines are LF: non-LF terminators inside the
+    selected body come back as LF. `#N` ordinals agree with `read_note`; a heading inside a fenced code block is
+    not a heading.
+    A write keeps the note's line endings: in every mode but `replace_frontmatter=True` (written byte for
+    byte), your text takes the note's own most common ending, so a CRLF note stays CRLF.
 
-    Section mode resolves headings over the frontmatter-stripped body, exactly
-    as `read_note` does, so `#N` ordinals agree between the two and a YAML `#`
-    comment inside the block is never selectable. A heading inside a fenced
-    code block is not a heading: fences count with up to three spaces of
-    indentation and a closer at least as long as the opener, and an unclosed
-    column-zero fence hides everything below it.
-
-    **Two shapes refuse a section write outright, naming the problem and
-    writing nothing:**
-    - a malformed frontmatter block (unclosed fence, YAML error, non-mapping)
-      — the refusal names the defect and the `replace_frontmatter=True`
-      repair;
-    - a fence opener indented by one to three spaces that nothing below it
-      closes — such an opener may sit inside a list item, whose code block
-      ends where the item does, and this server does not parse container
-      blocks, so it will not guess whether the text below is code or content.
-      Close the fence or unindent it to column zero, then reissue.
-
-    Both refusals are asymmetric with reads on purpose: `read_note(section=…)`
-    and the truncation outline keep working on such notes, because a read
-    destroys nothing.
-
-    Flags:
-    - `operation="append"`: legacy alias for `append=True`. This is accepted to
-      prevent older clients from silently falling through to full replacement.
-      `operation="replace"` explicitly selects full replacement.
-    - `replace_all=True`: with `find`, replace every occurrence rather than failing on
-      multiple matches. Ignored when `find` is unset.
-    - `replace_frontmatter=True`: full replacement overwrites the entire file
-      including the frontmatter block. Combined with append/find/section it is
-      an error and nothing is written.
-    - `dry_run=True`: compute the would-be result and return a unified diff without
-      writing. Works for all four modes, and diffs the composed result.
-
-    Writes are atomic: the composed result is staged in the note's own directory,
-    flushed to disk, and published with a single same-directory rename, so a
-    crash mid-write cannot truncate the destination. The publish is guarded,
-    but only against a change landing inside **this call**: the file is read
-    here and re-compared immediately before the rename, so a writer racing this
-    tool's own read-modify-write fails with `File changed while editing:
-    <name>` and nothing is written. **That is not a guard on your read** — it
-    is the second of the two windows below, and `expected_hash` is the first.
-    Structured frontmatter mutation is better done via `set_frontmatter` —
-    PyYAML serialization there discards YAML comments. A
-    path whose final component is a symlink is refused in every mode
-    (`dry_run` included), naming the link's target; symlinked folders inside
-    the vault work normally.
-
-    **`expected_hash` — binding a write to the bytes you read.** Optional; omit
-    it and nothing changes, including today's silent overwrite of whatever
-    landed since your `read_note`. Pass the `content_hash` a read returned,
-    verbatim and canonical (`sha256:<64 lowercase hex>`), and the call is
-    refused with nothing written if the file changed in between. It is always
-    the **whole file's** hash, never a hash of the text you received. Two
-    windows, both live: `expected_hash` covers your read → this call's read,
-    the server's own pre-publication compare covers this call's read → its
-    publication, and a match on the first does not exempt the second. Every
-    refusal ends with one machine-readable `MCP-REFUSAL {"code":…}` line —
-    `stale_precondition` (with the file's current hash, ready to resend),
-    `concurrent_write`, `no_incumbent`, `malformed_precondition`,
-    `precondition_unavailable`, `precondition_required` — and each states what
-    resolves it.
-
-    It applies in **all four modes**, `dry_run` included, and is checked before
-    mode dispatch, the size cap, the diff and every no-op branch, so a stale
-    base never yields a diff or a "no changes" answer. A `section=` write binds
-    the **whole file** as well: `#N` ordinals are positional, so a body-only
-    digest could certify an unchanged body while an insertion above it changed
-    which section the selector names. That makes the narrowest mode the most
-    conflict-prone — an unrelated edit elsewhere refuses it — which is exactly
-    why the argument is optional: bind when you reasoned about what you read,
-    omit when you are appending to a log. Every mode that publishes reports the
-    `content_hash` of the bytes **this call wrote** (not of whatever is on disk
-    when you read the message), so an edit→edit chain needs no intervening
-    read; `dry_run` publishes nothing and reports none.
-
-    Args:
-        path: Vault-relative path to the note.
-        content: New body (full replace), replacement text, text to append, or
-            section body.
-        append: If True, append content to the end of the note.
-        operation: Legacy mode selector; accepts "append" or "replace".
-        find: Exact text to find and replace.
-        section: ATX heading text identifying the section whose body to replace.
-            Use `Parent/Child` to disambiguate repeated headings, or a "#N"
-            ordinal ("#7", 1-based document order) for duplicate siblings.
-        replace_all: With `find`, replace every match instead of requiring uniqueness.
-        dry_run: Return a unified diff and do not write.
-        replace_frontmatter: Full-replace only. If True, `content` replaces the
-            entire file including any frontmatter block. Default False
-            preserves an existing valid block.
-        expected_hash: The note's `content_hash` as you last read it. Refuses
-            the write, changing nothing, if the file has changed since.
+    **Two shapes refuse a section write outright, naming the problem and writing nothing:** a malformed
+    frontmatter block, whose refusal names the `replace_frontmatter=True` repair; and a fence opener indented by
+    one to three spaces that nothing below it closes — close the fence or unindent it to column zero, then
+    reissue. Both are asymmetric with reads: `read_note` keeps working on such notes. A symlinked
+    final component is refused.
     """
     return await edit_note_impl(
         path,
@@ -693,7 +760,7 @@ async def edit_note(
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Vault guide", annotations=_READ_ONLY)
 async def get_vault_guide() -> str:
     """Read first, before other tools: how to use these tools, and this vault's rules.
 
@@ -710,7 +777,7 @@ async def get_vault_guide() -> str:
     return await get_vault_guide_impl()
 
 
-@mcp.tool()
+@mcp.tool(title="Backlinks", annotations=_READ_ONLY)
 async def get_backlinks(path: str, limit: int = 50) -> str:
     """Notes that link TO `path`. Use this to discover what references a given
     note — projects citing a card, daily notes mentioning a person, etc.
@@ -724,7 +791,7 @@ async def get_backlinks(path: str, limit: int = 50) -> str:
     return await get_backlinks_impl(path, limit=limit)
 
 
-@mcp.tool()
+@mcp.tool(title="Outgoing links", annotations=_READ_ONLY)
 async def get_links(path: str, limit: int = 100) -> str:
     """Outgoing links from `path` — both resolved and dangling.
 
@@ -751,7 +818,7 @@ async def get_links(path: str, limit: int = 100) -> str:
     return await get_links_impl(path, limit=limit)
 
 
-@mcp.tool()
+@mcp.tool(title="Link neighborhood", annotations=_READ_ONLY)
 async def get_neighborhood(path: str, depth: int = 1, limit: int = 50) -> str:
     """The connected subgraph reachable from `path` via links or backlinks,
     up to `depth` hops (treated as undirected).
@@ -769,7 +836,7 @@ async def get_neighborhood(path: str, depth: int = 1, limit: int = 50) -> str:
     return await get_neighborhood_impl(path, depth=depth, limit=limit)
 
 
-@mcp.tool()
+@mcp.tool(title="Related notes", annotations=_READ_ONLY)
 async def find_related(
     path: str, limit: int = 10, include_private: Annotated[bool, _D_PRIVATE_SEARCH] = False,
 ) -> str:
@@ -805,6 +872,17 @@ async def find_related(
     **The bound on the staleness signal:** it reports what the index has
     committed, so an edit the indexer has not yet scanned is not marked.
 
+    **Section locator.** A fresh row names the section it matched on its
+    result line: `§ "<heading path>" (#N)` for a heading's section, or
+    `§ (top of note)` for text before the first heading.
+    `read_note(path, section="#N")` reads exactly that section. The quoted
+    path is note text; the `(#N)` after it is the server's. The locator is
+    omitted on stale rows and on rows not yet re-embedded since heading-aware
+    chunking. While any of your notes is not yet re-chunked, the line after
+    the header reads `index_transition: N notes not yet re-chunked; …`:
+    ranking across the two generations is approximate, so re-run once it is
+    gone. Previews are one line.
+
     Args:
         path: Vault-relative path to the source note.
         limit: Maximum results (default 10, hard cap 50).
@@ -812,7 +890,7 @@ async def find_related(
     return await find_related_impl(path, limit=limit, include_private=include_private)
 
 
-@mcp.tool()
+@mcp.tool(title="Orphan notes", annotations=_READ_ONLY)
 async def find_orphans(folder: str | None = None, limit: int = 50) -> str:
     """Notes with zero incoming AND zero outgoing resolved links — useful for
     vault hygiene ("what's disconnected?") and cleanup decisions.
@@ -828,7 +906,7 @@ async def find_orphans(folder: str | None = None, limit: int = 50) -> str:
     return await find_orphans_impl(folder=folder, limit=limit)
 
 
-@mcp.tool()
+@mcp.tool(title="Move note", annotations=_DESTRUCTIVE)
 @_plugins.tool_text("move_note")
 async def move_note(
     from_path: str,
@@ -841,96 +919,61 @@ async def move_note(
 
     {plugin_text}
 
-    Updates `notes_metadata.file_path` for the moved note and `note_links.target_path`
-    rows whose stored target matched the old path. Backlinks via `target_note_id`
-    keep working without rewriting source notes (the moved note's id is unchanged).
+    Arguments: `from_path`, `to_path` (must not exist; parent directories are created), `rewrite_links`
+    (default False) and the optional `expected_hash` precondition. The index follows the move, so backlinks
+    keep working without rewriting source notes. Every refusal the server raises ends with one
+    machine-readable `MCP-REFUSAL {"code":…}` line; an undeclared or mistyped argument is rejected by
+    protocol validation before the tool runs and carries no such line.
 
-    With `rewrite_links=True`, also opens every source note that linked to this
-    note and rewrites the link in place: `[[Old]]` → `[[New]]`,
-    `[[Old|alias]]` → `[[New|alias]]` (but `[[Old|Old]]` → `[[New|New]]`: an
-    alias or markdown link text that is exactly the old name, case included,
-    follows the rename), `[[Old#anchor]]` → `[[New#anchor]]`,
-    `![[Old]]` → `![[New]]`, path-style `[[folder/Old]]` → `[[new/folder/New]]`,
-    and markdown links `[text](Old.md)` → `[text](<new path>)`, whose href is
-    written relative to the linking note's own folder (anchors preserved).
-    Aliases and anchors survive; only the target portion is rewritten.
-    **The moved note's own body is rewritten as well**, so a self-reference
-    does not end up pointing at the old path.
+    **`expected_hash`** binds **`from_path`'s own bytes and nothing else**: pass the `content_hash` a read
+    returned, verbatim, and the move is refused with nothing written if that note
+    changed since. It is compared at preflight, before the rename and before any rewrite; the rename then pins
+    inode identity but does not compare the bytes again, so an in-place edit landing after that comparison is
+    still moved. The backlink sources a `rewrite_links=True` move rewrites are *not* bound, because you never
+    read them. Optional by default — omitted, the move proceeds — unless the deployment requires it, when
+    an omitted hash is refused `precondition_required`. Codes: `stale_precondition`, `concurrent_write`,
+    `no_incumbent`, `malformed_precondition`, `precondition_unavailable`, `precondition_required`.
 
-    Before that, the move brings the link index up to date (an index pass
-    over your notes, re-reading only the ones that changed), so links written
-    moments ago are found too. If it cannot — another index pass busy past
-    the wait limit, indexing paused, or a folder the index cannot list or a
-    note it set aside (named in the refusal) — the move is refused with
-    `index_not_ready` and nothing is moved or rewritten: retry shortly, fix
-    the named note, or move with `rewrite_links=False`.
+    With `rewrite_links=True`, every source note that links to this note is rewritten in place — wikilinks,
+    embeds, path-style links, and bare-href markdown links `[text](Old.md)`, whose new href is written
+    relative to the linking note's own folder; angle-bracket hrefs `[text](<Old.md>)` are **not** rewritten.
+    Aliases and anchors survive. **The moved note's own body is rewritten as well**, so a self-reference
+    does not end up pointing at the old path. The rewrites are planned
+    before anything changes: if one would push a source past the note size limit, or the planning would exceed
+    the aggregate memory bound, the whole move is refused before any file is touched, naming the source or the
+    count.
 
-    The rewrites are planned before anything changes: if one would push a
-    source note past the 10 MiB note limit the whole move is refused, naming
-    that source, before any file is touched. That preflight is also bounded in
-    aggregate: if the originals plus rewrites for all backlink sources would
-    exceed 256 MiB in memory the move is refused before anything changes,
-    naming the note count and the limit.
+    Before rewriting, the move brings the link index up to date (an index pass over your notes, re-reading
+    only the ones that changed), so links written moments ago are found too. If it cannot (another index
+    pass busy past the wait limit, indexing paused, or a folder the index cannot list or a note it set
+    aside, named in the refusal), the move is refused with `index_not_ready` and nothing is moved or
+    rewritten: retry shortly, fix the named note, or move with `rewrite_links=False`.
 
-    **The same preflight refuses the whole move, before the rename, when any
-    source it would rewrite — the moved note's own body included — contains a
-    fence opener indented by one to three spaces that nothing below it
-    closes.** The refusal names each such source and where its opener sits. A
-    link under such an opener may be inside a list item's code block, which
-    this server does not parse, and a rewrite would mutate text whose
-    code-or-content status had to be guessed. Move with `rewrite_links=False`
-    (unaffected by this refusal) and fix the links yourself, or close the
-    fences first.
+    **The same preflight refuses the whole move, before the rename, when any source it would rewrite — the
+    moved note's own body included — contains a fence opener indented by one to three spaces that nothing below
+    it closes.** The refusal names each such source and where its opener sits. Move with `rewrite_links=False`
+    (unaffected by this refusal) and fix the links yourself, or close the fences first.
 
-    **A rewrite can still fail after the move has committed.** The move is one
-    rename and the rewrites follow it, so an I/O failure, a vault reassignment,
-    or a database that cannot be reached to confirm the assignment stops the
-    remaining rewrites — and the result then reads `partial success: …`, naming
-    the sources that still link to the old path. The move is **not** rolled back
-    and the index rows describe where the note now is. Treat the link graph as
-    agreeing with the vault bytes only when the result reports plain success;
-    on a partial outcome, fix the named sources with `edit_note`.
+    **A rewrite can still fail after the move has committed.** The move is one rename and the rewrites follow
+    it, so an I/O failure or a lost vault assignment stops the remaining rewrites and the result reads `partial
+    success: …`, naming the sources that still link to the old path. The move is **not** rolled back; treat the
+    link graph as agreeing with the vault bytes only on plain success, and fix the named sources with
+    `edit_note`.
 
-    Writes are atomic. Either path is refused, naming the link's target, when
-    its final component is a symlink; symlinked folders inside the vault work
-    normally and the recorded paths are the real ones behind them. See
-    `get_vault_guide` for vault folder conventions.
+    Success reports the `content_hash` of the bytes actually published at `to_path` — the moved bytes for a
+    plain move, the post-rewrite bytes when the moved note's own body was rewritten — and that value binds a
+    following `edit_note(to_path, …, expected_hash=…)`. A failed rewrite stays a partial success and never
+    claims nothing was written; if another writer changed `to_path` in between, **no hash is reported** and the
+    result says to re-read `to_path` first.
 
-    **`expected_hash` — binding a write to the bytes you read.** Optional; omit
-    it and nothing changes. Pass the `content_hash` a read returned, verbatim
-    and canonical (`sha256:<64 lowercase hex>`), and the call is refused with
-    nothing written if the file changed in between. It is always the **whole
-    file's** hash, never a hash of the text you received. `expected_hash`
-    covers your read through this call's preflight read. The rename pins inode
-    identity but does not compare the bytes again: an in-place edit after that
-    comparison can still be moved. Each optional link rewrite retains its own
-    pre-publication byte comparison. Precondition refusals end with one
-    machine-readable `MCP-REFUSAL {"code":…}` line — `stale_precondition` (with
-    the file's current hash, ready to resend), `concurrent_write`,
-    `no_incumbent`, `malformed_precondition`, `precondition_unavailable`,
-    `precondition_required` — and each states what resolves it.
-
-    Here it binds **`from_path`'s own bytes and nothing else**, compared before
-    the rename and before any rewrite; the backlink sources a
-    `rewrite_links=True` move would rewrite are *not* bound, because you never
-    read them. Success reports the `content_hash` of the bytes actually
-    published at `to_path` — the moved bytes for a plain move, the post-rewrite
-    bytes when the moved note's own body was rewritten — and that value binds a
-    following `edit_note(to_path, …, expected_hash=…)`. A rewrite that fails
-    after the rename stays a **partial success** and never claims nothing was
-    written; if it failed because another writer changed `to_path` in between,
-    **no hash is reported at all** and the result says to re-read `to_path`
-    before writing to it.
+    Writes are atomic; a symlinked final component on either path is refused. See `get_vault_guide` for
+    vault folder conventions.
 
     Args:
         from_path: Vault-relative path of the existing note.
-        to_path: Vault-relative path of the destination. Must not exist. Parent
-            directories are created automatically.
-        rewrite_links: If True, also rewrite incoming wikilinks and embeds in
-            source notes. Off by default — opting in is destructive (it modifies
-            other notes' bodies).
+        to_path: Vault-relative path of the destination.
+        rewrite_links: Also rewrite incoming links in source notes (off by default).
         expected_hash: `from_path`'s `content_hash` as you last read it.
-            Refuses the move, changing nothing, if that note has changed since.
     """
     return await move_note_impl(
         from_path,
@@ -940,7 +983,7 @@ async def move_note(
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Delete note", annotations=_DESTRUCTIVE)
 async def delete_note(
     path: str, permanent: bool = False, expected_hash: str | None = None
 ) -> str:
@@ -976,15 +1019,17 @@ async def delete_note(
     Dangling backlinks left behind by a delete are surfaced via
     `get_backlinks` and `find_orphans`. See `get_vault_guide` for context.
 
-    **`expected_hash` — binding a write to the bytes you read.** Optional; omit
-    it and nothing changes. Pass the `content_hash` a read returned, verbatim
+    **`expected_hash` — binding a write to the bytes you read.** Optional by default — omitted, the
+    delete proceeds against whatever is on disk — unless the deployment requires it, when an omitted hash
+    is refused `precondition_required`. Pass the `content_hash` a read returned, verbatim
     and canonical (`sha256:<64 lowercase hex>`), and the call is refused with
     nothing written if the file changed in between. It is always the **whole
     file's** hash, never a hash of the text you received. `expected_hash`
     covers your read through this call's preflight read. The delete acts through the
     pinned parent directory but does not compare the bytes again: an in-place edit after that
-    comparison can still be deleted. Precondition refusals end with one
-    machine-readable `MCP-REFUSAL {"code":…}` line — `stale_precondition` (with
+    comparison can still be deleted. Every refusal the server raises ends with one
+    machine-readable `MCP-REFUSAL {"code":…}` line (an undeclared or mistyped argument is rejected by
+    protocol validation before the tool runs and carries no such line) — `stale_precondition` (with
     the file's current hash, ready to resend), `concurrent_write`,
     `no_incumbent`, `malformed_precondition`, `precondition_unavailable`,
     `precondition_required` — and each states what resolves it.
@@ -1005,7 +1050,7 @@ async def delete_note(
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Set frontmatter", annotations=_DESTRUCTIVE)
 async def set_frontmatter(
     path: str,
     updates: dict | None = None,
@@ -1015,72 +1060,56 @@ async def set_frontmatter(
     """Mutate a note's YAML frontmatter without touching its body. Requires write permission — a `readwrite` API key, or an OAuth token
     carrying the `readwrite` scope.
 
-    Parses the existing frontmatter, merges in `updates` (overwriting matching
-    keys, adding any new ones), then drops keys listed in `remove`. The note
-    body is preserved byte-for-byte. If the note has no frontmatter (no `---`
-    fence on line 1), a fresh block is prepended ahead of the unchanged body.
+    Arguments: `path`, `updates` (keys to set), `remove` (keys to drop) and the optional `expected_hash`
+    precondition. Parses the existing frontmatter, merges in `updates` (overwriting matching keys, adding new
+    ones), then drops the keys in `remove`; the body is preserved byte-for-byte. A note with no frontmatter
+    (no `---` fence on line 1) gets a fresh block prepended ahead of the unchanged body.
 
-    **A malformed block is refused, never worked around.** An unclosed line-1
-    fence, YAML that fails to parse, and YAML that is not a mapping (`null`,
-    `~`, comments only, a list, a scalar) each return an error naming the
-    defect and pointing at `edit_note(path, content, replace_frontmatter=True)`
-    as the repair. Nothing is written — in particular no second block is
-    prepended above the broken one — and `remove=` refuses identically rather
-    than silently doing nothing. This is reported even for a call with no
-    `updates` and no `remove`. An empty fenced block (`---` immediately
-    followed by `---`) is *valid*: it is a valid empty mapping and is updated
-    in place.
+    **`expected_hash`**: pass the `content_hash` a read returned, verbatim (`sha256:<64 lowercase hex>`), and
+    the call is refused with nothing written if the file changed since. It is the **whole file's** hash, never
+    a hash of the text you received. Optional by default — omitted, a stale edit overwrites — unless the
+    deployment requires it, when an omitted hash is refused `precondition_required`. The comparison runs ahead
+    of the malformed-block diagnosis and ahead of the no-op check, so a stale base never yields "no changes"
+    or a defect report about bytes you have not seen. Every refusal the server raises ends with one
+    machine-readable `MCP-REFUSAL {"code":…}` line (an undeclared or mistyped argument is rejected by protocol
+    validation before the tool runs and carries no such line) — `stale_precondition` (with the current hash),
+    `concurrent_write`, `no_incumbent`, `malformed_precondition`, `precondition_unavailable`,
+    `precondition_required` — each stating what resolves it. The server also re-compares the file immediately
+    before publishing. A write
+    reports the `content_hash` of the bytes **this call published**; a no-op publishes nothing and reports none.
 
-    **Only an effective change writes.** `updates` that set every named key to
-    the value it already holds (compared type-sensitively, so `true` is not
-    `1`) together with `remove` naming only absent keys report no changes and
-    leave the file byte-identical. Removing the last key removes the block
-    entirely — no fences, no separator, exactly the prior body.
+    **A malformed block is refused, never worked around.** An unclosed line-1 fence, YAML that fails to parse,
+    and YAML that is not a mapping (`null`, `~`, comments only, a list, a scalar) each return an error naming
+    the defect and pointing at `edit_note(path, content, replace_frontmatter=True)` as the repair. Nothing is
+    written — in particular no second block is prepended above the broken one — and `remove=` refuses
+    identically rather than silently doing nothing, even for a call with no `updates` and no `remove`. An
+    empty fenced block (`---` immediately followed by `---`) is *valid*: it is a valid empty mapping and is
+    updated in place.
 
-    Re-serialization uses `yaml.safe_dump(default_flow_style=False,
-    sort_keys=False, allow_unicode=True)`. **Caveat:** PyYAML does NOT preserve
-    YAML comments — any `# comment` in the original frontmatter will be lost on
-    the first `set_frontmatter` call.
+    **Only an effective change writes.** `updates` that set every named key to the value it already holds
+    (compared type-sensitively, so `true` is not `1`) together with `remove` naming only absent keys report no
+    changes and leave the file byte-identical. Removing the last key removes the block entirely — no fences, no
+    separator, exactly the prior body.
 
-    A path whose final component is a symlink is refused, naming its target, so
-    the frontmatter of an unnamed note is never rewritten; symlinked folders
-    inside the vault work normally.
-
-    See `get_vault_guide` for vault frontmatter conventions.
-
-    **`expected_hash` — binding a write to the bytes you read.** Optional; omit
-    it and nothing changes. Pass the `content_hash` a read returned, verbatim
-    and canonical (`sha256:<64 lowercase hex>`), and the call is refused with
-    nothing written if the file changed in between. It is always the **whole
-    file's** hash, never a hash of the text you received. Two windows, both
-    live: `expected_hash` covers your read → this call's read, the server's own
-    pre-publication compare covers this call's read → its publication, and a
-    match on the first does not exempt the second. Every refusal ends with one
-    machine-readable `MCP-REFUSAL {"code":…}` line — `stale_precondition` (with
-    the file's current hash, ready to resend), `concurrent_write`,
-    `no_incumbent`, `malformed_precondition`, `precondition_unavailable`,
-    `precondition_required` — and each states what resolves it.
-
-    The comparison runs ahead of the malformed-block diagnosis and ahead of the
-    no-op check, so a stale base never yields "no changes" or a defect report
-    about bytes you have not seen. A write reports the `content_hash` of the
-    bytes **this call published**; a no-op publishes nothing and reports none.
+    Re-serialization goes through PyYAML, which does NOT preserve YAML comments — any `# comment` in the
+    original frontmatter is lost on the first `set_frontmatter` call. A path whose final component is a symlink
+    is refused, naming its target; symlinked folders inside the vault work normally. See `get_vault_guide` for
+    vault frontmatter conventions.
 
     Args:
         path: Vault-relative path to the note.
         updates: Mapping of keys to set. Use the empty dict (or omit) to skip.
-        remove: List of keys to delete from the frontmatter. Missing keys are
-            ignored (and, on their own, make the call a no-op rather than a
-            write).
-        expected_hash: The note's `content_hash` as you last read it. Refuses
-            the write, changing nothing, if the note has changed since.
+        remove: List of keys to delete from the frontmatter. Missing keys are ignored (and, on their own, make
+            the call a no-op rather than a write).
+        expected_hash: The note's `content_hash` as you last read it. Refuses the write, changing nothing, if
+            the note has changed since.
     """
     return await set_frontmatter_impl(
         path, updates=updates, remove=remove, expected_hash=expected_hash
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Read file", annotations=_READ_ONLY)
 async def read_file(
     path: str,
     encoding: str = "auto",
@@ -1139,7 +1168,7 @@ async def read_file(
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Write file", annotations=_DESTRUCTIVE)
 @_plugins.tool_text("write_file")
 async def write_file(
     path: str,
@@ -1182,8 +1211,9 @@ async def write_file(
     bound is rejected by the transport with a bare HTTP 413 before this tool
     runs — send such content as base64 instead.
 
-    Optional `expected_hash` binds an existing whole file on `overwrite=True`.
-    Obtain its canonical `sha256:<64 lowercase hex>` value from `read_file`'s
+    `expected_hash` binds an existing whole file on `overwrite=True`; optional by default — omitted, the
+    overwrite replaces whatever is on disk — unless the deployment requires it, when an omitted hash on
+    an overwrite is refused `precondition_required`. Obtain its canonical `sha256:<64 lowercase hex>` value from `read_file`'s
     base64 header, `read_file(hash_only=True)`, or a prior write's success.
     Syntax is checked before path work; a hash with no-clobber or a missing
     destination is `no_incumbent`. An over-cap incumbent cannot be guarded.
@@ -1208,7 +1238,7 @@ async def write_file(
     )
 
 
-@mcp.tool()
+@mcp.tool(title="List files", annotations=_READ_ONLY)
 async def list_files(
     folder: str = ".",
     pattern: str = "*",
@@ -1242,7 +1272,7 @@ async def list_files(
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Request upload link", annotations=_DESTRUCTIVE)
 async def request_upload(
     path: str,
     overwrite: bool = False,
@@ -1287,7 +1317,7 @@ async def request_upload(
     return await request_upload_impl(path, overwrite=overwrite, expires_in=expires_in)
 
 
-@mcp.tool()
+@mcp.tool(title="Check upload", annotations=_READ_ONLY)
 async def check_upload(upload_id: str) -> str:
     """Ask what happened to an upload link you minted with `request_upload`.
 
@@ -1322,7 +1352,7 @@ async def check_upload(upload_id: str) -> str:
     return await check_upload_impl(upload_id)
 
 
-@mcp.tool()
+@mcp.tool(title="Request download link", annotations=_ADDITIVE)
 async def request_download(path: str, expires_in: int | None = None) -> str:
     """Get a short-lived link a person can use to save a vault file. Peer to
     `read_file`, which returns the bytes to you — use this one when the file is
@@ -1353,7 +1383,7 @@ async def request_download(path: str, expires_in: int | None = None) -> str:
     return await request_download_impl(path, expires_in=expires_in)
 
 
-@mcp.tool()
+@mcp.tool(title="Import from URL", annotations=_DESTRUCTIVE_OPEN_WORLD)
 async def import_from_url(url: str, path: str, overwrite: bool = False) -> str:
     """Fetch a file from a public https URL straight into the vault. Requires write permission — a `readwrite` API key, or an OAuth token
     carrying the `readwrite` scope.
@@ -1392,7 +1422,7 @@ async def import_from_url(url: str, path: str, overwrite: bool = False) -> str:
     return await import_from_url_impl(url, path, overwrite=overwrite)
 
 
-@mcp.tool()
+@mcp.tool(title="Fetch page", annotations=_READ_ONLY_OPEN_WORLD)
 async def fetch_page(
     url: str,
     keep_links: bool = False,
@@ -1455,7 +1485,7 @@ async def fetch_page(
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Delete file", annotations=_DESTRUCTIVE)
 async def delete_file(
     path: str, permanent: bool = False, expected_hash: str | None = None
 ) -> str:
@@ -1475,11 +1505,12 @@ async def delete_file(
     backlinks), directories, and symlinks. Non-markdown files are not indexed,
     so search and embeddings are unaffected either way.
 
-    Optional `expected_hash` binds the whole raw file in either mode. Use the
-    canonical `sha256:<64 lowercase hex>` from `read_file`'s base64 header,
+    `expected_hash` binds the whole raw file in either mode; optional by default — omitted, the delete
+    proceeds — unless the deployment requires it, when an omitted hash is refused `precondition_required`.
+    Use the canonical `sha256:<64 lowercase hex>` from `read_file`'s base64 header,
     `read_file(hash_only=True)`, or a write success. Malformed hashes refuse
     before path checks; unavailable, required and stale preconditions refuse
-    before any trash entry or unlink. The deployment may require a hash.
+    before any trash entry or unlink.
     This checks the caller-read-to-call window; a later concurrent replacement
     remains possible, so it is not an atomic filesystem compare-and-delete.
     A successful delete reports no content hash.
@@ -1622,7 +1653,7 @@ async def list_tasks(
             shuffle, for "give me one at random").
         limit: at most this many tasks (1–500), after sorting.
     """
-    return await list_tasks_impl(
+    return await fork_list_tasks_impl(
         path=path, status=status, status_types=status_types, tags=tags, exclude_tags=exclude_tags,
         area=area, due=due, scheduled=scheduled, starts=starts, happens=happens, priority=priority,
         text=text, sort=sort, limit=limit, include_private=include_private,
@@ -2237,6 +2268,560 @@ def _drop_include_private(server: FastMCP) -> None:
             tool.parameters["required"].remove("include_private")
 
 
+# Registered after every other tool (#350, design D12), so the first 25 entries
+# of `tools/list` keep the order `tests/fixtures/tools_list_schema_5a391ca.json`
+# pins; tools added later append after it, in
+# `tests/fixtures/tools_list_schema_additions.json`.
+@mcp.tool(name="upstream_list_tasks", title="List tasks (upstream)", annotations=_READ_ONLY)
+async def upstream_list_tasks(
+    folder: str | None = None,
+    status: str = "open",
+    due_by: str | None = None,
+    scheduled_by: str | None = None,
+    tags: list[str] | None = None,
+    limit: int = 100,
+    cursor: str | None = None,
+    due_from: str | None = None,
+    scheduled_from: str | None = None,
+    done_from: str | None = None,
+    done_by: str | None = None,
+    undated: bool | None = None,
+    has_due: bool | None = None,
+    text: str | None = None,
+    priority: list[str] | None = None,
+    recurring: bool | None = None,
+    exclude_tags: list[str] | None = None,
+    path: str | None = None,
+    order_by: str = "due",
+    detail: str = "full",
+    context: bool = False,
+    scope: str = "default",
+) -> str:
+    """List checkbox tasks (`- [ ] …`) across the vault in one call, from the index — no note is read.
+
+    For a dated overview (overdue, due today, scheduled, upcoming) use
+    `task_agenda`; use `list_tasks` to filter, search and page. Plain
+    checkboxes work; Tasks-plugin emoji fields (📅 due, ⏳ scheduled, 🛫 start,
+    ✅ done, 🔁 recurrence, priority) are optional and read when present. Query
+    blocks are text and are not evaluated; a checkbox in code is not a task.
+    The index follows each pass (default every 300 s); task writes refresh it
+    at once.
+
+    Each row: the raw marker, the path in backticks with `:line`, `— id <id>`,
+    the dates, priority, tags, `under:` heading and `text:` last. In a path,
+    whitespace and a backtick are shown as `\\n`, `\\t`, `\\uXXXX`
+    (a backtick is `\\u0060`) and `\\` as `\\\\`; the write tools take the
+    unescaped path.
+    `complete_task` and `update_task` take that id with the path; an id shaped
+    `<key>.<i>of<n>` (identical lines) also needs `expected_hash`, the note's
+    `content_hash` from `read_note`. `detail="brief"` prints one short line per
+    task; `context=true` adds the indented lines under each task (`┆`).
+
+    Status: `[ ]`, `[/]` and other markers are `open`; `[x]`/`[X]` are `done`;
+    `[-]` is `cancelled` (only in `cancelled` and `all`). Dates accept
+    `YYYY-MM-DD`, `today`, `tomorrow`, `yesterday`, `+Nd` or `-Nd`, resolved in
+    your task timezone (the query line states it and each resolved date).
+    `*_from` / `*_by` are inclusive and exclude tasks without that date.
+
+    The header always states what the index could not show — notes not yet
+    scanned, tasks that could not be indexed, notes over the 5,000-task cap,
+    ids pending — and, under `scope="default"`, how many tasks your excluded
+    folders, note tags and task rule removed, so "no tasks" does not mean
+    none exist.
+    When more rows match, the header says `more: yes` and the response ends
+    `next: <cursor>`: pass it back with the same arguments. A cursor from other
+    arguments, an older server version, or a relative-date query continued
+    after midnight is refused (`invalid_argument`): start again without one.
+    `response_cap_too_small`: the response cap cannot hold one row.
+
+    Args:
+        folder: Only notes under this path prefix (e.g. "Projects/").
+        status: `open` (default), `done`, `cancelled` or `all`.
+        due_by: Due on or before this date.
+        scheduled_by: Scheduled on or before this date.
+        tags: Tasks carrying every one of these tags on the task line, matched
+            by `/` segment and case-insensitively (`a` matches `#a` and `#A/b`,
+            not `#ab`). At most 32, a leading `#` optional.
+        limit: Tasks per page, 1–500 (default 100).
+        cursor: The `next` value from the previous page of the same query.
+        due_from: Due on or after this date.
+        scheduled_from: Scheduled on or after this date.
+        done_from: Done on or after this date.
+        done_by: Done on or before this date.
+        undated: true — neither a due nor a scheduled date; false — at least one.
+        has_due: true — with a due date; false — without.
+        text: 1–256 characters, at most 8 words; every word must occur in the
+            task's text, case-insensitively.
+        priority: Any of `highest`, `high`, `medium`, `none`, `low`, `lowest`.
+        recurring: true — with a 🔁 rule; false — without.
+        exclude_tags: Drop tasks carrying any of these tags (matched as `tags`).
+        path: Exactly this note.
+        order_by: `due` (default, undated last), `priority`, `scheduled`,
+            `done` (newest first) or `path`.
+        detail: `full` (default) or `brief`.
+        context: true to include each task's indented context lines.
+        scope: `default` applies your task settings: excluded folders,
+            excluded note tags and the task rule (which checkboxes count as
+            tasks); `all` ignores them.
+    """
+    return await list_tasks_impl(
+        folder=folder, status=status, due_by=due_by, scheduled_by=scheduled_by,
+        tags=tags, limit=limit, cursor=cursor, due_from=due_from,
+        scheduled_from=scheduled_from, done_from=done_from, done_by=done_by,
+        undated=undated, has_due=has_due, text=text, priority=priority,
+        recurring=recurring, exclude_tags=exclude_tags, path=path,
+        order_by=order_by, detail=detail, context=context, scope=scope,
+    )
+
+
+@mcp.tool(title="Change feed", annotations=_READ_ONLY)
+async def get_changes(
+    since: str,
+    folder: str | None = None,
+    kinds: list[str] | None = None,
+    by: str = "any",
+    limit: int = 50,
+) -> str:
+    """List what changed in your vault after a cursor: one line per note created, modified, moved or deleted, oldest first.
+
+    `since` is either the `next_since` cursor a previous call returned
+    (`ev:<number>`, exclusive and exact) or a UTC date/datetime
+    (`YYYY-MM-DD`, or ISO 8601 with `Z`/`±HH:MM`). A date or datetime *starts*
+    a feed and is approximate; `next_since` *continues* one without losing or
+    repeating an event. Store `next_since` (it is in the header and the last
+    line) in your own notes and pass it next session. A cursor means
+    something only for your own vault; one above this vault's last event is
+    refused (`invalid_argument`).
+
+    Each line: `- ev:<n> <UTC time> <kind> "<path>"` (a move shows
+    `"<from>" -> "<to>"`; paths are JSON-quoted, so a newline in a name is
+    `\n`), then `reason=…` where it applies, then who: `by api_key "<name>"
+    via <tool>` or `by oauth "<client>" via <tool>`, marked `(you)` when it was
+    your own credential, or `by human/sync` for anything the index discovered
+    — edits outside MCP (Obsidian, a sync client, git, a shell) are
+    `human/sync`. `created` means first seen at this path: a new note, one half
+    of a rename that could not be paired, or a note that became indexable.
+    `deleted` always carries `reason=`: `removed` (the file is gone),
+    `not_indexable` (still on disk but cannot be indexed) or `quarantined`.
+
+    Two meta lines are always shown, whatever the filters: `gap` (events not
+    itemised, with a count) and `reset` (the index was rebuilt from empty).
+    After either, resync with `get_recent(order_by="content_changed",
+    since=…)`. `history_truncated: true` in the header means events older than
+    the retained history (default 90 days) were removed.
+
+    Args:
+        since: A `next_since` cursor (`ev:<n>`) or a UTC date/datetime.
+        folder: Only events whose path or source path is under this prefix (a
+            move out of the folder counts).
+        kinds: Subset of `created`, `modified`, `moved`, `deleted`.
+        by: `any` (default); `me` (your exact credential — the same API key,
+            or the same OAuth grant across token refreshes); `agents` (any MCP
+            caller of this vault); `human` (`human/sync`, discovered by the index).
+        limit: Events per page (1–500, default 50). A full page says
+            `more: true`; pass its `next_since` to continue.
+    """
+    return await get_changes_impl(
+        since=since, folder=folder, kinds=kinds, by=by, limit=limit
+    )
+
+
+@mcp.tool(title="Hybrid search", annotations=_READ_ONLY)
+async def hybrid_search(
+    query: str,
+    limit: int = 10,
+    folder: str | None = None,
+    tags: list[str] | None = None,
+    frontmatter: dict | None = None,
+    rerank: bool = False,
+) -> str:
+    """Keyword and semantic search fused into one ranking, for a query that is not clearly an identifier or a paraphrase.
+
+    Exact identifiers, code symbols, titles or known phrases: `keyword_search`.
+    Conceptual or paraphrased questions: `semantic_search`. Unsure which:
+    `hybrid_search`.
+
+    Both arms run for the same query and filters in one database snapshot:
+    the `keyword_search` ranking and the `semantic_search` ranking, each taken
+    to its top 50. They are fused by reciprocal rank fusion over note paths
+    with equal votes: a note's score is the sum, over the arms that found it,
+    of `1/(k + rank)` (`k` is the server's `HYBRID_RRF_K`, shown as `rrf_k`).
+    A note outside both top-50 lists is not considered; the header's
+    `arm_depth: keyword n/50, semantic c/50 chunks` says when an arm was full.
+    Fusion helps when the query's kind is unclear, and a single arm can rank
+    better than it on its own kind of query (an exact identifier, or a pure
+    paraphrase); use that arm's tool then.
+
+    One line per result: a JSON object of the note-controlled fields
+    `{"title","path","tags","preview_kind","preview"}` (every value a JSON
+    string, so note text cannot forge a field), then the server fields:
+    `score`, semantic_rank (with similarity) or `-`, keyword_rank (with
+    `match` and `matched_in`) or `-`, and `explain` (the `1/(k+rank)` terms
+    that make the score). `preview_kind` is `snippet` (a keyword highlight in
+    `«»`), `head`, `chunk` (semantic), `stale_notice` or `none`, from the arm
+    that ranked the note better. `stale: true` and `embedding_truncated: true`
+    mean what they mean in `semantic_search`, and so do the semantic arm's
+    `§ "<heading path>" (#N)` / `§ (top of note)` field (read the section
+    with `read_note(path, section="#N")`) and the `index_transition:` line
+    under the header. A long response drops whole rows
+    from the end and says how many; a first row that does not fit is cut and
+    labelled. Call `read_note` on a path for the full note.
+
+    The header always says `arms:`. `arms: both` is a fused answer. `arms:
+    keyword-only (semantic unavailable: provider_error | provider_input_rejected)`
+    means the embedding provider failed or refused the query: the page is the
+    keyword arm alone, in keyword order, and `semantic_search` will fail the
+    same way until the provider recovers.
+
+    `rerank=true` asks the deployment's reranker to reorder the candidates
+    this call already fetched; it can add up to the configured timeout. Its
+    rows are one-line quoted objects followed by server fields (with
+    `rerank_score` after them when reranked). The header says
+    `reranked: true` or `reranked: false (<reason>)`, and an unreranked page
+    keeps the unreranked order; `reranked: false (not_configured)` means
+    this deployment has no reranker.
+
+    Every page's header also says `confidence: ok` or `confidence: low`:
+    `low` means no note matched all the keyword terms and the closest
+    semantic candidate is under this deployment's similarity threshold (a
+    line then suggests `keyword_search` or `get_neighborhood`), and `ok` is
+    also what a deployment that set no threshold says, so it is not a
+    quality claim.
+
+    Args:
+        query: What you are looking for — words, a phrase or a question.
+        limit: Maximum number of results (default 10, at most 50).
+        folder: Optional folder prefix (e.g. "Projects/").
+        tags: Optional list of tag names; only notes carrying ALL listed tags match.
+        frontmatter: Optional dict of frontmatter key/value pairs; strict type matching —
+            string "0" does not match integer 0 (e.g. {"status": "active"}).
+        rerank: Reorder the first 50 fused candidates with the deployment's
+            reranker (default false).
+    """
+    return await hybrid_search_impl(
+        query, limit=limit, folder=folder, tags=tags, frontmatter=frontmatter,
+        rerank=rerank,
+    )
+
+
+# The task tools of #428, registered after every other tool in this order
+# (design D15), so the first 28 entries of `tools/list` keep their order; the
+# four are appended to `tests/fixtures/tools_list_schema_additions.json`.
+@mcp.tool(title="Task agenda", annotations=_READ_ONLY)
+async def task_agenda(
+    date: str = "today",
+    days: int = 7,
+    folder: str | None = None,
+    tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
+    scope: str = "default",
+) -> str:
+    """A dated overview of open tasks in one call, from the index: overdue, due today, scheduled and now due, and upcoming.
+
+    Use `list_tasks` to filter, search or page through tasks in general; use
+    `task_agenda` for "what is due". Plain checkboxes work; only tasks with a
+    Tasks-plugin date (📅 due, ⏳ scheduled) can be dated, and the emoji fields
+    are otherwise optional.
+
+    Sections, each counted and disjoint — every open task due on or before
+    `date + days`, or scheduled on or before `date`, is in exactly one:
+    - overdue: due before `date`;
+    - due today: due on `date`;
+    - scheduled and now due: scheduled on or before `date` with no due date,
+      or with a due date after the window;
+    - upcoming: due in the `days` days after `date`, grouped by due date.
+
+    Rows are brief: marker, id, the path in backticks with `:line` (escaped
+    as in `list_tasks`; pass it unescaped), dates,
+    priority, tags and description. `complete_task` and `update_task` take
+    that id with the path. A section shows at most 25 rows (overdue, due
+    today), 15 (each scheduled part) or 50 (upcoming); one with more ends
+    `continue: list_tasks(…)` — the exact `list_tasks` arguments, dates
+    resolved, with a `cursor` when rows were shown — to be called with this
+    call's folder, tags, exclude_tags and scope.
+
+    The header states the timezone and date used, `days`, the scope,
+    `excluded by scope: N`, and what the index could not show (notes not yet
+    scanned, tasks that could not be indexed, notes over the task cap, ids
+    pending), so an empty section does not mean no tasks exist. Invalid
+    arguments are refused `invalid_argument`; `response_cap_too_small` means
+    the deployment's response cap is under 2,800 characters (3,121 while a
+    task rule is in force).
+
+    Args:
+        date: The day to report on: `YYYY-MM-DD`, `today` (default),
+            `tomorrow`, `yesterday`, `+Nd` or `-Nd`, in your task timezone.
+        days: The upcoming window in days, 1–31 (default 7).
+        folder: Only notes under this path prefix (e.g. "Projects/").
+        tags: Only tasks carrying every one of these tags, matched by `/`
+            segment and case-insensitively. At most 32.
+        exclude_tags: Drop tasks carrying any of these tags.
+        scope: `default` applies your task settings: excluded folders,
+            excluded note tags and the task rule (which checkboxes count as
+            tasks); `all` ignores them.
+    """
+    return await task_agenda_impl(
+        date=date, days=days, folder=folder, tags=tags,
+        exclude_tags=exclude_tags, scope=scope,
+    )
+
+
+@mcp.tool(title="Complete task", annotations=_DESTRUCTIVE)
+async def complete_task(
+    path: str,
+    id: str,
+    done_on: str | None = None,
+    dry_run: bool = False,
+    expected_hash: str | None = None,
+) -> str:
+    """Mark one task done — `[x]` and `✅ <date>` — and, for a recurring task, write its next occurrence in the same edit. Requires write permission (a `readwrite` API key or OAuth scope).
+
+    Arguments: `path` and `id` (both from a listing), `done_on`, `dry_run` and
+    the `expected_hash` precondition.
+    Every refusal the server raises ends with one machine-readable
+    `MCP-REFUSAL {"code":…}` line and writes nothing; an undeclared or
+    mistyped argument is rejected by protocol validation before the tool runs
+    and carries no such line.
+
+    The id, from a `list_tasks` or `task_agenda` row, is re-checked against
+    the note's current text, never a line number, so the call changes only
+    the line it names or
+    refuses. A task's id changes whenever its line changes; the response
+    returns the new one. An id shaped `<key>.<i>of<n>` names one of several
+    identical lines and is accepted only with `expected_hash`, the note's
+    `content_hash` from `read_note`; without it the call is refused
+    `precondition_required`.
+
+    Plain checkboxes work; Tasks-plugin emoji fields are optional. Any open
+    marker (`[ ]`, `[/]`, `[>]`…) becomes `[x]`. Whether `✅` is added, where
+    a next occurrence goes (above the task, or below its indented lines) and
+    whether it gets `➕ <today>` follow your task settings, which default to
+    the Tasks plugin's. Recurrence rules supported: every day / N days /
+    weekday / week / N weeks / week on <weekdays> / <weekdays> / month /
+    N months / month on the <Nth> / month on the last / year / N years /
+    <month> on the <Nth>, each optionally `when done`. Any other rule refuses
+    the whole completion: a recurring task is never completed without its
+    next occurrence.
+
+    `dry_run=true` returns the diff and the new line(s) and writes nothing.
+    `expected_hash` is optional otherwise and binds the whole note (refused
+    `stale_precondition` if it changed). Without it, a change made by someone
+    else during the call is retried from a fresh read, at most 3 attempts,
+    then refused `concurrent_write`.
+
+    The response gives the new line and id, the next occurrence's line,
+    position and id, `content_hash`, the timezone and dates resolved, and
+    `index: refreshed` (listings already show the change) or
+    `index: may lag (<reason>)` (the write stands; the next index pass
+    catches up).
+
+    Codes: `task_not_found` (the line changed since the listing: list again),
+    `task_ambiguous` (lists the suffixed ids), `task_changed`,
+    `precondition_required`, `stale_precondition`, `malformed_precondition`,
+    `concurrent_write`,
+    `already_completed`, `task_cancelled` (reopen it with
+    `update_task(status="open")` first), `recurrence_unsupported`,
+    `on_completion_unsupported` (`🏁 delete`), `task_malformed` (fix the line
+    with `edit_note`), `content_unsafe` (a malformed frontmatter block: the
+    refusal names the repair), `size_limit`, `invalid_argument`, `not_found`,
+    `permission_denied`.
+
+    Args:
+        path: The note's vault-relative path, unescaped (a listing shows
+            `\\`-escapes).
+        id: The task id from a `list_tasks` or `task_agenda` row.
+        done_on: The completion date: `YYYY-MM-DD`, `today` (default),
+            `yesterday`, `+Nd` or `-Nd`, in your task timezone.
+        dry_run: Preview the change without writing.
+        expected_hash: The note's `content_hash` from `read_note`; required
+            with a suffixed id.
+    """
+    return await complete_task_impl(
+        path, id, done_on=done_on, dry_run=dry_run, expected_hash=expected_hash
+    )
+
+
+@mcp.tool(title="Update task", annotations=_DESTRUCTIVE)
+async def update_task(
+    path: str,
+    id: str,
+    due: str | None = None,
+    scheduled: str | None = None,
+    start: str | None = None,
+    priority: str | None = None,
+    add_tags: list[str] | None = None,
+    remove_tags: list[str] | None = None,
+    recurrence: str | None = None,
+    status: str | None = None,
+    text: str | None = None,
+    append_context: str | None = None,
+    clear: list[str] | None = None,
+    dry_run: bool = False,
+    expected_hash: str | None = None,
+) -> str:
+    """Change one task's dates, priority, tags, recurrence, status, description or context, in place. Requires write permission (a `readwrite` API key or OAuth scope).
+
+    Arguments: `path` and `id` (both from a listing); the changes `due`,
+    `scheduled`, `start`, `priority`, `add_tags`, `remove_tags`, `recurrence`,
+    `status`, `text`, `append_context` and `clear`; `dry_run` and the
+    `expected_hash` precondition.
+    Every refusal the server raises ends with one machine-readable
+    `MCP-REFUSAL {"code":…}` line and writes nothing; an undeclared or
+    mistyped argument is rejected by protocol validation before the tool runs
+    and carries no such line.
+
+    The id, from a `list_tasks` or `task_agenda` row, is re-checked against
+    the note's current text, never a line number, so the call changes only
+    the line it names or refuses. A task's id changes whenever its line
+    changes; the response returns the new one. An id shaped `<key>.<i>of<n>`
+    names one of several identical lines and is accepted only with
+    `expected_hash`, the note's `content_hash` from `read_note`; without it
+    the call is refused `precondition_required`. To complete a task use
+    `complete_task`.
+
+    Only the named fields change: a value is replaced where it stands, an
+    added field goes into the trailing emoji fields, and every other
+    character of the line and the note is kept. Plain checkboxes work;
+    Tasks-plugin fields are added as you set them. `text` replaces the
+    description's words and keeps its tags; only `remove_tags` removes a tag
+    (whole tags, case-insensitive). `status`: `open` (`[ ]`) or `in_progress`
+    (`[/]`) drop `✅`/`❌`; `cancelled` (`[-]`) adds `❌ <today>` per your task
+    settings and never writes a next occurrence. `append_context` adds one
+    indented `- <text>` line after everything already under the task.
+
+    `dry_run=true` returns the diff and the new line(s) and writes nothing.
+    `expected_hash` is optional otherwise and binds the whole note (refused
+    `stale_precondition` if it changed). Without it, a change made by someone
+    else during the call is retried from a fresh read, at most 3 attempts,
+    then refused `concurrent_write`. A call that would change nothing answers
+    `No changes`. The response names the fields changed and gives the new
+    line and id, `content_hash`, the timezone and dates resolved, and
+    `index: refreshed` or `index: may lag (<reason>)` (the write stands).
+
+    Codes: `task_not_found` (the line changed since the listing: list again),
+    `task_ambiguous`, `task_changed`, `precondition_required`,
+    `stale_precondition`, `malformed_precondition`, `concurrent_write`,
+    `recurrence_unsupported`, `task_malformed` (fix the line with
+    `edit_note`), `content_unsafe` (a malformed frontmatter block: the
+    refusal names the repair), `size_limit`, `invalid_argument` (also
+    `status="done"`), `not_found`, `permission_denied`.
+
+    Args:
+        path: The note's vault-relative path, unescaped (a listing shows
+            `\\`-escapes).
+        id: The task id from a `list_tasks` or `task_agenda` row.
+        due: New due date (📅), a date form as above.
+        scheduled: New scheduled date (⏳), same forms.
+        start: New start date (🛫), same forms.
+        priority: `highest`, `high`, `medium`, `low` or `lowest`.
+        add_tags: Tags to add (at most 32).
+        remove_tags: Tags to remove.
+        recurrence: A 🔁 rule from the grammar `complete_task` lists.
+        status: `open`, `in_progress` or `cancelled`.
+        text: The new description: one line, 1–1,000 characters, no emoji.
+        append_context: One line of context to add under the task.
+        clear: Fields to remove: any of `due`, `scheduled`, `start`,
+            `priority`, `recurrence`.
+        dry_run: Preview the change without writing.
+        expected_hash: `content_hash` from `read_note`; needed for a suffixed id.
+    """
+    return await update_task_impl(
+        path, id, due=due, scheduled=scheduled, start=start, priority=priority,
+        add_tags=add_tags, remove_tags=remove_tags, recurrence=recurrence,
+        status=status, text=text, append_context=append_context, clear=clear,
+        dry_run=dry_run, expected_hash=expected_hash,
+    )
+
+
+@mcp.tool(title="Add task", annotations=_ADDITIVE)
+async def add_task(
+    path: str,
+    text: str,
+    section: str | None = None,
+    due: str | None = None,
+    scheduled: str | None = None,
+    start: str | None = None,
+    priority: str | None = None,
+    tags: list[str] | None = None,
+    recurrence: str | None = None,
+    context: str | None = None,
+    allow_duplicate: bool = False,
+    dry_run: bool = False,
+    expected_hash: str | None = None,
+) -> str:
+    """Insert one new task line (`- [ ] <text>`) into an existing note, next to its task list. Requires write permission (a `readwrite` API key or OAuth scope).
+
+    Arguments: `path`, `text`, `section`; the fields `due`, `scheduled`,
+    `start`, `priority`, `tags`, `recurrence`; `context`, `allow_duplicate`,
+    `dry_run` and the optional `expected_hash` precondition.
+    Every refusal the server raises ends with one machine-readable
+    `MCP-REFUSAL {"code":…}` line and writes nothing; an undeclared or
+    mistyped argument is rejected by protocol validation before the tool runs
+    and carries no such line.
+
+    The note must exist; this tool never creates one (use `create_note`).
+    The line is placed after the last top-level task of the region — the
+    `section` heading's body, or the whole note — and after everything
+    indented under that task, copying its list marker and quote prefix; with
+    no task there it goes after the region's last line, and in an empty
+    section right under the heading. Nothing else in the note changes.
+
+    Plain checkboxes work; Tasks-plugin fields are written only for the
+    arguments you give, in the plugin's order: `#tags`, priority, 🔁 rule,
+    ➕ created (per your task settings), 🛫 start, ⏳ scheduled, 📅 due.
+    `context` adds one indented `- <text>` line under the new task.
+    Under a `filter` task rule your global filter text is put at the start of
+    `text` when the line lacks it; under `fields`, a line with no task field
+    or task tag is still written and the response says default listings will
+    not show it.
+
+    An open task with the same description (case, spacing and Unicode form
+    ignored; tags count) in this note, or elsewhere in your default scope, is
+    refused `duplicate_task`, naming up to 5 matches; `allow_duplicate=true`
+    adds it anyway. Up to 5 similar open tasks are listed in the response and
+    the dry run, and never block. The response gives the new line and its id
+    (for `complete_task` / `update_task`), `content_hash`, the timezone and
+    dates resolved, and `index: refreshed` or `index: may lag (<reason>)`
+    (the write stands).
+
+    `dry_run=true` returns the diff, the new line(s) and the similar tasks,
+    and writes nothing. `expected_hash` is optional, even where the deployment
+    requires preconditions (adding a line removes nothing); when given it
+    binds the whole note (refused `stale_precondition` if it changed).
+    Without it, a change made by someone else during the call is retried from
+    a fresh read, at most 3 attempts, then refused `concurrent_write`.
+
+    Codes: `duplicate_task`, `not_found`, `selector_unresolved` (no such section),
+    `content_unsafe` (a malformed frontmatter block or an unclosed indented
+    fence: the refusal names the repair), `recurrence_unsupported`,
+    `stale_precondition`, `concurrent_write`, `task_malformed`, `size_limit`,
+    `invalid_argument`, `permission_denied`.
+
+    Args:
+        path: The existing note's vault-relative path.
+        text: The task description: one line, 1–1,000 characters, no field
+            emoji (pass dates and the rest as arguments).
+        section: A heading, as `edit_note` addresses one (`Parent/Child`, or a
+            `#N` ordinal); omit for the whole note.
+        due: Due date (📅): `YYYY-MM-DD`, `today`, `tomorrow`, `yesterday`,
+            `+Nd` or `-Nd`, in your task timezone.
+        scheduled: Scheduled date (⏳), same forms.
+        start: Start date (🛫), same forms.
+        priority: `highest`, `high`, `medium`, `low` or `lowest`.
+        tags: Tags for the task, e.g. ["errand"] (at most 32).
+        recurrence: A 🔁 rule from the grammar `complete_task` lists.
+        context: One line of context under the task.
+        allow_duplicate: Add even if an identical open task exists.
+        dry_run: Preview the change without writing.
+        expected_hash: Optional; the note's `content_hash` from `read_note`.
+    """
+    return await add_task_impl(
+        path, text, section=section, due=due, scheduled=scheduled, start=start,
+        priority=priority, tags=tags, recurrence=recurrence, context=context,
+        allow_duplicate=allow_duplicate, dry_run=dry_run, expected_hash=expected_hash,
+    )
+
+
 def _forbid_unknown_arguments(server: FastMCP) -> None:
     """Refuse undeclared tool arguments on every registered tool (#295).
 
@@ -2301,3 +2886,42 @@ if not _private_folders.enabled():
 # behaviour and unmodified schemas. `src/main.py` logs it at WARNING on start.
 if settings.mcp_reject_unknown_arguments:
     _forbid_unknown_arguments(mcp)
+
+
+# ── Upstream tools switched off (fork) ──────────────────────────────────────
+#
+# Upstream tools the owner has not decided on yet (CLAUDE.md, "Following
+# upstream"): their code is kept as upstream wrote it and registered like any
+# other tool above, then taken off the list here, so no client is offered them.
+# Removing a name switches that tool on. `switch_on` puts them back for
+# upstream's tests of them. `upstream_list_tasks` is upstream's `list_tasks`,
+# renamed because the fork's own task tools keep that name.
+SWITCHED_OFF = frozenset({
+    "upstream_list_tasks", "task_agenda", "complete_task", "update_task", "add_task",
+    "get_changes", "hybrid_search",
+})
+_SWITCHED_OFF_TOOLS: dict = {}
+
+
+def _switch_off(server: FastMCP, names) -> None:
+    tools = server._tool_manager._tools
+    for name in names:
+        tool = tools.pop(name, None)
+        if tool is not None:
+            _SWITCHED_OFF_TOOLS[name] = tool
+
+
+def switch_on(names=None) -> None:
+    """Register switched-off tools again (tests); all of them by default."""
+    tools = mcp._tool_manager._tools
+    for name in list(_SWITCHED_OFF_TOOLS if names is None else names):
+        if name in _SWITCHED_OFF_TOOLS:
+            tools[name] = _SWITCHED_OFF_TOOLS.pop(name)
+
+
+def switch_off_again() -> None:
+    """Undo `switch_on` (tests)."""
+    _switch_off(mcp, SWITCHED_OFF)
+
+
+_switch_off(mcp, SWITCHED_OFF)

@@ -4,25 +4,24 @@ The router is mounted at the FastAPI app level in `src/main.py` ONLY when
 `settings.multi_user_mode` is true. In single-user mode the router is not
 mounted at all, so these paths 404.
 
-`/admin/auth/*` and `/admin/register` live under the `/admin` prefix so that
-Traefik's `chain-oauth@file` middleware (which gates `/admin/*` on the
-production deploy) still fronts them. That gating is what makes the bootstrap
-race-free in practice — only an already-SSO'd admin can reach
-`/admin/register`. The application also enforces a strict empty-users-table
-guard with a PostgreSQL transaction-scoped advisory lock for defense in
-depth.
+`/admin/auth/*` and `/admin/register` retain the legacy `/admin` prefix.
+Legacy deployments protect bootstrap with an external login gate; the app also
+serializes the empty-users-table check with a PostgreSQL advisory lock.
+Native OIDC closes bootstrap entirely, so its operator can retire that gate
+after verifying native authentication without exposing first-admin creation.
 """
 import logging
 import os
 import re
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Form, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.auth import oidc
 from src.auth.passwords import (
     MIN_PASSWORD_LENGTH,
     hash_password,
@@ -42,7 +41,7 @@ from src.database import get_session
 from src.limiter import limiter
 from src.models.db import APIKey, NoteMetadata, OAuthClient, OAuthCode, OAuthToken, UsageLog, User
 from src.oauth.grants import USER_BOOTSTRAP_LOCK_KEY
-from src.services import panel_csp, rate_limits, security_events
+from src.services import oidc_links, panel_csp, rate_limits, security_events
 from src.services.vault import validate_vault_root_path, warm_user_vault_cache
 
 router = APIRouter(tags=["auth"], dependencies=[Depends(verify_csrf)])
@@ -163,7 +162,9 @@ def _render_login(
     return templates.TemplateResponse(
         request,
         "login.html",
-        {"error": error, "next": next_url, "username": username, "csrf_token": generate_csrf_token(request)},
+        {"error": error, "next": next_url, "username": username, "csrf_token": generate_csrf_token(request),
+         "oidc_enabled": settings.oidc_enabled, "oidc_display_name": settings.oidc_display_name,
+         "local_login_enabled": settings.local_login_enabled},
         status_code=status_code,
     )
 
@@ -222,6 +223,8 @@ async def login_submit(
     next: str = Form("/admin/"),
     session: AsyncSession = Depends(get_session),
 ):
+    if not settings.local_login_enabled:
+        raise HTTPException(403, "Password sign-in is disabled")
     target = _safe_next(next)
     normalized = (username or "").strip().lower()
 
@@ -384,6 +387,127 @@ async def login_submit(
     return RedirectResponse(target, status_code=status.HTTP_302_FOUND)
 
 
+def _oidc_refused(request: Request, reason: str):
+    # The closed set (#416 D14): anything else is recorded as `provider`
+    # rather than letting an unlisted value reach the log.
+    if reason not in security_events.OIDC_REFUSAL_REASONS:
+        reason = "provider"
+    security_events.emit(
+        "panel_oidc_refused", subject=security_events.subject_for(request=request),
+        reason=reason, client_ip=security_events.client_ip(request), route=request.url.path,
+    )
+    response = _render_login(request, error="Single sign-on could not be completed. Please try again.",
+                             status_code=503 if reason == "capacity" else 401)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if reason == "capacity":
+        response.headers["Retry-After"] = "60"
+    return response
+
+
+@router.get("/admin/auth/oidc/start")
+@limiter.limit("5/minute")
+async def oidc_start(request: Request, next: str = "/admin/"):
+    if not settings.oidc_enabled:
+        raise HTTPException(404)
+    state = None
+    try:
+        target = _safe_next(next) if len(next) <= 4096 else "/admin/"
+        state, tx = oidc.begin(request.session, target)
+        url = await oidc.authorization_url(state, tx)
+    except Exception as exc:
+        if state is not None:
+            oidc._transactions.pop(state, None)
+            request.session.pop(oidc.STATE_KEY, None)
+        reason = exc.reason if isinstance(exc, oidc.LoginRefused) else "provider"
+        return _oidc_refused(request, reason)
+    security_events.emit(
+        "panel_oidc_started", level=logging.INFO,
+        subject=security_events.subject_for(request=request),
+        client_ip=security_events.client_ip(request), route=request.url.path,
+    )
+    return RedirectResponse(url, status_code=302,
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
+@router.get(oidc.CALLBACK_PATH)
+@limiter.limit("10/minute")
+async def oidc_callback(request: Request, session: AsyncSession = Depends(get_session)):
+    """The OIDC callback (#416 design D4, task 3.1). In this order:
+
+    1. consume the browser-bound state, then (inside `exchange`) fetch
+       discovery;
+    2. check the RFC 9207 `iss` parameter (`oidc.check_iss_parameter`, which
+       needs discovery to know whether `iss` is mandatory);
+    3. fetch the token and the JWKS and validate the ID token;
+    4. only then touch the database: `resolve` (unlocked), `prepare_login`
+       (account guard, `FOR UPDATE` re-read, the first-login bind and
+       `last_login_at`, no commit), then `start_session`, which commits the
+       bind, the stamp and the session row together — a refused mint rolls
+       all three back;
+    5. warm the vault cache, then the events.
+
+    Every refusal goes through `_oidc_refused`, the one response builder, so
+    the body is identical whatever the reason (D14). The per-account
+    password-failure budget is neither consulted nor charged here (D10).
+    Nothing logs the subject, the issuer claim or an email.
+    """
+    if not settings.oidc_enabled:
+        raise HTTPException(404)
+    try:
+        params = request.query_params
+        if any(len(params.getlist(k)) > 1 for k in ("state", "code", "error", "iss")):
+            raise oidc.LoginRefused("state")
+        tx = oidc.consume(request.session, params.get("state", ""))
+        if "error" in params:
+            raise oidc.LoginRefused("provider")
+        # get_session has not checked out a connection: all network I/O
+        # precedes DB access. `exchange` checks `iss` after discovery and
+        # before the token request.
+        identity = await oidc.exchange(params.get("code", ""), tx, iss=params.get("iss"))
+    except Exception as exc:
+        reason = exc.reason if isinstance(exc, oidc.LoginRefused) else "provider"
+        return _oidc_refused(request, reason)
+
+    # The database phase: `(iss, sub)` first; email only on the pending branch.
+    resolution = await oidc_links.resolve(
+        session, identity.iss, identity.sub, identity.email, identity.email_verified
+    )
+    prepared = await oidc_links.prepare_login(session, resolution)
+    if not prepared.ok:
+        # `prepare_login` has rolled back: nothing was written.
+        return _oidc_refused(request, prepared.reason)
+    user_id = prepared.user_id
+    # Reuse the one guarded mint. No provider identity or role enters the cookie.
+    if await start_session(
+        request, session, user_id, expected_session_version=prepared.session_version
+    ) is None:
+        # `start_session` rolls back on its refusal paths; this is the route's
+        # own guarantee that a refused mint leaves no binding and no
+        # `last_login_at` (D4 step 4), whatever that helper does.
+        await session.rollback()
+        return _oidc_refused(request, "session_mint")
+    username = (
+        await session.execute(select(User.username).where(User.id == user_id))
+    ).scalar_one_or_none()
+    await warm_user_vault_cache(session, user_id)
+    if prepared.linked:
+        security_events.emit(
+            "panel_oidc_linked", level=logging.INFO,
+            subject=security_events.subject_for(user_id=user_id, request=request),
+            user_id=user_id, username=username,
+            client_ip=security_events.client_ip(request), route=request.url.path,
+        )
+    security_events.emit(
+        "panel_login_succeeded", level=logging.INFO,
+        subject=security_events.subject_for(user_id=user_id, request=request),
+        user_id=user_id, username=username, client_ip=security_events.client_ip(request),
+        route=request.url.path,
+    )
+    return RedirectResponse(_safe_next(tx.next_url), status_code=302,
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
 @router.post("/admin/auth/logout")
 async def logout(request: Request, session: AsyncSession = Depends(get_session)):
     """Revoke this session server-side, then clear the cookie. Always redirects.
@@ -483,6 +607,8 @@ async def register_form(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ):
+    if settings.oidc_enabled:
+        raise HTTPException(404)
     # Bootstrap is closed once any user exists.
     if not await _users_table_empty(session):
         return RedirectResponse("/admin/auth/login", status_code=status.HTTP_302_FOUND)
@@ -498,6 +624,8 @@ async def register_submit(
     vault_path: str = Form(...),
     session: AsyncSession = Depends(get_session),
 ):
+    if settings.oidc_enabled:
+        raise HTTPException(404)
     # Early UX-friendly validation (no DB roundtrip).
     normalized = (username or "").strip().lower()
     if not _USERNAME_RE.match(normalized):

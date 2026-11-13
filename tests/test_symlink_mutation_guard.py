@@ -26,6 +26,20 @@ from src.services.indexer import discover_markdown_files
 from src.services.vault import validate_mutable_path
 
 
+@pytest.fixture(autouse=True)
+def _no_keyword_generation(monkeypatch):
+    """The fake sessions here are scripted by statement order. `move_note`'s
+    metadata transaction now opens with the index generation lock and the
+    keyword fingerprint re-read (#344, D6); both are pinned against a real
+    PostgreSQL in `tests/integration/test_keyword_ranking_pg.py`, so stand
+    them down here."""
+
+    async def _noop(_session):
+        return None
+
+    monkeypatch.setattr(tools, "_enter_keyword_generation", _noop)
+
+
 @pytest.fixture
 def vault(monkeypatch, tmp_path):
     monkeypatch.setattr(vault_service.settings, "vault_path", str(tmp_path))
@@ -184,6 +198,23 @@ def writable(vault, monkeypatch):
         return None
 
     monkeypatch.setattr(tools, "_log_usage", noop)
+    # The task tools (#428) also read their settings, scan for duplicates and
+    # refresh the index; stand those database touches in so the path guards
+    # are what these tests exercise.
+    from src.services import task_index, task_settings, task_write
+
+    async def task_defaults(_uid):
+        return task_settings.defaults()
+
+    async def no_duplicates(*_a, **_k):
+        return [], [], False
+
+    async def refreshed(**_k):
+        return task_index.RefreshResult(task_index.REFRESHED)
+
+    monkeypatch.setattr(tools, "_effective_task_settings", task_defaults)
+    monkeypatch.setattr(task_write, "duplicate_scan", no_duplicates)
+    monkeypatch.setattr(task_index, "refresh_note_tasks", refreshed)
     token = current_permission.set("readwrite")
     yield vault
     current_permission.reset(token)
@@ -236,6 +267,11 @@ def _mutations(path: str) -> dict:
             base64.b64encode(b"clobber").decode(),
             overwrite=True,
         ),
+        # #428: the task write tools act on the note they name, never a link.
+        "complete_task": lambda: tools.complete_task_impl(path, "0123456789ab"),
+        "update_task": lambda: tools.update_task_impl(path, "0123456789ab", due="today"),
+        "add_task": lambda: tools.add_task_impl(path, "clobber"),
+        "add_task_dry_run": lambda: tools.add_task_impl(path, "clobber", dry_run=True),
     }
 
 
@@ -531,6 +567,10 @@ def _two_directories_with_identical_notes(root: Path) -> tuple[Path, Path]:
             ),
             id="set_frontmatter",
         ),
+        pytest.param(
+            lambda: tools.add_task_impl("Shared/note.md", "after"),
+            id="add_task",
+        ),
     ],
 )
 async def test_repointing_an_ancestor_mid_write_cannot_redirect_it(
@@ -597,6 +637,13 @@ _SWAPPED_LEAF_CASES = {
         lambda: tools.move_note_impl("note.md", "moved.md"),
         True,
     ),
+    # #428: the task write tools, on an existing note.
+    "complete_task": (lambda: tools.complete_task_impl("note.md", "0123456789ab"), True),
+    "update_task": (
+        lambda: tools.update_task_impl("note.md", "0123456789ab", due="today"),
+        True,
+    ),
+    "add_task": (lambda: tools.add_task_impl("note.md", "after"), True),
     "create_note": (lambda: tools.create_note_impl("note.md", "body\n"), False),
     "write_file_overwrite": (
         lambda: tools.write_file_impl(

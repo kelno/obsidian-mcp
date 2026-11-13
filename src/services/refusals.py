@@ -110,6 +110,17 @@ PRECONDITION_CODES = frozenset(
     }
 )
 
+#: The task-tool codes (#428, design D16). Body-only, like their siblings:
+#: each names a fact about the note's current bytes or the call's arguments,
+#: so none carries a retry interval or a bucket field.
+#: `response_cap_too_small` is a read refusal (`list_tasks` / `task_agenda`),
+#: nothing written by definition.
+TASK_CODES = frozenset({
+    "task_not_found", "task_ambiguous", "task_changed", "already_completed",
+    "task_cancelled", "task_malformed", "recurrence_unsupported",
+    "on_completion_unsupported", "duplicate_task", "response_cap_too_small",
+})
+
 # Body-only codes omit unrelated bucket fields. Existing gate codes retain
 # their historical wire shape, including argument_too_long at the provider.
 BODY_CODES = frozenset({
@@ -135,7 +146,7 @@ BODY_CODES = frozenset({
     # Agent ledger (fork): the entry, line or topic changed since the
     # revision the caller read; the result carries `current_revision`.
     "stale_revision",
-})
+} | TASK_CODES)
 
 CODES = frozenset(
     {

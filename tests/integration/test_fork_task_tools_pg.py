@@ -157,21 +157,21 @@ async def test_list_tasks_answers_from_the_index_and_writes_reindex_at_once(sess
     write(vault, "projects/Area X/Area X.md", "---\narea_tag: area/area-x\n---\n- [ ] area task #area/area-x\n")
     await indexer.index_vault(user_id=None)
 
-    listed = await tools.list_tasks_impl()
+    listed = await tools.fork_list_tasks_impl()
     assert [t.ref for t in listed.tasks] == ["Tasks inbox.md:1", "projects/Area X/Area X.md:4"]
-    assert (await tools.list_tasks_impl(area="area-x")).tasks[0].description == "area task #area/area-x"
-    assert [t.ref for t in (await tools.list_tasks_impl(status="done")).tasks] == ["Tasks inbox.md:2"]
+    assert (await tools.fork_list_tasks_impl(area="area-x")).tasks[0].description == "area task #area/area-x"
+    assert [t.ref for t in (await tools.fork_list_tasks_impl(status="done")).tasks] == ["Tasks inbox.md:2"]
 
     # A write is visible to the very next list_tasks, with no pass in between.
     created = await tools.create_task_impl("call the bank", path="projects/Area X/Area X.md")
     assert created.indexed is True, created
-    by_area = await tools.list_tasks_impl(area="area-x")
+    by_area = await tools.fork_list_tasks_impl(area="area-x")
     assert [t.description for t in by_area.tasks] == ["area task #area/area-x", "call the bank #area/area-x"]
 
     milk = listed.tasks[0]
     done = await tools.set_task_status_impl(milk.path, milk.line, milk.text, milk.content_hash, status="done")
     assert done.indexed is True and done.text == "- [x] buy milk #next 📅 2026-11-02 ✅ 2026-10-31"
-    assert [t.ref for t in (await tools.list_tasks_impl(tags=["next"])).tasks] == []
+    assert [t.ref for t in (await tools.fork_list_tasks_impl(tags=["next"])).tasks] == []
 
     # A stale write is refused: the hash from before the status change.
     again = await tools.edit_task_impl(milk.path, milk.line, milk.text, milk.content_hash, due="today")
@@ -182,7 +182,7 @@ async def test_list_tasks_reports_a_line_changed_on_disk_as_stale(sessionmaker, 
     write(vault, "s.md", "- [ ] before\n")
     await indexer.index_vault(user_id=None)
     write(vault, "s.md", "- [ ] after\n")
-    result = await tools.list_tasks_impl()
+    result = await tools.fork_list_tasks_impl()
     assert result.tasks == [] and [s.ref for s in result.stale] == ["s.md:1"]
 
 
@@ -202,7 +202,7 @@ async def test_list_tasks_only_reads_the_callers_rows(sessionmaker, vault, monke
             "INSERT INTO fork_note_tasks (note_id, line_number, kind, line) VALUES (:id, 1, 'task', '- [ ] theirs')"
         ), {"id": note_id})
         await session.commit()
-    result = await tools.list_tasks_impl()
+    result = await tools.fork_list_tasks_impl()
     assert [t.text for t in result.tasks] == ["- [ ] mine"]
     assert result.stale is None
 
@@ -214,7 +214,7 @@ async def test_with_the_agent_edit_stamp_the_reported_line_is_where_the_task_now
     monkeypatch.setattr(tools.settings, "last_ai_edit_field", "last_ai_edit")
     write(vault, "plain.md", "- [ ] first\n")
     await indexer.index_vault(user_id=None)
-    listed = (await tools.list_tasks_impl(path="plain.md")).tasks[0]
+    listed = (await tools.fork_list_tasks_impl(path="plain.md")).tasks[0]
     done = await tools.set_task_status_impl(listed.path, listed.line, listed.text, listed.content_hash, status="done")
     assert done.ref == "plain.md:4" and done.line == 4, done
     on_disk = (vault / "plain.md").read_text(encoding="utf-8").splitlines()

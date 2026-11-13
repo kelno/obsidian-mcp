@@ -137,7 +137,7 @@ def search_stubs(monkeypatch):
     keyword = _NoSearch()
     semantic = _NoSearch()
 
-    async def _no_embedding(_text):  # pragma: no cover - reaching this fails
+    async def _no_embedding(_text, **_kw):  # pragma: no cover - reaching this fails
         raise AssertionError("an embedding was requested for a refused query")
 
     class _Session:
@@ -149,6 +149,11 @@ def search_stubs(monkeypatch):
 
     monkeypatch.setattr(tools, "full_text_search", keyword)
     monkeypatch.setattr(tools, "semantic_search", semantic)
+
+    async def _no_transition(*_a, **_k):
+        return 0
+
+    monkeypatch.setattr(tools, "rechunk_pending_count", _no_transition)
     monkeypatch.setattr(tools, "async_session", _Session)
     monkeypatch.setattr(embeddings, "get_embedding", _no_embedding)
     return SimpleNamespace(keyword=keyword, semantic=semantic)
@@ -219,8 +224,10 @@ def test_a_structured_tool_refuses_in_its_own_shape():
     assert _sentinel(result.error)["code"] == refusals.ARGUMENT_TOO_LONG
 
 
-def test_the_cap_is_declared_on_both_search_tools_and_the_ledger_search():
-    for impl in (tools.search_notes_impl, tools.semantic_search_impl, tools.ledger_search_impl):
+def test_the_cap_is_declared_on_the_search_tools_and_the_ledger_search():
+    # `hybrid_search_impl` declares the same cap (#354); the ledger search is the fork's.
+    for impl in (tools.search_notes_impl, tools.semantic_search_impl, tools.hybrid_search_impl,
+                 tools.ledger_search_impl):
         source = f"{impl.__wrapped__.__name__}"
         assert source  # the impls exist; the declaration is checked below
     import inspect

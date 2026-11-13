@@ -11,6 +11,8 @@ Self-hosted MCP server exposing an Obsidian vault (~2,577 markdown files) via se
   - `OllamaProvider` — bge-m3 by default, set `OLLAMA_URL` in `.env`
   - `OpenAIProvider` — `text-embedding-3-{small,large}` over httpx, supports
     Azure OpenAI / OpenAI-compatible base URLs
+  - `TeiProvider` — Hugging Face Text Embeddings Inference native `/embed`
+    API, set `TEI_URL` (use `openai` for TEI's `/v1/embeddings` route)
 - Jinja2 control panel; Chart.js vendored under
   `src/control_panel/static/vendor/`, no CDN, hand-written CSS, **nonce-based
   CSP** (`PANEL_CSP`) — see [control panel](docs/architecture/control-panel.md).
@@ -40,6 +42,11 @@ Self-hosted MCP server exposing an Obsidian vault (~2,577 markdown files) via se
   (maxkuminov/infra `docs/homelab-image-automation.md`). Until the app is cut
   over there, a digest-bump PR in maxkuminov/infra. Docs-only merges build
   nothing.
+- Release tag (`v*`, cut at a PR's merge commit) → `registry-publish`
+  workflow: retags the `sha-` image CI proved as `ghcr.io/maxkuminov/obsidian-mcp:<tag>`
+  (no rebuild) and publishes `server.json` to the official MCP Registry via
+  GitHub OIDC. Not a deploy; the GHCR package must be public for the
+  registry's OCI validation (owner setting).
 - `make deploy` (build → scan → push → backup → migrate → recreate) is the
   compose path, not production.
 
@@ -69,6 +76,13 @@ This fork's core must serve any Obsidian vault as it is. Behaviour that follows 
 - `make test-schema` — schema gate: migrations vs. models on a throwaway
   pgvector container (run before any deploy that carries a migration)
 - `make audit` — pip-audit dependency scan
+- `make search-eval` — retrieval metrics on the synthetic fixture (no DB);
+  with `SEARCH_EVAL_DATA` / `SEARCH_EVAL_DATABASE_URL`, on judgments mined from
+  the usage log against a restored copy
+- `make search-eval-export` — read-only export of search/read rows into
+  `.search-eval/` (tenant data, git-ignored; `USER_ID=` for an attachable report)
+- `make search-eval-snapshot` — pre-candidate corpus snapshot of the restored
+  copy (see [search](docs/architecture/search.md#search-evaluation-harness-356))
 - `make reindex` / `make reset-embeddings` / `make rebuild-tsvectors` — index
   maintenance (see [indexing and embeddings](docs/architecture/indexing-and-embeddings.md))
 - `make db-backup` / `make db-restore` — database dump and restore
@@ -106,6 +120,8 @@ This fork follows `maxkuminov/obsidian-mcp` under kelno's rules for forks, kept 
 | Schema drift | `make db-check` (`docker exec obsidian-mcp alembic check`) |
 | Schema gate (any change carrying a migration) | `make test-schema` |
 | Integration suite (real Postgres) | `make test-integration` |
+| Search-quality fixture | `make search-eval` |
+| Search eval (any search-path change) | `make search-eval-snapshot` then `make search-eval SEARCH_EVAL_DATA=.search-eval SEARCH_EVAL_DATABASE_URL=<restored BACKUP_FULL=1 copy>` — attach `report.json` only if `attachable: true` (`USER_ID=` export on multi-user), incumbent as `BASELINE`; `CORPUS_LOSS` invalidates; a change with a mechanical bar adds `python -m scripts.search_eval gate` (PASS/FAIL per metric × slice; exit 64 with no output on a non-attachable or multi-user report) and its table goes in the PR body |
 | Deploy | merge to `main` → CI → `image` workflow → Flux (homelab k3s); `make deploy` for a compose host |
 
 **`tests/integration/` skips itself without a database.** Those modules are
@@ -236,6 +252,52 @@ update it in the same change.** What stays here is the short list:
   content-identical to an ordinary failed login — not a 429, not a lockout;
   the window expires on its own. The new timing signal (attempt 11 skips
   bcrypt) is an accepted limitation.
+- **Native OIDC is federated panel login onto existing accounts, linked by an
+  admin and pinned to `(iss, sub)`** (#414, #415, #416, migration 037). Off by
+  default; off, every page and `/authorize` is byte-identical
+  (`tests/golden/oidc_off/`) and the link routes 404. The server stays the MCP
+  OAuth server — OIDC only mints the panel session (via the one guarded
+  `start_session`), which also covers consent. `oidc.exchange()` returns
+  `VerifiedIdentity` claims, never a user id, and **never refuses on email**
+  (non-string/> 254 → `None`; `email_verified` only the JSON `true`).
+  `oidc_links.resolve`: a row bound to `(iss, sub)` wins and email is not
+  read; only otherwise an exact normalized (ASCII-only lower-casing, no
+  IDN folding) verified email matching a pending expectation under the same
+  issuer, < 7 days old (`PENDING_DAYS`, a constant), binds — once.
+  `prepare_login` (account guard, `FOR UPDATE` + `populate_existing`, every
+  check re-run, no commit) then `start_session(expected_session_version=…)`
+  commit bind + `last_login_at` + session together; a refused mint leaves no
+  binding. No provisioning, no group→admin mapping, no SSO bootstrap
+  (`/admin/register` 404 under OIDC), no provider tokens kept, one issuer;
+  every refusal is one page (reason only in `panel_oidc_refused`, never a
+  user id). Admin actions `POST /admin/users/{id}/oidc/{expect,bind,unlink}`:
+  `_lock_admin_guard`, **immediately** `_actor_still_privileged`, then the
+  target; a bound row is never re-pointed (unlink first); unlink revokes the
+  user's sessions. **D15:** while `LOCAL_LOGIN_ENABLED=false`, unlink,
+  demote, deactivate, soft and permanent delete refuse a result with zero
+  active admins bound under the configured issuer (inside the guard, after
+  the actor re-check; `tests/test_oidc_mutation_sites.py` pins the writer
+  allow-list), self-unlink is refused, and the lifespan logs one CRITICAL
+  (never a refusal) when none exists. Provider profile: same-host HTTPS
+  endpoints, RS256/PS256/ES256 ∩ discovery, `client_secret_basic|post`,
+  optional group, RFC 9207 `iss` required when advertised, zero clock leeway,
+  per-login discovery/JWKS (no cache). `OIDC_SUBJECT_USER_IDS` is **retired**
+  and refuses startup; its message names the docs heading "Upgrading from
+  OIDC_SUBJECT_USER_IDS" — change both together. See
+  [native OIDC](docs/native-oidc.md) and
+  [control panel](docs/architecture/control-panel.md).
+- **A TEI server must prove its identity before it gets a vector request**
+  (#425). `/embed` has no model field, so `verify_tei_server` compares `GET
+  /info` with `TEI_EMBEDDING_MODEL` (exact) and `TEI_EMBED_BATCH_SIZE`, in one
+  5 s `wait_for` (a phase timeout cannot bound a trickling body). The process
+  exits only on a proven mismatch; a vector is requested only after a match.
+  Unreachable or unusable answers serve with embedding withheld, re-checked at
+  most every 30 s (a late mismatch never exits). The optional secret
+  `TEI_API_KEY` (#426) goes as a per-request bearer on `/embed`, `/info` and
+  the panel `/health` only (`_tei_auth_headers`, never a client default; unset
+  sends the pre-#426 requests), is never shown, and a 401/403 is inconclusive,
+  never a mismatch, with a reason naming the setting. See
+  [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
 - **Unused dynamically registered OAuth clients expire** (#194).
   `oauth_clients.last_used_at` is stamped by consent approval, code exchange
   and refresh; migration 025 stamped every pre-existing row, so **NULL means
@@ -260,6 +322,44 @@ update it in the same change.** What stays here is the short list:
   to an unknown code — and so does **every failed revalidation of a spent
   code** (reason only in the log). A live code keeps its specific refusals
   and the pre-#325 check order (expiry first). See [oauth and grants](docs/architecture/oauth-and-grants.md).
+- **OAuth Client ID Metadata Documents, DCR as the fallback** (#357, #420,
+  migrations 036/038). An `https://` `client_id` at `/authorize` is fetched through
+  `transfer.fetch_url_guarded` (no redirects, 10 s, 64 KiB, the SSRF deny list,
+  pinned). Admission: cache, then **join an in-progress fetch before any
+  charge**, a 30 s failure cooldown, the failed-auth salted 4,096-slot table
+  (`OAUTH_CIMD_FETCHES_PER_ADDRESS_PER_MINUTE`, 10), 1 in flight per slot and
+  8 per process. The URL must be canonical with **no `?`/`#`**, and the
+  document's `client_id` byte-equal to it. One synthetic `oauth_clients` row
+  per (URL, user), `cimd_` + HMAC under a `SECRET_KEY`-derived key, written
+  only by an approve. The consent POST is pinned to the **authorization hash**
+  (client_id, sorted redirect URIs, scope; never `client_name`). **The
+  `cimd_` id is never caller input, and where it is refused differs by
+  endpoint.** At `/authorize` it is refused before any lookup. At `/token`
+  the credential and the unchanged #182/#325/#326 processing run first,
+  then it is refused. At `/revoke` it is a concealed 200 (`{}`). `/token` and
+  `/revoke` never fetch **the document**. **`private_key_jwt` is CIMD-only**
+  (#420; `/register` still refuses it): the declared method is honoured, never
+  downgraded; the document needs a same-origin `jwks_uri`, no inline `jwks`,
+  an optional RS256/PS256/ES256 pin; `/authorize` fetches the JWKS with its
+  own cache and a **second** per-address charge; the approve stores a
+  normalised snapshot with its **origin** fetch time (038's four columns and
+  three CHECKs), and a `private_key_jwt` row never becomes `none` — refused
+  under `FOR UPDATE` *and* by the conflict update's `WHERE` (two first
+  approvals race; L10 owner-accepted) — nor moves its snapshot backwards.
+  `src/oauth/client_assertion.py` verifies the assertion at the one
+  `_client_authenticated` position (one key, one alg; `jku`/`jwk`/`x5*`/`crit`
+  refused; `aud` = issuer or `/token`, single-valued; zero `exp` leeway, 300 s
+  life; `jti` single-use per client URL, a full cache refuses). A failed
+  assertion never revokes; #182 reuse is unchanged (L7 owner-accepted). The
+  JWKS refetch (kid miss, or snapshot > 24 h; 60 s cooldown per URI; a failed
+  stale refetch falls back to the stored snapshot) runs only in a pre-phase,
+  for an eligible credential, **before the main session, with no lock across
+  the hop**, decides no response, and runs while CIMD is disabled. Consent shows the document's host and URL, never its
+  `client_name`. Loopback redirects match on any port for CIMD only. `iss` is
+  on every authorization redirect. RFC 8707 `resource` is **classified, never
+  refused** (`resource_class` on every record; `invalid_target` waits for a
+  14-day gate). CIMD rows with no code or token are swept after the #194
+  age, whoever owns them. See [oauth and grants](docs/architecture/oauth-and-grants.md).
 - **Machine-facing paths refuse plaintext HTTP** (#196): a priority-200
   Traefik router on the `http` entrypoint, in `docker-compose.yml`'s labels,
   answers 403 via `ipAllowList` on `192.0.2.0/32` for `/mcp`, `/transfer`,
@@ -273,8 +373,9 @@ update it in the same change.** What stays here is the short list:
   closed. No inline `style=` anywhere (#289): `style-src-attr 'none'`, dynamic
   presentation through `el.style.*` or classes, SVG colours via classes, no
   `!important`; `_utilities.html` is generated. The consent page's
-  `form-action` is `'self' https:` by owner decision (multi-hop OAuth
-  callbacks). Scope is a marker set by the context
+  `form-action` is `'self' https: http://localhost:* http://127.0.0.1:*` by
+  owner decision (multi-hop OAuth callbacks; the two loopback sources since
+  #357 for native RFC 8252 callbacks). Scope is a marker set by the context
   processor on the four panel/auth/consent template instances — not a path, so
   transfer pages and `/docs` are untouched. `PANEL_CSP=report-only|off` is the
   rollback (recreate, no rebuild). htmx is deliberately absent: its `hx-*`
@@ -292,7 +393,9 @@ update it in the same change.** What stays here is the short list:
   connecting, and the lifespan exits on an unencrypted session. The active
   embedding URL must be `https` or loopback unless `EMBEDDING_ALLOW_PLAINTEXT`,
   and every embedding HTTP client comes from `embedding_http_client`
-  (`trust_env=False`, no redirects). See
+  (`trust_env=False`, no redirects). The optional reranker (#367) is a third
+  hop under the same policy: `RERANK_URL` judged by the same parser with its
+  own `RERANK_ALLOW_PLAINTEXT`, every client from `rerank_http_client`. See
   [schema and migrations](docs/architecture/schema-and-migrations.md) and
   [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
 - **The app is never the PostgreSQL superuser** (#324). The lifespan reads
@@ -357,12 +460,95 @@ update it in the same change.** What stays here is the short list:
   the stamp records only when an in-transaction re-read finds every surviving
   row current, after re-resolving every link target. A skip (including an
   unlisted directory) withholds only over a row that is not current.
+- **The keyword vector is `A(title) || A(aliases) || B(tags) || D(body)`**
+  (#344, #391, migrations 031/035), built by the one builder in
+  `src/services/fts.py` for every writer — a required `tags_bind` that every
+  `src/` writer passes (`fts.tags_text`: each tag plus its `/`-segments,
+  2,048 chars on whole tags) and only 031 passes `None` (AST-pinned) — ranked with `ts_rank_cd(RANK_WEIGHTS, …)` (`{0.02,0.2,0.4,1.0}`, a
+  bound `float4[]`) so one title cover outweighs fifty body covers.
+  `keyword_search` runs the conjunction first (`match: all`) and, when it
+  under-fills the page, a disjunction **derived per config from PostgreSQL's
+  own `websearch_to_tsquery` text** (never the caller's string; an ineligible
+  config keeps its AND form, so the union is a superset by construction)
+  tagged `match: any`, never interleaved. Snippets come from
+  `notes_metadata.body_excerpt` (the first `KEYWORD_EXCERPT_CHARS` of exactly
+  the text the vector was built from, same UPDATE) via a statement over the
+  first `KEYWORD_SNIPPET_ROWS` ids only, every statement of the call in one
+  `REPEATABLE READ, READ ONLY` snapshot; a row whose body part did not match
+  (or held no highlight) shows `head:`, both rendered on one line so a note
+  cannot forge a result row; a pre-031 row has no excerpt until edited or
+  `make rebuild-tsvectors`. 031 re-heads in SQL under the generation lock
+  with the **stored fingerprint's** configs and skips rows already headed
+  (`rehead` is not position-idempotent); its downgrade strips every `A`
+  lexeme. 035 does the same for tags after a read-only size preflight
+  (abort above 1,048,511 bytes, naming ids), all-or-nothing, skipping rows
+  already carrying a `B` lexeme or whose tags yield none; downgrade keeps
+  `{a,d}`. `matched_in` is six `ts_filter` flags → eleven values (`title`,
+  `tags`, `body`, comma-joined, or the first `+` split). **Both move paths re-head under the generation lock with the
+  fingerprint re-read** — the title is inside the vector — and `make deploy`
+  stops the app before a pending migration. See
+  [search](docs/architecture/search.md).
+- **`semantic_search` / `hybrid_search` pages carry `confidence: ok | low`**
+  (#389). One pure rule (`src/services/search_confidence.py`): `low` ⇔
+  `SEARCH_LOW_CONFIDENCE_SIMILARITY > 0` ∧ `keyword_all == 0` (`match: any`
+  is not evidence; semantic passes 0) ∧ the best similarity of the call's
+  candidate set (semantic: first overfetched row; hybrid: max over its
+  50-chunk arm, `HybridResult.top_similarity`; both before rerank and the
+  cap) is none or strictly below it. **Ships at 0 = off** — set a value only
+  after both tools' `confidence` tabulation lines PASS (DEPLOYMENT.md). The
+  token is base budget like `arm_depth` (a displaced boundary row is
+  disclosed by the cap footer, L14); the hint line is kept only when it
+  leaves every row byte-identical. A refusal carries neither; usage rows
+  always record `confidence`, `top_similarity`, `keyword_all`. Bounds:
+  hybrid header 405 / 444 (`rerank=true`), semantic rerank header 199, floor
+  995 (row structure 345 / 367 with #391's `title+tags+body`), last rung
+  `explain omitted`. See [search](docs/architecture/search.md).
 - **The vector index is a `halfvec` expression index** (#283, migration 027),
   defined once in `src/services/vector_index.py` and excluded from `alembic
   check` by `include_object`; queries cast to match it and re-rank by
   full-precision distance. Recall measured 1.00 → 1.00; ~146 MB → 45 MB.
   Embedding reuses a stored vector only on exact chunk text and a matching
   model fingerprint, re-verified under the generation lock (#281).
+- **Chunks are heading-aware, and the chunking format is per note, not in
+  the fingerprint** (#355, #367, migration 034). `chunk_note_bounded` splits
+  at ATX headings with `vault._scan_headings` itself (each heading's own text;
+  heading lines excluded; a headings-only note falls back to whole-body
+  chunking), so a chunk's
+  `section_ordinal` is the `#N` `read_note(section=…)` resolves. The provider
+  input is `embed_prefix + "\n\n" + chunk_text` (`Title > H > H`, tags line
+  if ≤ 300 chars); `chunk_text` stays un-prefixed. `certify_embedded` stamps that version and
+  `embedded_input_digest`; the upsert clears certification on a changed
+  title/tags and the full-hash pass re-checks the digest. A version change
+  re-selects notes through the backlog (budgeted in **every** mode, after
+  real edits) under `IS DISTINCT FROM CHUNKING_VERSION`, never `<`/`>`;
+  vector responses carry `index_transition: N …` while the caller's scope
+  has notes **holding vectors** of another generation (the query is echoed
+  as one escaped line), and `/health` only `indexer.rechunk:
+  in_progress|complete`, never a number. Rows print `§ "<path>" (#N)` /
+  `§ (top of note)`, withheld on stale and pre-034 rows; previews are one
+  line from the uncut chunk. Every embedding call passes `kind=query|
+  document`; `EMBEDDING_QUERY_INSTRUCTION` is queries-only and outside the
+  stored fingerprint (in the logged retrieval fingerprint). A heading-scan
+  change bumps `CHUNKING_VERSION`. See [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
+- **No chunk is shorter than the minimum; `CHUNKING_VERSION` is 2** (#390,
+  no migration). `CHUNK_MIN_CHARS = 200` and the 200-char boundary lookback
+  are **constants** in `embeddings.py` (never settings or fingerprint fields;
+  changing one is a version bump); the effective minimum is
+  `min(200, W // 2)`, `W = CHUNK_SIZE × 4`. Every length is `clen` (ASCII
+  whitespace runs collapsed, stripped; `CLEN_SQL` is its tested SQL twin);
+  stored `chunk_text` is the raw, unstripped window. Short sections group
+  forward (a short tail backward; a sole short group stands alone only in a
+  whole-short note, else the whole body is one group at 0); a group is its
+  contiguous cleaned span, inner heading lines included, then windowed at a
+  line/word start within the lookback, cuts admissible only at `clen ≥ m`,
+  the last two windows re-balanced, overlap starts never past the cut. The
+  locator is the **deepest** `#N` whose `read_note` body contains the chunk.
+  The provider input collapses whitespace runs > 8 (`EMBEDDED_TEXT_FORMATTERS`,
+  frozen per version, never edited; a prefix/separator change clears it);
+  reuse needs the stamp to be a key, equal prefixes and
+  `fmt[stamp](stored) == fmt[current](new)`. The embed completion line reads
+  `(S submitted, R reused)`; the harness's `chunk_lengths.under_min` must be
+  0. See [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
 - **A pass does not prune what it could not see** (#309). Rows at or beneath
   a directory the walk could not list (or type) are neither pruned nor
   move-paired, and the run is recorded `walk incomplete` (failed); under a
@@ -411,18 +597,234 @@ update it in the same change.** What stays here is the short list:
   [agent ledger](docs/architecture/agent-ledger.md).
 - **A plugin never fails a write, and never touches what the caller kept** (fork, owner's design 2026-11-12). `PLUGINS` names the plugins a deployment loads (`src/plugins/`), in run order; a name that does not load stops the server at startup. On the note writers, every plugin's `check` sees the caller's own text and the first refusal wins (`check_name`, on a new note's name or a move's destination, likewise); `rewrite`s chain in order after the core's own. A hook that raises or returns something unusable, or a rewrite that alters a non-blank line the caller kept or the frontmatter, is set aside with a `plugin_error:` line and an ERROR log, and the write goes ahead. See [plugins](docs/architecture/plugins.md).
 - **Agents read the guide** (fork, owner's design assumption). `get_vault_guide` is the agent's manual; an agent that skips it is a bug to fix (in the guide's description or the client's setup), not a case to design around. claude.ai shows an agent only about the first 80 characters of a tool's description until it searches its tools, so every tool's first line must stand on its own, and the guide's must say to read it first.
+- **Sync-conflict copies can be left out of the index, opt-in** (#392,
+  no migration). `INDEX_EXCLUDE_CONFLICT_FILES` (default false,
+  deployment-wide) matches a **basename** against the six source-cited
+  patterns in `src/services/conflict_copies.py`. The match is strict: a
+  literal marker plus a full timestamp right before `.md`. An exact-match
+  title is excluded too (L1). It is a third not-indexable reason, decided
+  at the scan before any stat or read: seen (never a move source), never
+  upserted or a move destination, any row pruned with cascades, and never
+  a skip, a pass failure, a `walk incomplete`, or a `/health` change. The
+  feed records `deleted reason=not_indexable` (CHECK-fixed reasons), and
+  nothing for a row-less copy. The files stay readable and writable by
+  path. `create_note` and a successful `move_note` onto such a name append
+  one notice line, byte-identical when off. See
+  [indexing and embeddings](docs/architecture/indexing-and-embeddings.md),
+  "Excluded sync-conflict copies (#392)".
+- **Every tool publishes a `title` and all four `ToolAnnotations` hints
+  explicitly** (#343). Nineteen read tools are read-only/idempotent/closed;
+  the destructive set is the write-bucket set minus `create_note` and
+  `add_task` (#428: inserts one line, removes no byte) plus
+  `request_upload` (its `overwrite=True` link overwrites on redemption);
+  `import_from_url` alone is open-world. **Hints, not enforcement** — nothing
+  server-side reads them; `_tracked` and `_require_write` enforce as before.
+  `FastMCP(instructions=SERVER_INSTRUCTIONS)` is ≤ 2,000 characters with a
+  ≤ 512-character lead that states the round trip *with its conditions* and
+  `expected_hash` as optional. No description exceeds 4,000 characters on the
+  wire (the raw docstring is what ships); the four long ones lead with their
+  contract and the reasoning moved to the vault-tools note. See
+  [vault tools](docs/architecture/vault-tools.md), "Tool metadata".
+  **`tools/list` is scoped by the presented credential** (#358): an OAuth
+  grant without `readwrite` lists 20 — the full list minus
+  `tool_permissions.WRITE_REQUIRED_TOOLS` (twelve names), the one literal that also drives
+  `_tracked`'s body-boundary write gate (after quota, so spend is unchanged);
+  API keys of either permission, `readwrite` grants, sandbox and in-process
+  callers list 32, byte-identical to `tests/fixtures/tools_list_full_v2.json`
+  (the oracle since #428 — regenerate only deliberately; `tools_list_full_v1.json`
+  stays the 1.0 freeze record, derived from v2 by a test). The seam is the
+  public `list_tools()` override (survives SDK 2.x); no setting, no
+  `list_changed`, instructions unfiltered.
+- **`hybrid_search` is a third search peer, not a primary** (#354). All three
+  search descriptions carry one routing sentence (identifiers →
+  `keyword_search`, paraphrase → `semantic_search`, unsure →
+  `hybrid_search`), none ranks a tool above another, and the instructions'
+  lead names all three. It fuses both arms by RRF over note paths, `score =
+  Σ 1/(k + rank)` with `k = HYBRID_RRF_K` (60, 1–1000, no per-call
+  argument), over **each arm's top 50 only** (`arm_depth:` says when an arm
+  was full); ties by the better arm rank, then path. The query is embedded
+  **before** any statement; both arms then run on one session in one
+  `REPEATABLE READ, READ ONLY` snapshot (keyword arm first, `SET LOCAL
+  enable_indexscan = on` restored after an exact re-run, before the
+  snippets). The arm cores (`keyword_arm_rows`, `semantic_arm_rows`) are
+  extracted from the unchanged `keyword_search` / `semantic_search`
+  services, whose output is byte-identical. An embedding failure returns the
+  keyword arm marked `arms: keyword-only (semantic unavailable: …)` on every
+  return path — **never silently**, never an `error` marker, class name
+  only in the log. Every note-controlled field is a `change_feed.quote`
+  JSON literal before the `"} — ` separator; the bound is on rendered
+  length. Concurrency class `embedding`, sharing the slot with
+  `semantic_search` (`CLASS_MAPPING_VERSION` 5). A search-path change: the
+  eval gate row applies, with the harness arms
+  `scripts.search_eval_arms.hybrid:make_arm` / `make_arm_alt`
+  (membership `keyword_or_semantic`). See [search](docs/architecture/search.md),
+  "Hybrid search (#354)".
+- Wikilink graph extracted from note bodies into `note_links`; resolved at index time with same-folder-first preference
+- **Task rows are derived state keyed by note id** (#350, migration 032).
+  `note_tasks` has no path and no owner column — both come from the
+  `notes_metadata` join, so a task cannot outlive, precede or be listed
+  under another tenant than its note — and is written by the index
+  pass, right after the link rebuild, for the same changed list, from the
+  scan's buffered bodies (`src/services/tasks.py`, fence-aware, the #218
+  rule), and since #428 also by the task tools' write-time refresh (next
+  bullet), never by any other writer. Extraction version 4 is the backfill (no re-embed). **A
+  task-derivation failure is isolated to that note's task rows**: per-note
+  savepoint, one retry, then `tasks_failed` — never the quarantine, never a
+  skip, never a pass failure. `list_tasks` always reports the not-yet-scanned
+  (`extraction_version < 4`), could-not-be-indexed and capped counts, each
+  even at zero; its cursor carries an owner discriminator and a filters
+  digest, never an id. See [indexing and embeddings](docs/architecture/indexing-and-embeddings.md)
+  and [vault tools](docs/architecture/vault-tools.md).
+- **Task writes address a line by `path` + id, re-derived from the bytes
+  being replaced** (#428, migration 039, extraction version 5). The id is
+  `sha256("omcp-task-v1\0" + uncut text)[:12]` (status, indent, marker and
+  quote prefix excluded), suffixed `.<i>of<n>` when identical lines share a
+  key; `note_tasks.task_key` / `key_ordinal` / `key_count` store it. Every
+  write re-reads the note, re-derives every id (`tasks_from_note_text`, the
+  one definition the pass and refresh share), plans, **verifies** (every other
+  line and task unchanged, no line changes owner by the **uncapped**
+  continuation block, tags conserved) and publishes with
+  `write_file_at(expected=existing_bytes)`; no index line number is ever
+  trusted. **A suffixed id always needs `expected_hash`** (every mode); in
+  required mode a bare id satisfies it and `add_task` is exempt. No hash →
+  up to 3 attempts on an in-call conflict, then `concurrent_write`; it
+  narrows nothing about the declared `expected=`→rename window. **Minimal
+  edits**: only the changed field's characters move, never the plugin's
+  whole-line rebuild; ambiguity (duplicated or stranded fields, inline code
+  in the run) is `task_malformed`, never a pick. **Recurrence is a closed
+  grammar** (`task_recurrence.py`, stdlib only, no rrule port); anything
+  else is `recurrence_unsupported`, and nothing completes without its next
+  occurrence. **The write-time refresh** (`task_index.refresh_note_tasks`)
+  rewrites only that note's task rows from the *published* bytes, derived
+  before its transaction, under the note's row lock with a 2 s
+  `lock_timeout` and a byte re-check (`superseded`) — **no generation lock,
+  ever**; `tasks_source_hash` / `tasks_refreshed_at` mark task-dirty rows,
+  which the pass never stat-shortcuts (R3) and keeps only when refreshed at
+  or after its `scan_started_at` (R4), so every row converges and none is
+  stuck. A refresh that cannot run leaves the write standing:
+  `index: may lag (<code>)`. Since #432 `edit_note`, `set_frontmatter`
+  and every `write_file` to a note path also attempt the refresh, after
+  their change-feed event, only when the replaced or published bytes may
+  hold a checkbox (`tasks.may_hold_tasks`, a superset of the extractor),
+  and silently: their output is unchanged, and a refresh that cannot run
+  leaves the rows to the next pass. `delete_note` always clears the deleted
+  note's task rows (absence form, never over a recreated file).
+  `create_note`, imports, uploads and `move_note`'s link rewrites wait for
+  the pass (task-refresh-on-write L1/L4). Settings
+  are per owner scope in `task_settings` (durable, `UNIQUE NULLS NOT
+  DISTINCT`, NULL fields → `TASKS_*` env defaults); an invalid
+  `TASKS_DEFAULT_TIMEZONE` (or, since #434, `TASKS_RULE`,
+  `TASKS_RULE_TAGS`, `TASKS_GLOBAL_FILTER`) refuses boot, init container
+  included. 032 skips
+  exactly 039's marked units by an allow-list a future `note_tasks` revision
+  must extend on purpose. See [vault tools](docs/architecture/vault-tools.md),
+  "Task tools (#428)", and [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
+- **A checkbox is not a task; the task rule says which are** (#434,
+  migration 040). Per owner scope: `all` (every checkbox — **the default,
+  byte-identical to v1.3.0**, cursors included), `fields` (a date,
+  priority or recurrence field, or a task tag matched like `tags=`) or
+  `filter` (case-sensitive `strpos` of the stored text, the plugin's
+  global filter; reverses #428 L12). Evaluated at query time from indexed
+  columns in **one place**, `task_rule.rule_clause` composed into
+  `task_query.scope_clause` (listing, counts, agenda, `duplicate_scan`);
+  `scope="all"` lifts it. Rows cut at 1,000 text characters or 64 tags
+  are **kept and counted** (`kept though unsure`), never hidden; an
+  unevaluable stored rule is `all`, stated on the rule line (≤ 320) with
+  `excluded by rule` and `pass scope="all"…`. Inherited from
+  `TASKS_RULE` / `TASKS_RULE_TAGS` / `TASKS_GLOBAL_FILTER` as one unit;
+  invalid values (or `filter` without text) refuse boot, init container
+  included. The filter text is validated (no backtick, field emoji,
+  comment marker, leading structure) because `add_task` **prepends** it,
+  and the combined description is structure-checked again before any
+  dry run or publish. The rule never blocks a write; `add_task` /
+  `update_task` state a non-task. The cursor digest carries the rule only
+  when one applies. 039 skips exactly 040's marked units (its own
+  allow-list). See [vault tools](docs/architecture/vault-tools.md),
+  "The task rule (#434)".
+- **The change feed is `note_events`, written at the moment the server
+  knows** (#351, migration 033). Tools write attributed events (actor label,
+  exact principal, tool) after their confirmed publication; the index pass
+  writes only what it discovers, unattributed (`human/sync`), as its
+  attempt's **final statement**, and suppresses its own line when the latest
+  MCP event at the path already says the same (same canonical hash, same
+  delete reason, or the same move latest at *both* endpoints). Every insert
+  goes through `change_feed.append_events`, which assigns a **per-scope
+  `seq` under the scope's two-key advisory lock held to commit** — so an
+  `ev:<seq>` cursor is exact (nothing committed later can sit at or below a
+  returned `next_since`) and reveals no other tenant's volume; the feed lock
+  is the last lock a transaction takes. **No foreign keys** on the three
+  feed tables (an FK to `users` reopens the permanent-deletion deadlock);
+  `delete_user` purges the scope explicitly, feed lock last. `move_note`'s
+  event is in its metadata transaction (all or nothing; a failure leaves the
+  move for the pass to record `human/sync`); file-only tools append after
+  publishing, bound to the root they ran under (re-checked under the lock,
+  `change_feed_root_changed`), and never change a tool's result. One
+  canonical note hash (`src/services/note_hash.py`) serves the indexer and
+  every event. A first pass over an empty scope is one `reset`, a provenance
+  discard purges the scope and appends `reset`, a pass itemises at most
+  `CHANGE_FEED_MAX_EVENTS_PER_PASS` and a failed pass append leaves a durable
+  `note_event_gaps` row (a `gap` line later) — the feed never fails a pass.
+  Retention (age, per-scope cap that always applies, newest kept, watermark
+  for `history_truncated`) runs in the tick's `finally`.
+  `notes_metadata.content_changed_at` moves **only** in the upsert, only on a
+  hash change (`now()`, not mtime); `get_recent` / `list_notes` gain
+  `since`/`until`/`order_by`/`cursor` with keyset paging, and a call using
+  none of them is byte-identical. See
+  [indexing and embeddings](docs/architecture/indexing-and-embeddings.md).
+- **The reranker is opt-in, all or nothing, and can never fail a search**
+  (#367). `rerank: bool = false` is always in `semantic_search`'s and
+  `hybrid_search`'s schemas; `rerank=false` is byte-identical to the render
+  before it. With `RERANK_URL` empty, `rerank=true` answers
+  `reranked: false (not_configured)` — never a refusal. Otherwise the call's
+  already-fetched candidates (≤ 50 notes, `semantic_candidates` / the first
+  50 fused rows; no second retrieval) go to one Jina-compatible `/v1/rerank`
+  exchange under one `RERANK_TIMEOUT_MS` deadline, and the page is either
+  fully reranked (`reranked: true (candidates: N)`, `rerank_score` after the
+  `"} — ` separator) or the capped unreranked baseline with one closed reason
+  code. `rerank=true` always renders hybrid's quoted-object encoding. A
+  failed startup probe (both document orders) disables reranking with one
+  CRITICAL and **never exits**; a background re-probe re-enables it.
+  `/health` gains `rerank: enabled|disabled|absent` without touching
+  `status` or the 200. The session closes before the hop (no connection held),
+  the call stays in the `embedding` class (no version bump), the trust anchor
+  is `EMBEDDING_CA_FILE`'s with a separate plaintext flag, and the CLAUDE.md
+  eval-gate row applies to any rerank change. Since #402 the documents are
+  the stored embedding input (`embed_prefix` + the stamped formatter; title
+  only for an unknown stamp), every candidate's cosine-best chunk first and
+  then further fetched chunks in distance order (≤ 4 per note, ≤
+  `RERANK_MAX_DOCUMENTS`, default 100), scored per note by the max, and a
+  chunk winner's preview and `§` are that chunk's. See
+  [search](docs/architecture/search.md), "Reranking (#367)".
 - `MCP_SANDBOX_MODE=true` is a registry-eval-only switch: lifespan skips `_check_embedding_dim` and the indexer, and `APIKeyMiddleware` bypasses auth on `/mcp/*`. Lets Glama's sandbox build the image and validate MCP introspection without external deps. Never enable in production — tools register but cannot run.
 
 ## MCP tools
 
-42 tools (41 in the core, `open_area` from the `kelno_vault` plugin), all
-registered in `src/mcp_server/server.py` and all wrapped by
+42 tools offered (41 in the core, `open_area` from the `kelno_vault` plugin), plus
+seven upstream tools registered and switched off (`SWITCHED_OFF` at the end of
+`server.py`; see "Following upstream"). All are registered in
+`src/mcp_server/server.py` and all wrapped by
 `_tracked`, which resolves the caller's vault root *before* the tool body runs
 — that decorator is the whole enforcement of "this user has no vault"
 ([vault roots and tenancy](docs/architecture/vault-roots-and-tenancy.md)).
+Every registration carries `title=` and `annotations=` (one of four shared
+`ToolAnnotations` shapes); `tests/test_issue_343_tool_metadata.py` fails on a
+registration without them, on a description over 4,000 characters, and on a
+destructive set that drifts from the write bucket.
 
-**Search and read** — `keyword_search`, `semantic_search`, `read_note`,
-`list_notes`, `get_tags`, `get_recent`, `get_vault_guide`.
+A read-only OAuth grant **sees 20 of the 32** (#358): `tools/list` omits the
+twelve names in `src/mcp_server/tool_permissions.py`'s `WRITE_REQUIRED_TOOLS`
+(the eleven-tool write bucket plus `request_upload`). That same literal drives the write
+gate `_tracked` runs at the body boundary, so the list and enforcement cannot
+drift; a hidden tool called by name is refused `permission_denied` as before.
+API keys and `readwrite` grants see all 32. See
+[vault tools](docs/architecture/vault-tools.md), "Who sees which tools (#358)".
+
+**Search and read** — `keyword_search`, `semantic_search`, `hybrid_search`
+(RRF of the two, for a query that is neither clearly an identifier nor a
+paraphrase; it and `semantic_search` take the optional `rerank` argument,
+#367), `read_note`, `list_notes`, `get_tags`, `get_recent`, `get_vault_guide`, `get_changes`
+(the change feed, after an `ev:<seq>` cursor or a UTC date; `by` =
+`any | me | agents | human`), and `list_tasks` / `task_agenda` (see **Tasks** below).
 
 **`index_status`** — how far indexing and embedding have got for the caller's vault (embedded, pending, excluded, no text; a folder, private folders, the ledger; the last hour's rate and time left; the indexer's health), counted by `src/services/index_status.py`, which also holds the one definition of "pending" the panel uses. Class `scan`. See [indexing and embeddings](docs/architecture/indexing-and-embeddings.md), "Reporting progress to agents".
 
@@ -444,6 +846,20 @@ destructive-write surface: read
 **Raw files (non-markdown)** — `read_file`, `write_file`, `list_files`,
 `delete_file`. Pure byte transport, same traversal and dot-dir guards, no
 indexing.
+
+**Tasks** (optional; plain `- [ ]` checkboxes work, Tasks-plugin emoji
+fields optional) — `list_tasks` and `task_agenda` read `note_tasks`, never a
+file; `complete_task`, `update_task` (both `path` + task id) and `add_task`
+write one line (write bucket, `write` class, `WRITE_REQUIRED_TOOLS`).
+Default listings and `add_task`'s index-side duplicate check apply the
+caller's task rule (#434: `all` | `fields` | `filter`, panel Tasks card or
+`TASKS_RULE*` / `TASKS_GLOBAL_FILTER`); `scope="all"` lists every checkbox.
+`list_tasks` is registered after the first 25 (then `get_changes`, then
+`hybrid_search`), so those keep the 5a391ca fixture's order; the four #428
+tools follow `hybrid_search` in the order `task_agenda`, `complete_task`,
+`update_task`, `add_task`, so the first 28 keep theirs (the rest are in
+`tools_list_schema_additions.json`; the deliberately amended filter-tool
+schemas are in `tools_list_schema_amendments.json`).
 
 **Transfer** — `request_upload`, `check_upload`, `request_download`,
 `import_from_url`, plus the public `/transfer/*` routes. A capability pins
@@ -495,10 +911,10 @@ summaries.
 | [oauth-and-grants.md](docs/architecture/oauth-and-grants.md) | `src/oauth/`, the consent page, anything minting/rotating/revoking a token |
 | [vault-roots-and-tenancy.md](docs/architecture/vault-roots-and-tenancy.md) | `APIKeyMiddleware`, `_vault_root`, owner predicates, publication confirmation, the vault-root overlap guard (`src/services/vault_overlap.py`, the snapshot, the five pass entry points) |
 | [open-area.md](docs/architecture/open-area.md) | `open_area`, `src/plugins/kelno_vault/open_area.py` and `areas_index.py` (fork) |
-| [vault-tools.md](docs/architecture/vault-tools.md) | any note or file tool: frontmatter, symlinks, anchored writes, section addressing, size caps |
+| [vault-tools.md](docs/architecture/vault-tools.md) | any note or file tool: frontmatter, symlinks, anchored writes, section addressing, size caps; the task tools (`src/services/task_line.py`, `task_write.py`, `task_recurrence.py`, `task_dates.py`, `task_query.py`, `task_settings.py`, `src/mcp_server/task_render.py`) |
 | [file-transfer.md](docs/architecture/file-transfer.md) | `src/transfer/`, `src/services/vault_fs.py`, the publish gate, SSRF policy, the write-bucket charge at redemption |
-| [search.md](docs/architecture/search.md) | `semantic_search` / `keyword_search` / `find_related` and every `SET LOCAL` they issue |
-| [indexing-and-embeddings.md](docs/architecture/indexing-and-embeddings.md) | the indexer loop, the embed pass, tsvector writers, provider abstraction, `index_status` |
+| [search.md](docs/architecture/search.md) | `semantic_search` / `keyword_search` / `find_related` and every `SET LOCAL` they issue; `scripts/search_eval/` (the search evaluation harness) |
+| [indexing-and-embeddings.md](docs/architecture/indexing-and-embeddings.md) | the indexer loop, the embed pass, tsvector writers, provider abstraction, `index_status`, the task derivation (`src/services/tasks.py`) and the write-time task refresh (`src/services/task_index.py`) |
 | [security-event-logging.md](docs/architecture/security-event-logging.md) | `src/logging_setup.py`, `src/services/security_events.py`, and any call site that logs a refusal: the field allow-list, the event catalogue, the suppressor |
 | [rate-limits.md](docs/architecture/rate-limits.md) | `src/services/rate_limits.py`, `src/services/concurrency.py`, `src/services/pool_budget.py`, `src/services/concurrency_counters.py`, `src/services/concurrency_readiness.py`, `src/services/refusals.py`, the pool subclass in `src/database.py`, the failed-auth budget in `APIKeyMiddleware`, the gate order in `_tracked`, the worker count, the key-creation budget and active-key cap (`src/services/api_keys.py`), and every `MCP_RATE_LIMIT_*` / `MCP_AUTH_FAILURE_*` / `MCP_CONCURRENCY_*` / `KEY_CREATION_*` / `KEY_MAX_ACTIVE_PER_ACCOUNT` / `DEFAULT_DAILY_REQUEST_LIMIT` setting |
 | [usage-attribution.md](docs/architecture/usage-attribution.md) | `usage_logs`, `_log_usage`, actor columns |
@@ -506,6 +922,8 @@ summaries.
 | [tasks.md](docs/architecture/tasks.md) | the four task tools, `src/services/fork_tasks/`, `fork_note_tasks` / migration 1001, and any Tasks plugin upgrade |
 | [plugins.md](docs/architecture/plugins.md) | `src/plugins/`, the `PLUGINS` setting, the plugin calls in the note writers, and moving a vault-specific behaviour out of the core |
 | [agent-ledger.md](docs/architecture/agent-ledger.md) | the eight `ledger_*` tools, `src/services/ledger*.py`, the `ledger_*` tables / migration 1002, `scripts/ledger_import.py` / `ledger_export.py`, and the ledger's vectors in the reset and the embed stage |
+| [native-oidc.md](docs/native-oidc.md) | `src/auth/oidc.py`, `src/services/oidc_links.py`, the OIDC callback and the `/admin/users/{id}/oidc/*` routes, `_warn_oidc_lockout`, any `OIDC_*` / `LOCAL_LOGIN_ENABLED` setting, migration 037's link columns (operator guide; the invariants are in control-panel.md) |
 
 Formal requirements live in `openspec/specs/`; the change history and its
 reasoning in `openspec/changes/archive/`.
+

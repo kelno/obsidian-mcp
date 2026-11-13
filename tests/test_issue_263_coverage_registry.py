@@ -51,7 +51,24 @@ COVERAGE = {
     'open_area': [('refused', 'integration/test_ledger_pg.py::test_open_area_refuses_both_or_neither_and_an_unknown_area'), ('success', 'integration/test_ledger_pg.py::test_open_area_gathers_the_note_folders_entries_and_tasks')],
     'index_status': [('success', 'integration/test_index_status_pg.py::test_counts_every_state_and_the_rate'), ('success', 'test_index_status.py::test_summary_and_notes_follow_the_state')],
     'ledger_topic_edit': [('refused', 'test_ledger_tools.py::test_writes_refuse_a_read_only_credential'), ('success', 'integration/test_ledger_pg.py::test_topics_create_merge_and_count')],
+    'upstream_list_tasks': [('refused', 'test_list_tasks_render.py::test_invalid_arguments_are_refused_before_any_statement'), ('success', 'test_list_tasks_render.py::test_the_query_runs_in_one_read_only_snapshot')],
+    'get_changes': [('refused', 'test_change_feed_offline.py::test_get_changes_refuses_bad_arguments_before_any_query'), ('success', 'test_change_feed_offline.py::test_render_changes_page_shape')],
+    'hybrid_search': [('refused', 'test_hybrid_search_offline.py::test_the_query_cap_is_pre_body'), ('success', 'test_hybrid_search_offline.py::test_provider_down_returns_the_keyword_arm_marked')],
+    'task_agenda': [('refused', 'test_task_tools_e2e.py::test_task_agenda_refuses_a_small_response_cap_before_any_statement'), ('success', 'test_task_tools_e2e.py::test_task_agenda_renders_through_the_query')],
+    'complete_task': [('refused', 'test_task_tools_e2e.py::test_a_suffixed_id_without_a_hash_is_refused_before_any_read'), ('success', 'test_task_tools_e2e.py::test_complete_task_writes_refreshes_then_records_the_event')],
+    'update_task': [('refused', 'test_task_tools_e2e.py::test_update_task_status_done_names_complete_task'), ('success', 'test_task_tools_e2e.py::test_update_task_sets_a_relative_due_date_and_echoes_it')],
+    'add_task': [('refused', 'test_task_tools_e2e.py::test_add_task_refuses_a_missing_note_and_creates_nothing'), ('success', 'test_task_tools_e2e.py::test_add_task_inserts_after_the_task_list_and_lists_similar_tasks')],
 }
+
+# Tools registered after the typed-tool-outcomes inventory was archived. Their
+# outcome contract lives in their own change's spec rather than in that
+# inventory, which is a historical record and is not edited.
+ADDED_AFTER_INVENTORY = {'list_tasks', 'get_changes', 'hybrid_search',  # #350, #351, #354
+                         'task_agenda', 'complete_task', 'update_task', 'add_task',  # #428
+                         'upstream_list_tasks'}  # upstream's list_tasks, renamed in the fork
+#: Tools whose body is not `<tool>_impl` (fork: two `list_tasks`).
+IMPLEMENTATION = {'keyword_search': 'search_notes_impl', 'list_tasks': 'fork_list_tasks_impl',
+                  'upstream_list_tasks': 'list_tasks_impl'}
 
 
 def test_every_registered_tool_has_inventory_and_live_behavioral_references():
@@ -62,13 +79,20 @@ def test_every_registered_tool_has_inventory_and_live_behavioral_references():
     plugin_tools = {tool.name for tool in plugins.load(("kelno_vault",))[0].tools}
     assert not registered & plugin_tools
     registered |= plugin_tools
+    # Upstream's tools the fork switched off are not registered, but are covered.
+    from src.mcp_server.server import SWITCHED_OFF
+    registered |= SWITCHED_OFF
     assert set(COVERAGE) == registered
-    assert len(registered) == 42
+    # 41 core tools, `open_area` (kelno_vault) and upstream's seven switched off.
+    assert len(registered) == 49
     root = Path(__file__).resolve().parents[1]
     inventory = (root / 'openspec/changes/archive/2026-09-06-typed-tool-outcomes/inventory.md').read_text()
     for tool, references in COVERAGE.items():
-        implementation = 'search_notes_impl' if tool == 'keyword_search' else tool + '_impl'
-        assert '### ' + implementation + ' ' in inventory
+        implementation = IMPLEMENTATION.get(tool, tool + '_impl')
+        if tool in ADDED_AFTER_INVENTORY:
+            assert ('async def ' + implementation + '(') in (root / 'src/mcp_server/tools.py').read_text()
+        else:
+            assert '### ' + implementation + ' ' in inventory
         assert references
         for contract, reference in references:
             assert contract in {'refused', 'partial', 'success'}

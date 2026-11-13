@@ -539,7 +539,7 @@ async def test_list_tasks_success_shape(vault, monkeypatch):
         _row("m.md", 1, "task", "- [ ] old text"),
     ]
     monkeypatch.setattr(tools, "async_session", lambda: _FakeSession(rows))
-    result = await tools.list_tasks_impl()
+    result = await tools.fork_list_tasks_impl()
     assert result.error is None
     assert [t.ref for t in result.tasks] == ["n.md:2"]
     task = result.tasks[0]
@@ -561,7 +561,7 @@ async def test_list_tasks_problems_in_a_private_folder_come_without_text(vault, 
         _row("Areas/x.md", 4, "problem", "-\t[ ] open", "whitespace_after_marker"),
     ]
     monkeypatch.setattr(tools, "async_session", lambda: _FakeSession(rows))
-    result = await tools.list_tasks_impl()
+    result = await tools.fork_list_tasks_impl()
     assert result.error is None
     by_ref = {p.ref: p for p in result.problems}
     hidden, shown = by_ref["People (private)/Sam.md:3"], by_ref["Areas/x.md:4"]
@@ -581,7 +581,7 @@ async def test_list_tasks_private_tasks_by_location_unless_include_private(vault
         _row("Areas/x.md", 1, "task", "- [ ] open thing"),
     ]
     monkeypatch.setattr(tools, "async_session", lambda: _FakeSession(rows))
-    result = await tools.list_tasks_impl()
+    result = await tools.fork_list_tasks_impl()
     assert result.error is None
     by_ref = {t.ref: t for t in result.tasks}
     hidden = by_ref["People (private)/Sam.md:2"]
@@ -594,14 +594,14 @@ async def test_list_tasks_private_tasks_by_location_unless_include_private(vault
     assert any("location only" in n for n in result.notes)
 
     # Naming the folder in `path` no longer opens it (P98): only the argument does.
-    named = await tools.list_tasks_impl(path="people (private)/")
+    named = await tools.fork_list_tasks_impl(path="people (private)/")
     assert named.tasks[0].private is True and named.tasks[0].text is None
 
-    scoped = await tools.list_tasks_impl(path="people (private)/", include_private=True)
+    scoped = await tools.fork_list_tasks_impl(path="people (private)/", include_private=True)
     assert [t.text for t in scoped.tasks] == ["- [ ] call Sam about the secret"]
     assert scoped.tasks[0].private is None and scoped.stale[0].indexed_text == "- [ ] stale secret line"
     assert not any("location only" in n for n in scoped.notes or [])
-    everywhere = await tools.list_tasks_impl(include_private=True)
+    everywhere = await tools.fork_list_tasks_impl(include_private=True)
     assert "secret" in everywhere.model_dump_json()
 
 
@@ -612,14 +612,14 @@ async def test_list_tasks_without_private_folders_configured_hides_nothing(vault
     note(vault, "People (private)/Sam.md", "# S\n- [ ] call Sam\n")
     rows = [_row("People (private)/Sam.md", 2, "task", "- [ ] call Sam")]
     monkeypatch.setattr(tools, "async_session", lambda: _FakeSession(rows))
-    result = await tools.list_tasks_impl()
+    result = await tools.fork_list_tasks_impl()
     assert [t.text for t in result.tasks] == ["- [ ] call Sam"] and result.tasks[0].private is None
     assert not any("private folder" in n for n in result.notes or [])
 
 
 async def test_list_tasks_refuses_an_unsupported_global_query(vault, monkeypatch):
     write_settings(vault, {**OWNER_SETTINGS, "globalQuery": "not done\ngroup by path"})
-    result = await tools.list_tasks_impl()
+    result = await tools.fork_list_tasks_impl()
     assert code(result) == "invalid_argument"
     assert "group by path" in result.error
 
@@ -630,15 +630,15 @@ async def test_list_tasks_applies_a_supported_global_query(vault, monkeypatch):
     note(vault, "other.md", "- [ ] out\n")
     rows = [_row("Tasks inbox.md", 1, "task", "- [ ] in"), _row("other.md", 1, "task", "- [ ] out")]
     monkeypatch.setattr(tools, "async_session", lambda: _FakeSession(rows))
-    result = await tools.list_tasks_impl()
+    result = await tools.fork_list_tasks_impl()
     assert [t.ref for t in result.tasks] == ["Tasks inbox.md:1"]
     assert result.notes
 
 
 async def test_list_tasks_bad_limit_area_and_date(vault):
-    assert code(await tools.list_tasks_impl(limit=0)) == "invalid_argument"
-    assert code(await tools.list_tasks_impl(area="nope")) == "invalid_argument"
-    assert code(await tools.list_tasks_impl(due="before next week")) == "invalid_argument"
+    assert code(await tools.fork_list_tasks_impl(limit=0)) == "invalid_argument"
+    assert code(await tools.fork_list_tasks_impl(area="nope")) == "invalid_argument"
+    assert code(await tools.fork_list_tasks_impl(due="before next week")) == "invalid_argument"
 
 
 # --- found by the adversarial review ---------------------------------------------

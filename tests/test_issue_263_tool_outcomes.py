@@ -12,6 +12,21 @@ from src.services import refusals, timing, vault
 from src.services.tool_outcomes import BODY_MARKERS, BodyOutcome, body_refusal
 
 
+@pytest.fixture(autouse=True)
+def _no_keyword_generation(monkeypatch):
+    """#351: `move_note` now stops its link rewrites when its metadata
+    transaction fails, so these scripted fake sessions must let that
+    transaction succeed. Its opening generation lock and fingerprint re-read
+    are pinned against PostgreSQL in `tests/integration/test_keyword_ranking_pg.py`;
+    stand them down here, as the other offline move modules do."""
+    from src.mcp_server import tools as _tools
+
+    async def _noop(_session):
+        return None
+
+    monkeypatch.setattr(_tools, "_enter_keyword_generation", _noop)
+
+
 def payload(value):
     return json.loads(str(value).splitlines()[-1].removeprefix("MCP-REFUSAL "))
 
@@ -211,13 +226,27 @@ async def test_precondition_helper_records_terminal_marker_without_side_effects(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", ["edit_note", "set_frontmatter"])
-async def test_frontmatter_helper_propagates_one_generated_sentinel(capture, tool):
+@pytest.mark.parametrize(
+    "tool", ["edit_note", "set_frontmatter", "add_task", "complete_task", "update_task"])
+async def test_frontmatter_helper_propagates_one_generated_sentinel(capture, tool, monkeypatch):
     root = capture[2]
-    original = "---\nbroken: [\n---\nbody\n"
+    original = "---\nbroken: [\n---\nbody\n- [ ] a\n"
     (root / "broken.md").write_text(original)
+    from src.services import task_line, task_settings
+
+    async def task_defaults(_uid):
+        return task_settings.defaults()
+
+    monkeypatch.setattr(tools, "_effective_task_settings", task_defaults)
+    tid = task_line.task_key("a")
     if tool == "edit_note":
         out = await tools.edit_note_impl("broken.md", "new", section="Heading")
+    elif tool == "add_task":
+        out = await tools.add_task_impl("broken.md", "new")
+    elif tool == "complete_task":
+        out = await tools.complete_task_impl("broken.md", tid)
+    elif tool == "update_task":
+        out = await tools.update_task_impl("broken.md", tid, due="today")
     else:
         out = await tools.set_frontmatter_impl("broken.md", {"title": "new"})
     assert payload(out)["code"] == "content_unsafe"

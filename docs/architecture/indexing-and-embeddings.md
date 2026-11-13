@@ -22,6 +22,18 @@
   queued a duplicate behind the abandoned original, tripling the load per
   batch while every attempt still timed out. The batch size changes request
   shape, not vectors, so it is not in the embedding fingerprint.
+- `EMBEDDING_PROVIDER=tei` — Hugging Face Text Embeddings Inference, native
+  protocol. Uses `TEI_URL` and `TEI_EMBEDDING_MODEL`. `/embed` has no model
+  field, so the name is compared with the server's `GET /info` `model_id`
+  ("TEI server identity" below) and recorded in the fingerprint. Sends
+  `{"inputs": [...], "truncate": true}` to `/embed`, in slices of at most
+  `TEI_EMBED_BATCH_SIZE` (default 16; a client batch above the server's
+  `--max-client-batch-size`, 32 on TEI 1.8.3 unless set, is refused with 413).
+  The default matches Ollama's safe size because large full-size batches can
+  exceed the 60 s request timeout on a shared GPU. Retries 429/5xx and
+  transport errors with exponential backoff, max 3 attempts, under one 90 s
+  deadline per slice. Use this provider when the embedder exposes only
+  `/embed`; when it also serves `/v1/embeddings`, `openai` works as well.
 - `EMBEDDING_DIMENSIONS` (default 1024) controls both the pgvector column
   width and the `dimensions` param on OpenAI requests.
 - Reset workflow: `make reset-embeddings` (or **Settings → Danger zone →
@@ -39,6 +51,31 @@
   See "Filtered vector search" in [search.md](search.md) for why an older
   backend fails *silently* without it.
 
+### Reference deployment (2026-10-31)
+
+The reference deployment moved from Ollama `bge-m3` to Ollama
+`qwen3-embedding:0.6b` (1024 dimensions, so `EMBEDDING_DIMENSIONS` stayed
+1024) with
+`EMBEDDING_QUERY_INSTRUCTION="Instruct: Given a question, retrieve the notes that answer it\nQuery: "`
+— queries only; documents get no instruction, and the instruction is
+outside the stored fingerprint. The switch was the documented procedure:
+`.env` change, the refused start, `make reset-embeddings` (or the
+equivalent k8s job), then a full re-embed — ~4,200 notes in about 84
+minutes on an 8 GiB Quadro P4000 shared by Ollama and the reranker. The
+later `CHUNKING_VERSION` 2 re-chunk reused ~65% of the vectors.
+
+**No harness A/B was run for the switch** (owner-waived). What was
+observed, on one user's vault and not as a benchmark: strong
+cross-language recall between English and Russian queries and notes, and
+`hybrid_search` as the day-to-day default. The way to measure it on
+another vault is the search-evaluation recipe in `DEPLOYMENT.md`.
+
+`bge-m3` stays the code default and fully supported: the stored-fingerprint
+guard refuses to start a deployment whose model changed, so a changed
+default would break every existing install that never set
+`EMBEDDING_MODEL`. The mutable-tag limitation (L1, under "The settings
+fingerprints") applies to `qwen3-embedding:0.6b` exactly as to `bge-m3`.
+
 ### The embedding hop's transport (#185)
 
 Every chunk the indexer embeds and every `semantic_search` / `find_related`
@@ -51,7 +88,7 @@ client that talks to it is built one way. The code is
 
 **The scheme policy** applies to the **active** provider's URL only —
 `OLLAMA_URL` under `EMBEDDING_PROVIDER=ollama`, `OPENAI_BASE_URL` under
-`openai`. The inactive one is never dialled, so validating it would refuse a
+`openai`, `TEI_URL` under `tei`. The inactive one is never dialled, so validating it would refuse a
 deployment for a setting it does not use. In order:
 
 0. **The raw string is checked before any parser sees it.** Leading or trailing
@@ -105,7 +142,7 @@ booted "healthy" and failed every embedding. The file is refused with an
 checked in every mode, sandbox included.
 
 **One client factory**, `embedding_http_client(timeout)`, builds every HTTP
-client aimed at the embedding endpoint: both providers and the panel's Ollama
+client aimed at the embedding endpoint: every provider and the panel's Ollama
 reachability ping. It sets:
 
 - **`trust_env=False`.** httpx otherwise reads the environment for every
@@ -134,6 +171,42 @@ verify=… plaintext_override=…` — scheme, host and port only, never the pat
 query or userinfo. `plaintext_override=True` means the override is what
 admitted this hop (plaintext to a non-loopback host).
 
+### The rerank hop (#367)
+
+The optional reranker is the **third outbound hop** (after the database and
+the embedding endpoint), and it reuses the embedding hop's policy rather than
+inventing one (design D1, D3, D8):
+
+- `RERANK_URL` (empty = absent) is judged by `classify_embedding_url` and the
+  same plaintext rule, with its **own** flag, `RERANK_ALLOW_PLAINTEXT`:
+  `EMBEDDING_ALLOW_PLAINTEXT` does not admit a plaintext reranker. A violation
+  refuses boot; the address class is not restricted (an internal reranker is
+  expected on a private or loopback host — the opposite of `import_from_url`'s
+  SSRF policy, because this URL is operator configuration, never caller
+  input). `MCP_SANDBOX_MODE` skips the URL policy.
+- The **trust anchor is shared**: an `https` reranker is verified against the
+  `EMBEDDING_CA_FILE` context when set, else certifi. Because that file is
+  refused while the embedding URL is plain `http`, a loopback-`http` Ollama
+  plus an `https` reranker under a private CA cannot share it; that reranker
+  needs a publicly trusted certificate (L10). The embedding rule is not
+  relaxed.
+- Every client comes from `transport_security.rerank_http_client`
+  (`trust_env=False`, no redirects, two pooled connections); the AST guard
+  covers `src/services/rerank.py`. `log_rerank_transport()` writes one
+  `Rerank transport: scheme=… host=… port=… verify=… plaintext_override=…`
+  line when `RERANK_URL` is set, and `internal_transport_plaintext`
+  `reason=rerank outcome=override` for a non-loopback `http` URL.
+- The startup probe (both document orders, 10 s) needs no database. **Its
+  failure never exits**: it disables reranking with one CRITICAL, the server
+  serves, and a background re-probe (60 s doubling to 10 min) re-enables it.
+  A reranker outage must not take down the vault; every `rerank=true` answer
+  states the absence, and `/health` reports `rerank: disabled` without
+  touching `status`. Under `MCP_SANDBOX_MODE` there is no probe, no
+  transport line and no re-probe; the state is `disabled` (`probe_skipped`)
+  with a URL, else `absent`.
+
+The query-time behaviour is in [search](search.md), "Reranking (#367)".
+
 ### One pooled client per provider, and Ollama batches (#281)
 
 **D14 — the shared client is built by the factory, never beside it.** Each
@@ -156,7 +229,7 @@ exemption. The client is:
   indexer task has been cancelled and awaited and before `engine.dispose()`.
 - **given its timeout per request**: every `post(..., timeout=)` carries
   `OLLAMA_REQUEST_TIMEOUT_SECONDS` (30 s) for Ollama and
-  `OPENAI_REQUEST_TIMEOUT_SECONDS` (60 s) for OpenAI, read at call time; the
+  `OPENAI_REQUEST_TIMEOUT_SECONDS` (60 s) for OpenAI, read at call time, and 60 s for TEI (a constant); the
   client-level timeout is built from the same setting. Pool limits are
   httpx's defaults.
 
@@ -166,17 +239,120 @@ sends each as one request with an `input` array, awaited under
 `asyncio.wait_for(..., OLLAMA_REQUEST_TIMEOUT_SECONDS)`. Every response must carry exactly
 `len(slice)` vectors, in input order, or the batch raises and no vector of it
 is used; `embed_note`'s whole-note cardinality check stays above it. The
-input-limit translation (#194) is unchanged. OpenAI keeps its native batching
-(at most 96 inputs) and its own retry contract; it is adapted to the shared
-client only.
+input-limit translation (#194) is unchanged. OpenAI keeps its batching (`OPENAI_EMBED_BATCH_SIZE`, at most 96) and
+its retry contract, a read timeout never retried; native TEI uses `TEI_EMBED_BATCH_SIZE` (default
+16) and its own retry contract. Both are adapted to the shared client only.
 Why the size is fixed and there is still no aggregate deadline is the D5
 bullet under "Indexing decisions" below.
 
+### TEI server identity and the embedding gate (#425)
+
+The rule: **the process exits only on positive evidence of a mismatch, and a
+vector is requested only on positive evidence of a match.** `/embed` has no
+model field, so without this check a wrong server would fill the index with
+vectors from another model.
+
+`verify_tei_server()` makes one `GET /info` through the factory-built client,
+with the whole exchange inside a 5 s `asyncio.wait_for` (an httpx `timeout=`
+bounds each phase, so a trickling body would otherwise hold the lifespan).
+The lifespan calls it after the fingerprint guards, under `tei` only and
+below the sandbox short-circuit.
+
+| `/info` result | Startup | Embedding |
+| --- | --- | --- |
+| 200, `model_id` equal and batch within the limit | proceeds | allowed for the process lifetime |
+| 200, `model_id` differs (exact comparison) or `max_client_batch_size` < `TEI_EMBED_BATCH_SIZE` | one CRITICAL, `sys.exit(1)` | n/a |
+| transport error, the 5 s bound, non-200, non-object body, no usable `model_id` | one CRITICAL, keeps serving | withheld |
+
+An absent or non-integer `max_client_batch_size` passes with a WARNING: too
+large a batch fails loudly with a 413 and cannot produce wrong vectors. The
+gate lives in `TeiProvider`, so maintenance scripts that never run the
+lifespan are covered. While unverified each call fails as an ordinary
+provider failure carrying the last reason, with at most one re-check per
+30 s; concurrent callers see the stamped check time and fail fast rather
+than start another. A late mismatch fails every call and logs one CRITICAL
+per verdict change, and does **not** exit: a process serving reads and writes
+should not die from a sibling's rollout. A corrected server recovers without
+a restart. Once verified, a process does not check again (L2 in the change's
+design: a server replaced mid-process is not noticed until restart).
+
+**Do not exit on an unreachable server.** TEI is often a sibling that takes
+minutes to load a model; an exit becomes a crash loop that takes keyword
+search, reads and writes down too. Ollama and OpenAI do not exit either.
+**Do not proceed on one either.** Unreachable at startup and wrong a minute
+later is what one rollout restarting both pods looks like, which is why the
+check gates traffic instead of warning once as the reranker probe does.
+
+Every 200 is validated before any vector of it is used: a JSON list holding
+exactly one row per input, each row a list of `EMBEDDING_DIMENSIONS` finite
+numbers (a boolean is not a number; `NaN` and `Infinity` parse in Python and
+are refused here because pgvector would refuse them later). A malformed or
+non-JSON 200 is a `RuntimeError` naming the row and width, never input text,
+and is not retried. Each slice is bounded by `TEI_SLICE_DEADLINE_SECONDS`
+(90 s: one timed-out 60 s attempt, its backoff and a normal-speed retry); the
+bound is per slice, so D5's argument against aggregate deadlines is intact.
+
+**Over-limit chunks are truncated (owner decision).** With `truncate: true` the
+server embeds the leading tokens, the rest of that chunk is unsearchable by
+vector and the note is certified with no marker, the same terms as Ollama's
+truncation. So TEI raises no `ProviderInputTooLarge`: a 413 is an ordinary
+non-retried provider failure, and the phrase `less than \d+ tokens` is not in
+the shared list, because `max_tokens must be less than 4096 tokens` from an
+OpenAI gateway would otherwise tell an agent to shorten a query that was never
+the problem. Observed on TEI 1.8.3: `truncate: true` answers 200 past both the
+256-token and the 64,000-character validation; the only remaining refusal is
+the 2 MB body limit (`--payload-limit`), a separate `413 Failed to buffer the
+request body`, out of reach at any default chunk size.
+
+### `TEI_API_KEY` (#426)
+
+An optional secret for a TEI started with `--api-key` or behind a
+bearer-protected gateway. These are the decisions not to undo:
+
+- **Three requests carry it, passed per request.** `POST /embed`, the
+  identity check's `GET /info` and the panel's `GET /health` each pass
+  `headers=embeddings._tei_auth_headers()`, the only reader of
+  `get_secret_value()`. It is never a client default and never in
+  `embedding_http_client`, because that factory also builds the Ollama and
+  OpenAI clients. A test pins the setting to `config.py`, `embeddings.py` and
+  `transport_security.py`, and pins the reranker against the helper. Unset
+  passes `headers=None`, so the requests are exactly the pre-#426 ones (the
+  test holds the header lists captured on `aafb9f0`).
+- **Never shown.** `SecretStr` (masked `repr`), `hide_input_in_errors` (or
+  pydantic prints the raw env dict in every validation error), fixed-text
+  messages, and no response body, URL or header in any failure text. A
+  sentinel test sweeps logs, pages, exceptions, stored failures and
+  fingerprints. An integration test does the same for `indexer_runs.error`
+  and `/admin/health`.
+- **Format check in `Settings`, under `tei` only, no I/O.** Blank means unset.
+  Surrounding whitespace is stripped (a Secret file's newline), and anything
+  outside U+0021 to U+007E refuses boot. An absent key always passes, so the
+  alembic init container starts without the Secret.
+- **401/403 are never a mismatch.** At `/info` they are `inconclusive`, with
+  `TEI_API_KEY is not set` or `the server rejected TEI_API_KEY`, and the
+  auth reason is its own CRITICAL verdict. Otherwise "unreachable, then 401"
+  would log only the first line. At `/embed` they are a non-retried
+  `RuntimeError` through `_post_with_retries`' `refuse` hook (OpenAI passes
+  none), with one ERROR line per run of failures, re-armed by a 200. They
+  leave the verified state alone: a key says nothing about the model.
+- **A plaintext remote hop is admitted with one WARNING.**
+  `EMBEDDING_ALLOW_PLAINTEXT` already sends every note in clear, and refusing
+  would push operators to turn TEI authentication off.
+- **Not in either fingerprint.** Changing the key needs a restart, not a reset.
+
+Accepted (change design L1–L6): restart to rotate; the key crosses an
+admitted plaintext hop in clear; no reranker key; no panel indicator; the key
+lives in process memory and in the container environment; a key with
+deliberate surrounding whitespace cannot be matched.
+
 ### Chunk-vector reuse (#281, D16)
 
-A stored vector is reused for a chunk whose text is **byte-identical** to a
-stored chunk of the same note, so an append or a metadata-only edit no longer
-re-embeds the whole note. A reused vector attached to text it was not computed
+A stored vector is reused for a chunk whose **provider input** is
+byte-identical to the one a stored chunk of the same note was embedded from —
+since #390, equal `embed_prefix` and `fmt[stored version](stored chunk_text)
+== fmt[current version](new chunk_text)` over the frozen
+`EMBEDDED_TEXT_FORMATTERS`, any version in that table being eligible — so an
+append or a metadata-only edit no longer re-embeds the whole note. A reused vector attached to text it was not computed
 from — or computed by another model — would be a silently wrong search result,
 so reuse is gated three ways, and a doubt anywhere re-embeds:
 
@@ -221,12 +397,259 @@ numeric noise, so a note mixing reused and fresh vectors is not bit-identical
 to a from-scratch embed. The vector is assumed to be a function of (model,
 text) alone; the fingerprint names the model.
 
+**The key is the exact embedded input (#355, amended by #390).** Reuse
+requires, in addition to the three gates above, that the note's
+`embedded_chunking_version` be a key of `EMBEDDED_TEXT_FORMATTERS` (NULL never
+is; at #355 this was "equal to `CHUNKING_VERSION`"), that the row's
+`embed_prefix` equal the new chunk's, and that the row's `chunk_text` under
+its stamped version's formatter equal the new chunk's text under the current
+one. A row with a NULL prefix (pre-034) is never a candidate, and the
+under-lock check compares the stored row's own `(chunk_text, embed_prefix)`
+pair, not the text alone.
+The locator (`heading_path`, `section_ordinal`) is not in the key: a reused
+vector is re-inserted with the new chunk's locator, so a heading inserted above
+a section re-embeds nothing and still records the shifted ordinals. See
+"Heading-aware chunks (#355)" below.
+
+## Heading-aware chunks (#355)
+
+**Sectioning.** `chunk_note_bounded` (`src/services/embeddings.py`) splits the
+frontmatter-stripped body `read_note` scans, with `vault._scan_headings`
+itself (imported, never copied: a heading inside fenced or inline code is not
+a boundary). Section *k* is heading *k*'s **own** text — one terminator past
+its `line_end` (the `_section_body_span` step) up to the next heading of **any**
+depth — and section 0 is the text before the first heading. `read_note(section=
+"#k")` returns a superset (the subsections too), so the guarantee is
+*containment*: every chunk with ordinal *k* is a substring of that section's
+body with the whole-body fence spans removed. Cleaning uses the spans of one
+`scan_fences(body, BODY)` call per note; windowing is `chunk_text_bounded` per
+section with **one cap counter across sections**, stopping one past
+`MAX_CHUNKS_PER_NOTE` so `chunks_truncated` keeps its meaning. Heading lines
+are not chunk text. The heading path is the enclosing chain (each step to a
+strictly shallower heading, `_path_chain_match`'s rule), components cut at 200
+characters with `…`. A change to the heading scan is now also a
+`CHUNKING_VERSION` bump.
+
+**The zero-chunk invariant.** A note with no headings is one group, chunked
+exactly like `chunk_text_bounded(clean_for_embedding(body), min_chars=m)`
+(since #390; #355's "byte-identical to the pre-change chunker" ended with the
+minimum and the word-boundary windows below). A note whose sections are all
+empty but whose cleaned body is not (headings only) is chunked as one group of
+the whole cleaned body at ordinal 0, so a note has zero chunks exactly when
+`chunk_text_bounded(clean_for_embedding(body))` gives it zero: `CERTIFIED_EMPTY`, #127's convergence exceptions
+and the exclusion sweep's probe (which now calls `chunk_note_bounded`) keep
+their meaning.
+
+**The prefix.** The provider input is `embedding_input(prefix, chunk)` =
+`prefix + "\n\n" + embedded_text(chunk)` (`embedded_text` is the identity at
+version 1 and collapses whitespace runs longer than 8 at version 2, #390);
+`prefix` is `build_embed_prefix(title, path,
+tags)`: `Title > H1 > … > Hk`, each component whitespace-collapsed and cut at
+80, outer headings replaced by one `…` until the breadcrumb fits
+`EMBED_PREFIX_MAX_CHARS` (300; the title and innermost heading always fit),
+then a `tags: a, b` line only if the whole prefix still fits. The row stores
+the prefix (`embed_prefix`) and the un-prefixed `chunk_text`.
+
+**The reranker is a second reader of that input (#402).** A `rerank=true`
+call rebuilds each fetched row's provider input from the stored columns —
+`embed_prefix + "\n\n" + EMBEDDED_TEXT_FORMATTERS[embedded_chunking_version](chunk_text)`,
+the reconstruction vector reuse relies on — and sends it as the rerank
+document (`rerank.embedding_document`). Only a stamp that is a key of the
+table reconstructs; a NULL or unknown stamp (a later version read after a
+rollback) sends the note's title alone. So a change to `build_embed_prefix`,
+the separator or a formatter is also a rerank-input change: it bumps
+`CHUNKING_VERSION` as before, and the eval-gate row applies to the reranker
+too. Because the stored prefix is what is sent, a title or tag edit is
+reflected only once the next pass has re-embedded the note; until then the
+row is stale (the upsert clears `embedded_content_hash`) and sends no stored
+text. See [search](search.md), "Reranking (#367)".
+
+**The certification covers the input (D3a).** `certify_embedded` stamps, in
+its one conditional UPDATE, `embedded_chunking_version = CHUNKING_VERSION` and
+`embedded_input_digest` (SHA-256 of the canonical JSON of the ordered provider
+inputs, `[]` for an empty or excluded note) on every certifying branch. The
+index upsert clears `embedded_content_hash` in the same statement when the
+stored `title` or `tags` are `IS DISTINCT FROM` the new ones (a re-derive, an
+extraction-version re-upsert, a frontmatter edit); both move paths already
+clear it unconditionally. As a backstop, every full-hash pass (which keeps
+every body for this) recomputes the digest of what the current code would send
+for each note certified under the current version — CPU only, no provider call
+— and clears certification on a NULL or differing digest, in the pass
+transaction under the generation lock.
+
+**The re-embed is a per-note backlog, outside the stored fingerprint.** A
+fingerprint change refuses startup and its reset empties semantic search, and
+clearing every `embedded_content_hash` would mark every result stale. So the
+chunking format is a per-note stamp instead. The embed backlog, the
+dashboard pending count and the progress endpoint share
+`embedded_chunking_version IS DISTINCT FROM CHUNKING_VERSION` (never `<` or
+`>`, so a rollback to a lower version re-selects notes stamped higher;
+`vectors_not_current_sql` / `_expr`). The `index_transition:` marker and
+`/health` use the narrower `legacy_vectors_sql` / `_expr`: the same version
+test **and** the note holds vector rows — a generation mix, not a note that
+simply has not been embedded yet (the harness's `legacy_chunked_notes` is the
+same definition). Each is paired SQL text and expression; a test checks they
+agree and greps `src/` for an ordered comparison. Staleness is unchanged (`embedded_content_hash IS DISTINCT FROM
+content_hash`), so a version-only note is fresh and keeps its preview. The
+model, and the space, are unchanged and stay in the refusing fingerprint; the
+mix still changes ranking (L1), so the vector tools declare it.
+
+**Ordering and the budget in every mode.** The backlog SELECT sorts
+content-stale notes first, then version-only ones (`version_only`), each
+`modified_at DESC`. `EmbedBudget.enter_version_only()` applies the budget to
+the version-only segment **whatever `_active_scope_count`**: in a single-scope
+pass it starts enforcement there with a fresh allowance (at-least-one-note and
+note-boundary rules unchanged) and `leave_version_only()` restores the
+unbudgeted state for the sweep; a multi-scope pass is budgeted across both
+segments as before. A stop is not a failure.
+
+**`/health` stays non-volumetric.** Each embed stage counts its scope's
+notes holding vectors of another generation at its end and stores the count
+in `indexer_health` (process memory). `/health` exposes only
+`indexer.rechunk: "in_progress" | "complete"`, process-wide — beside the
+"counts only, no path/error/user id" rule, this field carries **no number at
+all**, because the endpoint is unauthenticated and a count would be
+tenant-derived. "Not yet counted" is not "zero pending": after a process
+start the state reads `in_progress` until every known scope's embed stage
+has counted (production read `complete` over 4,206 pre-034 notes for the
+minutes before the first embed stage); a disabled indexer
+(`MCP_SANDBOX_MODE`) reads `complete`. It never affects `status` or the HTTP code, and no counter
+keys on backlog size or pass length. Exact per-owner counts live on the panel
+and in the owner-scoped `index_transition:` line.
+
+**No build overlap in the supported deployments (L2).** The repository's
+Kubernetes bundle is one replica with `strategy: Recreate`, migrating in an
+init container; compose `make deploy` stops the app first. Only a deployment
+modified outside the repository (rolling update, second replica) can have a
+033 build write after 034: such a note keeps legacy rows (NULL locator, never
+reused) until its next edit or the next full-hash backstop.
+
+**Accepted limitations (#355).**
+- **L1** — during the transition, legacy and heading-era vectors coexist, so
+  which notes fit a bounded page depends on re-embed progress; declared on
+  every vector response by `index_transition:` until the scope drains.
+- **L2** — see above.
+- **L3** — an edit not yet scanned leaves a fresh-looking row whose `#N` may
+  name another section; `read_note` returns the `heading` to check.
+- **L4** — a tag edit, or a title change, re-embeds the whole note (every
+  prefix changes), undoing #281's reuse for metadata edits.
+- **L5** — the `§` path quotes note-controlled heading text; it cannot forge
+  the ordinal, but its words are the author's.
+- **L6** — only ATX headings are boundaries, as in section addressing.
+- **L7** — `alembic downgrade 033` deletes heading-era vectors; those notes
+  are absent from semantic search until the old build re-embeds them.
+- **L8** — `EMBEDDING_QUERY_INSTRUCTION` is not checked against the model.
+- **L9** — searches during the re-embed may wait up to one batch on a shared
+  Ollama.
+- **L10** — heading components and the prefix are cut at fixed lengths,
+  marked `…`.
+- **L11** — the full-hash backstop holds every note body for the pass, once
+  per interval and at startup, the memory profile of a re-derive.
+
+### A minimum chunk length and word-boundary windows (#390, chunking version 2)
+
+Live, a four-word chunk ("in the Email Triage log") ranked first for a
+paraphrase query, and another row's preview was "lves". A chunk that short is
+mostly its own prefix, so its vector is the note's topic and outranks real
+passages; and the windowing cut fixed 2,048-character slices with no word
+boundary, leaving four-character tails. Both are fixed at chunking time.
+
+- **One length, `clen`.** Every rule — the minimum, a section's shortness, cut
+  admissibility, tail balancing, the harness's `under_min` — measures the
+  *collapsed length*: runs of the six ASCII whitespace characters (U+0009–
+  U+000D, U+0020) collapsed to one space, then stripped, in code points.
+  `embeddings.clen` and `embeddings.CLEN_SQL` are one pair; a PostgreSQL test
+  checks they agree. The stored `chunk_text` is the **raw** window,
+  unstripped, as single-window chunks always were (previews trim).
+- **The minimum is a constant.** `CHUNK_MIN_CHARS = 200` and
+  `CHUNK_BOUNDARY_LOOKBACK_CHARS = 200` live in `embeddings.py`: not
+  settings, not fingerprint fields, no validator. The effective minimum is
+  `m = min(200, W // 2)` with `W = CHUNK_SIZE × 4`, so every previously valid
+  `CHUNK_SIZE` (1 included, `m = 2`) still starts. Changing either constant is
+  a `CHUNKING_VERSION` bump.
+- **Grouping.** Over the unchanged `_note_sections`, a section is *short* when
+  its cleaned `clen` is non-zero and below `m`. A group opens at a non-empty
+  section and extends forward while short; a group still short at the end
+  joins the previous group; a sole short group stands alone only when the
+  whole cleaned note is short (L7), otherwise the note becomes one whole-body
+  group at ordinal 0 (the sixty-empty-headings-then-`x` outline). A group's
+  text is its **contiguous** raw span cleaned with the whole-body fence spans,
+  so a merged chunk keeps the inner heading lines and is still one substring
+  of the note; a one-section group is exactly #355's section text.
+- **Windows.** A window of `W` is cut at the last line start, else the last
+  word start, within `L = min(200, W // 10)` of its limit, and hard only when
+  that range holds none (L4). A cut is taken only when *admissible* (the
+  window before it reaches `m`); a window that is mostly whitespace extends
+  to the first admissible word start past the limit whose window keeps
+  `clen ≤ W`, else the first admissible position. When the text after a cut
+  falls below `m`, the last two windows are **re-balanced** over their span
+  `S`. A *valid split* leaves both **actual** slices at `clen ≥ m` (measured
+  after their own boundary whitespace is stripped — the implementation
+  review's `A×199 + space×1700 + "x " + B×199` stranded a 199 otherwise). The
+  cut is the valid split nearest the collapsed midpoint from the first
+  non-empty tier of: word starts within `W` raw on both sides; any position
+  within `W` raw on both sides (the hard cut clamped into `[end − W, a + W]`,
+  so `A×300 + space×1822 + B×175` gives 249/2048, not a 2,059-raw chunk); word
+  starts; positions. At `S ≤ 2m` the span is one window unless that exceeds
+  `W` raw and an in-bound valid split exists. With no valid split at all
+  (which needs `S ≤ 2m + 1`) the span is one window when `S ≤ W`; only at
+  `W ≤ 400` can `S > W` too, leaving the pure midpoint cut (L10). With overlap the next start
+  is `max(cut − overlap × 4, a + 1)`, and after a balance
+  `min(cut, max(cut − overlap × 4, end − W, a + 1))`, each snapped forward to
+  a word start **never past the cut**, so every non-heading cleaned character
+  is in some chunk (Codex r1 B2's skipped `B`s).
+- **The bound.** Every chunk has `clen ≤ W`; its raw length exceeds `W` only
+  by whitespace, when no valid in-bound split exists (L3), counted as
+  `raw_over_window`. The provider never receives those runs: `embedded_text`
+  collapses every run longer than 8 whitespace characters to one space
+  (stored text untouched), so a chunk within `W` raw keeps #355's `W + 302`,
+  and an over-window one exceeds it by at most `7r + 2` (`r` interior runs of
+  2–8, plus kept leading and trailing whitespace).
+- **The locator** is the deepest heading `N` whose `read_note(section="#N")`
+  body span (`vault._section_body_span`, imported) contains the chunk's raw
+  span, recovered through the cleaned-to-raw offset map; 0 when none does, and
+  0 for the whole-body groups. An unmerged chunk keeps its own section; a
+  short lead merged into its first child keeps the parent; merged siblings
+  take their common parent or 0 (L1). Containment and ordinal parity hold by
+  construction, and a property test asserts them, coverage and the bounds.
+- **Reuse across versions.** `EMBEDDED_TEXT_FORMATTERS = {1: identity,
+  2: collapse runs > 8}` is frozen per version, like `_EXTRACTION_CLEANERS`. A
+  stored vector is reused when its note's stamp is a key of the table (NULL
+  never is), its prefix equals the new chunk's, and `fmt[stamp](stored text)
+  == fmt[2](new text)` — the input it was built from equals the input that
+  would now be sent. A frozen entry is never edited; a formatter change adds
+  an entry; a prefix-builder or separator change clears the table to its own
+  entry; a golden test pins every entry. The under-lock re-check compares the
+  stored row's own `(chunk_text, embed_prefix)`. Every other version
+  comparison stays strict (the backstop's `= :cv`).
+- **The transition** is #355's, unchanged: the backlog (`IS DISTINCT FROM 2`),
+  the `index_transition:` marker, `/health` `rechunk: "in_progress"` and the
+  rollback rule. The embed stage's completion line now reads
+  `Embedding complete…: N notes, X chunks (S submitted, R reused)` — counts
+  only — where `S` is the provider work and `R = X − S`, both over the
+  certified notes of the pass.
+
+**Accepted limitations (#390).** L1 merged locators are coarser; L3 a chunk
+may exceed `W` raw by whitespace only; L4 an unbroken run (base64, a URL, CJK
+without spaces) is cut hard; L5 lengths are code points, not tokens; L6 the
+second transition repeats #355's L1; L7 a note whose whole cleaned text is
+below `m` keeps its one short chunk (`whole_short`); L8 a rollback to a
+version-1 build re-embeds every note stamped 2; L9 the live "lves" row was not
+traced to its note; L10 at `CHUNK_SIZE ≤ 100` single-character words around a
+tail's midpoint can leave one chunk below `m` (never at the default window).
+A note whose cleaned body is only NBSP (Unicode, not ASCII, whitespace) now
+yields one chunk where #355 yielded none.
+
 ## Indexing decisions
 
-- Embeddings: pluggable provider, `EmbeddingProvider` Protocol with two
-  implementations (Ollama, OpenAI). Single `EMBEDDING_PROVIDER` env var
-  picks the backend; `get_provider()` is a cached singleton. Default is
-  Ollama bge-m3 at 1024 dim, 512 token chunks, no overlap.
+- Embeddings: pluggable provider, `EmbeddingProvider` Protocol with three
+  implementations (Ollama, OpenAI, native TEI). Single `EMBEDDING_PROVIDER`
+  env var picks the backend; `get_provider()` is a cached singleton. Default is
+  Ollama bge-m3 at 1024 dim, 512 token windows inside heading-aware
+  sections (#355), no overlap, each chunk embedded under a
+  `Title > Heading` context prefix. Every call declares `kind="query"` or
+  `kind="document"`; `EMBEDDING_QUERY_INSTRUCTION` is applied to queries
+  only, in `get_embedding` / `get_embeddings_batch`.
 - **Each embed pass ends with an exclusion reconciliation sweep** (#127). The
   backlog selects on `embedded_content_hash IS NULL OR != content_hash`, so it
   is driven entirely by *content* changes and an `EMBEDDING_EXCLUDE_PATTERNS`
@@ -273,6 +696,68 @@ text) alone; the fingerprint names the model.
   bytes through `set_frontmatter`. One shared token helper, `.nan` / `.inf` /
   `-.inf`, keys included — see [the section below](#non-finite-frontmatter-numbers-and-the-one-title-rule-154),
   which also names the one title rule every surface shares.
+- **The keyword vector is `A(title) || A(aliases) || B(tags) || D(body)` and
+  stores its excerpt** (#344 and #391, migrations 031 and 035). One builder,
+  `fts.index_tsvector_sql`, produces the fragment for every writer — title
+  parts for every config, then aliases parts, then tags parts (the bullet
+  below), then the pre-031 content parts byte for byte; ranking is a
+  title-versus-tags-versus-body competition under `RANK_WEIGHTS` — and the same
+  UPDATE writes `body_excerpt`, the first `KEYWORD_EXCERPT_CHARS` characters
+  of exactly the prefix the successful attempt bound. The title is the row's
+  (the shared `note_title` rule); the aliases are `fts.note_aliases` over the
+  parsed frontmatter — `aliases` then `alias`, a list's scalars or a scalar
+  string comma-split like a scalar `tags`, rendered as the title rule renders
+  a scalar, NUL and the headline sentinels removed, the joined text cut at
+  2,048 characters so the head stays small against the 1 MiB limit (the
+  halving retreat shrinks the **body** bind only). The same list comes from a
+  freshly parsed mapping and from the stored JSONB, which is what lets the
+  rebuild and `move_note` parse while 031 reads the column. **Both move paths
+  re-head the vector** (`fts.rehead_tsvector_sql`: `head ||
+  ts_filter(content_tsvector, '{d}')`), because the title is derived from the
+  path and both preserve the vector — #127 D3's class, one column over — and
+  both do it as every tsvector writer does, under the generation lock with
+  the fingerprint re-read (the pass at its head; `move_note`'s metadata
+  transaction as its first two statements, a wait past the statement timeout
+  or a mismatch aborting it into the partial-outcome report the next pass's
+  move detection repairs). `rehead` keeps the body's lexemes, weights and
+  relative positions but shifts its absolute positions by the previous head's
+  length on each application; `@@`, phrases and `ts_rank_cd` are invariant,
+  an edit rebuilds the vector, and positions saturate only after thousands of
+  consecutive renames. The rebuild recomputes title and aliases from the
+  bytes it verified and writes the excerpt in its certified UPDATE; the
+  fingerprint it records still certifies configs only (weights are not
+  configuration, and a `FINGERPRINT_VERSION` bump would invalidate the
+  embedding fingerprint too). See [search](search.md#keyword-ranking-the-disjunctive-fill-and-the-snippet-344).
+- **Tags enter the vector at weight `B`, between the head and the body**
+  (#391, migration 035): `A(title) || A(aliases) || B(tags) || D(body)`.
+  The tags text is `fts.tags_text` over the list `vault.extract_tags`
+  returns — exactly what `notes_metadata.tags` stores — one line per tag
+  with a nested tag's `/`-segments appended (`ctx/phone ctx phone`), cut at
+  2,048 characters on a whole line (the head stays small against the 1 MiB
+  limit; the halving retreat shrinks only the body). Every builder takes a
+  required `tags_bind`, and every writer passes one: the **incremental
+  pass** binds `tags_text(entry["tags"])`, the same entry whose `tags`
+  column the upsert wrote in that transaction (bind name `tags_text`, so it
+  cannot collide with the `tags` column bind); the **indexer move-pair**
+  binds the entry parsed for the new path (`head_tags`); **`move_note`**
+  derives the tags from the destination read through `extract_tags(body,
+  frontmatter)` and, when that read or parse fails, falls back to the
+  caller's **own** row's stored `tags`, selected with the stored frontmatter
+  in the one owner-predicated statement (best-effort, self-healing at the
+  next content change, like the title fallback); the **rebuild** binds
+  `extract_tags` over the bytes it verified (off the loop). Only migration
+  031 builds without tags (`tags_bind=None`), so an upgrade from 030 runs
+  031's A-only re-head and then 035. **A tag edit rewrites the vector**: tags
+  come from the note's bytes, so a frontmatter or inline tag change changes
+  `content_hash`, the note enters `to_upsert`, and the tsvector UPDATE runs
+  for it in the same pass — no extraction-version bump. #355's rule (the
+  upsert clears `embedded_content_hash` when title or tags change) is
+  independent: it governs re-embedding, not the keyword vector. Migration
+  035 re-heads the stored vectors in SQL (see [schema and
+  migrations](schema-and-migrations.md#035-tags-in-the-keyword-vector-391));
+  both move paths' re-head replaces the tags part along with the title and
+  aliases (`head(title, aliases, tags) || ts_filter(v, '{d}')`). See
+  [search](search.md#tags-in-the-keyword-vector-391).
 - **The keyword vector attempts the full note and retreats per note** (#127).
   Both writers bound `content[:100000]`, so every term past that was invisible
   to `keyword_search` on a note the tool still reported. `write_tsvector_bounded`
@@ -825,6 +1310,74 @@ next unforeseen value costs one note rather than its owner's whole index.
   most five, then `…`), and `/health` counts them as `quarantined_notes`
   (`degraded`, no paths). **A quarantining pass is a successful pass**:
   nothing derives success from the `error` column.
+- **Task rows are not a quarantine site** (#350). A failure of one note's
+  `note_tasks` write (a poison SQLSTATE, or the task extractor raising) is
+  isolated to that note's task rows — a savepoint, one retry, then
+  `notes_metadata.tasks_failed` — and never raises `PoisonNote`. The four
+  sites above are the whole set; see "Task extraction (#350)" below.
+
+### Excluded sync-conflict copies (#392)
+
+`INDEX_EXCLUDE_CONFLICT_FILES` (default `false`, deployment-wide) adds a
+**third not-indexable reason**, `EXCLUDED_CONFLICT_COPY`, beside D7's and the
+quarantine's. The full contract is in
+`openspec/changes/archive/2026-11-12-index-exclude-conflict-files/design.md` (D1–D10, L1–L15).
+
+- **One matcher, by basename.** `src/services/conflict_copies.py` holds six
+  source-cited patterns (Syncthing, Nextcloud current and legacy, Dropbox,
+  Obsidian Sync, and the unidentified `(conflict YYYY-MM-DD-HH-MM-SS)` form).
+  They are `fullmatch`, case-sensitive, `[0-9]` digits only, with a literal
+  marker plus a full timestamp right before `.md`. A miss leaves a copy
+  indexed, which is the behaviour without the setting. A title that exactly
+  matches is excluded by design (L1). Folder names are never matched.
+  **Not a glob list** (D1): a glob cannot state "marker + full timestamp",
+  and a loose one hides real notes.
+- **Decided at the scan, by name, before any stat or read.** `_scan_vault`
+  gets the setting as `exclude_conflicts`, read once per invocation (so
+  quarantine restarts see one value), and checks it right after the
+  path-encodability test. The path goes into `not_indexable`, so everything
+  D7 says holds: it stays in `seen` (never vanished, never a move source),
+  it is never in `files` (never upserted, never a move destination), its row
+  is deleted after move detection with cascades (inbound links dangle), and
+  it is **not a skip**. That means no withheld re-derive stamp, no blocked
+  backstop clock, no `walk_incomplete`, no `indexer_health` counter.
+- **Unlike D7's name reasons, it can have a row** (from before the setting
+  was turned on). C4 never re-reads it (it is not in `files`), and its
+  locked row is deleted whatever it now holds. A vanished row at a
+  conflict-shaped path is an ordinary vanished row: it is paired with a
+  same-hash new path or pruned `removed`. That is true, because the file is
+  gone. An indexed note renamed *onto* a conflict name loses its pairing and
+  is pruned `removed` (L3).
+- **Excluding at the walk was rejected.** "Not seen" would prune the row as
+  `removed` (false), and could pair it as a move source with an unrelated
+  same-hash file, which is #309's failure.
+- **Change feed.** A removed row records `deleted reason=not_indexable`. The
+  reason set is CHECK-constrained (033), and `get_changes` already defines
+  that reason as "still on disk but cannot be indexed". A row-less excluded
+  path records nothing (`created reason=not_indexable` stays reserved for
+  undecodable content). Toggling off yields ordinary `created`, a `reset`
+  over an empty scope, or nothing when an agent's same-hash MCP event is the
+  latest at the path (L9, pinned by a test).
+- **#309 interplay.** A conflict-copy row beneath an unlisted directory is
+  protected like any other (L6). The empty-root predicate is unchanged:
+  excluded files are discovered, so a root holding only conflict copies is
+  determinate (D8).
+- **Reporting.** One INFO line at startup, one per pass with a non-zero
+  count, and one INFO removal line naming the paths through `_format_skips` (up to 20, then `, and N more`). These rows are
+  kept out of the D7 WARNING. `IndexPassResult.excluded` carries the count,
+  and `not_indexable` excludes it. `indexer.excluded_conflict_copies[scope]`
+  (process memory) feeds the dashboard. **Never `indexer_runs.error`**:
+  `run_outcome` would label the run failed. `/health` is unchanged.
+- **Tools.** Exact-path tools are unchanged. `create_note`, and a fully
+  successful `move_note` onto a conflict name, append one notice line
+  (`tools.CONFLICT_EXCLUSION_NOTICE`). Their output is byte-identical with
+  the setting off or a non-matching name. `move_note` does not remove the
+  row it re-keys; the next pass does (L10). Byte-transport writers give no
+  notice (L11). Task scopes are defined over indexed notes (L12). A
+  `move_note(rewrite_links=True)` out of an excluded name cannot discover
+  backlinks (they are keyed on the removed row), so it succeeds and appends
+  `tools.CONFLICT_REWRITE_NOTICE` (L14). It is just as silent today for any
+  source the index does not hold, and that case is unchanged.
 
 ## A pass does not prune what it could not see (#309)
 
@@ -1021,6 +1574,286 @@ amplification by a rarer route. #308's accounting made it visible
   transaction commits only after the A stamp, is not detected (one committing
   before the final re-read NULLs a marker and withholds the stamp) — the stamp matches A, so no re-derive follows (triaged
   implausible; no cross-writer lock protocol).
+
+## Task extraction (#350)
+
+`note_tasks` holds one row per checkbox list item of a note body, so
+`list_tasks` can answer "what is open" from the index in one bounded call.
+The 2026-10-23 morning-briefing incident (≈ 400 `read_note` calls in ≈ 100 s
+against a task index made of Tasks-plugin query blocks) is what it replaces.
+
+### The table is keyed by note id, with no path and no owner (D1)
+
+`note_tasks.note_id` → `notes_metadata.id` `ON DELETE CASCADE`; the path and
+the owner come from the join. Duplicating either would need a writer on every
+move path (the pass's id-preserving branch and `move_note`'s UPDATE), and one
+that forgot would list a task under a path that no longer exists or under
+another tenant. Keyed by id, a task cannot outlive its note (prune, quarantine
+removal, provenance discard and user delete all cascade), cannot precede it
+(the FK), and follows an id-preserving move without a write. No content hash
+is stored: every task write is in the transaction that wrote the row's hash,
+from the same buffered body.
+
+### The grammar (D2, D3)
+
+`src/services/tasks.py`, one pure function, `extract_tasks_bounded`, run off
+the loop. It masks the body with the shared fence grammar (`BODY` context),
+splits lines under the universal-newline rule, and recognises a checkbox on
+the **masked** line with a possessive, line-anchored pattern (blockquote
+prefixes, any indentation, `-`/`*`/`+` or 1–9 digits with `.`/`)`, a
+one-code-point marker that is U+0020 or non-whitespace other than `[`/`]`).
+The #218 rule applies: the original and masked text must be equal through the
+closing `]`, so `` `- [ ]` `` in inline code is not a task. `x`/`X` are done,
+`-` is cancelled, every other marker (`/`, `>`, `!`, …) is open, and the raw
+marker is stored. Fields come from the masked slice — last occurrence of each
+family wins, an invalid date is NULL and never an error — and tags from the
+shared inline-tag rule (`vault.INLINE_TAG_RE`), longer than 128 dropped, the
+first 64 distinct kept in document order, `tags_cut` on either drop. The
+heading path is the stack of column-zero ATX headings above the task. Caps:
+`MAX_TASKS_PER_NOTE` (5,000; `tasks_truncated`, not a skip),
+`TASK_TEXT_MAX_CHARS` (1,000; `text_cut`), 200 per heading and 512 for the
+path. **Any change to the grammar or to these caps is an extraction-version
+bump.** Accepted divergences from the Tasks plugin: checkboxes inside HTML or
+`%% %%` comments and fences nested in callouts are listed (the flat fence
+grammar, L1); signifiers count anywhere on the line, not only trailing (L2);
+custom statuses and dependencies are not modelled (L6); nesting is visible
+only through line order (L7). Version 5 (#428, below) adds the task id, the
+recurrence rule text, the created and cancelled dates and a capped context
+run to each row; the grammar above is unchanged. Every checkbox is still a
+row: which rows count as tasks is the caller's task rule (#434), decided at
+query time and never stored here (see "The task rule (#434)" in
+[vault tools](vault-tools.md)), which is why the `text_cut` and `tags_cut`
+flags above matter to it.
+
+### The seam: a second per-note derivation beside the link rebuild (D4)
+
+`_update_tasks_for_changed` runs immediately after `_update_links_for_changed`
+(after its poison check), for the same changed list (upserted plus moved
+paths), in the pass's transaction and before the re-derive marks. The link
+rebuild returns its `paths_to_id`, which the task stage reuses. Per note, in
+its own savepoint: delete the note's rows, insert the extracted ones in batches
+of 1,000, clear `tasks_failed` and set or clear `tasks_truncated` (one UPDATE,
+predicated on a value changing). A changed path with no buffered body (or line
+offset) or no id is appended to the shared `skips` / `skipped_paths`, which
+withholds a re-derive's record (#311), as the link rebuild does. It reads no
+file. The scan buffers each body's frontmatter line count beside the body, so
+a task's line counts from the file's first line.
+
+**Failure isolation, and why it is not the quarantine.** A derivation
+failure — the extractor raised, or one of the note's statements failed with a
+poison SQLSTATE (class 22 or 54000) — rolls the savepoint back and is retried
+once in a fresh one. If the retry also fails, a third savepoint deletes the
+note's task rows and sets `tasks_failed`, with one ERROR line (path, exception
+class, SQLSTATE; never content or the driver's message). The note's row,
+keyword vector, links, embeddings and the pass are untouched; nothing goes to
+`poisoned`, no `PoisonNote` is raised, and it is not a skip, so a permanently
+failing note cannot hold its owner in re-derive mode (#311). The quarantine
+exists for writes that *are* the note; task rows are a view of it, and
+quarantining on their account would drop an otherwise searchable note from
+every tool — and from `list_tasks`'s own counts, silently. Any other database
+error propagates and fails the pass with nothing committed. The bit is cleared
+only by a later successful derivation, which every content change, version
+bump or re-derive runs. All three entry points (startup, periodic, panel
+Reindex) reach the same code through `_index_vault_attempt`.
+`tests/test_note_tasks_isolation.py` pins that the stage never names
+`PoisonCandidate` / `PoisonNote`.
+
+**The composition rule, for the next derivation (#351).** A per-note
+derivation (1) is keyed by `notes_metadata.id` with `ON DELETE CASCADE`, (2) is
+a pure function of the buffered body and the extraction version, (3) runs after
+the link rebuild in the same transaction for the same changed list, (4) records
+a missing body or id in the shared skip lists, (5) never reads a file, and (6)
+isolates its own failure (savepoint, one retry, an owner-visible bit — never the
+quarantine, never a pass failure). A third derivation is one more call after
+`_update_tasks_for_changed`. A change feed must key on a content-hash change,
+not on membership in the changed set: the version-4 bump makes every row
+"changed" for one pass.
+
+### What `list_tasks` can and cannot see
+
+It reads only the index, so it is one pass behind an edit (L5,
+`INDEX_INTERVAL_SECONDS`), except a write whose refresh ran: the task tools
+(#428, the next section), and since #432 `edit_note`, `set_frontmatter`, a
+`write_file` to a note path, and `delete_note` (a clear). A refresh that
+cannot run, a new note (`create_note`, a `write_file` creation — its refresh
+finds no index row — an import or an upload) and `move_note`'s link rewrites
+wait for the next pass. Rows stamped below version 4 have not been scanned
+for tasks; the tool counts them in every header (`not yet scanned for tasks`)
+rather than reporting "no tasks", alongside `tasks could not be indexed`
+(`tasks_failed`) and `over the task cap` (`tasks_truncated`). The rendering and
+cursor rules are in [vault tools](vault-tools.md#list_tasks-rendering-and-the-cursor-350).
+
+## The write-time task refresh (#428)
+
+`complete_task`, `update_task` and `add_task` promise read-your-writes: a
+`list_tasks` right after the write sees it. #350's D9 declined re-deriving
+inside `edit_note`, because a derivation writer outside the pass would break
+"task rows are written only with the row" (task rows always describe the
+row's committed `content_hash`). #428 keeps that invariant in a weaker,
+checkable form. A task tool **does not index the note**: the row's hash,
+stat, keyword vector, links, embeddings, `derived_under` and
+`extraction_version` stay the pass's alone. It refreshes **only that note's
+`note_tasks` rows** and records which bytes they describe. A full single-note
+index from the tool was rejected as a second writer of the hottest,
+most-audited code in the server; leaving freshness to the pass was rejected
+because the tools promise read-your-writes.
+
+**Columns (migration 039).** `notes_metadata.tasks_source_hash` is the
+canonical note hash of the bytes the task rows were derived from;
+`tasks_refreshed_at` is set only by the tool refresh. **Invariant:** the task
+rows describe the bytes whose hash is `tasks_source_hash`. Either it equals
+`content_hash` (pass-derived, the #350 state), or a task tool published those
+bytes after the row's scan and the row is **task-dirty**. A NULL
+`tasks_source_hash`, which every row has until its first version-5
+derivation, is task-dirty too.
+
+**R1, the refresh** (`task_index.refresh_note_tasks`), after a confirmed
+publication. It derives the tasks from **the bytes this call published**, off
+the loop and **before** opening its transaction, so neither the row lock nor a
+pooled connection is held during the derivation; the result, or its failure,
+is applied only after step 3a. Then, in its own transaction:
+
+1. `SET LOCAL lock_timeout` to `TASK_REFRESH_LOCK_WAIT_MS` (2 s, a constant).
+2. Check that the caller is still bound to the root the tool ran under (the
+   check `change_feed.record_tool_events` makes).
+3. `SELECT id … FOR UPDATE` on the owner-scoped row at the path.
+4. **Still current?** (step 3a in the design.) Under that lock, re-read the
+   file through the call's anchored target and compare it byte for byte with
+   the published bytes. A difference, or a failed read, means another writer
+   published since: write nothing (`superseded`).
+5. Delete and re-insert the note's task rows with `tasks.note_task_row`, the
+   pass's own mapping, so the two writers agree column for column.
+6. Set `tasks_source_hash = canonical_note_hash(published)`,
+   `tasks_refreshed_at = clock_timestamp()`, and `tasks_truncated` /
+   `tasks_failed` from the result. **No other column is written.**
+
+Rows are never derived from the re-read, so a refresh cannot launder a
+concurrent writer's edit into "tool-refreshed" state. Any later edit changes
+the stat, and R3/R4 catch it.
+
+**No generation lock, ever** (an AST guard in
+`tests/test_note_tasks_extractor.py` pins it). Tasks do not depend on the
+index fingerprint, and the pass takes the generation lock *before* any row
+lock, so a writer that takes a single row lock with a bounded wait cannot form
+a cycle with it; at worst it waits 2 s and lags. The pass already holds the
+row lock of every note whose tasks it rewrites (its upsert or move took it),
+so the two writers of a note's `note_tasks` are serialised by that lock and no
+`(note_id, line)` unique-key race is possible.
+
+**R2.** The pass reads `scan_started_at` from the database clock (the
+snapshot statement's `statement_timestamp()`) **once per pass invocation**,
+before the walk's first file read, not once per attempt. An earlier instant is
+safe: it can only make R4 keep more, and a kept row stays task-dirty.
+
+**R3.** A task-dirty row is **never stat-shortcut**: the scan reads it, and
+its task derivation joins the changed list for the task stage only. It is not
+upserted when its hash is unchanged. Task-dirtiness is part of the C4
+comparison, so a row a refresh dirtied between the snapshot and the lock is
+re-read under the lock.
+
+**R4.** In `_update_tasks_for_changed`, per note, under the note's row lock
+(one `SELECT … FOR UPDATE` per derived note re-reads the two columns; the row
+is already locked by the pass's upsert or move, so this costs a round trip,
+not a wait): if `tasks_refreshed_at >= scan_started_at` and
+`tasks_source_hash` differs from the pass's buffered hash, **keep the task
+rows**. A tool wrote them from bytes published after this pass began reading,
+so they may be newer. This is not a skip and not a failure; it is logged at
+DEBUG. Otherwise the pass derives as before, sets `tasks_source_hash` to the
+buffered hash and clears `tasks_refreshed_at`.
+
+**Convergence, and why no state is stuck.** After the last write to a note at
+time W, the first pass whose `scan_started_at` is later than both W and the
+last refresh reads the note, through the stat change or R3. R4 cannot keep
+the rows then, because `tasks_refreshed_at < scan_started_at`, so that pass
+derives from current disk and `tasks_source_hash = content_hash` again. While
+a row is task-dirty, R3 forces a read on every pass, so no row stays stale.
+
+A superseded refresh writes nothing and leaves the rows as they were. The
+newer bytes came from a later publication P2: if P2 was a task tool, its own
+refresh queues on the same row lock; if it was a generic writer, it changed
+the stat, or the row is already task-dirty and R3 reads it regardless — and
+since #432 a generic writer (`edit_note`, `set_frontmatter`, `write_file`,
+`delete_note`) may have refreshed the rows itself, through the same lock and
+re-check, which leaves the same two cases. A
+refresh that passes the still-current check and is then followed, before its
+commit, by another publication leaves the ordinary task-dirty state, which the
+same two rules cover. Integration tests interleave a pass's scan, a tool
+write, a refresh and a later edit in every order, and run two task writes
+whose refreshes finish out of order (the earlier one reports `superseded`,
+and the rows describe the later write).
+
+Cost: when only task-dirty notes changed, the task stage reads every id in
+the scope, and R4 adds one round trip per derived note, which matters only
+during the one-time backfill.
+
+**Failure mode: the write stands, the listing may lag.** Each of these leaves
+the publication standing and writes no task row (except where noted):
+
+| Code | When |
+| --- | --- |
+| `lock_timeout` | the row lock was not granted within 2 s |
+| `root_changed` | the account is no longer bound to the root the tool ran under |
+| `not_indexed` | no index row at the path for this owner (never indexed, or quarantined) |
+| `superseded` | the file no longer holds the published bytes |
+| `not_utf8` | the published bytes are not UTF-8 (the index would not index them either) |
+| `derivation_failed` | the extractor raised: the note's task rows are removed and `tasks_failed` is set, the pass's own failure mark |
+| `error` | anything else, such as a database error |
+
+The response says `index: may lag (<code>)`, the usage row records
+`task_refresh = lagged:<code>`, and the next pass converges regardless (L9).
+A success says `index: refreshed`. The refresh never changes the call's
+outcome classification. The order is publish → refresh → change-feed event,
+so a consumer reacting to the event sees the new state in `list_tasks`; the
+event is recorded whatever the refresh did.
+
+**Generic writers (#432, task-refresh-on-write).** #428's L5 ("generic
+writers do not refresh") is narrowed:
+
+- **Refresh:** `edit_note`, `set_frontmatter` (a block that changes size
+  moves every task's line number) and every `write_file` publication to a
+  note path (`change_feed.is_note_path`). `write_file` never keys this on
+  its pre-publication existence sample: a note moved onto the path between
+  the sample and the publication would be overwritten without a refresh
+  (impl review r1); a genuine creation finds no index row and the refresh
+  is a no-op (`not_indexed`). Each calls
+  the same `refresh_note_tasks`, at most once, **after** its change-feed
+  event — today's publish → event order is untouched, and a call cancelled
+  during the refresh has already recorded its attributed event (the task
+  tools keep publish → refresh → event). The refresh runs only when the
+  bytes the call published, or the bytes it replaced, may hold a task:
+  `tasks.may_hold_tasks`, the extractor's checkbox prefix (`_CHECKBOX_RE`
+  without its trailing lookahead) at any line start of the canonical text.
+  It is a **superset** of the extractor — the original line equals the
+  masked one through `]` (the #218 rule) — and the lookahead is left out
+  because the extractor evaluates it on masked text, where a code span right
+  after `]` reads as spaces (a property test pins the superset). Bytes not
+  UTF-8 count as "may hold"; replaced bytes the call never held (every
+  `write_file` but a guarded overwrite) are assumed to; a call that knows the replaced bytes and
+  published the same ones does nothing. No second read, no database read.
+- **Clear:** `delete_note`, after **every** confirmed delete, ungated (the
+  incumbent is read before the delete, which removes whatever stands at the
+  leaf by then), through the absence form `published=ABSENT`: under the row
+  lock it confirms nothing is at the path (else `superseded`, so a recreated
+  note is never cleared), deletes the task rows and stamps
+  `tasks_source_hash` with the empty note's canonical hash. The pass prunes
+  the row; R4 keeps the cleared set against a pass that read the note first.
+- **Silent and best effort.** The writers' responses are byte-identical; a
+  refresh that cannot run (`lock_timeout`, `superseded`, …) leaves the rows
+  to the next pass, exactly as before, and only the usage row's
+  `task_refresh` says so (present only when a refresh was attempted).
+- **Excluded:** `create_note` (no index row yet), `move_note` (a plain move re-keys the row and the tasks follow it;
+  link rewrites wait for the pass — a stale id there only makes a task write
+  refuse with `task_not_found`), `import_from_url` and uploads (they never
+  hold the bytes, and a re-read would break R1), `delete_file` (refuses
+  `.md`).
+
+The pass is unchanged: R3/R4 cover every refreshing writer exactly as a task
+tool's. Two residuals are accepted: the
+refresh's root re-check is not under a lock, so a reassignment between the
+check and the write stores rows under the old scope's row, which the
+provenance discard then purges (L21); and a clean row may keep a non-NULL
+`tasks_refreshed_at` when a pass read some bytes and then their refresh landed
+(L23, harmless).
 
 ## Non-finite frontmatter numbers, and the one title rule (#154)
 
@@ -1848,6 +2681,19 @@ fts_fingerprint()       -> {"configs":["english"],"v":1}
   changes every fingerprint, so the change that adds one must ship either a
   rewrite of the stored value or an instruction to reset.
 
+**What is deliberately not in the embedding fingerprint (#355, #367).**
+`EMBEDDING_QUERY_INSTRUCTION` — every stored vector is a document vector
+embedded without it, so changing it invalidates nothing and must not refuse or
+re-embed — and `CHUNKING_VERSION`, which is per note (see "Heading-aware
+chunks"). Both are in the **retrieval fingerprint**, `retrieval_fingerprint()`:
+the embedding fingerprint's fields plus `chunking_version` and
+`query_instruction_sha256` (16 hex digits, null when empty). It is never
+stored and never compared; startup logs it once (`Embedding retrieval: …`,
+the digest, never the text) and the search-evaluation harness records it per
+semantic arm, so two deployments that differ only in the instruction share a
+stored fingerprint and are labelled apart. A model switch still changes the
+stored fingerprint and takes the refuse-then-reset runbook.
+
 ### Comparison at startup: both fail closed
 
 `_check_embedding_fingerprint()` and `_check_fts_fingerprint()` in
@@ -1899,7 +2745,7 @@ short-circuit, so `MCP_SANDBOX_MODE` skips them like every other guard.
   artifact, and including them would demand a full vault re-embed for a move
   that changed nothing about the vectors. The consequence is that the
   fingerprint records the **configuration, not the artifact**: `bge-m3` is a
-  mutable Ollama tag, so `ollama pull` can replace the weights behind it and a
+  mutable Ollama tag (as is `qwen3-embedding:0.6b`), so `ollama pull` can replace the weights behind it and a
   second host can serve different weights under the same name. No value
   available to this process distinguishes those cases, and a probe would have
   to trust the endpoint it is checking. **The operator rule that stands in its
@@ -2444,6 +3290,69 @@ notes need nothing: the rows cascade. The task write tools also replace one
 note's rows outside the pass, under the generation lock — see
 [task tools](tasks.md), choice 2 and T5.
 
+### Version 4 adds task extraction (#350)
+
+Task rows are new derived state, so every existing note has to be parsed once
+to gain them; `content_hash` cannot see that, so the marker moves. The fence
+and link grammars did not change, and version 4's cleaner is version 3's
+(`_EXTRACTION_CLEANERS[4] = clean_for_embedding`), so
+`_grammar_changed_the_embedding_text` is False for every v3 row and **nothing
+is re-embedded**: the cost is one re-derive pass (tags, links, keyword vector,
+tasks), the same as the v2 and v3 bumps. `TASKS_SINCE_EXTRACTION_VERSION = 4`
+in `src/services/tasks.py` is what `list_tasks` compares against for its
+not-yet-scanned count. During the window `move_note(rewrite_links=True)`
+refuses with `index_not_ready`, as after every bump. A bare redeploy of the
+v3 image (L8) re-extracts every note, and — having no version-4 cleaner —
+clears every note's embedding certification; its embed pass then re-chunks
+every note with full vector reuse (#281) and no provider calls. It never
+reads or writes `note_tasks`, and the cascade still holds. Rolling forward
+again is one more re-derive.
+
+### Version 5 adds task ids (#428)
+
+The task tools need more per task than version 4 stored, and `content_hash`
+cannot see that, so the marker moves again. Version 5 derives, per task:
+
+- the id key over the uncut text, with its ordinal and count (`task_key`,
+  `key_ordinal`, `key_count`);
+- the duplicate-detection key (`description_key`) and the casefolded text
+  (`text_fold`);
+- the hierarchical tag prefixes (`tag_prefixes`);
+- the plugin-parsed recurrence rule (`recurrence`, cut at 256 characters with
+  `recurrence_cut`);
+- the created and cancelled dates (`➕`, `❌`);
+- the context run: at most 8 lines of at most 160 characters each, 600 in
+  total (`context`, `context_cut`).
+
+Migration 039 adds those columns nullable, so existing rows read NULL until
+re-derived. The pass and the refresh always write all of them, and
+`ck_note_tasks_key_shape` keeps the key triple all NULL, or all set with
+`1 ≤ key_ordinal ≤ key_count`. The checkbox grammar and the #350 caps did not
+change.
+
+`_EXTRACTION_CLEANERS[5] = clean_for_embedding`, so **nothing is
+re-embedded**: the cost is one re-derive pass, the same as the version 2–4
+bumps. Every row's NULL `tasks_source_hash` also makes it task-dirty until
+then (R3 above), so the stat shortcut cannot skip it either.
+
+- **Ids render from the row, not the note's version.** A row whose `task_key`
+  is populated renders its id even in a note still stamped 4 (a write-time
+  refresh wrote it). A row with a NULL key renders `id pending`, and the header
+  counts such rows as `task ids pending: N tasks`, even at 0.
+  `TASK_IDS_SINCE_EXTRACTION_VERSION = 5` in `src/services/tasks.py` is kept
+  only for the operator's backfill progress; no listing decision reads it.
+  The write tools work on any task meanwhile, because resolution re-derives
+  from the bytes.
+- During the window, `move_note(rewrite_links=True)` refuses with
+  `index_not_ready`, as after every bump, and `list_tasks`' `text` and
+  `recurring` filters fall back on rows not yet derived and say so.
+- **Rollback is roll-forward** (#350 L8's mechanism). A version-4 image
+  re-extracts every note (`5 != 4`) and never reads or writes the new columns;
+  its inserts leave them NULL, which the CHECK admits. Having no version-5
+  cleaner, it also clears every note's embedding certification, and its embed
+  pass then re-chunks every note with full vector reuse (#281) and no provider
+  calls. Rolling forward again is one more re-derive.
+
 ### The frozen v0 cleaner is a line scanner with the regexes as its oracle
 
 `_v0_clean` must keep producing byte-identical output forever — the
@@ -2500,3 +3409,83 @@ the stale vectors for ever.
 - **The ledger** counts entries whose `embedded_hash` differs from `content_hash`, the sweep's own selection; the estimate leaves them out (the sweep embeds them after the notes, a few at most).
 - **Health** is `indexer_health.snapshot()`, which is server-wide (the same object `/health` publishes unauthenticated), so `embedding_failing` can be another tenant's provider trouble; the note says so. `embedding_now` is `embed_pass_lock.locked()`, also held by a panel reset and the search pre-warm.
 - **Scope and privacy.** Every count is scoped to the caller's owner slice (`apply_note_filters`' total mapping, `owner_key` for the ledger, `user_id` for runs). The result carries counts only, never paths, so private folders get their own counts (`private_folders`) without `include_private`.
+
+## Change feed (#351)
+
+`get_changes` reads `note_events`, the durable record of what changed in a
+scope. The index pass is one of its two writers; the full contract is in
+`openspec/changes/archive/2026-10-30-change-feed/design.md` and
+`src/services/change_feed.py`.
+
+**`content_changed_at` is stamped in exactly one statement.** The batch
+upsert's `ON CONFLICT … SET content_changed_at = CASE WHEN
+notes_metadata.content_hash IS DISTINCT FROM excluded.content_hash THEN now()
+ELSE notes_metadata.content_changed_at END`; an inserted row takes the file's
+mtime. The comparison sits in the statement that overwrites the hash, so the
+stamp cannot drift from it, and a touch, a stat refresh, a stale-marker or
+re-derive re-upsert with the same hash, either move path, the keyword-vector
+writers and the link backfill never name the column (a guard test pins it).
+`now()` and not the new mtime, because a sync client that preserves mtime
+would otherwise stamp a real edit in the past. The cost is a lag of one tick
+(and up to `INDEX_FULL_HASH_INTERVAL_HOURS` for an edit that kept all four
+stat fields, perf-L3).
+
+**Events are collected from the pass's own classification** —
+`existing`, `to_upsert`, the committed moves and the final `deleted_paths`,
+none of which a derivation stage mutates — and appended as the attempt's
+**final statement before `session.commit()`**, after the keyword vectors,
+links, tasks and the re-derive tail with its stamp. Any later stage goes
+above that block, so a `PoisonNote` it raises restarts the attempt before an
+event exists; a rolled-back attempt leaves none. `created` is "first seen at
+this path"; `modified` is exactly the rows whose stamp moved; `deleted`
+covers every row the pass removes, with `reason=removed`, `not_indexable`
+(present but undecodable) or `quarantined`; a present-but-undecodable path
+with no row is one `created reason=not_indexable`, once. Protected (#309)
+and C5-deferred rows get nothing — this pass does not change them. A path not
+indexable by its *name* (not UTF-8, over the cap) cannot be stored in a feed
+row and has no event.
+
+**Suppression is read under the feed lock.** The pass drops its own line when
+the latest event at the path (by `path` or `from_path`, highest seq) is an
+MCP event describing the same state: the same canonical hash for a content
+event (or both NULL with `not_indexable`), the same reason for a deletion,
+and for a move the same pair **and** that MCP move latest at both endpoints.
+`read_note_at` reads bytes and derives its text through
+`note_hash.canonical_note_text_strict`, so the stored `content_hash` *is*
+`canonical_note_hash(file bytes)`, the function every tool event uses — a
+CRLF or NUL note hashes the same on both sides (parity test:
+`tests/test_note_hash.py`).
+
+**Baseline, discard, overflow.** A scope with no rows at the attempt's start
+records one `reset` (only when the pass writes rows, so an empty vault's
+ticks record nothing), never a creation per note. A provenance discard
+deletes the scope's events in the discard's transaction, raises
+`note_event_scopes.pruned_through_seq` to `last_seq` (an old cursor reads
+`history_truncated`) and appends `reset`. A pass itemises at most
+`CHANGE_FEED_MAX_EVENTS_PER_PASS` events per scope — moves, deletions,
+creations, modifications, path order within each — and the rest is one
+`gap pass_overflow` line.
+
+**The feed never fails a pass.** The append runs in a savepoint under
+`lock_timeout = CHANGE_FEED_LOCK_TIMEOUT_MS`. On any failure the savepoint
+rolls back and the pass inserts one `note_event_gaps` row in its own
+transaction — a plain INSERT of a new row, which waits on nothing — so the
+row changes and the record of what was not itemised commit together; the
+scope's next successful append turns the gap rows into one `gap
+write_failed` line ahead of its own. No in-process state is the only record
+of a lost event, and no `indexer_health` counter moves.
+
+**The lock-order exception.** The feed lock (`pg_advisory_xact_lock(
+NOTE_EVENTS_LOCK_NS, user_id or 0)`, held to commit) is the **last** lock a
+pass or tool transaction takes; after it come only rows nobody else can hold
+(the scope row, new event rows, this scope's gap rows). That inverts
+`embeddings.py`'s "advisory before any row lock" on purpose: it is what makes
+seq order commit order, and the tables carry no foreign key, so nothing after
+it waits on `users`. Retention (`change_feed.prune`) runs in the tick's
+`finally` after `cleanup_expired_tokens`, separately guarded, never inside a
+pass. Its age cut is the **prefix** ending just before the oldest unexpired
+event — `occurred_at` is a transaction's start and not monotone in seq, so
+"every event older than the cutoff" could hit an unexpired one with a lower
+seq — which keeps `pruned_through_seq` a true watermark. A discard also
+drops the scope's gap rows, so a previous root's `write_failed` gap never
+reaches the new root's feed.

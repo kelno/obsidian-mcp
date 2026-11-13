@@ -1,6 +1,6 @@
 """The embedding HTTP client factory (#185; design D7, task 2.6).
 
-Every client aimed at `OLLAMA_URL` / `OPENAI_BASE_URL` comes from
+Every client aimed at `OLLAMA_URL` / `OPENAI_BASE_URL` / `TEI_URL` comes from
 `embedding_http_client`, which switches the environment off (no proxy, no
 `SSL_CERT_*`, no netrc), refuses redirects and pins the trust anchor. The
 proxy regression is proven with two real loopback listeners rather than a
@@ -167,7 +167,58 @@ async def test_ollama_does_not_follow_a_redirect(monkeypatch):
         return_value=httpx.Response(200, json={"embeddings": [[0.1]]})
     )
     with pytest.raises(httpx.HTTPStatusError):
-        await embeddings.OllamaProvider().embed_one("text")
+        await embeddings.OllamaProvider().embed_one("text", kind="query")
+    assert target.call_count == 0
+
+
+@respx.mock
+async def test_tei_does_not_follow_a_redirect(monkeypatch):
+    _use_settings(
+        monkeypatch,
+        embedding_provider="tei",
+        tei_url="http://127.0.0.1:18080",
+        tei_embedding_model="m",
+        embedding_dimensions=1,
+    )
+    monkeypatch.setattr(embeddings, "_TEI_CLIENT", embeddings._SharedClient())
+    monkeypatch.setattr(
+        embeddings,
+        "_TEI_VERIFICATION",
+        embeddings._TeiVerification(verified=True),
+    )
+    respx.post("http://127.0.0.1:18080/embed").mock(
+        return_value=httpx.Response(
+            307, headers={"Location": "http://elsewhere.example/embed"}
+        )
+    )
+    target = respx.post("http://elsewhere.example/embed").mock(
+        return_value=httpx.Response(200, json=[[0.1]])
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await embeddings.TeiProvider().embed_one("text", kind="query")
+    assert target.call_count == 0
+
+
+@respx.mock
+async def test_tei_info_does_not_follow_a_redirect(monkeypatch):
+    _use_settings(
+        monkeypatch,
+        embedding_provider="tei",
+        tei_url="http://127.0.0.1:18080",
+        tei_embedding_model="m",
+    )
+    monkeypatch.setattr(embeddings, "_TEI_CLIENT", embeddings._SharedClient())
+    monkeypatch.setattr(embeddings, "_TEI_VERIFICATION", embeddings._TeiVerification())
+    respx.get("http://127.0.0.1:18080/info").mock(
+        return_value=httpx.Response(
+            307, headers={"Location": "http://elsewhere.example/info"}
+        )
+    )
+    target = respx.get("http://elsewhere.example/info").mock(
+        return_value=httpx.Response(200, json={"model_id": "m"})
+    )
+    result = await embeddings.verify_tei_server()
+    assert result.status == "inconclusive"
     assert target.call_count == 0
 
 
@@ -197,6 +248,8 @@ async def test_openai_does_not_follow_a_redirect(monkeypatch):
 _SWEPT = (
     ROOT / "src" / "services" / "embeddings.py",
     ROOT / "src" / "control_panel" / "routes.py",
+    # The reranker hop (#367): its one client comes from `rerank_http_client`.
+    ROOT / "src" / "services" / "rerank.py",
 )
 
 
@@ -228,7 +281,7 @@ def _client_constructions(path: Path) -> list[int]:
 def test_no_http_client_is_built_outside_the_factory(path):
     assert _client_constructions(path) == [], (
         f"{path.name} builds an httpx client directly; use "
-        "transport_security.embedding_http_client"
+        "transport_security.embedding_http_client (or rerank_http_client)"
     )
 
 
@@ -243,5 +296,7 @@ def test_the_sweep_would_catch_a_direct_construction(tmp_path):
 
 def test_every_embedding_call_site_uses_the_factory():
     sources = {p.name: p.read_text() for p in _SWEPT}
-    assert sources["embeddings.py"].count("embedding_http_client(") == 2
-    assert sources["routes.py"].count("embedding_http_client(") == 1
+    assert sources["embeddings.py"].count("embedding_http_client(") == 3
+    assert sources["routes.py"].count("embedding_http_client(") == 2
+    assert sources["rerank.py"].count("rerank_http_client(") == 1
+    assert "embedding_http_client(" not in sources["rerank.py"]

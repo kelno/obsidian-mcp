@@ -51,7 +51,8 @@ def test_setting_defaults_on():
 
 def test_every_tool_is_covered():
     # The registry the rest of this module iterates is the real one, not empty.
-    # The core's tools: the suite runs with PLUGINS empty (open_area is kelno_vault's).
+    # The core's tools: the suite runs with PLUGINS empty (open_area is kelno_vault's),
+    # and upstream's switched-off tools are not registered.
     assert len(TOOLS) == 41
 
 

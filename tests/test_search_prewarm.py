@@ -86,7 +86,7 @@ def _install(monkeypatch, session, embed=None):
     monkeypatch.setattr(indexer, "async_session", lambda: session)
     calls = {"embed": 0}
 
-    async def _embed(_text):
+    async def _embed(_text, **_kw):
         calls["embed"] += 1
         if embed is not None:
             return await embed(_text)
@@ -165,10 +165,12 @@ async def test_reset_invalidates_the_hnsw_cache(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_embed_skipped_for_remote_provider_but_probe_still_runs(monkeypatch):
-    """A remote API has no warm state; billing it once per tick buys nothing.
-    The database probe is unaffected — the index still goes cold."""
-    monkeypatch.setattr(indexer.settings, "embedding_provider", "openai", raising=False)
+@pytest.mark.parametrize("provider", ["openai", "tei"])
+async def test_embed_skipped_for_remote_provider_but_probe_still_runs(monkeypatch, provider):
+    """Only Ollama's warm state is worth keeping; a query per tick to any other
+    provider buys nothing. The database probe is unaffected — the index still
+    goes cold."""
+    monkeypatch.setattr(indexer.settings, "embedding_provider", provider, raising=False)
     session = _ProbeSession()
     calls = _install(monkeypatch, session)
 
@@ -343,7 +345,7 @@ async def test_prewarm_does_not_touch_the_failure_counter(monkeypatch, caplog):
         async def execute(self, clause, *_a, **_k):
             raise RuntimeError("connection reset")
 
-    async def _broken_embed(_text):
+    async def _broken_embed(_text, **_kw):
         raise RuntimeError("ollama is down")
 
     monkeypatch.setattr(indexer, "async_session", lambda: _BrokenSession())

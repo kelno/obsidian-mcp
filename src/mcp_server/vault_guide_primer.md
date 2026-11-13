@@ -293,3 +293,5 @@ The `ledger_*` tools keep what agents write for each other, in the server's data
   not edit source notes to "create" a backlink.
 - What agents log for each other (quirks, feedback, proposals) goes in the
   agent ledger through the `ledger_*` tools, never in a note.
+- Notes whose content changed since a point in time are found with
+  `order_by="content_changed"` and `since` on `get_recent` / `list_notes`.

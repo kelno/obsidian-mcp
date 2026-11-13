@@ -1,6 +1,7 @@
 import ipaddress
 import logging
 import re
+import math
 import resource
 import sys
 from typing import Annotated, Any, Literal
@@ -10,6 +11,7 @@ from pydantic import (
     BeforeValidator,
     Field,
     PrivateAttr,
+    SecretStr,
     field_validator,
     model_validator,
 )
@@ -35,6 +37,37 @@ def _off_means_none(value: Any) -> Any:
     if isinstance(value, str) and value.strip().casefold() in _OFF_SPELLINGS:
         return None
     return value
+
+
+#: Surrounding whitespace stripped from `TEI_API_KEY` (#426, design D2): a
+#: Secret created from a file usually ends in a newline, and TEI compares the
+#: token exactly.
+_KEY_STRIP = " \t\r\n"
+
+
+def _blank_key_is_none(value: Any) -> Any:
+    """`TEI_API_KEY`: unset, empty or whitespace-only is `None`; anything
+    else loses its surrounding whitespace. The format check is a model
+    validator, because it applies only under the `tei` provider."""
+    if isinstance(value, SecretStr):
+        value = value.get_secret_value()
+    if value is None:
+        return None
+    if isinstance(value, str):
+        # Any whitespace-only value is unset (form feed, vertical tab and
+        # U+00A0 included); only the ordinary four are stripped from a real
+        # key, so anything else left over is refused by the format check.
+        if not value or value.isspace():
+            return None
+        return value.strip(_KEY_STRIP) or None
+    return value
+
+
+def tei_api_key_is_well_formed(key: str) -> bool:
+    """Visible ASCII only, U+0021 to U+007E: no space, no control character,
+    nothing outside ASCII. A bearer token holds none of those, and a newline
+    in a header would be an injection vector."""
+    return bool(key) and all(0x21 <= ord(ch) <= 0x7E for ch in key)
 
 
 #: Upper bound on every limiter *count* — the rates, the bursts and the
@@ -126,6 +159,77 @@ MAX_NOTE_BYTES = 10 * 1024 * 1024  # 10 MB
 # real note, including a generated MOC.
 MAX_LINKS_PER_NOTE = 10_000
 
+# Task extraction caps (#350, design D11). Constants, not settings: changing
+# any of the first four changes what the extractor stores, which is a grammar
+# change and needs a `CURRENT_EXTRACTION_VERSION` bump (design D3).
+#
+# - `MAX_TASKS_PER_NOTE`: checkbox rows kept per note, in document order. A
+#   capped note sets `notes_metadata.tasks_truncated`; `list_tasks` counts it.
+# - `TASK_TEXT_MAX_CHARS`: code points of task text stored (`text_cut`).
+# - `TASK_TAG_MAX_CHARS`: a longer inline tag on a task is not stored
+#   (`tags_cut`). The tag regex is ASCII-only, so this is also far under
+#   `MAX_TAG_BYTES`.
+# - `TASK_MAX_TAGS`: the first N distinct tags of a task, in document order.
+# - `LIST_TASKS_MAX_TAG_ARGS`: entries `list_tasks(tags=…)` accepts.
+MAX_TASKS_PER_NOTE = 5_000
+TASK_TEXT_MAX_CHARS = 1_000
+TASK_TAG_MAX_CHARS = 128
+TASK_MAX_TAGS = 64
+LIST_TASKS_MAX_TAG_ARGS = 32
+
+# The task tools (#428). Constants, not settings: each is part of a stated
+# contract (design D9, D10, D12), and none is an operator's tuning knob.
+#
+# - `TASK_REFRESH_LOCK_WAIT_MS`: the write-time task refresh's `lock_timeout`
+#   on the note's `notes_metadata` row. Past it the write stands and the
+#   response says `index: may lag (lock_timeout)` (D10).
+# - `TASK_SIMILAR_SCAN_MAX`: candidate rows `add_task`'s similar-task scan
+#   reads before it stops and says so (D9).
+# - `TASK_CONTEXT_MAX_LINES`: continuation lines stored and rendered as a
+#   task's context; placement never uses this cap (D8, D12).
+TASK_REFRESH_LOCK_WAIT_MS = 2_000
+TASK_SIMILAR_SCAN_MAX = 2_000
+TASK_CONTEXT_MAX_LINES = 8
+
+
+#: Names `zoneinfo.available_timezones()` can pick up from a host's OS zone
+#: directory that are not portable IANA zones: `localtime` is whatever the
+#: host is set to, `Factory` is a placeholder, `posixrules` a tzcode
+#: internal, and `posix/` / `right/` are alternative trees. A task setting must
+#: mean the same thing on every host, so these are refused everywhere.
+HOST_ONLY_ZONE_NAMES = frozenset({"localtime", "Factory", "posixrules"})
+_HOST_ONLY_ZONE_PREFIXES = ("posix/", "right/")
+
+
+def is_portable_zone_name(name: str) -> bool:
+    """True for a name that is neither a host-only pseudo-zone nor under one
+    of the alternative trees. Membership in the available set is separate."""
+    return name not in HOST_ONLY_ZONE_NAMES and not name.startswith(_HOST_ONLY_ZONE_PREFIXES)
+
+
+def _validate_timezone_name(value: str, *, variable: str) -> str:
+    """A zone name this build can load, or a ValueError naming `variable`.
+
+    Membership in `zoneinfo.available_timezones()` first — `ZoneInfo` alone
+    would also accept a file-system path that is not an IANA key — then a
+    load, so a listed but unreadable zone is refused too.
+    """
+    import zoneinfo
+
+    name = value.strip() if isinstance(value, str) else value
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"{variable} must name an IANA timezone, e.g. UTC or Europe/Berlin")
+    try:
+        if not is_portable_zone_name(name) or name not in zoneinfo.available_timezones():
+            raise KeyError(name)
+        zoneinfo.ZoneInfo(name)
+    except (KeyError, ValueError, OSError, zoneinfo.ZoneInfoNotFoundError):
+        raise ValueError(
+            f"{variable}={name!r} is not a timezone available to this build. "
+            "Use an IANA name such as UTC, Europe/Berlin or America/New_York."
+        ) from None
+    return name
+
 # Chunks embedded and stored for a single note. Unbounded, the arithmetic is
 # `MAX_NOTE_BYTES` (10 MiB) ÷ `CHUNK_SIZE` (512 tokens, ~4 characters each) ≈
 # 5,120 chunks for one legal note, each of them one sequential, 30 s-bounded
@@ -192,6 +296,11 @@ MAX_SEARCH_QUERY_CHARS = 8192
 # `max_chars`: about 5,000 tokens, enough for a full encyclopedia article
 # without links. A caller may ask for more, up to `max_read_response_chars`.
 FETCH_PAGE_DEFAULT_CHARS = 20_000
+
+#: The smallest accepted `RANK_WEIGHTS` entry (#344, Codex C-3). The array is
+#: bound as `float4[]`, where a positive Python float below float4's smallest
+#: subnormal (~1.4e-45) encodes as 0 and silently zeroes that weight's covers.
+RANK_WEIGHT_MIN = 1e-6
 
 # Upper bound on `import_from_url`'s (and `fetch_page`'s) `url` argument (#322), through the same
 # declarative `arg_char_caps` screen as the search query: the existing
@@ -324,6 +433,55 @@ class _FieldFilteredSource(PydanticBaseSettingsSource):
         return f"{self.__class__.__name__}({self._inner!r})"
 
 
+# ── Native OIDC (#415, #416) ────────────────────────────────────────────────
+#
+# The startup refusal for the retired subject map (design D3). The section
+# name at the end must match the heading in docs/native-oidc.md.
+OIDC_SUBJECT_USER_IDS_RETIRED = (
+    "OIDC_SUBJECT_USER_IDS is retired (#416). Upgrade: (1) confirm a local admin "
+    "password works; (2) set LOCAL_LOGIN_ENABLED=true; (3) remove "
+    "OIDC_SUBJECT_USER_IDS; (4) start; (5) bind each former subject on its user's "
+    "edit page (Single sign-on → Bind subject); (6) verify SSO and /authorize; "
+    "(7) optionally set LOCAL_LOGIN_ENABLED=false. See docs/native-oidc.md, "
+    "\"Upgrading from OIDC_SUBJECT_USER_IDS\"."
+)
+OIDC_TOKEN_AUTH_METHODS = ("client_secret_basic", "client_secret_post")
+OIDC_BASE_SCOPES = ("openid", "email", "profile")
+OIDC_MAX_ISSUER_CHARS = 2048
+OIDC_MAX_EXTRA_SCOPES = 8
+OIDC_MAX_SCOPE_CHARS = 64
+OIDC_MAX_DISPLAY_NAME_CHARS = 40
+# RFC 6749 §3.3: scope-token = 1*( %x21 / %x23-5B / %x5D-7E )
+_OIDC_SCOPE_TOKEN_CHARS = frozenset(
+    chr(c) for c in (0x21, *range(0x23, 0x5C), *range(0x5D, 0x7F))
+)
+
+
+def _normalise_oidc_extra_scopes(value: str) -> str:
+    """`OIDC_EXTRA_SCOPES` → its canonical space-joined form, or `ValueError`.
+
+    Separated by spaces only (a tab is not a scope-token character, so it is
+    refused rather than split on); each token an RFC 6749 scope-token of at
+    most 64 characters; at most eight distinct extra tokens. `offline_access`
+    is refused — no refresh token is ever wanted. `openid`, `email`,
+    `profile` and repeats are dropped, as they are already requested.
+    """
+    tokens = [t for t in value.split(" ") if t]
+    if len(tokens) > OIDC_MAX_EXTRA_SCOPES:
+        raise ValueError(f"OIDC_EXTRA_SCOPES accepts at most {OIDC_MAX_EXTRA_SCOPES} scopes")
+    kept: list[str] = []
+    for token in tokens:
+        if len(token) > OIDC_MAX_SCOPE_CHARS or not set(token) <= _OIDC_SCOPE_TOKEN_CHARS:
+            raise ValueError(
+                "OIDC_EXTRA_SCOPES must be space-separated RFC 6749 scope tokens "
+                f"of at most {OIDC_MAX_SCOPE_CHARS} characters")
+        if token.casefold() == "offline_access":
+            raise ValueError("OIDC_EXTRA_SCOPES must not request offline_access")
+        if token not in OIDC_BASE_SCOPES and token not in kept:
+            kept.append(token)
+    return " ".join(kept)
+
+
 class Settings(BaseSettings):
     # No password in the default (#324): an unset DATABASE_URL must not
     # authenticate with a known value. The bundled compose files set it from
@@ -424,8 +582,44 @@ class Settings(BaseSettings):
     # the panel's Reindex, and once this many hours have elapsed since that
     # scope's last *successful* one (one that committed with nothing skipped).
     index_full_hash_interval_hours: int = Field(24, ge=1)
+    # Opt-in (#392): leave sync-conflict copies (`Note.sync-conflict-…`,
+    # `Note (conflicted copy …)`, `Note (conflict 2026-05-29-19-45-39)` and the
+    # rest of the fixed set in `src/services/conflict_copies.py`) out of the
+    # index. The files are never touched and stay readable and writable by
+    # exact path; their rows are removed by the next pass. Deployment-wide.
+    # See openspec/changes/archive/2026-11-12-index-exclude-conflict-files/design.md.
+    index_exclude_conflict_files: bool = False
+    # The change feed (#351, `note_events`, design D9/D10). Retention runs in
+    # the periodic tick's `finally`, never inside a pass. The age limit is a
+    # `NullableLimit`-style "null disables" setting (`OAUTH_CLIENT_UNUSED_
+    # EXPIRY_DAYS`' rule) with `0` refused at load — "delete every event the
+    # moment it is written" is an outage, not a setting. The per-scope row cap
+    # is deliberately **not** disable-able: it is what keeps a shared database
+    # bounded with the age limit off (unbounded history is how #308 started).
+    # Env: CHANGE_FEED_RETENTION_DAYS, CHANGE_FEED_MAX_EVENTS_PER_SCOPE,
+    # CHANGE_FEED_MAX_EVENTS_PER_PASS, CHANGE_FEED_LOCK_TIMEOUT_MS.
+    change_feed_retention_days: Annotated[
+        Annotated[int, Field(ge=1, le=3650)] | None,
+        BeforeValidator(_off_means_none),
+    ] = 90
+    change_feed_max_events_per_scope: int = Field(100_000, ge=1_000, le=100_000_000)
+    # Events one pass itemises per scope; the remainder is one `gap` line.
+    change_feed_max_events_per_pass: int = Field(2_000, ge=100, le=50_000)
+    # The bounded wait for the scope's feed lock (a pass or a file-only tool);
+    # a timeout is a `gap` (pass) or a rediscovered `human/sync` event (tool).
+    change_feed_lock_timeout_ms: int = Field(2_000, ge=100, le=30_000)
     embedding_model: str = "bge-m3"
     embedding_dimensions: int = Field(1024, ge=1, le=16000)
+    # Prepended verbatim, with no separator, to every *query* embedding input
+    # and never to a document (#367; heading-chunks design D7). Instruction-
+    # tuned embedders (Qwen3-Embedding) expect e.g. "Instruct: <task>\nQuery: ".
+    # Empty by default, so bge-m3's inputs are byte-identical to before. **Not**
+    # part of the stored embedding fingerprint — every stored vector is a
+    # document vector embedded without it — so changing it neither refuses
+    # startup nor re-embeds anything; it is in the logged, non-stored
+    # retrieval fingerprint instead. At most 1,000 characters; NUL and C0
+    # controls other than LF and TAB are refused at load.
+    embedding_query_instruction: str = Field("", max_length=1000)
     # bge-m3 design point. Must stay strictly greater than `chunk_overlap`:
     # the chunker steps by `max(char_size - char_overlap, 1)`, so at equality
     # the step collapses to one character and `MAX_CHUNKS_PER_NOTE` stops
@@ -515,8 +709,49 @@ class Settings(BaseSettings):
     # validator below so the CSV form doesn't trip pydantic-settings' JSON
     # decode of complex (list) fields.
     fts_configs: Annotated[list[str], NoDecode] = ["english"]
+    # ── Keyword ranking and snippets (#344/#391, migrations 031/035) ───────
+    #
+    # `ts_rank_cd`'s weight array `{D, C, B, A}`, bound as `float4[]` and never
+    # interpolated. The keyword vector is `A(title) || A(aliases) || B(tags)
+    # || D(body)` (`C` unused); at the default one adjacent two-word title
+    # cover (`2/(1+1) = 1.0`) outweighs fifty body covers (`2/(50+50) = 0.02`
+    # each), where PostgreSQL's default `D = 0.1` lets ten body repetitions tie
+    # the title — the #344 failure — and one tag cover (`0.4`) ranks below a
+    # title cover and equals twenty body covers. Changing it re-ranks
+    # title-versus-tags-versus-body competition only; body-only order is
+    # unchanged by any uniform `D`.
+    # Accepts `{0.02, 0.2, 0.4, 1.0}`, a JSON list or a CSV; four finite
+    # numbers in [1e-6, 1] (`RANK_WEIGHT_MIN`: float4 must not round one to 0). See "Keyword ranking" in docs/architecture/search.md.
+    rank_weights: Annotated[list[float], NoDecode] = [0.02, 0.2, 0.4, 1.0]
+    # How many leading characters of the text a keyword vector was built from
+    # are stored in `notes_metadata.body_excerpt` for `ts_headline`. Applies to
+    # rows written afterwards; `make rebuild-tsvectors` rewrites the rest.
+    keyword_excerpt_chars: int = Field(20_000, ge=1_000, le=100_000)
+    # Snippets (`ts_headline`) are computed for the first N rows of a
+    # keyword_search page regardless of `limit` — the parse cost is bounded by
+    # this, by `KEYWORD_EXCERPT_CHARS` and by the config count, never by the
+    # page size. 0 disables snippets.
+    keyword_snippet_rows: int = Field(20, ge=0, le=100)
+    # `hybrid_search`'s reciprocal-rank-fusion constant (#354): a note's
+    # fused score is the sum over the two arms of `1 / (k + rank)`. A small k
+    # lets each arm's top ranks dominate; a large one flattens toward a vote
+    # count. Operator configuration, measured with the harness arm
+    # (`scripts/search_eval_arms/hybrid.py`); there is no per-call argument.
+    hybrid_rrf_k: int = Field(60, ge=1, le=1000)
+    # Where `semantic_search` and `hybrid_search` start reading
+    # `confidence: low` (#389): no `match: all` keyword note and the best
+    # similarity of the call's candidate set strictly below this value.
+    # **0 is hard off** (the shipped default): the token is still on every
+    # page and reads `ok`, and the usage rows still record the evidence.
+    # Model-dependent (bge-m3's candidate value is 0.50; OpenAI
+    # `text-embedding-3-*` cosines run lower), so it is chosen by the
+    # calibration recipe in DEPLOYMENT.md and re-chosen when the embedding
+    # model changes. It ranks nothing, so it is not in
+    # `retrieval_fingerprint()`. See "Confidence (#389)" in
+    # docs/architecture/search.md.
+    search_low_confidence_similarity: float = Field(0.0, ge=0.0, le=1.0, allow_inf_nan=False)
 
-    embedding_provider: Literal["ollama", "openai"] = "ollama"
+    embedding_provider: Literal["ollama", "openai", "tei"] = "ollama"
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
     openai_embedding_model: str = "text-embedding-3-small"
@@ -527,9 +762,36 @@ class Settings(BaseSettings):
     # Per-request bound on one `/embeddings` call, in seconds. A read timeout
     # is not retried (the server may still be computing the request).
     openai_request_timeout_seconds: float = Field(60.0, gt=0, le=3600)
+    # Hugging Face Text Embeddings Inference (TEI) native API. TEI serves
+    # `POST /embed` with `{"inputs": [...], "truncate": true}` and answers a
+    # bare array of vectors. It takes no model field; the served model is
+    # fixed by the container's `--model-id`. Some TEI builds also expose
+    # `/v1/embeddings`; use the OpenAI provider for those, and this one when
+    # the endpoint has only the native protocol.
+    tei_url: str = "http://tei:80"
+    tei_embedding_model: str = "BAAI/bge-m3"
+    # Inputs per native `/embed` request. A request above the server's
+    # `--max-client-batch-size` is a 413, and a value above the limit `/info`
+    # reports refuses startup. Large full-size batches can exceed the request
+    # timeout on a shared GPU (measured ~0.6 s per 512-token input). The
+    # default matches Ollama's safe 16; the limit stays available for a
+    # faster endpoint.
+    tei_embed_batch_size: int = Field(16, ge=1, le=256)
+    # Bearer token for a TEI started with `--api-key` / `API_KEY`, or one
+    # behind a gateway that wants one (#426). **A secret**: keep it in a
+    # secret store (a Kubernetes Secret, never a ConfigMap). With the `tei`
+    # provider it goes as `Authorization: Bearer <key>` on exactly three
+    # requests to `TEI_URL` (`POST /embed`, `GET /info`, the panel's
+    # `GET /health`) and nowhere else. Empty or whitespace-only means unset,
+    # which sends no header at all; surrounding whitespace is stripped, and
+    # anything but visible ASCII refuses startup (under `tei` only). It is in
+    # no fingerprint, so a change needs no reset. Read only through
+    # `embeddings._tei_auth_headers()`.
+    tei_api_key: Annotated[SecretStr | None, BeforeValidator(_blank_key_is_none)] = None
     # ── Embedding transport (#185) ─────────────────────────────────────────
     #
-    # The **active** provider's URL (`OLLAMA_URL` or `OPENAI_BASE_URL`) must be
+    # The **active** provider's URL (`OLLAMA_URL`, `OPENAI_BASE_URL`, or
+    # `TEI_URL`) must be
     # `https`, or `http` to a literal loopback host — or `http` to anything
     # else only when this override is true. Default false (owner decision
     # 2026-09-22): an `http://` URL never becomes encrypted by itself, so the
@@ -540,6 +802,37 @@ class Settings(BaseSettings):
     # only (replacing certifi's bundle; the OS store is never consulted).
     # Parsed once, at settings construction, in every mode including sandbox.
     embedding_ca_file: Annotated[str | None, BeforeValidator(_off_means_none)] = None
+
+    # ── Optional reranker (#367) ───────────────────────────────────────────
+    #
+    # `RERANK_URL` is the **full** endpoint URL of a Jina-compatible
+    # `/v1/rerank` server (llama-server `--reranking`, vLLM, Infinity); empty
+    # means the feature is absent and `rerank=true` answers
+    # `reranked: false (not_configured)`. The URL is judged by the embedding
+    # hop's parser and plaintext rule (`https`, loopback `http`, or `http`
+    # admitted by `RERANK_ALLOW_PLAINTEXT` — a separate written decision from
+    # `EMBEDDING_ALLOW_PLAINTEXT`); a policy violation refuses boot, a
+    # reranker that is merely down never does. An `https` reranker is
+    # verified against `EMBEDDING_CA_FILE`'s context, else certifi. The
+    # endpoint receives note text. See "Reranking (#367)" in
+    # docs/architecture/search.md.
+    rerank_url: str = ""
+    # Sent as `model` in the request body; llama-server serves one model and
+    # ignores it.
+    rerank_model: str = Field("", max_length=200)
+    # One wall-clock deadline per rerank exchange (pool wait, connect, write
+    # and read); past it the page falls back with `reranked: false (timeout)`.
+    # Up to 30 s (#402): size it together with `rerank_max_documents` from
+    # DEPLOYMENT.md's latency table. Under `MCP_CONCURRENCY_MODE` queue or
+    # enforce it must not exceed the tool wait unless the concurrency report
+    # passes with rerank traffic: the call holds its `embedding` slot.
+    rerank_timeout_ms: int = Field(1500, ge=100, le=30000)
+    rerank_allow_plaintext: bool = False
+    # #402: the most documents one rerank call sends. Every candidate note
+    # (≤ 50) gets its primary document first, then further fetched chunks in
+    # distance order, at most 4 per note; 50 reproduces the incumbent count.
+    # Latency scales with it (see DEPLOYMENT.md, "Reranker (optional)").
+    rerank_max_documents: int = Field(100, ge=50, le=200)
 
     # Caps for the raw file-access tools (read_file / write_file). Read is
     # checked against on-disk size before reading; write against the decoded
@@ -734,6 +1027,107 @@ class Settings(BaseSettings):
     # Default **false**, so enabling this change is a no-op for every existing
     # client. Env: WRITE_PRECONDITION_REQUIRED.
     write_precondition_required: bool = False
+
+    # ── Task tools defaults (#428, design D14) ─────────────────────────────
+    #
+    # The values a scope's `task_settings` row falls back to, field by field,
+    # when the row (or the field) is NULL — which is every scope until someone
+    # saves the panel's Tasks card. The four booleans mirror the Obsidian
+    # Tasks plugin's own defaults, so with nothing configured the task tools
+    # write what the plugin would.
+    #
+    # `TASKS_DEFAULT_TIMEZONE` resolves "today" and relative dates. Validated
+    # here, so an unknown name refuses startup naming the variable (and refuses
+    # the migration init container too, which imports these settings: the same
+    # image carries the same zone data, so a name it refuses the app would
+    # refuse as well). `tzdata` is pinned in requirements.txt.
+    tasks_default_timezone: str = "UTC"
+    # "Set done date on every completed task" (✅ <date>).
+    tasks_set_done_date: bool = True
+    # "Set cancelled date on every cancelled task" (❌ <date>).
+    tasks_set_cancelled_date: bool = True
+    # "Set created date on every added task" (➕ <date>).
+    tasks_set_created_date: bool = False
+    # "Next recurrence appears on the line below".
+    tasks_next_recurrence_below: bool = False
+
+    @field_validator("tasks_default_timezone", mode="before")
+    @classmethod
+    def _validate_tasks_default_timezone(cls, v):
+        return _validate_timezone_name(v, variable="TASKS_DEFAULT_TIMEZONE")
+
+    # ── The task rule's server default (#434, design D8, D9) ───────────────
+    #
+    # Which checkboxes count as tasks for a scope whose `task_settings` row
+    # has no rule of its own (`task_rule` NULL, or no row). Inherited as ONE
+    # unit — kind, task tags and filter text together — never field by field:
+    # a row that sets its own rule ignores all three.
+    #
+    # - `TASKS_RULE`: `all` (default; every checkbox, exactly as before),
+    #   `fields` (a task field or a task tag) or `filter` (contains
+    #   `TASKS_GLOBAL_FILTER`, case-sensitively, like the Tasks plugin's
+    #   "Global task filter").
+    # - `TASKS_RULE_TAGS`: comma-separated task tags for `fields` (≤ 32, each
+    #   `#` optional, lower-cased, the tag grammar, no trailing `/`).
+    # - `TASKS_GLOBAL_FILTER`: the filter text for `filter` (1–64 characters,
+    #   one line, no backtick, no field emoji, no `%%`, `<!--` or `-->`, no
+    #   leading list marker / checkbox / heading marker / `>`).
+    #
+    # Validated here by the same functions the panel's save uses
+    # (`task_rule.normalise_*`, imported inside each validator so loading this
+    # module imports nothing that imports it back): an invalid value refuses
+    # startup naming the variable — and refuses the migration init container
+    # too, which imports these settings. That is deliberate: the values are
+    # image-independent text, so a value the init container refuses the app
+    # would refuse as well, and failing before the migration is the earlier,
+    # clearer failure. `TASKS_RULE=filter` with an empty filter text is
+    # refused naming both variables.
+    tasks_rule: str = "all"
+    tasks_rule_tags: Annotated[list[str], NoDecode] = []
+    tasks_global_filter: str = ""
+
+    @field_validator("tasks_rule", mode="before")
+    @classmethod
+    def _validate_tasks_rule(cls, v):
+        from src.services import task_rule
+
+        value, error = task_rule.normalise_rule(v)
+        if error:
+            raise ValueError(f"TASKS_RULE {error}")
+        return value
+
+    @field_validator("tasks_rule_tags", mode="before")
+    @classmethod
+    def _validate_tasks_rule_tags(cls, v):
+        from src.services import task_rule
+
+        if v is None:
+            return []
+        items = v.split(",") if isinstance(v, str) else list(v)
+        items = [str(i).strip() for i in items]
+        tags, errors = task_rule.normalise_task_tags([i for i in items if i])
+        if errors:
+            raise ValueError("TASKS_RULE_TAGS: " + " ".join(errors))
+        return tags
+
+    @field_validator("tasks_global_filter", mode="before")
+    @classmethod
+    def _validate_tasks_global_filter(cls, v):
+        from src.services import task_rule
+
+        value, error = task_rule.normalise_filter("" if v is None else v)
+        if error:
+            raise ValueError(f"TASKS_GLOBAL_FILTER: {error}")
+        return value or ""
+
+    @model_validator(mode="after")
+    def _validate_tasks_rule_combination(self):
+        if self.tasks_rule == "filter" and not self.tasks_global_filter:
+            raise ValueError(
+                "TASKS_RULE=filter needs TASKS_GLOBAL_FILTER: set the text every "
+                "task line contains (for example #task), or choose another TASKS_RULE."
+            )
+        return self
 
     # Cap on how much note/file text a single read_note / read_file call may
     # return to the model. The byte caps above stop the server from reading a
@@ -1022,6 +1416,51 @@ class Settings(BaseSettings):
         return self
 
     multi_user_mode: bool = False
+    oidc_enabled: bool = False
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = Field("", repr=False)
+    # Optional since #416: empty means no group check; set, the exact
+    # case-sensitive element check of #415 applies.
+    oidc_required_group: str = ""
+    # `client_secret_basic` (Authorization header) or `client_secret_post`
+    # (form body) — never both. Checked against discovery at login (D5).
+    oidc_token_auth_method: str = "client_secret_basic"
+    # Space-separated scopes requested after `openid email profile`; RFC 6749
+    # scope-tokens, ≤ 8 of ≤ 64 characters; `offline_access` refused.
+    oidc_extra_scopes: str = ""
+    # The login button reads "Sign in with {OIDC_DISPLAY_NAME}".
+    oidc_display_name: str = "SSO"
+    # PEM trust anchor for the OIDC back-channel only (not EMBEDDING_CA_FILE:
+    # different operators, different roots). Unset → certifi's bundle.
+    # Parsed once, when OIDC is enabled, by `_validate_oidc`.
+    oidc_ca_file: Annotated[str | None, BeforeValidator(_off_means_none)] = None
+    # Retired (#416). Kept only so that a non-empty value can be refused with
+    # the upgrade sequence; linking now lives on the `users` row.
+    oidc_subject_user_ids: dict[str, Any] = Field(default_factory=dict, repr=False)
+    local_login_enabled: bool = True
+
+    _oidc_ssl_context: Any = PrivateAttr(default=None)
+
+    @property
+    def oidc_ssl_context(self):
+        """The parsed `OIDC_CA_FILE` context, or `None` (certifi applies)."""
+        return self._oidc_ssl_context
+
+    @field_validator("oidc_ca_file", mode="before")
+    @classmethod
+    def _oidc_ca_off(cls, value):
+        if isinstance(value, str) and value.strip().casefold() == "off":
+            return None
+        return value
+
+    @field_validator("oidc_subject_user_ids", mode="before")
+    @classmethod
+    def _oidc_mapping_retired(cls, value):
+        if value is None or value == {} or (isinstance(value, str) and not value.strip()):
+            return {}
+        raise ValueError(OIDC_SUBJECT_USER_IDS_RETIRED)
+
     session_max_age: int = 60 * 60 * 24 * 7
     session_cookie_name: str = "omcp_session"
 
@@ -1117,6 +1556,25 @@ class Settings(BaseSettings):
     # OAUTH_GRANT_ABSOLUTE_LIFETIME_DAYS.
     oauth_grant_absolute_lifetime_days: int = Field(90, ge=1, le=365)
 
+    # Client ID Metadata Documents (#357, MCP 2026-07-28). When true the AS
+    # metadata advertises `client_id_metadata_document_supported` and an
+    # `https://` client_id at /authorize is fetched as a metadata document
+    # through the transfer subsystem's hardened fetch. When false the flag is
+    # absent and such a client_id is an unknown client, so clients fall back
+    # to DCR; existing CIMD grants keep refreshing (the token endpoint never
+    # fetches). Env: OAUTH_CIMD_ENABLED.
+    oauth_cimd_enabled: bool = True
+    # Ceiling, in seconds, on how long a validated document is cached (its
+    # `Cache-Control: max-age`, 300 s when absent). 0 = never cache.
+    # Env: OAUTH_CIMD_CACHE_MAX_SECONDS.
+    oauth_cimd_cache_max_seconds: int = Field(86400, ge=0, le=86400)
+    # Document fetches each client address slot may start per 60 s window —
+    # the outbound hop an unauthenticated caller can drive. Same salted
+    # fixed-slot algorithm as the /mcp failed-auth budget; cache hits and
+    # joins of an in-progress fetch spend nothing.
+    # Env: OAUTH_CIMD_FETCHES_PER_ADDRESS_PER_MINUTE.
+    oauth_cimd_fetches_per_address_per_minute: int = Field(10, ge=1, le=120)
+
     # Registry-eval only: when true, lifespan skips the DB dim check,
     # indexer, and embedding provider, and the /mcp auth middleware
     # short-circuits. Lets Glama's sandbox build the image and validate
@@ -1188,6 +1646,20 @@ class Settings(BaseSettings):
             _FieldFilteredSource(dotenv_settings),
             file_secret_settings,
         )
+
+    @field_validator("embedding_query_instruction")
+    @classmethod
+    def _refuse_instruction_controls(cls, v: str) -> str:
+        """NUL and C0 controls other than `\n` and `\t` are refused: the value
+        is prepended to provider input verbatim, and a stray CR or NUL is a
+        silent query degradation nobody would see (design D7)."""
+        for ch in v:
+            if ord(ch) < 0x20 and ch not in "\n\t":
+                raise ValueError(
+                    "EMBEDDING_QUERY_INSTRUCTION contains a control character "
+                    f"(U+{ord(ch):04X}); only line feed and tab are allowed"
+                )
+        return v
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -1358,6 +1830,54 @@ class Settings(BaseSettings):
         if "omcp-path-marker" in probe.netloc:
             raise ValueError("OPEN_NOTE_URL's `{path}` must be in the URL's path or query, not its host")
         return v
+    @field_validator("rank_weights", mode="before")
+    @classmethod
+    def _parse_rank_weights(cls, v):
+        """`{0.02, 0.2, 0.4, 1.0}` (PostgreSQL array spelling), a JSON list, a
+        CSV, or a list: exactly four finite numbers, each in [1e-6, 1], as
+        `D, C, B, A`."""
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("{") and s.endswith("}"):
+                s = s[1:-1]
+            elif s.startswith("["):
+                import json
+
+                try:
+                    v = json.loads(s)
+                except ValueError as e:
+                    raise ValueError(
+                        f"RANK_WEIGHTS looks like JSON but failed to parse: {e}"
+                    ) from e
+            if isinstance(v, str):
+                v = s.split(",")
+        if not isinstance(v, (list, tuple)):
+            raise ValueError(
+                "RANK_WEIGHTS must be four numbers {D, C, B, A}, e.g. "
+                "{0.02, 0.2, 0.4, 1.0}"
+            )
+        out: list[float] = []
+        for item in v:
+            try:
+                number = float(str(item).strip())
+            except ValueError as e:
+                raise ValueError(f"RANK_WEIGHTS entry {item!r} is not a number") from e
+            # Finite and in [1e-6, 1]: ts_rank_cd divides by each weight (zero
+            # is not a weight) and PostgreSQL refuses one above 1 ("weight out
+            # of range"); the array binds as float4, where a positive value
+            # below ~1.4e-45 encodes as 0 — so the floor sits far above that.
+            if not math.isfinite(number) or not (RANK_WEIGHT_MIN <= number <= 1.0):
+                raise ValueError(
+                    f"RANK_WEIGHTS entry {item!r} is outside [{RANK_WEIGHT_MIN:g}, 1]; "
+                    "ts_rank_cd divides by each weight, PostgreSQL refuses one above 1, "
+                    "and a smaller value would bind as float4 zero"
+                )
+            out.append(number)
+        if len(out) != 4:
+            raise ValueError(
+                f"RANK_WEIGHTS must have exactly four entries (D, C, B, A), got {len(out)}"
+            )
+        return out
 
     @field_validator("oauth_known_redirect_hosts", mode="before")
     @classmethod
@@ -1754,6 +2274,29 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_tei_api_key(self) -> "Settings":
+        """#426 (design D2): a set `TEI_API_KEY` must be visible ASCII.
+
+        Only under `tei` and outside sandbox, like the URL policy: an inactive
+        provider's setting is never sent. Pure, no I/O, and an absent key is
+        always valid, so the migration init container (which imports this
+        class) starts without the Secret. The message is fixed text and
+        `hide_input_in_errors` keeps pydantic from echoing the input.
+        """
+        if (
+            self.embedding_provider != "tei"
+            or self.mcp_sandbox_mode
+            or self.tei_api_key is None
+        ):
+            return self
+        if not tei_api_key_is_well_formed(self.tei_api_key.get_secret_value()):
+            raise ValueError(
+                "TEI_API_KEY must be visible ASCII with no spaces or control "
+                "characters"
+            )
+        return self
+
     # The `ssl.SSLContext` parsed from `EMBEDDING_CA_FILE` by the validator
     # below, or `None`. Reused by `embedding_http_client`; the file is never
     # re-read.
@@ -1789,6 +2332,8 @@ class Settings(BaseSettings):
             return self
         if self.embedding_provider == "openai":
             setting, url = "OPENAI_BASE_URL", self.openai_base_url
+        elif self.embedding_provider == "tei":
+            setting, url = "TEI_URL", self.tei_url
         else:
             setting, url = "OLLAMA_URL", self.ollama_url
         endpoint = check_embedding_url_policy(
@@ -1800,6 +2345,28 @@ class Settings(BaseSettings):
                 "where a trust anchor verifies nothing. Use an https endpoint "
                 "or unset EMBEDDING_CA_FILE."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_rerank_transport(self) -> "Settings":
+        """#367 (design D1): `RERANK_MODEL` holds no control character, and a
+        non-empty `RERANK_URL` passes the embedding hop's URL rules with its
+        own plaintext flag. The URL policy is skipped under `MCP_SANDBOX_MODE`,
+        like the embedding policy; the address class is not restricted (an
+        internal reranker is expected on a private or loopback host)."""
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in self.rerank_model):
+            raise ValueError("RERANK_MODEL contains a control character")
+        if not self.rerank_url or self.mcp_sandbox_mode:
+            return self
+        from src.services.transport_security import check_embedding_url_policy
+
+        check_embedding_url_policy(
+            self.rerank_url,
+            setting="RERANK_URL",
+            allow_plaintext=self.rerank_allow_plaintext,
+            allow_setting="RERANK_ALLOW_PLAINTEXT",
+            what="every rerank query and candidate note text",
+        )
         return self
 
     @model_validator(mode="after")
@@ -1958,6 +2525,44 @@ class Settings(BaseSettings):
                     repr(h) for h in public_hosts
                 ),
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_oidc(self) -> "Settings":
+        if self.multi_user_mode and not (self.local_login_enabled or self.oidc_enabled):
+            raise ValueError("Multi-user mode requires at least one login method")
+        if not self.oidc_enabled:
+            return self
+        if not self.multi_user_mode or self.mcp_sandbox_mode:
+            raise ValueError("OIDC requires multi-user mode and forbids sandbox mode")
+        for value, origin_only in ((self.oidc_issuer, False), (self.base_url or "", True)):
+            parsed = urlsplit(value)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+                    or parsed.password or parsed.query or parsed.fragment
+                    or any(ord(c) <= 32 or c == "\\" for c in value)
+                    or (origin_only and parsed.path not in ("", "/"))):
+                raise ValueError("OIDC requires an HTTPS issuer and HTTPS BASE_URL origin")
+            _ = parsed.port  # invalid port fails at startup
+        if len(self.oidc_issuer) > OIDC_MAX_ISSUER_CHARS:
+            raise ValueError(f"OIDC_ISSUER must be at most {OIDC_MAX_ISSUER_CHARS} characters")
+        if not all((self.oidc_client_id.strip(), self.oidc_client_secret.strip())):
+            raise ValueError("OIDC requires OIDC_CLIENT_ID and OIDC_CLIENT_SECRET")
+        if len(self.oidc_required_group) > 512:
+            raise ValueError("OIDC_REQUIRED_GROUP must be at most 512 characters")
+        if self.oidc_required_group and not self.oidc_required_group.strip():
+            raise ValueError("OIDC_REQUIRED_GROUP must be empty or name a group")
+        if self.oidc_token_auth_method not in OIDC_TOKEN_AUTH_METHODS:
+            raise ValueError("OIDC_TOKEN_AUTH_METHOD must be one of " + ", ".join(OIDC_TOKEN_AUTH_METHODS))
+        self.oidc_extra_scopes = _normalise_oidc_extra_scopes(self.oidc_extra_scopes)
+        name = self.oidc_display_name
+        if (not 1 <= len(name) <= OIDC_MAX_DISPLAY_NAME_CHARS or not name.isprintable()
+                or not name.strip()):
+            raise ValueError(
+                f"OIDC_DISPLAY_NAME must be 1-{OIDC_MAX_DISPLAY_NAME_CHARS} printable characters")
+        if self.oidc_ca_file is not None:
+            from src.services.transport_security import load_oidc_ca_context
+
+            self._oidc_ssl_context = load_oidc_ca_context(self.oidc_ca_file)
         return self
 
 

@@ -1,11 +1,11 @@
 # embedding-providers Specification
 
 ## Purpose
-TBD - created by archiving change add-openai-embeddings. Update Purpose after archive.
+How the server turns text into vectors: a pluggable provider (Ollama, an OpenAI-compatible endpoint, or a native Text Embeddings Inference server) selected by configuration, its transport and batching, the stored embedding fingerprint that refuses a startup whose model, dimensions or chunking parameters differ from the stored vectors', and (#355, #367) the query/document `kind` every embedding call declares, the query-only `EMBEDDING_QUERY_INSTRUCTION` that stays outside the stored fingerprint, the logged but never-compared retrieval fingerprint, and the per-note chunking version that re-selects notes instead of refusing startup.
 ## Requirements
 ### Requirement: Configurable embedding provider selection
 
-The system SHALL support selecting the embedding backend via the `EMBEDDING_PROVIDER` environment variable, with valid values `ollama` and `openai`. The default value SHALL be `ollama` so existing deployments continue working without configuration changes.
+The system SHALL support selecting the embedding backend via the `EMBEDDING_PROVIDER` environment variable, with valid values `ollama`, `openai` and `tei`. The default value SHALL be `ollama` so existing deployments continue working without configuration changes.
 
 #### Scenario: Default provider is Ollama
 - **WHEN** the server starts with no `EMBEDDING_PROVIDER` set
@@ -16,8 +16,18 @@ The system SHALL support selecting the embedding backend via the `EMBEDDING_PROV
 - **THEN** all calls to `get_embedding` and `get_embeddings_batch` route to OpenAI's `/v1/embeddings` endpoint using the configured `OPENAI_EMBEDDING_MODEL`
 
 #### Scenario: Invalid provider value
-- **WHEN** `EMBEDDING_PROVIDER` is set to a value other than `ollama` or `openai`
+- **WHEN** `EMBEDDING_PROVIDER` is set to a value other than `ollama`, `openai` or `tei`
 - **THEN** the server fails to start with a configuration error naming the invalid value and listing valid options
+
+#### Scenario: TEI provider selected
+- **WHEN** `EMBEDDING_PROVIDER=tei`
+- **THEN** all calls to `get_embedding` and `get_embeddings_batch` route to `POST /embed` on the configured `TEI_URL`
+- **AND** the active embedding model SHALL be `TEI_EMBEDDING_MODEL`, read by the same branch that selects the provider
+
+#### Scenario: TEI without an API key
+- **WHEN** `EMBEDDING_PROVIDER=tei`, `OPENAI_API_KEY` is unset and `TEI_API_KEY` is unset, empty or whitespace-only
+- **THEN** settings construction SHALL succeed
+- **AND** no `Authorization` header SHALL be sent to `TEI_URL`
 
 ### Requirement: OpenAI provider configuration validation
 
@@ -33,7 +43,7 @@ When `EMBEDDING_PROVIDER=openai`, the system SHALL validate at startup that `OPE
 
 ### Requirement: Provider-native batch embedding
 
-The system SHALL embed multiple chunks per indexer pass using the provider's batch mechanism. For OpenAI, this SHALL be a batched request that sends up to `OPENAI_EMBED_BATCH_SIZE` inputs (default and maximum 96) in one HTTP call. For Ollama, this SHALL be a sequence of `/api/embed` requests, each carrying an `input` array of at most `OLLAMA_EMBED_BATCH_SIZE` consecutive chunks. The batch size SHALL default to 16 and SHALL be bounded to 1–256. Each Ollama request SHALL be bounded by `OLLAMA_REQUEST_TIMEOUT_SECONDS` (default 30 s), and there SHALL be no aggregate deadline across requests. Each response SHALL carry exactly as many vectors as the request carried inputs, in input order, or the batch SHALL fail. Setting the batch size to 1 reproduces the pre-batching request shape.
+The system SHALL embed multiple chunks per indexer pass using the provider's batch mechanism. For OpenAI, this SHALL be a batched request that sends up to `OPENAI_EMBED_BATCH_SIZE` inputs (default and maximum 96) in one HTTP call. For Ollama, this SHALL be a sequence of `/api/embed` requests, each carrying an `input` array of at most `OLLAMA_EMBED_BATCH_SIZE` consecutive chunks. The batch size SHALL default to 16 and SHALL be bounded to 1–256. Each Ollama request SHALL be bounded by `OLLAMA_REQUEST_TIMEOUT_SECONDS` (default 30 s), and there SHALL be no aggregate deadline across requests. Each response SHALL carry exactly as many vectors as the request carried inputs, in input order, or the batch SHALL fail. For TEI, this SHALL be a sequence of `/embed` requests, each carrying at most `TEI_EMBED_BATCH_SIZE` consecutive chunks (default 16, bounded to 1–256), under the TEI request contract requirement. Setting the batch size to 1 reproduces the pre-batching request shape.
 
 #### Scenario: OpenAI batch request
 - **WHEN** the indexer calls `get_embeddings_batch` with N chunks (N ≤ 96) and provider is `openai`
@@ -57,7 +67,7 @@ The system SHALL embed multiple chunks per indexer pass using the provider's bat
 
 ### Requirement: Retry on transient OpenAI errors
 
-When the OpenAI provider encounters an HTTP 429 or 5xx response, the system SHALL retry the request with exponential backoff up to 3 attempts before propagating the error.
+When the OpenAI provider encounters an HTTP 429 or 5xx response or an `httpx.HTTPError` raised while sending the request, the system SHALL retry the request with exponential backoff of 1 s then 2 s, up to 3 attempts in total, before propagating the error. A retry after a 429 or 5xx SHALL be logged at WARNING level; a retry after a transport error SHALL NOT log. When the attempts are exhausted by transport errors, the exception from the last attempt SHALL propagate unchanged; when they are exhausted by a status, the `httpx.HTTPStatusError` for that response SHALL propagate. Any other non-200 status SHALL NOT be retried. A 200 response whose body is not JSON SHALL propagate `json.JSONDecodeError` after one request, with no retry.
 
 #### Scenario: Rate limit retry
 - **WHEN** OpenAI returns 429 on the first attempt and 200 on retry
@@ -66,6 +76,22 @@ When the OpenAI provider encounters an HTTP 429 or 5xx response, the system SHAL
 #### Scenario: Persistent failure
 - **WHEN** OpenAI returns 5xx on three consecutive attempts
 - **THEN** the call raises an error that the indexer logs and skips, leaving `embedded_content_hash` unchanged so the chunk is retried on the next indexer pass
+
+#### Scenario: A transport error is retried
+- **WHEN** the first attempt raises `httpx.ConnectError` and the second is answered 200 with a valid body
+- **THEN** the call SHALL return the vectors after one 1 s backoff, having made two requests
+
+#### Scenario: Three transport errors exhaust the attempts
+- **WHEN** all three attempts raise an `httpx.HTTPError`
+- **THEN** the backoffs SHALL be 1 s then 2 s, three requests SHALL have been made, and the exception object from the third attempt SHALL propagate unchanged
+
+#### Scenario: A non-retryable status is sent once
+- **WHEN** OpenAI answers 400 with no input-limit code or phrase
+- **THEN** exactly one request SHALL be made and `httpx.HTTPStatusError` SHALL propagate
+
+#### Scenario: A non-JSON 200 is not retried
+- **WHEN** OpenAI answers 200 with an HTML body
+- **THEN** exactly one request SHALL be made, with no backoff, and `json.JSONDecodeError` SHALL propagate
 
 ### Requirement: Configurable embedding dimensions
 
@@ -78,6 +104,10 @@ The system SHALL store note embeddings in a pgvector column whose width matches 
 #### Scenario: OpenAI dimension override
 - **WHEN** `EMBEDDING_PROVIDER=openai`, `EMBEDDING_DIMENSIONS=512`, and the column has been created with width 512
 - **THEN** OpenAI requests include `"dimensions": 512` and stored vectors have length 512
+
+#### Scenario: TEI sends no dimension parameter
+- **WHEN** `EMBEDDING_PROVIDER=tei`
+- **THEN** the `/embed` request SHALL NOT carry a dimension field, the model's own output width SHALL apply, and a width other than `EMBEDDING_DIMENSIONS` SHALL fail under the TEI response validation requirement
 
 ### Requirement: Dimension-mismatch startup check
 
@@ -130,6 +160,11 @@ The control-panel settings/dashboard view SHALL display the active embedding pro
 - **WHEN** the dashboard loads with provider=openai and a key prefixed `sk-proj-1234...wxyz`
 - **THEN** the page shows "Provider: OpenAI", the configured model, the dimension, and a masked key like `sk-proj-...wxyz`; the full key is not present in HTML or JS sources
 
+#### Scenario: TEI active
+- **WHEN** the dashboard loads with provider=tei
+- **THEN** the page shows the provider name `tei`, `TEI_EMBEDDING_MODEL`, the dimension and `TEI_URL`
+- **AND** the reachability indicator SHALL reflect a `GET /health` against `TEI_URL` made through the embedding transport factory
+
 ### Requirement: Stored settings fingerprints gate startup, and both fail closed
 The system SHALL record, once per derived kind, a **fingerprint of the configuration those rows were generated under**, and SHALL compare it at startup against the fingerprint of the configuration the process is about to run with, refusing to start on a mismatch of either. Two fingerprints SHALL be kept: one for embeddings, covering the active provider, the active model, the dimension count, the chunk size, the chunk overlap and the per-note chunk cap; and one for keyword vectors, covering the configured text-search config list.
 
@@ -139,7 +174,7 @@ The embedding fingerprint's `model` field SHALL be the model of the **active** p
 
 **The per-note chunk cap SHALL be part of the embedding fingerprint.** It determines what a note's stored vector set *is*: at one cap a long note holds N chunks and its tail is absent, and at another it holds a different set. Lowering it leaves rows beyond the new bound; raising it leaves rows that are silently incomplete against the new policy and that nothing will ever re-select, because their content hash still matches. Including it makes a cap change a declared reset rather than a permanent, invisible under-embedding.
 
-**Endpoint identity SHALL be excluded from the fingerprint** — neither the local provider's URL nor the hosted provider's base URL is part of it. Repointing at another host or proxy is an infrastructure change that usually serves the identical artifact, and including it would demand a full vault re-embed for it. The consequence SHALL be recorded as an accepted limitation rather than partially mitigated: **the fingerprint records the configuration, not the model artifact**, so replacing the weights behind a mutable model tag, or pointing at a host serving different weights under the same tag, mixes vector spaces undetected. No value available to the process distinguishes those cases, and a probe of the endpoint would have to trust the endpoint it is checking. The operator rule that stands in its place SHALL be documented beside the model keys: a change of model artifact requires the embedding reset, and nothing will detect it if that step is skipped.
+**Endpoint identity SHALL be excluded from the fingerprint** — none of `OLLAMA_URL`, `OPENAI_BASE_URL` and `TEI_URL` is part of it. Repointing at another host or proxy is an infrastructure change that usually serves the identical artifact, and including it would demand a full vault re-embed for it. The consequence SHALL be recorded as an accepted limitation rather than partially mitigated: **the fingerprint records the configuration, not the model artifact**, so replacing the weights behind a mutable model tag, or pointing at a host serving different weights under the same tag, mixes vector spaces undetected. No value available to the process distinguishes those cases, and a probe of the endpoint would have to trust the endpoint it is checking. The TEI server identity check does not change this: it compares the model name the server reports with the configured one, and compares no artifact digest. The operator rule that stands in its place SHALL be documented beside the model keys: a change of model artifact requires the embedding reset, and nothing will detect it if that step is skipped.
 
 The keyword fingerprint's config list SHALL be compared **order-insensitively**, because a note's stored vector is the concatenation of one vector per config and a query is the disjunction of one query per config; reordering the list changes neither, so refusing on it would be a false alarm.
 
@@ -222,9 +257,9 @@ The dimension check SHALL remain in place alongside the embedding fingerprint. I
 
 #### Scenario: The active provider's model is the one fingerprinted
 
-- **WHEN** the provider is one of the two supported backends and the other backend's model setting carries a different value
-- **THEN** the fingerprint SHALL name the active provider's model
-- **AND** changing only the inactive backend's model setting SHALL NOT cause a mismatch
+- **WHEN** the provider is any of `ollama`, `openai` and `tei`, and the model settings of the two inactive providers carry different values
+- **THEN** the fingerprint SHALL name the active provider's model and no other
+- **AND** changing either inactive provider's model setting SHALL NOT change the fingerprint or cause a mismatch
 
 #### Scenario: A changed endpoint alone does not refuse
 
@@ -423,13 +458,13 @@ The swallow-on-failure rule the indexer follows covers **instrumentation** — t
 - **AND** the old provider output SHALL be refused without certification or vector writes after the reset commits
 
 ### Requirement: A configuration knob that invalidates derived rows SHALL name its remedy where it is set
-Every configuration key whose change silently invalidates stored derived rows SHALL carry, in the operator-facing configuration example and in the reference documentation, the command that repairs those rows. The embedding model keys — the local provider's model name and the hosted provider's model name — SHALL carry the embedding-reset pointer that the chunk-size, chunk-overlap and provider keys already carry, and the reference documentation's provider-switching section SHALL cover a model change within a single provider and SHALL state the deploy-then-reset ordering.
+Every configuration key whose change silently invalidates stored derived rows SHALL carry, in the operator-facing configuration example and in the reference documentation, the command that repairs those rows. The embedding model keys — `EMBEDDING_MODEL`, `OPENAI_EMBEDDING_MODEL` and `TEI_EMBEDDING_MODEL` — SHALL carry the embedding-reset pointer that the chunk-size, chunk-overlap and provider keys already carry, and the reference documentation's provider-switching section SHALL cover a model change within a single provider and SHALL state the deploy-then-reset ordering.
 
 Documenting the remedy is not made redundant by the startup guard. The guard tells an operator that they have already made the change; the documentation tells them what the change costs before they make it, and it is the only signal for the operator editing the file on a host where the server is not running.
 
 #### Scenario: The model keys carry the reset warning
 
-- **WHEN** an operator reads the configuration example at the local provider's model key or the hosted provider's model key
+- **WHEN** an operator reads the configuration example at any of the three model keys
 - **THEN** each SHALL state that changing it after deploy requires the embedding reset workflow
 
 #### Scenario: The reference documentation covers a same-provider model change and the ordering
@@ -440,7 +475,7 @@ Documenting the remedy is not made redundant by the startup guard. The guard tel
 
 #### Scenario: The artifact rule is documented where the model is set
 
-- **WHEN** an operator reads the configuration example or the reference documentation at either model key
+- **WHEN** an operator reads the configuration example or the reference documentation at any of the three model keys
 - **THEN** it SHALL state that replacing the artifact behind an unchanged model name — re-pulling a mutable tag, or pointing at a host serving different weights — also requires the embedding reset
 - **AND** it SHALL state that no startup check detects that case
 
@@ -450,7 +485,7 @@ Each embedding provider SHALL send its requests through one shared, connection-p
 - redirects not followed;
 - the configured CA context.
 
-No code path SHALL construct an `httpx` client for the embedding endpoint by any other means. The client SHALL be created lazily. It SHALL be rebuilt if the running event loop differs from the one it was created on. It SHALL be closed during application shutdown, after the indexer task has been cancelled. Per-request timeouts SHALL be passed on each request: 30 s for Ollama and 60 s for OpenAI.
+No code path SHALL construct an `httpx` client for the embedding endpoint by any other means. The client SHALL be created lazily. It SHALL be rebuilt if the running event loop differs from the one it was created on. It SHALL be closed during application shutdown, after the indexer task has been cancelled. Per-request timeouts SHALL be passed on each request: 30 s for Ollama, 60 s for OpenAI, and 60 s for each TEI `POST /embed` attempt. The 60 s TEI timeout SHALL NOT apply to `GET /info`, which SHALL be bounded by the 5 s wall-clock timeout of the TEI identity check.
 
 #### Scenario: Connections are reused
 - **WHEN** the indexer embeds several notes in one pass
@@ -463,4 +498,351 @@ No code path SHALL construct an `httpx` client for the embedding endpoint by any
 #### Scenario: The client is closed at shutdown
 - **WHEN** the application shuts down
 - **THEN** the shared client SHALL be closed after the indexer task has stopped
+
+### Requirement: Every embedding call SHALL declare whether it embeds a query or a document
+The shared embedding entry points and the provider protocol SHALL take a required keyword argument `kind`, either `"query"` or `"document"`, with no default. The indexer's chunk embedding SHALL pass `"document"`. `semantic_search`, the indexer's cache prewarm and the startup warm-up SHALL pass `"query"`. A test SHALL fail on any call to an embedding entry point under `src/` or `scripts/` that does not pass `kind`. Providers SHALL receive `kind`. A provider whose API has no input-type field SHALL ignore it.
+
+#### Scenario: The indexer embeds documents
+- **WHEN** `embed_note` sends chunks to the provider
+- **THEN** the call SHALL carry `kind="document"`
+
+#### Scenario: A search embeds a query
+- **WHEN** `semantic_search` embeds the caller's query
+- **THEN** the call SHALL carry `kind="query"`
+
+#### Scenario: A call site without a kind fails the sweep
+- **WHEN** a new call to `get_embedding` or `get_embeddings_batch` is added without `kind`
+- **THEN** the call-site sweep test SHALL fail
+
+### Requirement: `EMBEDDING_QUERY_INSTRUCTION` SHALL be prepended verbatim to query inputs only, and SHALL NOT be part of the stored embedding fingerprint
+The system SHALL accept a setting `EMBEDDING_QUERY_INSTRUCTION`, default empty, of at most 1,000 characters, refused at load if it contains NUL or a C0 control other than line feed and tab. When it is non-empty, the shared embedding layer SHALL prepend it, unchanged and with no separator added, to the input of every `kind="query"` call. It SHALL NOT be applied to any `kind="document"` call. With the default empty value, every provider input SHALL be byte-identical to the input without the setting.
+
+Because every stored vector is a document vector embedded without the instruction, the instruction SHALL NOT be a field of the stored, startup-compared embedding fingerprint. Changing it SHALL NOT refuse startup, SHALL NOT clear any certification and SHALL NOT re-embed anything.
+
+#### Scenario: Default is unchanged
+- **WHEN** the setting is empty
+- **THEN** a query's provider input SHALL equal the query text
+
+#### Scenario: Instructed query, plain documents
+- **WHEN** the setting is `Instruct: find notes\nQuery: ` and a search and an index pass both run
+- **THEN** the search's provider input SHALL be that string followed by the query, and no chunk's provider input SHALL contain it
+
+#### Scenario: Changing the instruction needs no reset
+- **WHEN** the instruction is changed between two starts and nothing else is
+- **THEN** the second start SHALL proceed, the stored fingerprint SHALL be unchanged, and the embed backlog SHALL be unchanged
+
+#### Scenario: A control character is refused
+- **WHEN** the setting contains a NUL or a carriage return
+- **THEN** settings load SHALL fail naming the setting
+
+### Requirement: A retrieval fingerprint SHALL distinguish deployments by everything that shapes a query's result, without being stored or compared
+The system SHALL provide `retrieval_fingerprint()`, a canonical-JSON rendering of the embedding fingerprint's fields plus `chunking_version` (the current `CHUNKING_VERSION`) and `query_instruction_sha256` (the first 16 hexadecimal digits of SHA-256 over the instruction's UTF-8, or null when the instruction is empty). It SHALL NOT be written to the index state store and SHALL NOT be compared at startup. Startup SHALL log it once. The log line SHALL carry the digest and never the instruction text. The search-evaluation harness SHALL record it for semantic arms.
+
+#### Scenario: Two deployments that differ only in the instruction
+- **WHEN** two processes share every embedding setting and differ only in `EMBEDDING_QUERY_INSTRUCTION`
+- **THEN** their stored-fingerprint renderings SHALL be equal and their retrieval fingerprints SHALL differ
+
+### Requirement: The chunking format SHALL be versioned per note and outside the stored embedding fingerprint, while model identity stays global and refusing
+The system SHALL track the chunking format as the integer `CHUNKING_VERSION`, record it per note in `notes_metadata.embedded_chunking_version`, and SHALL NOT add it to the stored embedding fingerprint. The chunking format covers:
+- the sectioning rule;
+- the minimum-length constant `CHUNK_MIN_CHARS` and the effective-minimum rule;
+- the grouping and tail rules;
+- the window-boundary lookback and its constant;
+- the locator rule;
+- whether window text is stored raw;
+- the prefix, the embedded-text formatter (version 2 collapses whitespace runs longer than 8 characters) and the embedded-input formatter.
+
+The current version SHALL be 2.
+
+A change of chunking format SHALL re-select notes through the embed backlog, as the index-integrity requirement on chunking versions states. It SHALL NOT refuse startup or require the reset workflow. A change to any element of the chunking format SHALL bump `CHUNKING_VERSION`. The embedded-text formatter of each version SHALL be frozen in a per-version table (`EMBEDDED_TEXT_FORMATTERS`), in the same way as the per-version extraction cleaners. Vector reuse SHALL compare the stored row's text under its stamped version's formatter with the new text under the current formatter, so a version that changes the embedded-text formatter adds an entry and never edits one. Version 2 adds the collapse of whitespace runs longer than 8 characters, giving the entries `{1, 2}`. A version that changes the prefix builder SHALL clear the table to its own entry. `CHUNK_MIN_CHARS` SHALL NOT be a configuration setting and SHALL NOT be part of the stored fingerprint. Its effective value depends only on the chunk size, which is already in the fingerprint.
+
+This is not the per-row model identity that the fingerprint requirement forbids. That prohibition exists because vectors from two models in one column make distance meaningless. A chunking change leaves provider, model and dimensions unchanged, and those stay in the stored, refusing fingerprint, so legacy and re-chunked vectors share one space. A transition still changes ranking, and with it which notes fit inside a bounded page. That is why every vector-search response declares the transition while it lasts, as the index-integrity requirement on chunking versions states.
+
+#### Scenario: A chunking bump does not refuse startup
+- **WHEN** a build with a different `CHUNKING_VERSION` starts over an index whose stored fingerprint matches its configuration
+- **THEN** startup SHALL proceed silently, and every note whose stamp `IS DISTINCT FROM` the running version, whether lower, higher or NULL, SHALL be in the embed backlog
+
+#### Scenario: A model change still refuses
+- **WHEN** the configured model differs from the stored fingerprint's, whatever the chunking version
+- **THEN** startup SHALL refuse and name the reset workflow, as before
+
+#### Scenario: The version-2 deploy over a version-1 index
+- **WHEN** the version-2 build starts over an index built and certified by the version-1 build, with any previously valid configuration
+- **THEN** the computed embedding fingerprint SHALL equal the stored one byte for byte, and startup SHALL proceed
+- **AND** every note SHALL be in the backlog, and a stored vector SHALL be reused when its prefix and its version-1 embedded text equal a new chunk's prefix and version-2 embedded text
+
+### Requirement: The TEI provider SHALL embed through native `/embed` requests with an exact request and response cardinality
+With `EMBEDDING_PROVIDER=tei`, every embedding SHALL be one or more `POST {TEI_URL}/embed` requests whose JSON body is exactly `{"inputs": [...], "truncate": true}`. A batch SHALL be split into consecutive slices of at most `TEI_EMBED_BATCH_SIZE` inputs, sent sequentially. `TEI_EMBED_BATCH_SIZE` SHALL default to 16 and be bounded to 1–256. Each 200 response SHALL carry exactly one vector per input, in input order, or the batch SHALL fail and no vector of it SHALL be used. The request SHALL NOT carry a model field. The query/document `kind` SHALL be accepted and not sent.
+
+#### Scenario: Single input
+- **WHEN** `get_embedding("hello", kind="query")` runs under `tei` with an empty `EMBEDDING_QUERY_INSTRUCTION`
+- **THEN** exactly one `POST /embed` SHALL be sent with the body `{"inputs": ["hello"], "truncate": true}`
+
+#### Scenario: Fixed-size slices
+- **WHEN** `TEI_EMBED_BATCH_SIZE` is 16 and `get_embeddings_batch` is called with 40 chunks
+- **THEN** three sequential requests carrying 16, 16 and 8 inputs SHALL be sent, and the 40 vectors SHALL be returned in input order
+
+#### Scenario: A short response fails the batch
+- **WHEN** a request carrying 16 inputs is answered with 15 vectors
+- **THEN** the batch SHALL fail and no vector from it SHALL be used
+
+### Requirement: The TEI provider SHALL retry transient failures within one overall deadline per slice
+A TEI slice SHALL be attempted at most 3 times, retrying on HTTP 429, HTTP 5xx and transport errors with exponential backoff of 1 s then 2 s. Each attempt SHALL carry the 60 s per-request timeout. The whole slice, attempts and backoff together, SHALL be bounded by one overall deadline of 90 s, and a single-input call SHALL be bounded the same way. Any other non-200 status SHALL NOT be retried. There SHALL be no deadline across slices. A slice that reaches the deadline SHALL fail with a provider failure whose message is non-empty and names the deadline.
+
+#### Scenario: A transient 503 is retried
+- **WHEN** `/embed` answers 503 and then 200 with a valid body
+- **THEN** the call SHALL return the vectors after one backoff
+
+#### Scenario: Persistent 5xx exhausts the attempts
+- **WHEN** `/embed` answers 503 on three consecutive attempts
+- **THEN** the call SHALL raise, the indexer SHALL record `PROVIDER_FAILED`, and the note SHALL remain uncertified with its previous vectors intact
+
+#### Scenario: A hung server cannot hold a slice past the deadline
+- **WHEN** every attempt on a slice hangs until its 60 s timeout
+- **THEN** the slice SHALL fail no later than the 90 s deadline, and SHALL NOT take the roughly 183 s that three timed-out attempts and their backoff would
+
+#### Scenario: A batch-limit refusal is not retried
+- **WHEN** `/embed` answers 413 with `batch size 17 > maximum allowed batch size 16`
+- **THEN** exactly one request SHALL be made and the call SHALL raise a provider failure
+
+#### Scenario: A healthy many-slice note is not cut off
+- **WHEN** a note needs more slices than 90 s of normal latency covers and every slice is answered within the deadline
+- **THEN** every slice SHALL complete and the note SHALL be certified
+
+### Requirement: Every TEI response MUST be validated before any vector of it is used
+A 200 response body from `/embed` MUST parse as JSON and MUST be a list in which every row is a list of exactly `EMBEDDING_DIMENSIONS` finite numbers; a JSON boolean SHALL NOT count as a number. A response that does not satisfy this SHALL be a provider failure raised from the provider, carrying no input text, before any vector of the response is returned to its caller, so that it follows the path of any other provider exception and never reaches the database as a vector.
+
+#### Scenario: A row of the wrong width
+- **WHEN** `EMBEDDING_DIMENSIONS` is 1024 and one row of a 200 response has 768 elements
+- **THEN** the provider SHALL raise, and no vector of that response SHALL be used
+
+#### Scenario: A non-numeric or non-finite element
+- **WHEN** a row contains a string, a null, a JSON boolean, a nested list, `NaN` or `Infinity`
+- **THEN** the provider SHALL raise, and no vector of that response SHALL be used
+
+#### Scenario: A non-JSON 200
+- **WHEN** a proxy answers `/embed` with status 200 and an HTML body
+- **THEN** the provider SHALL raise a provider failure and SHALL NOT retry it
+
+#### Scenario: A JSON object instead of a list
+- **WHEN** `/embed` answers 200 with `{"error": "x"}`
+- **THEN** the provider SHALL raise a provider failure
+
+#### Scenario: The indexer records it as a provider failure
+- **WHEN** a malformed 200 is received while embedding a note
+- **THEN** `embed_note` SHALL return `PROVIDER_FAILED`, nothing SHALL be written to `note_embeddings`, and no pgvector error SHALL occur
+
+#### Scenario: Hybrid search degrades
+- **WHEN** a malformed 200 is received for the query embedding of `hybrid_search`
+- **THEN** the call SHALL return the keyword arm marked `semantic unavailable: provider_error`
+
+### Requirement: The server MUST compare the TEI server's reported identity with its configuration at startup
+With `EMBEDDING_PROVIDER=tei`, outside `MCP_SANDBOX_MODE`, the lifespan MUST make one `GET {TEI_URL}/info` request after the stored-fingerprint guards, with the complete exchange, including reading the response body, bounded by an overall `asyncio` wall-clock timeout of 5 s. The server SHALL exit non-zero, with one CRITICAL log line naming the setting and both values, when the response is a 200 JSON object whose `model_id` differs from `TEI_EMBEDDING_MODEL` by exact string comparison, or whose integer `max_client_batch_size` is less than `TEI_EMBED_BATCH_SIZE`. When the check cannot be concluded, because of a transport error, a timeout including that wall-clock timeout, any non-200 status, a body that is not a JSON object, or a `model_id` that is absent or not a non-empty string, the server SHALL start, SHALL log one CRITICAL line stating that embedding is withheld until the server is verified, and SHALL NOT exit. When `model_id` matches and `max_client_batch_size` is absent or not an integer, the check SHALL pass with one WARNING. The server-reported value SHALL be bounded to 200 characters and escaped in the log. Under any other provider no request to `/info` SHALL be made.
+
+#### Scenario: A matching server
+- **WHEN** `/info` reports `model_id` equal to `TEI_EMBEDDING_MODEL` and `max_client_batch_size` 96 with `TEI_EMBED_BATCH_SIZE` 16
+- **THEN** startup SHALL proceed and the server SHALL be marked verified
+
+#### Scenario: A different model refuses startup
+- **WHEN** `TEI_EMBEDDING_MODEL` is `BAAI/bge-m3` and `/info` reports `model_id` `intfloat/multilingual-e5-small`
+- **THEN** the server SHALL log one CRITICAL line naming `TEI_EMBEDDING_MODEL` and both values, and exit non-zero
+
+#### Scenario: A batch size above the server's limit refuses startup
+- **WHEN** `TEI_EMBED_BATCH_SIZE` is 128 and `/info` reports `max_client_batch_size` 96
+- **THEN** the server SHALL log one CRITICAL line naming `TEI_EMBED_BATCH_SIZE` and both values, and exit non-zero
+
+#### Scenario: An unreachable TEI does not stop the server
+- **WHEN** `GET /info` fails with a connection error at startup
+- **THEN** the server SHALL start and serve, with one CRITICAL line and no non-zero exit, and keyword search and the read and write tools SHALL be unaffected
+
+#### Scenario: A hung or trickling /info cannot hold startup
+- **WHEN** `GET /info` never answers, or sends its response slowly enough that no single read reaches the HTTP client's timeout
+- **THEN** the exchange SHALL be abandoned at the 5 s wall-clock bound, and startup SHALL continue in the inconclusive state with one CRITICAL line and no non-zero exit
+
+#### Scenario: A server that answers without a usable identity does not stop the server
+- **WHEN** `/info` answers 401, 404, a 3xx, or a 200 without a `model_id`
+- **THEN** the server SHALL start and the check SHALL be treated as not concluded
+
+#### Scenario: A missing batch limit is not a refusal
+- **WHEN** `model_id` matches and the response has no `max_client_batch_size`
+- **THEN** the check SHALL pass with one WARNING
+
+#### Scenario: Sandbox mode skips the check
+- **WHEN** `MCP_SANDBOX_MODE=true` and `EMBEDDING_PROVIDER=tei`
+- **THEN** no request to `/info` SHALL be made
+
+#### Scenario: Other providers are not probed
+- **WHEN** `EMBEDDING_PROVIDER` is `ollama` or `openai`
+- **THEN** no request to `/info` SHALL be made and startup behaviour SHALL be unchanged
+
+### Requirement: No TEI vector SHALL be requested until the TEI server has been verified
+`TeiProvider` SHALL send no `/embed` request until a `/info` check in this process has concluded that the server matches. While unverified, each embedding call SHALL run the same check under the same 5 s wall-clock timeout, at most once per 30 s; between checks the call SHALL raise a provider failure without any HTTP request, carrying the last reason. A mismatch found after startup SHALL fail each call the same way, SHALL log one CRITICAL line when the verdict changes, and SHALL NOT exit the process. Once verified, a process SHALL NOT check again. This gate SHALL apply on every path that uses the provider, including maintenance scripts that do not run the lifespan.
+
+#### Scenario: TEI comes up after the application
+- **WHEN** `/info` failed at startup and later reports a matching model
+- **THEN** the first embedding call after the 30 s check interval SHALL verify the server and proceed to `/embed`
+
+#### Scenario: A wrong server that comes up late writes nothing
+- **WHEN** `/info` failed at startup and later reports a different `model_id`
+- **THEN** every embedding call SHALL raise a provider failure, no `/embed` request SHALL be sent, no vector SHALL be stored, and the notes SHALL remain uncertified
+
+#### Scenario: Recovery without restart
+- **WHEN** a late mismatch is corrected on the TEI server
+- **THEN** the next check SHALL verify the server and embedding SHALL proceed without restarting the application
+
+#### Scenario: An unverified server does not cost a probe per note
+- **WHEN** 100 notes are embedded within 30 s while TEI is unreachable
+- **THEN** at most one `/info` request SHALL be made in that interval and each note SHALL record `PROVIDER_FAILED`
+
+#### Scenario: Verification is not repeated
+- **WHEN** the server has been verified at startup and embedding calls follow
+- **THEN** no further `/info` request SHALL be made by this process
+
+### Requirement: The TEI provider SHALL NOT raise input-limit refusals, and other providers' input-limit classification SHALL NOT change
+`TeiProvider` SHALL NOT raise `ProviderInputTooLarge`, because it sends `truncate: true`. A TEI response on a non-retryable status SHALL be a provider failure. The alternative `less than \d+ tokens` SHALL NOT be in the shared input-limit phrase list, so that the classification of Ollama and OpenAI-compatible responses is the classification on `main` before the TEI provider.
+
+#### Scenario: A gateway's unrelated token message stays a provider error
+- **WHEN** an OpenAI-compatible gateway answers 400 with `{"error": {"message": "max_tokens must be less than 4096 tokens"}}`
+- **THEN** the `openai` provider SHALL NOT raise `ProviderInputTooLarge`, and SHALL raise the ordinary provider error
+
+#### Scenario: The same message from Ollama
+- **WHEN** Ollama answers 400 with `{"error": "max_tokens must be less than 4096 tokens"}`
+- **THEN** the `ollama` provider SHALL NOT raise `ProviderInputTooLarge`
+
+#### Scenario: Existing input-limit detection is unchanged
+- **WHEN** an OpenAI-compatible provider answers 400 with `context_length_exceeded`
+- **THEN** the `openai` provider SHALL raise `ProviderInputTooLarge` as before
+
+#### Scenario: A TEI token-limit message is a provider failure
+- **WHEN** `/embed` answers 413 with `` Input validation error: `inputs` must have less than 2048 tokens. Given: 4003 ``
+- **THEN** exactly one request SHALL be made and a provider failure, not `ProviderInputTooLarge`, SHALL be raised
+
+### Requirement: An over-limit chunk under TEI SHALL be truncated and certified as an accepted limitation
+The TEI provider SHALL always send `truncate: true`, so that the server embeds an input longer than the model's limit from its leading tokens. Such a note SHALL be certified as embedded on the same terms as any other note, and no marker SHALL be recorded for the truncation. The operator documentation SHALL state this limitation and that it matches Ollama's truncation to the model context.
+
+#### Scenario: An over-limit chunk is certified
+- **WHEN** a chunk's provider input tokenizes to more than the model's limit and TEI returns a valid vector for it
+- **THEN** the vector SHALL be stored and the note SHALL be certified as embedded, and the text beyond the limit SHALL NOT be represented in that vector
+
+#### Scenario: An over-limit query is searched, not refused
+- **WHEN** a `semantic_search` query under `MAX_SEARCH_QUERY_CHARS` exceeds the model's token limit under `tei`
+- **THEN** the call SHALL return results for the truncated query and SHALL NOT return `argument_too_long`
+
+### Requirement: `TEI_API_KEY` SHALL be sent as a bearer token on every request to `TEI_URL`, and on no other request
+With `EMBEDDING_PROVIDER=tei` and `TEI_API_KEY` set, every request the server makes to `TEI_URL` SHALL carry the header `Authorization: Bearer <key>`, where `<key>` is the value after surrounding whitespace is stripped. These requests are `POST /embed` (every attempt, including retries), `GET /info` (the identity check, from the lifespan and from the embedding gate) and `GET /health` (the control panel's reachability probe). The header SHALL be passed per request, and SHALL NOT be set as a default header of any client or inside `embedding_http_client`. The header SHALL NOT be sent by the Ollama or OpenAI providers, by the reranker, or on any request whose URL is not built from `TEI_URL`. When `TEI_API_KEY` is unset, empty or whitespace-only, the requests to `TEI_URL` SHALL be the same as before this change: the same methods, paths, bodies and header set, with no `Authorization` header. `TEI_API_KEY` SHALL NOT be part of the stored embedding fingerprint or the retrieval fingerprint, and setting, changing or removing it SHALL NOT require an embedding reset.
+
+#### Scenario: All three call sites carry the header
+- **WHEN** `TEI_API_KEY` is `k-123`, and the lifespan check, one `embed_batch` call of 20 inputs with `TEI_EMBED_BATCH_SIZE` 16, and one panel settings page load run against a mock TEI
+- **THEN** the mock SHALL receive `GET /info`, two `POST /embed` and `GET /health`, each with exactly `Authorization: Bearer k-123`
+
+#### Scenario: Retries carry the header
+- **WHEN** `/embed` answers 503 and then 200
+- **THEN** both attempts SHALL carry the header
+
+#### Scenario: Unset is byte-identical
+- **WHEN** `TEI_API_KEY` is unset, `""` or `"   "`
+- **THEN** the header set of each request to `/info`, `/embed` and `/health` SHALL equal the header set captured with the pre-change code under the same mock, and SHALL contain no `Authorization`
+
+#### Scenario: Surrounding whitespace is stripped
+- **WHEN** `TEI_API_KEY` is `k-123` followed by a newline
+- **THEN** the header SHALL be `Authorization: Bearer k-123`
+
+#### Scenario: Other providers never send it
+- **WHEN** `TEI_API_KEY` is set and `EMBEDDING_PROVIDER` is `ollama` or `openai`, or a rerank request is made
+- **THEN** no request SHALL carry a header containing the key; the OpenAI provider's header SHALL still be built from `OPENAI_API_KEY` only
+
+#### Scenario: The setting is read in three files only
+- **WHEN** the source tree under `src/` is searched for `tei_api_key`
+- **THEN** it SHALL occur only in `src/config.py`, `src/services/embeddings.py` and `src/services/transport_security.py`, and `src/services/rerank.py` SHALL NOT reference the header helper
+
+#### Scenario: A redirect does not forward the header
+- **WHEN** `/embed`, `/info` or `/health` answers 307 with `Location` naming a second listener
+- **THEN** the second listener SHALL receive no request
+
+#### Scenario: A key change does not refuse startup
+- **WHEN** only `TEI_API_KEY` changes between two starts
+- **THEN** the embedding fingerprint and the retrieval fingerprint SHALL be unchanged and startup SHALL proceed
+
+### Requirement: `TEI_API_KEY` SHALL never be disclosed by the server
+The value of `TEI_API_KEY` SHALL NOT appear in any log record (message, arguments or formatted exception), in the `/health` response, in any control-panel page (the `/admin/health` run history and error ring included), in the persisted `indexer_runs.error` column, in any exception message or stored embed-failure message, in any security event, in `repr` or `str` of the settings object, in a settings `ValidationError`, or in either embedding fingerprint. The setting SHALL be held as a `SecretStr`, and `Settings` SHALL keep `hide_input_in_errors` enabled.
+
+#### Scenario: A sentinel value never surfaces
+- **WHEN** `TEI_API_KEY` is a sentinel and the test runs startup (transport line, plaintext warning, identity check answering 200 match, 200 mismatch, 401 and 403), `embed_note` with `/embed` answering 200, 401, 403 and three 503s, the panel settings page, the app's `/health`, both fingerprints, and every security event emitted along the way, with logs captured at DEBUG
+- **THEN** the sentinel SHALL NOT occur in any captured log record, response body, exception string, stored failure message, event or fingerprint
+- **AND** the mock TEI SHALL have received the sentinel in the `Authorization` header, as the positive control
+
+#### Scenario: The persisted pass record and the health page do not carry it
+- **WHEN** `TEI_API_KEY` is a sentinel and an index pass runs against a verified TEI whose `/embed` answers 401
+- **THEN** the persisted `indexer_runs.error` value of that pass SHALL NOT contain the sentinel, and SHALL name `TEI_API_KEY`
+- **AND** the rendered `/admin/health` page (run history and the error ring) SHALL NOT contain the sentinel
+
+#### Scenario: The settings representation masks it
+- **WHEN** `repr(settings)` and `str(settings.tei_api_key)` are taken with the sentinel set
+- **THEN** neither SHALL contain the sentinel
+
+#### Scenario: A validation error does not echo it
+- **WHEN** settings construction fails on a malformed `TEI_API_KEY` that contains the sentinel
+- **THEN** the `ValidationError` text SHALL NOT contain the sentinel
+
+### Requirement: A malformed `TEI_API_KEY` SHALL refuse startup without showing the value
+With `EMBEDDING_PROVIDER=tei`, outside `MCP_SANDBOX_MODE`, settings construction SHALL refuse a `TEI_API_KEY` whose value, after surrounding whitespace is stripped, is non-empty and contains any character outside visible ASCII (U+0021 to U+007E), with a message naming `TEI_API_KEY` and not containing the value. An empty or whitespace-only value SHALL be treated as unset. Under any other provider, or under `MCP_SANDBOX_MODE`, the value SHALL NOT be checked and SHALL NOT be sent. The check SHALL do no I/O, so that settings construction in the migration init container, which imports `Settings`, succeeds whenever the key is absent.
+
+#### Scenario: An inner space refuses startup
+- **WHEN** `EMBEDDING_PROVIDER=tei` and `TEI_API_KEY` is `abc def`
+- **THEN** settings construction SHALL fail with a message naming `TEI_API_KEY`, and the message SHALL NOT contain `abc` or `def`
+
+#### Scenario: A control or non-ASCII character refuses startup
+- **WHEN** `TEI_API_KEY` contains a carriage return, a tab between two visible characters, or the character U+00E9 (Latin small letter e with acute)
+- **THEN** settings construction SHALL fail naming `TEI_API_KEY`
+
+#### Scenario: Another provider ignores it
+- **WHEN** `EMBEDDING_PROVIDER=ollama` and `TEI_API_KEY` is `abc def`
+- **THEN** settings construction SHALL succeed and no request SHALL carry it
+
+#### Scenario: An absent key never refuses
+- **WHEN** `EMBEDDING_PROVIDER=tei`, `TEI_API_KEY` is absent, and settings are constructed as the migration init container constructs them
+- **THEN** settings construction SHALL succeed
+
+### Requirement: A 401 or 403 from TEI SHALL name `TEI_API_KEY` as the likely cause and SHALL NOT be treated as a model mismatch
+A `GET /info` answered 401 or 403 SHALL be an inconclusive identity check, never a mismatch. It SHALL NOT exit the process, and embedding SHALL stay withheld under the existing re-check rule. The reason SHALL be `GET /info answered HTTP <status>; TEI_API_KEY is not set` when the key is unset, and `GET /info answered HTTP <status>; the server rejected TEI_API_KEY` when it is set. The identity check SHALL log one CRITICAL line carrying that reason when an auth reason first appears or changes, even if an inconclusive verdict of another kind was logged before. A repeat of the same auth reason SHALL NOT log again. Every other inconclusive reason SHALL keep its existing wording and once-per-verdict logging. A `POST /embed` answered 401 or 403 SHALL be raised after one request, with no retry, as a provider failure whose message is `TEI /embed answered HTTP <status>; TEI_API_KEY is not set` or `TEI /embed answered HTTP <status>; the server rejected TEI_API_KEY`, carrying no URL, header or response body. It SHALL be recorded by `embed_note` as `PROVIDER_FAILED`, leaving previous vectors intact. One ERROR line with that message SHALL be logged on the first such failure, and SHALL NOT be logged again until a `POST /embed` has been answered 200. An `/embed` auth failure SHALL NOT clear the verified state. The OpenAI provider's handling of 401 and 403 SHALL NOT change.
+
+#### Scenario: /info 401 with no key
+- **WHEN** `TEI_API_KEY` is unset and `/info` answers 401 at startup
+- **THEN** the server SHALL start, SHALL NOT exit, and SHALL log one CRITICAL line containing `GET /info answered HTTP 401; TEI_API_KEY is not set`
+
+#### Scenario: /info 403 with a rejected key
+- **WHEN** `TEI_API_KEY` is set and `/info` answers 403
+- **THEN** the check SHALL be inconclusive with the reason `GET /info answered HTTP 403; the server rejected TEI_API_KEY`, and no `/embed` request SHALL be sent
+
+#### Scenario: The auth line is not swallowed by an earlier inconclusive line
+- **WHEN** `/info` first fails with a connection error, and at the next check answers 401
+- **THEN** two CRITICAL lines SHALL have been logged, the second naming `TEI_API_KEY`; a third check answering 401 again SHALL log nothing
+
+#### Scenario: Recovery after the key is fixed
+- **WHEN** `/info` answered 401 and, after a restart with the right key, answers 200 with a matching `model_id`
+- **THEN** the server SHALL be verified and embedding SHALL proceed
+
+#### Scenario: /embed 401 mid-run
+- **WHEN** the server is verified and `/embed` answers 401 for every note of a 50-note pass
+- **THEN** each note SHALL record `PROVIDER_FAILED` with the message `TEI /embed answered HTTP 401; the server rejected TEI_API_KEY`, exactly one request SHALL be made per slice, and no `/info` request SHALL be made
+- **AND** exactly one provider ERROR line naming `TEI_API_KEY` SHALL be logged for the pass, beside the indexer's existing pass-summary ERROR line and its existing per-note WARNING lines (`Failed to embed <path>: …`), which this change SHALL NOT alter
+
+#### Scenario: The ERROR line re-arms after success
+- **WHEN** `/embed` answers 401, then 200, then 401
+- **THEN** two provider ERROR lines naming `TEI_API_KEY` SHALL have been logged
+
+### Requirement: A key on a plaintext non-loopback TEI hop SHALL be admitted with one startup warning
+When `EMBEDDING_PROVIDER=tei`, `TEI_API_KEY` is set, and `TEI_URL` is `http` to a non-loopback host (admitted by `EMBEDDING_ALLOW_PLAINTEXT=true`), the server SHALL start and SHALL log, once at startup after the embedding transport line, one WARNING: `TEI_API_KEY is sent in clear over http to a non-loopback host (admitted by EMBEDDING_ALLOW_PLAINTEXT); use an https TEI_URL to protect it`. With an `https` URL, a loopback `http` URL, or the key unset, no such line SHALL be logged. The embedding transport line and the `internal_transport_plaintext` event SHALL be unchanged.
+
+#### Scenario: Plaintext remote hop with a key
+- **WHEN** `TEI_URL=http://tei:80`, `EMBEDDING_ALLOW_PLAINTEXT=true` and `TEI_API_KEY` is set
+- **THEN** startup SHALL proceed and the WARNING SHALL be logged exactly once, without the key
+
+#### Scenario: Loopback or TLS
+- **WHEN** `TEI_URL` is `http://127.0.0.1:8080` or `https://tei.internal.example`, with `TEI_API_KEY` set
+- **THEN** no plaintext-key WARNING SHALL be logged
+
+#### Scenario: Unset key logs nothing new
+- **WHEN** `TEI_URL=http://tei:80`, `EMBEDDING_ALLOW_PLAINTEXT=true` and `TEI_API_KEY` is unset
+- **THEN** the startup log lines SHALL be the same as before this change
 

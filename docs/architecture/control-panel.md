@@ -30,7 +30,7 @@
   object-src 'none'
   base-uri 'none'
   frame-ancestors 'none'
-  form-action 'self'        (the consent page: 'self' https:)
+  form-action 'self'        (the consent page: 'self' https: http://localhost:* http://127.0.0.1:*)
   ```
 
   Each source is there for something the templates do. `script-src` lists
@@ -174,6 +174,24 @@
   go is decided by the HTTPS-only registration rule and `authorize_post`'s
   exact-match re-validation, never by this header. `authorize_get` calls
   `mark_consent` before rendering; every other page keeps `'self'`.
+  **#357 adds `http://localhost:*` and `http://127.0.0.1:*`**
+  (`panel_csp.CONSENT_FORM_ACTION`, still a constant). A Client ID Metadata
+  Document client such as Claude Code receives its code on an RFC 8252
+  loopback callback on an ephemeral port, and the 302 to it is a
+  form-submission hop. Without the two sources the approve completes
+  server-side and the browser blocks the delivery. Where a code may go is
+  still decided server-side (`cimd.redirect_uri_allowed`: loopback http only
+  for those exact host literals, port-agnostic, path and query exact). CSP
+  host-source syntax cannot name an IPv6 literal, so a `[::1]` callback is
+  matched by the server but may be blocked here. No known client declares it
+  (L3 in [oauth and grants](oauth-and-grants.md)).
+
+- **The CIMD consent card (#357)** shows the client identifier URL's host as
+  the application, the full URL as the client ID, and "First approved".
+  The document's self-declared `client_name` is **not rendered** on the
+  consent page. The OAuth panel lists a CIMD row by host and URL, with the
+  name labelled "Self-described as". Both use existing utility classes, so
+  no `style=` and no handler are involved.
 
 - **`PANEL_CSP` is the rollback lever** (`enforce` | `report-only` | `off`,
   default `enforce`, boot-validated — an unknown value refuses startup).
@@ -890,6 +908,27 @@ action is how an administrator says it was on purpose.
   per-pass budget, which is deliberately *not* written into the pass record's
   `error` because it is a decision rather than a fault.
 
+## The excluded sync-conflict count (#392)
+
+While `INDEX_EXCLUDE_CONFLICT_FILES` is on, the dashboard shows
+`N sync-conflict cop{y|ies} not indexed (INDEX_EXCLUDE_CONFLICT_FILES)` beside
+"Indexer last ran", read from `indexer.excluded_conflict_copies` (process
+memory, the last committed pass's count).
+
+- **Its scope is the viewer's own vault, not `_scope_user_id`.** That helper
+  returns `None` for an administrator, meaning "no filter" on the aggregate
+  queries, but `None` is also the single-user *scope key*, so an
+  administrator would have read nothing for their own vault (spec review r1).
+  The route uses `user.id` in multi-user mode, administrators included, and
+  `None` only in single-user mode.
+- **Template-only.** One Jinja conditional appended after the existing
+  `</span>` on the same line, using the existing `u-opacity-0_75` class. No
+  script, no `style=`, no handler, no new class. The test is `is integer`, so
+  a context without the key (or `None`: setting off, nothing counted yet)
+  renders byte-identically to the page before the change. Like every panel
+  template change, it needs the owner's devtools walk with zero CSP
+  violations.
+
 
 ## The last-admin guard
 
@@ -982,7 +1021,7 @@ The lifecycle, in one table — one implementation per phase:
 
 | Phase | Trigger | What happens | Where |
 | --- | --- | --- | --- |
-| **Mint** | login; bootstrap registration; the re-issue after a password change | **under the account guard**: re-read the user `FOR UPDATE` with `populate_existing=True`, require it to exist and be active, insert a row keyed on `sha256(sid)` with `expires_at = now + session_max_age` and `user_agent_hash`, **commit**, and only then write `sid` into the signed cookie | `start_session()`, three callers |
+| **Mint** | password/OIDC login; bootstrap registration; the re-issue after a password change | **under the account guard**: re-read the user `FOR UPDATE` with `populate_existing=True`, require it to exist and be active, insert a row keyed on `sha256(sid)` with `expires_at = now + session_max_age` and `user_agent_hash`, **commit**, and only then write `sid` into the signed cookie | `start_session()`, four callers |
 | **Validate** | every request that resolves a browser identity | the cookie must carry **both** `user_id` and `sid`; refused when the row is absent, revoked, expired, or `row.user_id` disagrees with the cookie's; then the existing user-exists / `is_active` / `session_version` checks. Every refusal clears the cookie **and records `panel_session_replay_refused`** with one of eight reasons | `get_active_session_user()`, reached from `require_user_panel`, `login_form`, `authorize_get`, `authorize_post` — the only four entry points |
 | **Touch** | a `GET`/`HEAD` whose row is more than `SESSION_TOUCH_INTERVAL_SECONDS` stale | `last_seen_at = now()` on the **request's own** session, committed in the dependency before the handler runs; skipped on every other method and on any failure | `touch_session()` |
 | **Revoke — one** | logout | `revoked_at` for that row, commit, cookie cleared | `logout` in `src/auth/routes.py` |
@@ -996,7 +1035,7 @@ The lifecycle, in one table — one implementation per phase:
   handed to the browser beside it would authenticate nothing, which is a hard
   logout loop on the very next request. Making `start_session` own its
   transaction makes "the row exists before the cookie leaves" a property of one
-  function rather than of three call sites' discipline.
+  function rather than of four call sites' discipline.
   `revoke_session` / `revoke_user_sessions` are the opposite by the same
   reasoning: every one of their callers holds the account guard, and the
   documented rule for that critical section is that nothing may commit between
@@ -1032,9 +1071,10 @@ The lifecycle, in one table — one implementation per phase:
   that only asked that question would insert a live row *after* the reset's
   sweep and copy the new version into the cookie — handing the **superseded**
   password a fully valid session and defeating both invalidators at once. The
-  three call sites each pass the generation they hold: `login_submit` the
+  call sites each pass the generation they hold: `login_submit` the
   version `verify_password` ran against, `register_submit` the row it just
-  created, `change_password` the bumped version it just committed. The same
+  created, `change_password` the bumped version it just committed, and the OIDC callback
+  the local account version resolved after provider verification. The same
   window is why the post-change re-issue, which runs in a *second* transaction,
   needs it too.
 
@@ -1247,3 +1287,223 @@ The lifecycle, in one table — one implementation per phase:
   absence of any numeric `minlength` on these forms **and** that each handler
   actually passes the key — a template reading it off a context that has none
   renders `minlength=""`, which is silently no minimum at all.
+
+## The Tasks card (#428)
+
+One shared template, `templates/_task_settings_card.html`, edits one
+`task_settings` row (the per-owner-scope settings of the task tools). It has
+two homes, because the scopes differ by mode:
+
+- **Multi-user mode:** on the account page, editing the signed-in user's own
+  row. `GET /admin/account` renders it; `POST /admin/account/tasks` saves it,
+  behind `require_user_panel`, and 404s in single-user mode like every
+  `/account` route (`_require_account_route`).
+- **Single-user mode:** on the Settings page, editing the NULL-scope row that
+  every MCP caller there uses. `POST /admin/settings/tasks` saves it, behind
+  `require_admin_panel`, and 404s in multi-user mode, where nobody reads the
+  NULL row and a route that wrote it would be a control with no effect. A card
+  on `/account` in single-user mode was rejected: that page 404s there by
+  design (#197).
+
+**Neither route takes a scope from the request.** The scope is the session's
+own user id (multi-user) or NULL (single-user), and only the card's own field
+names are passed to `task_settings.save`, so an extra `user_id` field never
+reaches the service. Validation and the upsert (under `FOR UPDATE`) live in
+the service; the route owns the transaction, the flash and the 303. A refused
+save rolls back, writes nothing and flashes every problem; the redirected GET
+shows the values still stored. Both routes take the router-wide CSRF check.
+
+**The controls.**
+
+- **"Which checkboxes are tasks"** (#434), the first block on the card. Why
+  the rule exists and what it does are in [vault tools](vault-tools.md),
+  "The task rule (#434)". Three controls, every one always visible (no
+  show/hide logic, so `panel.js` is untouched), each input labelled with the
+  rule that uses it:
+  - a `task_rule` select, consistent with the card's other three-way
+    selects: *Server default (<the server's rule in words>)* (stored NULL),
+    *Every checkbox is a task* (`all`), *Only checkboxes with task details or
+    a task tag* (`fields`), *Only checkboxes that contain the global filter
+    text* (`filter`);
+  - a `task_tags` textarea, one per line, at most 32, normalised like the
+    excluded note tags (a leading `#` stripped, lower-cased, the tag
+    grammar, no trailing `/`);
+  - a `global_filter` text input, `maxlength="64"`, placeholder `#task`,
+    validated by `task_rule.normalise_filter`, the same function that
+    validates `TASKS_GLOBAL_FILTER` at startup.
+
+  The help text is written for someone who has never installed the Tasks
+  plugin (it lists the emoji fields and names the plugin's "Global task
+  filter"). Under the select, "In use now: <rule in words>[, task tags: …]
+  [, filter: …] (server default | set here)" shows the *effective* rule;
+  with the server default selected, the server's tags or filter appear
+  read-only there. **"Server default" inherits the server's whole rule as
+  one unit** (kind, tags and filter text), never field by field, so what the
+  card says is in use is exactly what the tools use, and a user who picks
+  `filter` can never silently inherit a filter text the card does not show.
+  A stored rule the server cannot apply (only a manual database edit can
+  make one) is shown with a warning, and the tools treat it as "every
+  checkbox". Save rules: an absent `task_rule`, `task_tags` or
+  `global_filter` key leaves the stored value unchanged (a client posting
+  part of the card must not erase a rule); tags or a filter text the chosen
+  rule does not use are stored and kept, so switching rules to compare
+  loses nothing; a merged `filter` rule without a filter text is refused
+  ("The “filter” rule needs a global filter text…"), nothing written. The
+  scope's saves are serialised by `pg_advisory_xact_lock` taken before the
+  row is read (two first saves for a scope with no row cannot interleave),
+  and a `ck_task_settings_global_filter` violation at flush is the same
+  refusal.
+- A timezone `<input list>` with a `<datalist>` of a **fixed** list of 76
+  common IANA names (`TASK_TIMEZONE_SUGGESTIONS` in `routes.py`). The list is
+  fixed rather than `zoneinfo.available_timezones()` because that set is the
+  union of the system zone files and the `tzdata` wheel and differs between
+  hosts, while the account page is pinned byte for byte by
+  `tests/golden/oidc_off/`. Any name the validator accepts may be typed; the
+  validator refuses host-only pseudo-zones (`localtime`, `Factory`,
+  `posixrules`, `posix/…`, `right/…`). A stored zone this build cannot load is
+  shown with a warning and the tools use UTC.
+- Two textareas, one entry per line, at most 32 each: excluded folders
+  (vault-relative, no `..`, `.` or empty segments, no leading `/`, normalised
+  to end in `/`) and excluded note tags (a leading `#` stripped, lower-cased,
+  the tag grammar, no trailing `/`).
+- Four **three-option selects** — *Server default (on/off)*, *On*, *Off* —
+  for the write behaviours, labelled by what they do, with the Tasks plugin's
+  own setting name in the help text. They are not checkboxes because "server
+  default" (stored NULL, following the environment) must stay expressible;
+  `save` reads the literal `default` as exactly that, and a boolean field
+  absent from the form leaves the stored value unchanged.
+
+**CSP posture** (#195, #289): the card has no script, no inline handler, no
+`style=` and no `javascript:` URL; every control is a plain form field, so
+`panel.js` gains nothing. Classes are existing components and generated
+utilities. The #434 rule block keeps that posture unchanged: no script,
+handler or `style=`, only existing classes. The `page_account_*` goldens
+were regenerated deliberately (again for #434); the settings page has no
+golden. The owner walks the card by hand in both modes
+with devtools open, and zero CSP violations is part of the bar.
+
+## Optional native OIDC (#414, #416)
+
+`src/auth/oidc.py` is the protocol half: discovery, PKCE S256 authorization,
+the token exchange and ID-token validation (Authlib + joserfc, RS256 / PS256 /
+ES256 intersected with what discovery advertises, exact `iss`, singleton
+`aud`, `azp`, `nonce`, integer `exp`/`iat` with zero leeway, `sub` ≤ 255, the
+group check only when `OIDC_REQUIRED_GROUP` is set). It returns a
+`VerifiedIdentity(iss, sub, email, email_verified)` — **claims, never a user
+id**. Which local user that identity is, if any, is decided by
+`src/services/oidc_links.py` in the callback's database phase. Operator
+guide: [docs/native-oidc.md](../native-oidc.md). The server's own MCP OAuth
+(DCR, CIMD, grants, rotation) is untouched; OIDC changes only how a panel
+session is minted.
+
+- **The link is on the `users` row** (migration 037, see
+  [schema and migrations](schema-and-migrations.md#037-oidc-account-links-on-users-416)):
+  a bound triple `(oidc_issuer, oidc_subject, oidc_linked_at)` or a pending
+  one `(oidc_expected_issuer, oidc_expected_email, oidc_expected_set_at)`,
+  never both. `OIDC_SUBJECT_USER_IDS` is retired and refuses startup (two
+  sources of truth for one binding is a precedence rule nobody remembers under
+  pressure); the message's last sentence names the docs heading, so the two
+  must change together.
+
+- **Resolution order: `(iss, sub)` first, email only after it fails.**
+  `oidc_links.resolve` is unlocked SELECTs. A row bound to `(iss, sub)` is the
+  user and the email claim is not read — so `exchange()` never refuses on
+  email: anything but a string of ≤ 254 characters becomes `None`, a
+  non-matching sentinel, and `email_verified` is `True` only for the JSON
+  boolean. Only when nothing is bound is the email normalized (strip ASCII
+  whitespace, lower-case ASCII letters only, exactly one `@`, no whitespace or
+  control characters, 3–254 characters; no IDN/Unicode folding, which would be
+  a homograph surface) and matched against a pending expectation under the
+  same issuer set less than `PENDING_DAYS` (7, a module constant, not a
+  setting) ago by the database clock. Match + verified → `pending` (may bind);
+  match + unverified → `email_unverified`; anything else → `unlinked`. An
+  expired expectation is not deleted on the read path, it just stops matching.
+  `preferred_username` is never consulted (OIDC Core says not to rely on its
+  uniqueness).
+
+- **Bind and mint are one transaction.** `prepare_login` takes
+  `lock_account_guard` — the same key `_lock_admin_guard` and `start_session`
+  take, transaction-scoped and re-entrant, so the mint re-taking it is a
+  no-op — re-reads the row `FOR UPDATE` with `populate_existing=True`, and
+  re-checks everything `resolve` saw: active (else `account`, before any
+  write); on the bound branch still bound to `(iss, sub)` (an unlink may have
+  committed, else `unlinked`); on the pending branch still pending with the
+  same issuer and email, live, unbound, and no other row holding `(iss, sub)`
+  (else `unlinked` / `link_conflict`; a unique violation at flush is also
+  `link_conflict`). It writes the bind and `last_login_at`, flushes and
+  **does not commit**. `start_session(expected_session_version=<the locked
+  re-read's version>)` commits bind, stamp and session row together; on a
+  refused mint the route rolls back again explicitly. So a refused mint leaves
+  no binding and no `last_login_at` — the admin's intent and the first session
+  are one fact. All provider I/O happens before the first statement, so no
+  connection is held during it.
+
+- **Every refusal is one response.** `_oidc_refused` maps any reason outside
+  `security_events.OIDC_REFUSAL_REASONS` to `provider`, records
+  `panel_oidc_refused`, and renders the same login page and message (401; 503 +
+  `Retry-After: 60` for `capacity`). `unlinked` and `account` bodies are
+  identical apart from the CSRF token and nonce, so the page never confirms
+  that an identity resolves to a local user. The callback never consults or
+  charges the per-account failed-password budget (it is about password
+  guessing, and must not let a password sprayer lock someone out of SSO).
+
+- **The admin actions** are `POST /admin/users/{id}/oidc/{expect,bind,unlink}`
+  in `src/control_panel/users.py`, sharing `_oidc_link_action`: 404 while OIDC
+  is off; `require_admin_panel` + CSRF; `_lock_admin_guard`, then
+  **immediately** `_actor_still_privileged` (on failure `actor_snapshot`,
+  rollback, `_log_actor_revoked`, `_ACTOR_REVOKED_MSG` — the last-admin
+  guard's sequence above, because the wait for the lock is exactly when this
+  actor's demotion can commit); only then the target, the `oidc_links`
+  operation (which re-reads the target `FOR UPDATE` and writes inside a
+  SAVEPOINT, so a uniqueness violation is a `conflict` flash without aborting
+  the guarded transaction), the commit, and after it the flash and the event.
+  Expect and bind are refused on a bound row (`bound_already`): **a bound user
+  is never re-pointed without an explicit unlink.** Unlink clears all six
+  columns and calls `revoke_user_sessions` in the same transaction. Bind is
+  always under the *configured* issuer.
+
+- **D15, the last reachable administrator.** The last-admin guard counts
+  admins who exist; with `LOCAL_LOGIN_ENABLED=false` an admin not bound under
+  the configured issuer cannot reach the panel at all. So while password login
+  is off (`_reachable_admin_rule_applies`), unlink, the edit form's clearing of
+  `is_admin` or `is_active`, soft delete and permanent delete refuse any
+  outcome with zero rows `is_admin AND is_active AND oidc_issuer = <configured>
+  AND oidc_subject IS NOT NULL` (`oidc_links.reachable_admins_after`, which
+  excludes the target, so it gives the same answer before or after the
+  target's write). It runs inside the guard, after the actor re-check, in the
+  writing transaction, beside the existing last-active-admin check; unlink
+  evaluates it after the operation and before the commit, so a refusal rolls
+  the unlink and its session revocations back together. Self-unlink is refused
+  outright while password login is off. `tests/test_oidc_mutation_sites.py`
+  pins that these four sites (plus the first-login bind, bootstrap and create,
+  which only add) are the only `src/` writers of `is_admin`, `is_active`,
+  `oidc_subject` and the only `users` deleters, so a fifth site cannot skip the
+  rule. With password login on, the rule does not apply: the form reaches
+  every active admin. What the panel cannot see — a changed `OIDC_ISSUER`, an
+  account disabled at the provider, `LOCAL_LOGIN_ENABLED=false` set with
+  nobody bound — is reported by `_warn_oidc_lockout` in the lifespan: one
+  CRITICAL line, never a refusal (an outage of one login method must not
+  become an outage of `/mcp`); a failure of its own query is a WARNING.
+
+- **Templates, under the nonce CSP.** Every new block is inside
+  `{% if oidc_enabled %}`, so with OIDC off the login, users, user edit and
+  account pages are byte-identical to before (the `tests/golden/oidc_off/`
+  goldens). The login button is a GET link labelled "Sign in with
+  `OIDC_DISPLAY_NAME`" (autoescaped), so `form-action` is unaffected. The
+  user edit page's "Single sign-on" card shows not linked / pending (with
+  expiry) / expired / linked (subject truncated to 8 characters) / linked
+  under a previous issuer; the issuer itself is never rendered. Unlink uses
+  the existing `type="button"` + `data-confirm` listener. The users list has
+  an SSO column (`linked` / `pending` / `—`), and `/admin/account` a read-only
+  line; there is no self-service linking.
+
+- **Unchanged from #414.** State is 32 random bytes bound to the signed
+  session cookie and consumed from a bounded in-memory store (5 min, 1,024
+  slots, 60 starts/min/process; one worker required) before any network I/O;
+  nonce and PKCE verifier never reach a cookie. `next` passes `_safe_next` at
+  start and at redirect. Activation requires multi-user mode and forbids
+  sandbox mode; `/admin/register` is 404 under OIDC even on an empty table
+  (no SSO bootstrap: the first identity would race for admin). At least one
+  login method must stay enabled in multi-user mode. Provider-side
+  offboarding does not end app sessions or MCP credentials (L2); logout is
+  local (L3).

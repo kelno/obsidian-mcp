@@ -35,21 +35,37 @@ from src.services.pool_budget import CLASS_CONNECTIONS, budget_terms
 
 # Bump whenever TOOL_CLASSES changes shape: it is part of the epoch, so rows
 # and counters from a different classification never mix in one window.
-CLASS_MAPPING_VERSION = 6
+# 3: `list_tasks` added to `scan` (#350).
+# 4: `get_changes` added to `scan` (#351).
+# 5: hybrid_search added to embedding (#354).
+# 6: complete_task, update_task, add_task added to write; task_agenda to scan (#428).
+# 7: the fork's tools and upstream's 6 in one mapping (resync, 2026-11-13).
+CLASS_MAPPING_VERSION = 7
 
 TOOL_CLASSES = {
-    "semantic_search": "embedding",
-    # Its default mode embeds the query, like `semantic_search`.
-    "ledger_search": "embedding",
+    # `hybrid_search` makes the same provider round trip as `semantic_search`,
+    # so the two share the `embedding` slot (#354, design D5). The ledger's
+    # default mode embeds the query too (fork).
+    **dict.fromkeys(("semantic_search", "hybrid_search", "ledger_search"), "embedding"),
     "find_related": "vector",
     **dict.fromkeys(("create_note", "edit_note", "move_note", "delete_note",
                      "set_frontmatter", "write_file", "delete_file", "move_file",
-                     "delete_folder", "import_from_url", "create_task",
-                     "edit_task", "set_task_status", "ledger_add", "ledger_update",
-                     "ledger_digest_edit", "ledger_topic_edit"), "write"),
+                     "delete_folder", "import_from_url",
+                     # #428: the three task write tools publish a note through
+                     # the same envelope as `edit_note` (mapping version 6).
+                     "complete_task", "update_task", "add_task",
+                     # The fork's task and ledger writers.
+                     "create_task", "edit_task", "set_task_status", "ledger_add",
+                     "ledger_update", "ledger_digest_edit", "ledger_topic_edit"), "write"),
     **dict.fromkeys(("keyword_search", "list_notes", "get_tags",
                      "get_neighborhood", "find_orphans", "list_files",
-                     "list_tasks", "open_area", "index_status"), "scan"),
+                     "list_tasks", "get_changes",
+                     # #428: one snapshot of `note_tasks`, like `list_tasks`.
+                     "task_agenda",
+                     # Upstream's `list_tasks`, registered under this name
+                     # (switched off) because the fork's task tools keep theirs.
+                     "upstream_list_tasks",
+                     "open_area", "index_status"), "scan"),
     **dict.fromkeys(("read_note", "read_file", "get_recent", "get_vault_guide",
                      "get_backlinks", "get_links", "request_upload",
                      "check_upload", "request_download", "fetch_page", "ledger_get",

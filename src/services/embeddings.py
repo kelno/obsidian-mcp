@@ -1,11 +1,13 @@
 import asyncio
 import enum
+import json
 import logging
+import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Callable, Protocol
+from typing import Callable, Literal, Protocol
 
 import httpx
 from sqlalchemy import delete, select, text, update
@@ -222,9 +224,16 @@ _EXTRACTION_CLEANERS = {
     # Version 3 only rejects mask-decided link targets (#218). Re-deriving
     # their graph rows must preserve version-2 embedding certification.
     3: clean_for_embedding,
-    # Version 4 adds `fork_note_tasks` rows (task tools, migration 1001). No grammar
-    # moved, so nothing may be re-embedded on its account.
+    # Version 4 adds task extraction: upstream's `note_tasks` rows (#350) and,
+    # in this fork, `fork_note_tasks` rows (task tools, migration 1001). Rows
+    # must be derived for every note once, but the embedding text is
+    # untouched, so a v3-stamped row compares equal here and is NOT re-embedded.
     4: clean_for_embedding,
+    # Version 5 adds task ids and the other task-tool columns (#428): every
+    # note's `note_tasks` rows are re-derived once, the embedding text is
+    # untouched, so a v4-stamped row compares equal here and is NOT
+    # re-embedded.
+    5: clean_for_embedding,
 }
 
 
@@ -240,12 +249,250 @@ def clean_at_version(version: int, body: str) -> str | None:
     return cleaner(body) if cleaner is not None else None
 
 
+# ── Chunk length and window boundaries (#390, design D1–D3, D7) ────────────
+#
+# **One length.** Every rule below — the minimum, a section's shortness, cut
+# admissibility, tail balancing, and the evaluation harness's `under_min` —
+# measures text with `clen`: every maximal run of the six ASCII whitespace
+# characters (U+0009–U+000D, U+0020) replaced by one space, then stripped of
+# spaces, counted in code points. `CLEN_SQL` is its SQL twin, used by
+# `scripts/search_eval/db.py` and the DEPLOYMENT.md recipe; a test checks the
+# two agree. The stored `chunk_text` stays the raw window; only lengths are
+# collapsed.
+
+#: The minimum chunk length, in collapsed characters (#390, design D2). A
+#: **module constant**: not a setting, not a fingerprint field, no validator.
+#: The effective minimum is `effective_min_chars(W)`, so every previously
+#: valid `CHUNK_SIZE` keeps working. **Changing it changes the chunking format
+#: and bumps `CHUNKING_VERSION`.**
+CHUNK_MIN_CHARS = 200
+#: How far back from a window's limit a cut may move to reach a line or word
+#: start (#390, design D1). **Changing it bumps `CHUNKING_VERSION`.**
+CHUNK_BOUNDARY_LOOKBACK_CHARS = 200
+
+_CLEN_WS_RUN_RE = re.compile(r"[\t\n\v\f\r ]+")
+_CLEN_WORD_RE = re.compile(r"[^\t\n\v\f\r ]+")
+#: A word start: a non-whitespace character at index 0 or after whitespace.
+_WORD_START_RE = re.compile(r"(?<![^\t\n\v\f\r ])[^\t\n\v\f\r ]")
+_CLEN_WS = frozenset("\t\n\v\f\r ")
+
+#: The SQL twin of `clen`, over a column or expression substituted for
+#: `{col}`. Kept beside `clen` on purpose: the two are one pair
+#: (`tests/test_chunk_min_length_pg.py` checks they agree).
+CLEN_SQL = "length(btrim(regexp_replace({col}, '[\\t\\n\\v\\f\\r ]+', ' ', 'g')))"
+
+
+def clen(text: str) -> int:
+    """The collapsed length of `text` (#390, design D1): ASCII whitespace runs
+    collapsed to one space, then stripped, in code points."""
+    return len(_CLEN_WS_RUN_RE.sub(" ", text).strip(" "))
+
+
+def effective_min_chars(window: int) -> int:
+    """`m = min(CHUNK_MIN_CHARS, W // 2)` for a window of `W` characters."""
+    return min(CHUNK_MIN_CHARS, window // 2)
+
+
+def lookback(window: int) -> int:
+    """`L = min(CHUNK_BOUNDARY_LOOKBACK_CHARS, W // 10)`."""
+    return min(CHUNK_BOUNDARY_LOOKBACK_CHARS, window // 10)
+
+
+def _first_reaching(t: str, a: int, end: int, target: int) -> int | None:
+    """The smallest `p` in `(a, end]` with `clen(t[a:p]) >= target`, or None.
+
+    Walks words, so it stops as soon as the target is met: a whitespace-heavy
+    tail is never collapsed whole just to learn it is long enough.
+    """
+    count = 0
+    for mo in _CLEN_WORD_RE.finditer(t, a, end):
+        ws, we = mo.span()
+        sep = 1 if count else 0
+        if count + sep + (we - ws) >= target:
+            # Including the word's first character also includes the space
+            # before it, so `clen` jumps by two there; at least one character.
+            return ws + max(target - count - sep, 1)
+        count += sep + (we - ws)
+    return None
+
+
+def _after_line_break(t: str, p: int) -> bool:
+    """Whether the whitespace run before word start `p` holds a line break."""
+    j = p - 1
+    while j >= 0 and t[j] in _CLEN_WS:
+        if t[j] in "\n\r":
+            return True
+        j -= 1
+    return False
+
+
+def _cut_at(t: str, a: int, n: int, w: int, lb: int, m: int) -> int:
+    """Where the window starting at `a` ends, when `a + w < n` (design D1).
+
+    The first **admissible** choice — `clen(t[a:c]) >= m` — of: the last line
+    start in `(a + w - lb, a + w]`; the last word start there; the hard cut
+    `a + w`. Only when even `t[a:a + w]` is below `m` (a window that is mostly
+    whitespace): the first admissible word start after the limit, or else the
+    first admissible position, or the end of the text.
+    """
+    limit = a + w
+    starts = [mo.start() for mo in _WORD_START_RE.finditer(t, limit - lb + 1, limit + 1)]
+    for p in reversed(starts):
+        if _after_line_break(t, p):
+            if clen(t[a:p]) >= m:
+                return p
+            break
+    if starts and clen(t[a:starts[-1]]) >= m:
+        return starts[-1]
+    if clen(t[a:limit]) >= m:
+        return limit
+    first = _first_reaching(t, a, n, m)
+    if first is None:
+        return n
+    mo = _WORD_START_RE.search(t, max(first, limit + 1), n)
+    # The word start is preferred, but never at the price of a window whose
+    # collapsed length exceeds one window (D7's bound): past a long
+    # unbroken run the first admissible position is taken instead.
+    if mo is not None and clen(t[a:mo.start()]) <= w:
+        return mo.start()
+    return first
+
+
+def _snap_forward(t: str, s: int, cut: int) -> int:
+    """The first word start in `[s, cut]`, or `s` when there is none. Never
+    beyond the cut, so coverage holds (Codex r1 B2)."""
+    mo = _WORD_START_RE.search(t, s, cut + 1)
+    return mo.start() if mo is not None else s
+
+
+def _balance(
+    t: str, a: int, n: int, w: int, m: int, overlap_chars: int
+) -> list[tuple[int, int]]:
+    """The last two windows, re-decided over `[a, n)` (design D3, tail
+    balancing; Codex implementation review r1).
+
+    A *valid* split leaves both **actual** slices with `clen >= m` (measured
+    after their own boundary whitespace is stripped, never inferred from the
+    span's total). Among valid splits the preference is: a word start within
+    `W` raw on both sides; any position within `W` raw on both sides (the
+    hard cut clamped into `[end − W, a + W]`); a word start; any position —
+    in each tier the one nearest the collapsed midpoint (`|clen(left) −
+    clen(right)|` least, the earlier on a tie). At `S <= 2m` the span is one
+    window unless that window would exceed `W` raw and an in-bound valid
+    split exists. With no valid split at all, the span is one window when
+    `S <= W` (always possible at the default window); only when `S > W` too
+    (`W <= 404`, single-character words around the midpoint, L10) does the
+    pure midpoint hard cut remain.
+    """
+    seg = t[a:n]
+    k = len(seg)
+    nonws = [ch not in _CLEN_WS for ch in seg]
+    # `starts[j]`: a word starts at j within `t` (j >= 1; j = 0 is the span's
+    # own start). Prefix sums make every slice's `clen` O(1).
+    starts = [False] + [nonws[j] and not nonws[j - 1] for j in range(1, k)]
+    pn = [0] * (k + 1)
+    ps = [0] * (k + 1)
+    for j in range(k):
+        pn[j + 1] = pn[j] + nonws[j]
+        ps[j + 1] = ps[j] + starts[j]
+
+    def cl(x: int, y: int) -> int:
+        count = pn[y] - pn[x]
+        if count == 0:
+            return 0
+        # A slice that opens mid-word opens a word of its own.
+        words = ps[y] - ps[x] + (1 if nonws[x] and not starts[x] else 0)
+        return count + words - 1
+
+    total = cl(0, k)
+    if total <= 2 * m and k <= w:
+        return [(a, n)]
+    tiers: list[tuple[int, int] | None] = [None, None, None, None]
+    for j in range(1, k):
+        left = cl(0, j)
+        if left < m:
+            continue
+        right = cl(j, k)
+        if right < m:
+            continue
+        d = abs(left - right)
+        inb = j <= w and k - j <= w
+        word = starts[j]
+        for tier, ok in ((0, inb and word), (1, inb), (2, word), (3, True)):
+            if ok and (tiers[tier] is None or d < tiers[tier][0]):
+                tiers[tier] = (d, j)
+    if total <= 2 * m:
+        allowed = tiers[:2]
+    else:
+        allowed = tiers
+    chosen = next((c for c in allowed if c is not None), None)
+    if chosen is None:
+        if total <= w:
+            return [(a, n)]
+        # L10: no valid split and no single window within `W` collapsed.
+        cut = _first_reaching(t, a, n, total // 2)
+    else:
+        cut = a + chosen[1]
+    right_start = cut
+    if overlap_chars > 0:
+        # Codex r3, normative: clamped so the right window stays within one
+        # window raw whenever the split itself did, and never past the cut.
+        s = min(cut, max(cut - overlap_chars, n - w, a + 1))
+        right_start = _snap_forward(t, s, cut)
+    return [(a, cut), (right_start, n)]
+
+
+def _window_spans(
+    t: str,
+    *,
+    window: int,
+    min_chars: int,
+    overlap_chars: int,
+    ceiling: int | None,
+) -> list[tuple[int, int]]:
+    """`(start, end)` of every window of `t`, in order, stopping once
+    `ceiling` windows exist (design D1, D3). A window is kept only when its
+    `clen` is non-zero."""
+    n = len(t)
+    if n <= window:
+        # One window, unstripped — the long-standing single-window shape, so
+        # an unchanged single-window section keeps its exact stored text.
+        return [(0, n)] if clen(t) else []
+    lb = lookback(window)
+    out: list[tuple[int, int]] = []
+    a = 0
+    while True:
+        if a + window >= n:
+            if clen(t[a:n]):
+                out.append((a, n))
+            break
+        cut = _cut_at(t, a, n, window, lb, min_chars)
+        if cut >= n:
+            if clen(t[a:n]):
+                out.append((a, n))
+            break
+        if min_chars > 0 and _first_reaching(t, cut, n, min_chars) is None:
+            out.extend(_balance(t, a, n, window, min_chars, overlap_chars))
+            break
+        if clen(t[a:cut]):
+            out.append((a, cut))
+        if ceiling is not None and len(out) >= ceiling:
+            break
+        if overlap_chars > 0:
+            # Termination: the next start is at least `a + 1`.
+            a = _snap_forward(t, max(cut - overlap_chars, a + 1), cut)
+        else:
+            a = cut
+    return out
+
+
 def chunk_text_bounded(
     content: str,
     *,
     chunk_size: int = 512,
     overlap: int = 0,
     max_chunks: int = MAX_CHUNKS_PER_NOTE,
+    min_chars: int = 0,
 ) -> tuple[list[str], bool]:
     """The first `max_chunks` chunks in DOCUMENT order, and whether it capped.
 
@@ -255,6 +502,17 @@ def chunk_text_bounded(
     them one sequential, 30 s-bounded provider call, under `index_pass_lock`,
     with no LIMIT on the backlog behind it. Re-editing one such note kept every
     later tenant's notes out of the index indefinitely (#202).
+
+    **Windows (#390, design D1).** A window of `W = chunk_size × 4` characters
+    is cut at the last line start, else the last word start, within
+    `lookback(W)` of its limit, and hard only when that range holds none. A cut
+    is taken only when it is *admissible* — the window before it reaches
+    `min_chars` in `clen` — and when the text after a cut falls below
+    `min_chars` the last two windows are re-balanced (design D3). The stored
+    text is the raw window, **unstripped**; a window is kept only when its
+    `clen` is non-zero. `min_chars=0` disables the minimum (a zero-chunk probe
+    needs only the windows' existence); `chunk_note_bounded` passes the
+    effective minimum.
 
     **Document order, and the head rather than an arbitrary window**, so a
     capped note keeps the part a reader would call the note. A capped note is a
@@ -270,43 +528,45 @@ def chunk_text_bounded(
     extra window, never the unbounded chunking the cap exists to prevent, which
     is also why nothing here can ever report the note's true chunk count.
 
-    `step = max(char_size - char_overlap, 1)` is #10's infinite-loop guard and
-    stays. It is a floor, not a sane configuration: `Settings` refuses
-    `CHUNK_OVERLAP >= CHUNK_SIZE` at startup, because at the floor ~3 KB of
-    prose becomes ~3,000 chunks and every ordinary note in the vault would be
-    silently truncated here (D3b).
+    With overlap, the next start is `max(cut - overlap × 4, a + 1)` snapped
+    forward to a word start no later than the cut: the `a + 1` floor is #10's
+    infinite-loop guard and stays. It is a floor, not a sane configuration:
+    `Settings` refuses `CHUNK_OVERLAP >= CHUNK_SIZE` at startup, because near
+    the floor ~3 KB of prose becomes thousands of chunks and every ordinary
+    note in the vault would be silently truncated here (D3b).
     """
-    char_size = chunk_size * 4
-    char_overlap = overlap * 4
-    # Guard against overlap >= chunk_size, which would make the window
-    # never advance (start <= previous start) and loop forever.
-    step = max(char_size - char_overlap, 1)
+    spans = _text_windows(
+        content,
+        chunk_size=chunk_size,
+        overlap=overlap,
+        max_chunks=max_chunks,
+        min_chars=min_chars,
+    )
+    chunks = [content[a:b] for a, b in spans[0]]
+    return chunks, spans[1]
 
-    if len(content) <= char_size:
-        # Deliberately unstripped, which is this branch's long-standing
-        # behaviour: the emptiness test is `strip()`, the stored chunk is the
-        # content. One chunk can never exceed a cap of at least one.
-        return ([content] if content.strip() else []), False
 
+def _text_windows(
+    content: str,
+    *,
+    chunk_size: int,
+    overlap: int,
+    max_chunks: int,
+    min_chars: int,
+) -> tuple[list[tuple[int, int]], bool]:
+    """`chunk_text_bounded`'s windows as spans, and whether the cap bit."""
     # One past the cap: if that chunk materialises, something was dropped.
     ceiling = max_chunks + 1 if max_chunks > 0 else None
-
-    chunks: list[str] = []
-    start = 0
-    while start < len(content):
-        end = start + char_size
-        chunk = content[start:end]
-        if chunk.strip():
-            chunks.append(chunk.strip())
-            if ceiling is not None and len(chunks) >= ceiling:
-                break
-        if end >= len(content):
-            break
-        start += step
-
-    if ceiling is not None and len(chunks) >= ceiling:
-        return chunks[:max_chunks], True
-    return chunks, False
+    spans = _window_spans(
+        content,
+        window=chunk_size * 4,
+        min_chars=min_chars,
+        overlap_chars=overlap * 4,
+        ceiling=ceiling,
+    )
+    if ceiling is not None and len(spans) >= ceiling:
+        return spans[:max_chunks], True
+    return spans, False
 
 
 def chunk_text(content: str, chunk_size: int = 512, overlap: int = 0) -> list[str]:
@@ -328,9 +588,524 @@ def chunk_text(content: str, chunk_size: int = 512, overlap: int = 0) -> list[st
     return chunks
 
 
+# ── Heading-aware chunks (#355, design D1–D3) ──────────────────────────────
+#
+# The chunker splits a note at its ATX headings with **the section-addressing
+# scanner itself** (`src.services.vault._scan_headings` over the
+# frontmatter-stripped body, fence-masked), imported rather than copied — the
+# "no private grammar" rule from #150 — so the ordinal a chunk records is the
+# ordinal `read_note(section="#N")` resolves for the same bytes. Each heading's
+# *own* text (up to the next heading of ANY depth) is one section; the text
+# before the first heading is section 0. Cleaning uses the whole-body fence
+# spans (one `scan_fences` call per note), and each section is windowed by
+# `chunk_text_bounded` with one cap counter across sections.
+
+#: The chunking format the stored vectors were built under, recorded per note
+#: in `notes_metadata.embedded_chunking_version` (NULL means pre-034). It is
+#: deliberately **outside** the stored embedding fingerprint: a note on another
+#: version is re-selected by the embed backlog (`IS DISTINCT FROM`, never `<`)
+#: instead of refusing startup. **Any change to sectioning, to the heading
+#: scan, to `build_embed_prefix` or to `embedding_input` bumps it** (the
+#: embedding-providers requirement), so a note's stored vectors are never
+#: reused, or certified current, under a format they were not built with.
+#: Version 2 (#390) adds the minimum chunk length (`CHUNK_MIN_CHARS`), the
+#: grouping and tail rules, word-boundary windows (`CHUNK_BOUNDARY_LOOKBACK_
+#: CHARS`), the deepest-containing-section locator, raw window text, and the
+#: embedded-text formatter that collapses whitespace runs longer than 8.
+CHUNKING_VERSION = 2
+
+# ── The one "not current" predicate (#355, design D4; tasks 5.1) ──────────
+#
+# Expressed once, as SQL text and as a SQLAlchemy expression, and read at call
+# time (so a patched `CHUNKING_VERSION` is honoured). The embed backlog, the
+# dashboard pending count, the re-embedding progress endpoint, the
+# `index_transition:` response marker and the `/health` rechunk state all use
+# these. **`IS DISTINCT FROM`, never `<` or `>`**: a NULL, lower *or higher*
+# stamp is a note to re-select, which is what makes a rollback to a lower
+# version a transition rather than a silent "complete" (Codex r2 B2). A test
+# greps `src/` for any ordered comparison.
+
+
+def not_rechunked_sql(alias: str = "nm") -> str:
+    """`<alias>.embedded_chunking_version IS DISTINCT FROM <CHUNKING_VERSION>`."""
+    return f"{alias}.embedded_chunking_version IS DISTINCT FROM {int(CHUNKING_VERSION)}"
+
+
+def vectors_not_current_sql(alias: str = "nm") -> str:
+    """Never embedded, embedded before the indexed content, or embedded under
+    another chunking version."""
+    return (
+        f"({alias}.embedded_content_hash IS NULL "
+        f"OR {alias}.embedded_content_hash IS DISTINCT FROM {alias}.content_hash "
+        f"OR {not_rechunked_sql(alias)})"
+    )
+
+
+def legacy_vectors_sql(alias: str = "nm") -> str:
+    """The **marker / `/health`** predicate (#355, amended after the verifier):
+    the note holds vector rows **and** its chunking version is not the
+    current one. Narrower than the backlog's, on purpose: a note with no
+    vectors yet (newly created, or failing to embed) is not a generation mix,
+    so it must not raise `index_transition:`. A legacy note whose
+    certification a tag edit cleared still serves its old vectors and still
+    counts. The same definition as the harness's `legacy_chunked_notes`.
+    """
+    return (
+        f"(EXISTS (SELECT 1 FROM note_embeddings AS lv WHERE lv.note_id = {alias}.id) "
+        f"AND {not_rechunked_sql(alias)})"
+    )
+
+
+def legacy_vectors_expr():
+    from sqlalchemy import exists
+
+    return exists().where(NoteEmbedding.note_id == NoteMetadata.id).correlate(
+        NoteMetadata
+    ) & not_rechunked_expr()
+
+
+def not_rechunked_expr():
+    from sqlalchemy import literal_column
+
+    # Inlined, like the SQL text form, so both render the same predicate.
+    return NoteMetadata.embedded_chunking_version.is_distinct_from(
+        literal_column(str(int(CHUNKING_VERSION)))
+    )
+
+
+def vectors_not_current_expr():
+    from sqlalchemy import or_
+
+    return or_(
+        NoteMetadata.embedded_content_hash.is_(None),
+        NoteMetadata.embedded_content_hash.is_distinct_from(
+            NoteMetadata.content_hash
+        ),
+        not_rechunked_expr(),
+    )
+
+
+#: The longest context prefix, in characters (design D2). About 75 tokens.
+EMBED_PREFIX_MAX_CHARS = 300
+#: A heading-path component as stored in `note_embeddings.heading_path`.
+HEADING_COMPONENT_MAX_CHARS = 200
+#: A title or heading component inside the embedded prefix.
+PREFIX_COMPONENT_MAX_CHARS = 80
+
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+@dataclass(frozen=True)
+class ChunkSpec:
+    """One chunk and the section it came from.
+
+    `text` is exactly what is stored as `note_embeddings.chunk_text` (never
+    prefixed); `heading_path` is outermost-first and empty for section 0;
+    `section_ordinal` is the `#N` selector (0 for the preamble).
+    """
+
+    text: str
+    heading_path: tuple[str, ...]
+    section_ordinal: int
+
+
+def _cut(text: str, limit: int) -> str:
+    """`text` cut to `limit` characters, the cut marked with a trailing `…`."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _note_sections(body: str) -> list[tuple[int, int, tuple[str, ...], int]]:
+    """`(start, end, heading_path, ordinal)` per section, in document order.
+
+    Section 0 is `body[0 : first heading's line_start]` (or the whole body);
+    section k is heading k's own text, from one terminator past its
+    `line_end` (the step `_section_body_span` takes) up to the next heading's
+    `line_start` **of any depth**. The heading path is built with
+    `_path_chain_match`'s rule — each enclosing step to a strictly shallower
+    heading — by a stack, which is that rule's single-pass form.
+    """
+    from src.services.vault import _scan_headings
+
+    return _sections_from_headings(body, _scan_headings(body))
+
+
+def _sections_from_headings(
+    body: str, headings: list[dict]
+) -> list[tuple[int, int, tuple[str, ...], int]]:
+    """`_note_sections` over an already-scanned heading list."""
+    from src.services.vault import _LINE_BREAK_RE
+
+    if not headings:
+        return [(0, len(body), (), 0)]
+    sections: list[tuple[int, int, tuple[str, ...], int]] = [
+        (0, headings[0]["line_start"], (), 0)
+    ]
+    stack: list[tuple[int, str]] = []
+    for i, h in enumerate(headings):
+        while stack and stack[-1][0] >= h["depth"]:
+            stack.pop()
+        component = _cut(h["text"], HEADING_COMPONENT_MAX_CHARS)
+        path = tuple(text for _depth, text in stack) + (component,)
+        stack.append((h["depth"], component))
+        start = h["line_end"]
+        terminator = _LINE_BREAK_RE.match(body, start)
+        if terminator is not None:
+            start = terminator.end()
+        end = (
+            headings[i + 1]["line_start"] if i + 1 < len(headings) else len(body)
+        )
+        sections.append((min(start, end), end, path, i + 1))
+    return sections
+
+
+def _clean_span(body: str, start: int, end: int, spans) -> str:
+    """`body[start:end]` with the intersecting whole-body fence spans removed."""
+    out: list[str] = []
+    cursor = start
+    for a, b in spans:
+        if b <= start or a >= end:
+            continue
+        a, b = max(a, start), min(b, end)
+        if a > cursor:
+            out.append(body[cursor:a])
+        cursor = max(cursor, b)
+    if cursor < end:
+        out.append(body[cursor:end])
+    return "".join(out)
+
+
+def _clean_span_mapped(
+    body: str, start: int, end: int, spans
+) -> tuple[str, list[tuple[int, int]]]:
+    """`_clean_span(body, start, end, spans)` and its cleaned-to-raw map: one
+    `(cleaned_offset, raw_offset)` per kept piece, in order (#390, D4)."""
+    out: list[str] = []
+    pieces: list[tuple[int, int]] = []
+    cleaned = 0
+    cursor = start
+    for a, b in spans:
+        if b <= start or a >= end:
+            continue
+        a, b = max(a, start), min(b, end)
+        if a > cursor:
+            pieces.append((cleaned, cursor))
+            out.append(body[cursor:a])
+            cleaned += a - cursor
+        cursor = max(cursor, b)
+    if cursor < end:
+        pieces.append((cleaned, cursor))
+        out.append(body[cursor:end])
+    return "".join(out), pieces
+
+
+def _raw_offset(pieces: list[tuple[int, int]], i: int) -> int:
+    """The raw-body offset of cleaned character `i`."""
+    import bisect
+
+    k = bisect.bisect_right(pieces, (i, float("inf"))) - 1
+    cleaned, raw = pieces[k]
+    return raw + (i - cleaned)
+
+
+#: `(clen, leading whitespace, trailing whitespace)` of a cleaned piece, or
+#: None for the empty string, so a group's `clen` grows by concatenation
+#: without re-collapsing the whole group on every extension.
+_Summary = tuple[int, bool, bool]
+
+
+def _summary(text: str) -> _Summary | None:
+    if not text:
+        return None
+    c = clen(text)
+    if c == 0:
+        return (0, True, True)
+    return (c, text[0] in _CLEN_WS, text[-1] in _CLEN_WS)
+
+
+def _join(x: _Summary | None, y: _Summary | None) -> _Summary | None:
+    if x is None:
+        return y
+    if y is None:
+        return x
+    if x[0] == 0:
+        return (y[0], True, y[2]) if y[0] else (0, True, True)
+    if y[0] == 0:
+        return (x[0], x[1], True)
+    return (x[0] + y[0] + (1 if (x[2] or y[1]) else 0), x[1], y[2])
+
+
+def _group_sections(
+    body: str, sections, spans, m: int
+) -> list[tuple[int, int]] | None:
+    """Design D3's grouping: `[(first_section, last_section)]` over the
+    non-empty sections, or None for "chunk the whole cleaned body as one
+    group at ordinal 0".
+
+    A group opens at a non-empty section and extends forward while its text —
+    the contiguous cleaned span, inner heading lines included — is short
+    (`clen < m`). A group still short at the end of the body joins the last
+    closed group; with none, it stands alone only when the whole cleaned body
+    is short too (Codex r1 M1), else the whole body is one group.
+    """
+    own = [_summary(_clean_span(body, s, e, spans)) for s, e, _p, _o in sections]
+    nonempty = [k for k, sm in enumerate(own) if sm is not None and sm[0] > 0]
+    groups: list[list[int]] = []
+    idx = 0
+    while idx < len(nonempty):
+        first = last = nonempty[idx]
+        summ = own[first]
+        while summ[0] < m and idx + 1 < len(nonempty):
+            idx += 1
+            nxt = nonempty[idx]
+            summ = _join(
+                summ,
+                _summary(_clean_span(body, sections[last][1], sections[nxt][1], spans)),
+            )
+            last = nxt
+        idx += 1
+        if summ[0] >= m:
+            groups.append([first, last])
+        elif groups:
+            groups[-1][1] = last
+        elif clen(_remove_spans(body, spans)) < m:
+            groups.append([first, last])
+        else:
+            return None
+    return [(f, l) for f, l in groups]
+
+
+def chunk_note_bounded(
+    body: str,
+    *,
+    chunk_size: int = 512,
+    overlap: int = 0,
+    max_chunks: int = MAX_CHUNKS_PER_NOTE,
+) -> tuple[list[ChunkSpec], bool]:
+    """A note body's chunks: sections at its ATX headings (#355, design D1),
+    grouped to the minimum length and windowed (#390, design D1–D4).
+
+    `body` is the frontmatter-stripped body — the text `read_note` scans.
+    Sections come from `_note_sections`, unchanged. A section is *short* when
+    its cleaned `clen` is non-zero and below `m = effective_min_chars(W)`; a
+    short section is grouped with the following non-empty section(s), a short
+    group at the end joins the previous group, and a sole short group stands
+    alone only in a note whose whole cleaned body is short — otherwise the
+    whole cleaned body is one group at ordinal 0 (`_group_sections`). A
+    group's text is its contiguous raw span cleaned with the whole-body fence
+    spans, so a merged group includes the heading lines it absorbed and is
+    still one substring of the note; a one-section group is exactly that
+    section's cleaned text. Each group is windowed by `_window_spans` with the
+    minimum.
+
+    **The locator (design D4)** of each chunk is the deepest heading `N` whose
+    `read_note(section="#N")` body span (`_section_body_span`, imported)
+    contains the chunk's raw span, else 0; its path is `N`'s. An unmerged chunk
+    therefore keeps its own section, a short lead merged into its first child
+    keeps the parent, and siblings merged together take their common parent or
+    0. The whole-body groups (the fallbacks) record 0.
+
+    **The zero-chunk invariant.** If no section is non-empty while the cleaned
+    body has text (a note of headings only), the whole cleaned body is one
+    group at ordinal 0, so a note has zero chunks exactly when
+    `chunk_text_bounded(clean_for_embedding(body))` gives it zero. A note with
+    no headings chunks exactly like `chunk_text_bounded(clean_for_embedding(
+    body), min_chars=m)`. The cap is one counter across groups in document
+    order and stops one chunk past it, so the second element keeps
+    `chunk_text_bounded`'s meaning.
+
+    Pure and CPU-bound: call sites run it under `asyncio.to_thread`.
+    """
+    specs, _raw_spans, truncated = _chunk_note(
+        body, chunk_size=chunk_size, overlap=overlap, max_chunks=max_chunks
+    )
+    return specs, truncated
+
+
+def _chunk_note(
+    body: str, *, chunk_size: int, overlap: int, max_chunks: int
+) -> tuple[list[ChunkSpec], list[tuple[int, int]], bool]:
+    """`chunk_note_bounded`, plus each chunk's raw-body span (the span its
+    locator is decided on; the coverage property test reads it)."""
+    import bisect
+
+    from src.services.vault import _scan_headings, _section_body_span
+
+    window = chunk_size * 4
+    m = effective_min_chars(window)
+    spans = scan_fences(body, context=BODY).spans
+    headings = _scan_headings(body)
+    sections = _sections_from_headings(body, headings)
+    grouped = _group_sections(body, sections, spans, m)
+    if grouped is not None and not grouped:
+        # Nothing non-empty in any section: headings only (or nothing).
+        grouped = None if clen(_remove_spans(body, spans)) else []
+    if grouped is None:
+        groups = [(0, len(body), True)]
+    else:
+        groups = [(sections[f][0], sections[l][1], False) for f, l in grouped]
+
+    bodies = [_section_body_span(body, headings, k) for k in range(len(headings))]
+    body_starts = [s for s, _e in bodies]
+
+    def locate(raw_start: int, raw_end: int) -> int:
+        k = bisect.bisect_right(body_starts, raw_start) - 1
+        while k >= 0:
+            if bodies[k][1] >= raw_end:
+                return k + 1
+            k -= 1
+        return 0
+
+    capped = max_chunks > 0
+    out: list[ChunkSpec] = []
+    raw_spans: list[tuple[int, int]] = []
+    truncated = False
+    for g_start, g_end, whole in groups:
+        if capped and len(out) >= max_chunks:
+            # One chunk past the cap materialises here: something is dropped.
+            truncated = True
+            break
+        text, pieces = _clean_span_mapped(body, g_start, g_end, spans)
+        windows, cut = _text_windows(
+            text,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            max_chunks=(max_chunks - len(out)) if capped else 0,
+            min_chars=m,
+        )
+        for a, b in windows:
+            raw = (_raw_offset(pieces, a), _raw_offset(pieces, b - 1) + 1)
+            ordinal = 0 if whole else locate(*raw)
+            path = sections[ordinal][2] if ordinal else ()
+            out.append(ChunkSpec(text[a:b], path, ordinal))
+            raw_spans.append(raw)
+        if cut:
+            truncated = True
+            break
+    return out, raw_spans, truncated
+
+
+def _prefix_component(text: str) -> str:
+    return _cut(_WHITESPACE_RUN_RE.sub(" ", text or "").strip(), PREFIX_COMPONENT_MAX_CHARS)
+
+
+def build_embed_prefix(
+    title: str | None, heading_path, tags
+) -> str:
+    """The context prefix a chunk is embedded under (design D2).
+
+    `{title} > {h1} > … > {hk}`, every component whitespace-collapsed and cut
+    at 80 characters. Over `EMBED_PREFIX_MAX_CHARS`, the outermost headings
+    after the title are replaced by one `…` component, one at a time; the title
+    and the innermost heading are always kept. Then a `tags: a, b` line, only
+    when the whole prefix including it still fits — never partially.
+    """
+    head = _prefix_component(title or "")
+    parts = [_prefix_component(h) for h in (heading_path or ())]
+    breadcrumb = " > ".join([head, *parts])
+    dropped = 0
+    while len(breadcrumb) > EMBED_PREFIX_MAX_CHARS and dropped < len(parts) - 1:
+        dropped += 1
+        breadcrumb = " > ".join([head, "…", *parts[dropped:]])
+    if tags:
+        line = "tags: " + ", ".join(str(t) for t in tags)
+        candidate = f"{breadcrumb}\n{line}"
+        if len(candidate) <= EMBED_PREFIX_MAX_CHARS:
+            return candidate
+    return breadcrumb
+
+
+#: A run of MORE than 8 of the six ASCII whitespace characters (#390, D9).
+_LONG_WS_RUN_RE = re.compile(r"[\t\n\v\f\r ]{9,}")
+
+
+def _embedded_text_v1(chunk: str) -> str:
+    """Version 1 (#355): the chunk as stored. Frozen."""
+    return chunk
+
+
+def _embedded_text_v2(chunk: str) -> str:
+    """Version 2 (#390, D9): every run of more than 8 whitespace characters
+    (U+0009–U+000D, U+0020) becomes one space; shorter runs, NBSP and every
+    other character are kept. Frozen."""
+    return _LONG_WS_RUN_RE.sub(" ", chunk)
+
+
+#: The embedded-text formatter of every chunking version whose vectors this
+#: build may reuse (#390, design D6/D9), in the pattern of
+#: `_EXTRACTION_CLEANERS`. **A frozen entry is never edited.** A version that
+#: changes the embedded-text formatter ADDS an entry; a version that changes
+#: `build_embed_prefix` or the `"\n\n"` separator CLEARS the table to its own
+#: entry, because a stored vector's input could no longer be reconstructed.
+#: `tests/test_chunk_min_length.py` pins every entry with golden outputs.
+#: Reuse compares `fmt[stamped version](stored text)` with
+#: `fmt[CHUNKING_VERSION](new text)`, so a stored vector is reused exactly when
+#: the input it was built from equals the input that would now be sent.
+EMBEDDED_TEXT_FORMATTERS: dict[int, Callable[[str], str]] = {
+    1: _embedded_text_v1,
+    2: _embedded_text_v2,
+}
+
+
+def embedded_text(chunk: str) -> str:
+    """The current version's embedded text of a stored chunk (D9). The stored
+    `chunk_text` itself is never collapsed."""
+    return EMBEDDED_TEXT_FORMATTERS[CHUNKING_VERSION](chunk)
+
+
+def embedding_input(prefix: str, chunk: str) -> str:
+    """The one formatter of a provider document input:
+    `prefix + "\n\n" + embedded_text(chunk)`. Changing the separator or the
+    prefix rule bumps `CHUNKING_VERSION` and clears
+    `EMBEDDED_TEXT_FORMATTERS`."""
+    return f"{prefix}\n\n{embedded_text(chunk)}"
+
+
+def input_digest(inputs: list[str]) -> str:
+    """SHA-256 hex of the canonical JSON of the ordered provider inputs
+    (`[]` for a certified-empty or excluded note), design D3a."""
+    import hashlib
+    import json
+
+    encoded = json.dumps(list(inputs), ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("ascii")).hexdigest()
+
+
+def note_provider_inputs(
+    body: str, title: str | None, tags, *, excluded: bool = False
+) -> list[str]:
+    """Every provider input the current code would send for this note, in
+    order — what `certify_embedded`'s digest covers. Used by the full-hash
+    backstop (D3a), which makes no provider call."""
+    if excluded:
+        return []
+    specs, _truncated = chunk_note_bounded(
+        body,
+        chunk_size=settings.chunk_size,
+        overlap=settings.chunk_overlap,
+        max_chunks=MAX_CHUNKS_PER_NOTE,
+    )
+    return [
+        embedding_input(build_embed_prefix(title, spec.heading_path, tags), spec.text)
+        for spec in specs
+    ]
+
+
+#: Whether an embedding call embeds a search query or a stored document
+#: (#367, design D7). Required everywhere, with no default, so every call site
+#: chooses; `tests/test_embedding_kind.py` sweeps `src/` and `scripts/`.
+EmbeddingKind = Literal["query", "document"]
+
+
 class EmbeddingProvider(Protocol):
-    async def embed_one(self, text: str) -> list[float]: ...
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]: ...
+    """A provider receives `kind` so a backend with a native input type can map
+    it. The query instruction is applied above this layer, once."""
+
+    async def embed_one(self, text: str, *, kind: EmbeddingKind) -> list[float]: ...
+    async def embed_batch(
+        self, texts: list[str], *, kind: EmbeddingKind
+    ) -> list[list[float]]: ...
 
 
 def _coerce_keep_alive(value: str):
@@ -586,11 +1361,26 @@ class _SharedClient:
 
 _OLLAMA_CLIENT = _SharedClient()
 _OPENAI_CLIENT = _SharedClient()
+_TEI_CLIENT = _SharedClient()
 
 #: Per-request bounds, passed on every `post(...)`, are the settings
 #: `ollama_request_timeout_seconds` (default 30 s) and
 #: `openai_request_timeout_seconds` (default 60 s), read at call time. The
 #: client-level timeout is built from the same setting, so the two agree.
+#: TEI's per-request bound, a constant like upstream's (TEI has no setting).
+TEI_REQUEST_TIMEOUT_SECONDS = 60.0
+#: One TEI slice, attempts and backoff together (native-tei-embeddings D3). Not
+#: 60 s: a hung first attempt would use all of it and make retry unreachable.
+#: Per slice, never per batch, so a long healthy note is not cut off (#127 D5).
+TEI_SLICE_DEADLINE_SECONDS = 90.0
+#: The complete `GET /info` exchange, body included. An httpx `timeout=` bounds
+#: each phase, not the total, so only a wall-clock bound stops a trickling
+#: response from holding the lifespan.
+TEI_INFO_TIMEOUT_SECONDS = 5.0
+#: Between checks while the server is unverified, each call fails with no HTTP.
+TEI_RECHECK_INTERVAL_SECONDS = 30.0
+#: A value the server reports, before it is escaped for a log or an error.
+TEI_REPORTED_VALUE_MAX_CHARS = 200
 
 
 def _ollama_client() -> httpx.AsyncClient:
@@ -605,12 +1395,105 @@ def _openai_client() -> httpx.AsyncClient:
     )
 
 
+def _tei_client() -> httpx.AsyncClient:
+    return _TEI_CLIENT.get(
+        lambda: embedding_http_client(TEI_REQUEST_TIMEOUT_SECONDS)
+    )
+
+
 async def close_provider_client() -> None:
     """Close every provider's shared client. Idempotent; the lifespan calls it
     at shutdown, after the indexer task has stopped and before the engine is
     disposed."""
     await _OLLAMA_CLIENT.aclose()
     await _OPENAI_CLIENT.aclose()
+    await _TEI_CLIENT.aclose()
+
+
+async def _post_with_retries(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    label: str,
+    headers: dict[str, str] | None,
+    payload: dict,
+    timeout: float,
+    max_attempts: int,
+    base_delay: float,
+    parse: Callable[[httpx.Response], list[list[float]]],
+    input_limit: Callable[[httpx.Response], Exception | None] | None,
+    refuse: Callable[[httpx.Response], Exception | None] | None = None,
+    retry_read_timeout: bool = True,
+) -> list[list[float]]:
+    """POST `payload`, retrying 429/5xx and transport errors with exponential
+    backoff; the loop the OpenAI and TEI providers share.
+
+    `parse` handles a 200 and runs **outside** the transport-error `try`: what
+    it raises propagates after one request, so a provider's malformed answer is
+    never retried as if it were a network fault. `input_limit` returns the
+    exception to raise for an input the provider refuses, or `None`; pass
+    `None` instead of a callable for a provider with no such refusal.
+    `refuse` has the same shape, for any other non-retried status a provider
+    explains in its own words (TEI's 401/403, #426); OpenAI passes none.
+    `retry_read_timeout=False` raises a read timeout at once (OpenAI, fork).
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = await client.post(
+                url, headers=headers, json=payload, timeout=timeout
+            )
+        except httpx.ReadTimeout:
+            if not retry_read_timeout:
+                raise
+            if attempt >= max_attempts:
+                raise
+            await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+            continue
+        except httpx.HTTPError as e:
+            last_exc = e
+            if attempt >= max_attempts:
+                raise
+            await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+            continue
+
+        status = response.status_code
+        if status == 200:
+            return parse(response)
+
+        # Decided **before** `retryable`, deliberately: an input the provider
+        # will not accept fails identically on every attempt, so retrying it
+        # would turn one refusal into three provider round trips and three
+        # times the latency before the caller hears the one thing it can act
+        # on. No status in `_INPUT_LIMIT_STATUSES` is retryable today — this
+        # ordering is what keeps that true if one ever becomes so.
+        if input_limit is not None:
+            refusal = input_limit(response)
+            if refusal is not None:
+                raise refusal
+        if refuse is not None:
+            refusal = refuse(response)
+            if refusal is not None:
+                raise refusal
+
+        retryable = status == 429 or 500 <= status < 600
+        if retryable and attempt < max_attempts:
+            logger.warning(
+                "%s embeddings %d on attempt %d/%d, retrying",
+                label,
+                status,
+                attempt,
+                max_attempts,
+            )
+            await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+            continue
+
+        response.raise_for_status()
+        raise RuntimeError(f"Unexpected {label} response: {status}")
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"{label} embeddings failed without an exception")
 
 
 class OllamaProvider:
@@ -653,12 +1536,15 @@ class OllamaProvider:
             )
         return vectors
 
-    async def embed_one(self, text: str) -> list[float]:
+    async def embed_one(self, text: str, *, kind: EmbeddingKind) -> list[float]:
         # The query path: a one-element `input` array, the request shape the
-        # batch sends, so one code path answers both.
+        # batch sends, so one code path answers both. `/api/embed` has no
+        # input-type field, so `kind` is accepted and ignored.
         return (await self._embed_inputs([text]))[0]
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def embed_batch(
+        self, texts: list[str], *, kind: EmbeddingKind
+    ) -> list[list[float]]:
         """Embed in consecutive fixed-size slices, one `/api/embed` request per
         slice. **The per-request timeout is the only deadline, deliberately**
         (#127 D5; #281 D15).
@@ -717,89 +1603,65 @@ class OpenAIProvider:
             "dimensions": settings.embedding_dimensions,
         }
 
-        last_exc: Exception | None = None
-        # The shared client (D14) outlives this call, so no `async with`.
-        client = _openai_client()
-        for attempt in range(1, self.MAX_ATTEMPTS + 1):
-            try:
-                response = await client.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=settings.openai_request_timeout_seconds,
+        def parse(response: httpx.Response) -> list[list[float]]:
+            data = response.json()
+            rows = data.get("data") if isinstance(data, dict) else None
+            if isinstance(rows, list):
+                rows = sorted(rows, key=lambda r: r.get("index", -1))
+            # Per request, like Ollama's slice check: exactly one vector
+            # per input with indices exactly 0..n-1, or no vector of this
+            # response is used — a short, duplicated or gapped answer
+            # cannot be attributed to the right inputs.
+            if not isinstance(rows, list) or [
+                r.get("index") for r in rows
+            ] != list(range(len(inputs))):
+                got = len(rows) if isinstance(rows, list) else "no"
+                raise RuntimeError(
+                    f"OpenAI returned {got} vectors with indices not "
+                    f"exactly 0..{len(inputs) - 1} for {len(inputs)} inputs"
                 )
-            except httpx.ReadTimeout:
-                # **Not retried.** The request was sent and the server is most
-                # likely still computing it: neither an OpenAI-compatible
-                # gateway nor the model server behind it is guaranteed to
-                # cancel on client disconnect, and a single-slot server queues
-                # the re-send behind the abandoned original. Retrying a slow
-                # server's timeout multiplied its load by `MAX_ATTEMPTS` per
-                # batch and still failed. Size the timeout instead.
-                raise
-            except httpx.HTTPError as e:
-                last_exc = e
-                if attempt >= self.MAX_ATTEMPTS:
-                    raise
-                await asyncio.sleep(self.BASE_DELAY * (2 ** (attempt - 1)))
-                continue
+            return [r["embedding"] for r in rows]
 
-            status = response.status_code
-            if status == 200:
-                data = response.json()
-                rows = data.get("data") if isinstance(data, dict) else None
-                if isinstance(rows, list):
-                    rows = sorted(rows, key=lambda r: r.get("index", -1))
-                # Per request, like Ollama's slice check: exactly one vector
-                # per input with indices exactly 0..n-1, or no vector of this
-                # response is used — a short, duplicated or gapped answer
-                # cannot be attributed to the right inputs.
-                if not isinstance(rows, list) or [
-                    r.get("index") for r in rows
-                ] != list(range(len(inputs))):
-                    got = len(rows) if isinstance(rows, list) else "no"
-                    raise RuntimeError(
-                        f"OpenAI returned {got} vectors with indices not "
-                        f"exactly 0..{len(inputs) - 1} for {len(inputs)} inputs"
-                    )
-                return [r["embedding"] for r in rows]
-
-            # Decided **before** `retryable`, deliberately: an input
-            # the provider will not accept fails identically on every
-            # attempt, so retrying it would turn one refusal into three
-            # provider round trips and three times the latency before the
-            # caller hears the one thing it can act on. No status in
-            # `_INPUT_LIMIT_STATUSES` is retryable today — this ordering is
-            # what keeps that true if one ever becomes so.
+        def input_limit(response: httpx.Response) -> Exception | None:
             reason = _input_limit_reason(
                 response, codes=_OPENAI_INPUT_LIMIT_CODES
             )
-            if reason is not None:
-                raise refusals.ProviderInputTooLarge(reason, provider="openai")
+            if reason is None:
+                return None
+            return refusals.ProviderInputTooLarge(reason, provider="openai")
 
-            retryable = status == 429 or 500 <= status < 600
-            if retryable and attempt < self.MAX_ATTEMPTS:
-                logger.warning(
-                    "OpenAI embeddings %d on attempt %d/%d, retrying",
-                    status,
-                    attempt,
-                    self.MAX_ATTEMPTS,
-                )
-                await asyncio.sleep(self.BASE_DELAY * (2 ** (attempt - 1)))
-                continue
+        # The shared client (D14) outlives this call, so no `async with`.
+        return await _post_with_retries(
+            _openai_client(),
+            url,
+            label="OpenAI",
+            headers=headers,
+            payload=payload,
+            timeout=settings.openai_request_timeout_seconds,
+            max_attempts=self.MAX_ATTEMPTS,
+            base_delay=self.BASE_DELAY,
+            parse=parse,
+            input_limit=input_limit,
+            # **A read timeout is not retried** (fork): the request was sent
+            # and the server is most likely still computing it. Neither an
+            # OpenAI-compatible gateway nor the model server behind it is
+            # guaranteed to cancel on client disconnect, and a single-slot
+            # server queues the re-send behind the abandoned original, so
+            # retrying a slow server's timeout multiplied its load by
+            # `MAX_ATTEMPTS` per batch and still failed. Size
+            # `OPENAI_REQUEST_TIMEOUT_SECONDS` instead.
+            retry_read_timeout=False,
+        )
 
-            response.raise_for_status()
-            raise RuntimeError(f"Unexpected OpenAI response: {status}")
-
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("OpenAI embeddings failed without an exception")
-
-    async def embed_one(self, text: str) -> list[float]:
+    async def embed_one(self, text: str, *, kind: EmbeddingKind) -> list[float]:
+        # The embeddings endpoint has no input-type field for these models;
+        # `kind` is accepted and ignored.
         result = await self._post([text])
         return result[0]
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def embed_batch(
+        self, texts: list[str], *, kind: EmbeddingKind
+    ) -> list[list[float]]:
         if not texts:
             return []
         out: list[list[float]] = []
@@ -810,20 +1672,377 @@ class OpenAIProvider:
         return out
 
 
+# ── TEI_API_KEY (#426) ──────────────────────────────────────────────────────
+#
+# The key goes on exactly three requests to `TEI_URL` (`/embed`, `/info` and
+# the panel's `/health`), passed **per request** by `_tei_auth_headers`, never
+# as a client default and never in `embedding_http_client`, which the Ollama
+# and OpenAI clients share. The value is read there and nowhere else. No
+# message below carries it: the 401/403 text names the setting only.
+
+#: What an authenticating TEI, or a gateway in front of one, answers a
+#: missing or wrong bearer token with.
+TEI_AUTH_STATUSES = frozenset({401, 403})
+
+
+def _tei_auth_headers() -> dict[str, str] | None:
+    """`{"Authorization": "Bearer <key>"}` with `TEI_API_KEY` set, else `None`,
+    which leaves each request exactly as it was before the setting existed."""
+    key = settings.tei_api_key
+    # Sandbox mode skips the format check, so an unchecked key is never sent.
+    if key is None or settings.mcp_sandbox_mode:
+        return None
+    return {"Authorization": f"Bearer {key.get_secret_value()}"}
+
+
+def _tei_auth_cause() -> str:
+    """What a 401/403 most likely means, naming the setting, never its value."""
+    if settings.tei_api_key is None:
+        return "TEI_API_KEY is not set"
+    return "the server rejected TEI_API_KEY"
+
+
+class _TeiAuthLog:
+    """One ERROR line per run of `/embed` auth failures, re-armed by a 200."""
+
+    logged: bool = False
+
+
+_TEI_AUTH_LOG = _TeiAuthLog()
+
+
+def _tei_embed_refusal(response: httpx.Response) -> Exception | None:
+    """The `/embed` 401/403 failure: no URL, header or body, never retried.
+    It leaves the verified state alone, because an auth failure says nothing
+    about the model."""
+    if response.status_code not in TEI_AUTH_STATUSES:
+        return None
+    message = (
+        f"TEI /embed answered HTTP {response.status_code}; {_tei_auth_cause()}"
+    )
+    if not _TEI_AUTH_LOG.logged:
+        _TEI_AUTH_LOG.logged = True
+        logger.error("%s", message)
+    return RuntimeError(message)
+
+
+def _tei_reported(value: object) -> str:
+    """A value the TEI server chose, bounded then escaped: it goes into a log
+    line and into the failure text stored for a note."""
+    return json.dumps(str(value)[:TEI_REPORTED_VALUE_MAX_CHARS])
+
+
+@dataclass(frozen=True)
+class TeiServerCheck:
+    """One `/info` verdict: `ok`, `mismatch` (proven) or `inconclusive`."""
+
+    status: Literal["ok", "mismatch", "inconclusive"]
+    reason: str
+    #: A 401/403 (#426). Its reason is part of the logged verdict, so the
+    #: CRITICAL naming `TEI_API_KEY` is not swallowed by an earlier
+    #: inconclusive line.
+    auth: bool = False
+
+
+@dataclass
+class _TeiVerification:
+    """What this process knows about the server behind `TEI_URL`.
+
+    Module-level state rather than a lock: an `asyncio.Lock` binds to one loop
+    and the maintenance scripts run their own. `checked_at` is stamped before
+    the await, so a caller arriving during a check sees the interval as not
+    elapsed and fails fast instead of starting another check.
+    """
+
+    verified: bool = False
+    reason: str = "no /info check has completed"
+    checked_at: float | None = None
+    #: The verdict the last CRITICAL line described, so a verdict logs once.
+    logged_verdict: tuple[str, str] | None = None
+
+
+_TEI_VERIFICATION = _TeiVerification()
+
+
+async def _tei_info_exchange() -> httpx.Response:
+    return await _tei_client().get(
+        f"{settings.tei_url.rstrip('/')}/info",
+        headers=_tei_auth_headers(),
+        timeout=TEI_INFO_TIMEOUT_SECONDS,
+    )
+
+
+def _judge_tei_info(response: httpx.Response) -> TeiServerCheck:
+    """The verdict on one answered `/info`. The rule (design D1): a mismatch
+    needs positive evidence, and so does a match; everything else is
+    inconclusive."""
+    if response.status_code in TEI_AUTH_STATUSES:
+        # Never a mismatch (#426): a refused key proves nothing about the
+        # model, so the process keeps serving with embedding withheld.
+        return TeiServerCheck(
+            "inconclusive",
+            f"GET /info answered HTTP {response.status_code}; {_tei_auth_cause()}",
+            auth=True,
+        )
+    if response.status_code != 200:
+        return TeiServerCheck(
+            "inconclusive", f"GET /info answered HTTP {response.status_code}"
+        )
+    try:
+        info = response.json()
+    except (ValueError, RecursionError):
+        return TeiServerCheck("inconclusive", "GET /info answered non-JSON")
+    if not isinstance(info, dict):
+        return TeiServerCheck("inconclusive", "GET /info answered a non-object")
+    reported_model = info.get("model_id")
+    if not isinstance(reported_model, str) or not reported_model:
+        return TeiServerCheck(
+            "inconclusive", "GET /info reported no usable model_id"
+        )
+    if reported_model != settings.tei_embedding_model:
+        return TeiServerCheck(
+            "mismatch",
+            "TEI_EMBEDDING_MODEL is "
+            f"{_tei_reported(settings.tei_embedding_model)} but the server "
+            f"reports model_id {_tei_reported(reported_model)}",
+        )
+    limit = info.get("max_client_batch_size")
+    if isinstance(limit, int) and not isinstance(limit, bool):
+        if limit < settings.tei_embed_batch_size:
+            return TeiServerCheck(
+                "mismatch",
+                f"TEI_EMBED_BATCH_SIZE is {settings.tei_embed_batch_size} but "
+                "the server reports max_client_batch_size "
+                f"{_tei_reported(limit)}",
+            )
+    else:
+        logger.warning(
+            "TEI /info reported no integer max_client_batch_size; "
+            "TEI_EMBED_BATCH_SIZE=%d is unchecked",
+            settings.tei_embed_batch_size,
+        )
+    return TeiServerCheck("ok", "server identity verified")
+
+
+async def verify_tei_server() -> TeiServerCheck:
+    """One `GET /info`, compared with the configuration (design D1).
+
+    Shared by the lifespan and the provider's gate. Records the verdict and
+    never raises for a provider fault: only the lifespan turns a `mismatch`
+    into an exit. One attempt, through the factory-built client, the whole
+    exchange inside a wall-clock bound.
+    """
+    state = _TEI_VERIFICATION
+    state.checked_at = time.monotonic()
+    try:
+        response = await asyncio.wait_for(
+            _tei_info_exchange(), timeout=TEI_INFO_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        result = TeiServerCheck(
+            "inconclusive",
+            f"GET /info did not finish within {TEI_INFO_TIMEOUT_SECONDS:g} s",
+        )
+    except Exception as exc:
+        result = TeiServerCheck(
+            "inconclusive", f"GET /info failed: {type(exc).__name__}"
+        )
+    else:
+        result = _judge_tei_info(response)
+
+    state.reason = result.reason
+    if result.status == "ok":
+        state.verified = True
+        state.logged_verdict = None
+        logger.info("TEI server verified: %s", settings.tei_embedding_model)
+        return result
+
+    # Only a mismatch's text is part of its verdict: an inconclusive reason
+    # flips between refused, 503 and timeout while a server starts, and that
+    # must not be a CRITICAL line every 30 s.
+    if result.auth:
+        verdict = ("inconclusive-auth", result.reason)
+    else:
+        verdict = (
+            result.status, result.reason if result.status == "mismatch" else ""
+        )
+    if verdict != state.logged_verdict:
+        state.logged_verdict = verdict
+        if result.status == "mismatch":
+            logger.critical("TEI server identity mismatch: %s", result.reason)
+        else:
+            logger.critical(
+                "TEI server not verified, embedding is withheld until it is: %s",
+                result.reason,
+            )
+    return result
+
+
+async def _require_tei_verified() -> None:
+    """Raise unless `/info` has concluded that the server matches. No `/embed`
+    is sent before that, on any path that uses the provider."""
+    state = _TEI_VERIFICATION
+    if state.verified:
+        return
+    due = (
+        state.checked_at is None
+        or time.monotonic() - state.checked_at >= TEI_RECHECK_INTERVAL_SECONDS
+    )
+    if due:
+        await verify_tei_server()
+        if state.verified:
+            return
+    raise RuntimeError(f"TEI embedding withheld: {state.reason}")
+
+
+def _tei_number_ok(value: object) -> bool:
+    """A finite JSON number. `bool` is an `int` to Python and is not one here;
+    a JSON integer too large for a float must answer False, not raise."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+
+
+def _parse_tei_vectors(
+    response: httpx.Response, expected: int
+) -> list[list[float]]:
+    """Every row of a 200, checked before any of it is used (design D2). The
+    failure names a row and a width, never input text."""
+    try:
+        vectors = response.json()
+    except (ValueError, RecursionError):
+        raise RuntimeError("TEI answered 200 with a non-JSON body") from None
+    if not isinstance(vectors, list) or len(vectors) != expected:
+        got = len(vectors) if isinstance(vectors, list) else "no"
+        raise RuntimeError(f"TEI returned {got} vectors for {expected} inputs")
+    width = settings.embedding_dimensions
+    for index, row in enumerate(vectors):
+        if not isinstance(row, list):
+            raise RuntimeError(f"TEI vector {index} is not a list")
+        if len(row) != width:
+            raise RuntimeError(
+                f"TEI vector {index} has width {len(row)}, expected {width}"
+            )
+        if not all(_tei_number_ok(element) for element in row):
+            raise RuntimeError(
+                f"TEI vector {index} holds a non-numeric or non-finite element"
+            )
+    return vectors
+
+
+def _parse_tei_vectors_rearming(
+    response: httpx.Response, expected: int
+) -> list[list[float]]:
+    """`_parse_tei_vectors`; any 200 from `/embed` re-arms the auth ERROR line."""
+    _TEI_AUTH_LOG.logged = False
+    return _parse_tei_vectors(response, expected)
+
+
+class TeiProvider:
+    """Hugging Face Text Embeddings Inference, native protocol.
+
+    `/embed` takes `{"inputs": [...], "truncate": true}` and answers a bare
+    `[[float, ...], ...]`. It has no `model` field, so nothing goes out until
+    `/info` has shown that the server serves `TEI_EMBEDDING_MODEL`.
+
+    `truncate: true` means an over-limit input is embedded from its leading
+    tokens rather than refused, so this provider never raises
+    `ProviderInputTooLarge`; the note is certified anyway (accepted, like
+    Ollama's truncation to the model context). The request timeout is per
+    attempt and `TEI_SLICE_DEADLINE_SECONDS` bounds one slice's attempts and
+    backoff together.
+    """
+
+    MAX_ATTEMPTS = 3
+    BASE_DELAY = 1.0
+
+    async def _post(self, inputs: list[str]) -> list[list[float]]:
+        return await _post_with_retries(
+            _tei_client(),
+            f"{settings.tei_url.rstrip('/')}/embed",
+            label="TEI",
+            headers=_tei_auth_headers(),
+            payload={"inputs": inputs, "truncate": True},
+            timeout=TEI_REQUEST_TIMEOUT_SECONDS,
+            max_attempts=self.MAX_ATTEMPTS,
+            base_delay=self.BASE_DELAY,
+            parse=lambda response: _parse_tei_vectors_rearming(
+                response, len(inputs)
+            ),
+            input_limit=None,
+            refuse=_tei_embed_refusal,
+        )
+
+    async def _post_slice(self, inputs: list[str]) -> list[list[float]]:
+        try:
+            return await asyncio.wait_for(
+                self._post(inputs), timeout=TEI_SLICE_DEADLINE_SECONDS
+            )
+        except TimeoutError:
+            # `str(TimeoutError())` is empty, and this text is what
+            # `EmbedNoteFailure` records for the note.
+            raise RuntimeError(
+                f"TEI slice exceeded the {TEI_SLICE_DEADLINE_SECONDS:g} s deadline"
+            ) from None
+
+    async def embed_one(self, text: str, *, kind: EmbeddingKind) -> list[float]:
+        # `/embed` has no input-type field; `kind` is accepted and ignored.
+        await _require_tei_verified()
+        result = await self._post_slice([text])
+        return result[0]
+
+    async def embed_batch(
+        self, texts: list[str], *, kind: EmbeddingKind
+    ) -> list[list[float]]:
+        if not texts:
+            return []
+        await _require_tei_verified()
+        size = settings.tei_embed_batch_size
+        out: list[list[float]] = []
+        for start in range(0, len(texts), size):
+            out.extend(await self._post_slice(texts[start : start + size]))
+        return out
+
+
 @lru_cache(maxsize=1)
 def get_provider() -> EmbeddingProvider:
     """Return a singleton provider instance based on `settings.embedding_provider`."""
     if settings.embedding_provider == "openai":
         return OpenAIProvider()
+    if settings.embedding_provider == "tei":
+        return TeiProvider()
     return OllamaProvider()
 
 
-async def get_embedding(text_input: str) -> list[float]:
-    return await get_provider().embed_one(text_input)
+def _with_instruction(text_input: str, kind: EmbeddingKind) -> str:
+    """The provider input for `text_input`: `EMBEDDING_QUERY_INSTRUCTION`
+    prepended verbatim (no separator) for a query, nothing for a document.
+
+    **The one place the instruction is applied** (design D7). With the default
+    empty instruction every input is byte-identical to `text_input`.
+    """
+    if kind not in ("query", "document"):
+        raise ValueError(f"embedding kind must be 'query' or 'document', got {kind!r}")
+    if kind == "query" and settings.embedding_query_instruction:
+        return settings.embedding_query_instruction + text_input
+    return text_input
 
 
-async def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
-    return await get_provider().embed_batch(texts)
+async def get_embedding(text_input: str, *, kind: EmbeddingKind) -> list[float]:
+    return await get_provider().embed_one(
+        _with_instruction(text_input, kind), kind=kind
+    )
+
+
+async def get_embeddings_batch(
+    texts: list[str], *, kind: EmbeddingKind
+) -> list[list[float]]:
+    return await get_provider().embed_batch(
+        [_with_instruction(t, kind) for t in texts], kind=kind
+    )
 
 
 class StaleCertification(RuntimeError):
@@ -843,9 +2062,17 @@ async def certify_embedded(
     certified_hash: str,
     certified_path: str,
     *,
+    provider_inputs: list[str],
     expire_on: NoteMetadata | None = None,
 ) -> None:
     """Stamp `embedded_content_hash` conditionally, and lock the row doing it.
+
+    **The same UPDATE stamps `embedded_chunking_version = CHUNKING_VERSION` and
+    `embedded_input_digest`** (#355, design D3a/D4): the digest of exactly the
+    ordered provider inputs this certification covers, `[]` for a
+    certified-empty or excluded note. Every certifying branch goes through
+    here, so a note is never certified without both, and `provider_inputs` is
+    required so no caller can forget them.
 
     Public because `embed_vault`'s **exclusion** branch needs the identical
     predicate: adversarial round 2 found it stamping by `id` alone, so a
@@ -885,7 +2112,11 @@ async def certify_embedded(
             NoteMetadata.file_path == certified_path,
             NoteMetadata.content_hash == certified_hash,
         )
-        .values(embedded_content_hash=certified_hash)
+        .values(
+            embedded_content_hash=certified_hash,
+            embedded_chunking_version=CHUNKING_VERSION,
+            embedded_input_digest=input_digest(provider_inputs),
+        )
         .execution_options(synchronize_session=False)
     )
     if result.rowcount != 1:
@@ -899,7 +2130,22 @@ async def certify_embedded(
         # nothing later in this session reads (or flushes) the pre-update
         # value. Passed explicitly rather than inferred, because the exclusion
         # branch certifies from a plain result row that no session maps.
-        session.expire(expire_on, ["embedded_content_hash"])
+        session.expire(
+            expire_on,
+            [
+                "embedded_content_hash",
+                "embedded_chunking_version",
+                "embedded_input_digest",
+            ],
+        )
+
+
+def _stamp_uncertified(note, provider_inputs: list[str]) -> None:
+    """The legacy, uncertified path (unit tests with a stub session): copy the
+    in-memory hash and stamp the chunking version and digest beside it."""
+    note.embedded_content_hash = note.content_hash
+    note.embedded_chunking_version = CHUNKING_VERSION
+    note.embedded_input_digest = input_digest(provider_inputs)
 
 
 class NoteEmbedOutcome(enum.Enum):
@@ -909,7 +2155,7 @@ class NoteEmbedOutcome(enum.Enum):
     a note that cleaned to zero chunks *and was certified*, a provider
     exception the function swallowed, and a vector/chunk cardinality mismatch.
     `_embed_vault_pinned` then ran `outcome.embedded += 1` after all three, so a
-    total Ollama or OpenAI outage wrote an `indexer_runs` row reading
+    total embedding-provider outage wrote an `indexer_runs` row reading
     `notes_embedded = N, error = NULL` — byte for byte the record a healthy
     pass writes, with a *positive* count (#201).
     """
@@ -1037,7 +2283,7 @@ class EmbedNoteResult:
 async def _generation_matches(
     session: AsyncSession,
     note: NoteMetadata,
-    reused_rows: dict[int, str] | None = None,
+    reused_rows: dict[int, tuple[str, str]] | None = None,
 ) -> bool:
     """Take the generation lock and re-read the embedding fingerprint under it.
 
@@ -1080,8 +2326,9 @@ async def _generation_matches(
     otherwise unmigrated schema supported: the other required columns and
     tables must still exist.
 
-    **`reused_rows` (#281, D16)** maps the id of every stored row whose vector
-    `embed_note` is reusing to the chunk text it was looked up with. Reuse was
+    **`reused_rows` (#281, D16; #355 D3)** maps the id of every stored row
+    whose vector `embed_note` is reusing to the `(chunk_text, embed_prefix)`
+    pair it was looked up with — the exact embedded input. Reuse was
     licensed by a lookup that has since committed, so the licence is
     re-established here, under the lock: the fingerprint must still be
     *present* and equal (an absent one, or an absent table, licensed nothing),
@@ -1124,20 +2371,25 @@ async def _generation_matches(
         if reused_rows:
             # After the advisory lock, so this SELECT's table lock keeps the
             # lock-first ordering.
-            surviving = dict(
-                (
+            surviving = {
+                row_id: (chunk, prefix)
+                for row_id, chunk, prefix in (
                     await session.execute(
-                        select(NoteEmbedding.id, NoteEmbedding.chunk_text).where(
+                        select(
+                            NoteEmbedding.id,
+                            NoteEmbedding.chunk_text,
+                            NoteEmbedding.embed_prefix,
+                        ).where(
                             NoteEmbedding.note_id == note.id,
                             NoteEmbedding.id.in_(list(reused_rows)),
                         )
                     )
                 ).all()
-            )
+            }
             lost = sum(
                 1
-                for row_id, chunk in reused_rows.items()
-                if surviving.get(row_id) != chunk
+                for row_id, pair in reused_rows.items()
+                if surviving.get(row_id) != pair
             )
             if lost:
                 logger.warning(
@@ -1204,18 +2456,18 @@ async def embed_note(
             "certified_hash and certified_path are one unit: pass both or "
             "neither"
         )
-    # Off the event loop (#278, D8): the cleaner and the chunker are pure
-    # functions of the body, and on a large note they are seconds of CPU that
-    # would otherwise freeze every other request, `/health` included.
-    cleaned = await asyncio.to_thread(clean_for_embedding, content)
-    chunks, truncated = await asyncio.to_thread(
-        chunk_text_bounded,
-        cleaned,
+    # Off the event loop (#278, D8): the sectioner, the cleaner and the
+    # chunker are pure functions of the body, and on a large note they are
+    # seconds of CPU that would otherwise freeze every other request,
+    # `/health` included. Heading-aware since #355 (design D1).
+    specs, truncated = await asyncio.to_thread(
+        chunk_note_bounded,
+        content,
         chunk_size=settings.chunk_size,
         overlap=settings.chunk_overlap,
         max_chunks=MAX_CHUNKS_PER_NOTE,
     )
-    if not chunks:
+    if not specs:
         # Empty/fully-filtered notes are successfully represented by zero
         # vectors. Remove stale vectors and stamp the hash so they do not get
         # selected on every embedding pass forever.
@@ -1226,13 +2478,18 @@ async def embed_note(
         # exempts the exclusion branch (D7c).
         if certified_hash is not None:
             await certify_embedded(
-                session, note.id, certified_hash, certified_path, expire_on=note
+                session,
+                note.id,
+                certified_hash,
+                certified_path,
+                provider_inputs=[],
+                expire_on=note,
             )
         await session.execute(
             delete(NoteEmbedding).where(NoteEmbedding.note_id == note.id)
         )
         if certified_hash is None:
-            note.embedded_content_hash = note.content_hash
+            _stamp_uncertified(note, [])
         await session.flush()
         # `truncated` is False by construction here: a note the cap bit has at
         # least `MAX_CHUNKS_PER_NOTE` chunks.
@@ -1243,33 +2500,53 @@ async def embed_note(
             truncated=False,
         )
 
-    # ── Chunk-vector reuse: the lookup (#281, D16) ───────────────────────
-    # A stored vector is reused for a chunk whose text is byte-identical to a
-    # stored chunk of this note, and only while the stored embedding
-    # fingerprint is present and equal to this process's. The lookup's
+    # ── The provider inputs (#355, design D2) ────────────────────────────
+    # Every chunk is embedded as `prefix + "\n\n" + chunk`, the prefix built
+    # from the row's title and tags and the chunk's heading path. The stored
+    # `chunk_text` stays un-prefixed, for previews.
+    title = getattr(note, "title", None)
+    tags = getattr(note, "tags", None)
+    prefixes = [build_embed_prefix(title, spec.heading_path, tags) for spec in specs]
+    inputs = [embedding_input(p, spec.text) for p, spec in zip(prefixes, specs)]
+
+    # ── Chunk-vector reuse: the lookup (#281, D16; #355 D3) ──────────────
+    # A stored vector is reused for a chunk whose **embedded input** is
+    # byte-identical to the stored row's — equal prefixes, and the stored
+    # text under its stamped version's frozen formatter equal to the new text
+    # under the current one (#390, D6) — and only while the stored embedding
+    # fingerprint is present and equal to this process's and the note's
+    # stamp is a key of `EMBEDDED_TEXT_FORMATTERS`. A pre-034 row (NULL
+    # prefix) and a NULL stamp are never reused. The
+    # locator is not in the key: a reused vector is re-inserted with the new
+    # chunk's heading path and ordinal. The lookup's
     # transaction is **ended before any provider I/O on every path** — see
     # `_lookup_reusable_vectors`. Only the certified path reuses: ending the
     # transaction is only safe for a caller that has already ended its own,
     # which both production callers do before they call this function.
-    reusable: dict[str, tuple[int, object]] = {}
+    reusable: dict[tuple[str, str], tuple[int, object, str]] = {}
     if certified_hash is not None:
         reusable = await _lookup_reusable_vectors(session, note.id)
 
-    vectors: list[object | None] = [None] * len(chunks)
-    #: Stored row id → the chunk text it was looked up with. Re-checked under
-    #: the generation lock before anything is certified.
-    reused_rows: dict[int, str] = {}
+    vectors: list[object | None] = [None] * len(specs)
+    #: Stored row id → the `(chunk_text, embed_prefix)` it was looked up with.
+    #: Re-checked under the generation lock before anything is certified.
+    reused_rows: dict[int, tuple[str, str]] = {}
     to_send: list[int] = []
-    for i, chunk in enumerate(chunks):
-        hit = reusable.get(chunk)
+    for i, (spec, prefix) in enumerate(zip(specs, prefixes)):
+        # Keyed by the embedded input as it would now be sent (#390, D6): the
+        # prefix and the current formatter's embedded text.
+        hit = reusable.get((prefix, embedded_text(spec.text)))
         if hit is None:
             to_send.append(i)
             continue
-        row_id, stored_vector = hit
+        row_id, stored_vector, stored_text = hit
         vectors[i] = stored_vector
-        reused_rows[row_id] = chunk
+        # The STORED row's own text, which is what the under-lock re-check
+        # compares; it can differ from the new chunk's when the formatter
+        # maps both to one input.
+        reused_rows[row_id] = (stored_text, prefix)
     reusable.clear()
-    sent = [chunks[i] for i in to_send]
+    sent = [inputs[i] for i in to_send]
 
     # ── The accounting boundary, and it is *here* ────────────────────────
     # The caller used to account for the provider call from the returned
@@ -1296,7 +2573,7 @@ async def embed_note(
         if on_provider_call is not None:
             on_provider_call(len(sent))
         try:
-            fresh = await get_embeddings_batch(sent)
+            fresh = await get_embeddings_batch(sent, kind="document")
         except Exception as e:
             # Swallowed here rather than raised, deliberately:
             # `_reconcile_exclusions` calls this function too and its declared
@@ -1352,7 +2629,7 @@ async def embed_note(
     missing = sum(1 for v in vectors if v is None)
     if missing:
         raise RuntimeError(
-            f"{missing} of {len(chunks)} chunks of {note.file_path} have no "
+            f"{missing} of {len(specs)} chunks of {note.file_path} have no "
             "vector; refusing to certify partial coverage"
         )
 
@@ -1379,7 +2656,12 @@ async def embed_note(
     # whole note back.
     if certified_hash is not None:
         await certify_embedded(
-            session, note.id, certified_hash, certified_path, expire_on=note
+            session,
+            note.id,
+            certified_hash,
+            certified_path,
+            provider_inputs=inputs,
+            expire_on=note,
         )
 
     # Only delete the old embeddings once new ones are in hand. If the provider
@@ -1390,34 +2672,45 @@ async def embed_note(
         delete(NoteEmbedding).where(NoteEmbedding.note_id == note.id)
     )
 
-    for i, (chunk, embedding) in enumerate(zip(chunks, vectors)):
+    for i, (spec, prefix, embedding) in enumerate(zip(specs, prefixes, vectors)):
         session.add(NoteEmbedding(
             note_id=note.id,
             chunk_index=i,
-            chunk_text=chunk,
+            chunk_text=spec.text,
             embedding=embedding,
+            heading_path=list(spec.heading_path),
+            section_ordinal=spec.section_ordinal,
+            embed_prefix=prefix,
         ))
 
     await session.flush()
     if certified_hash is None:
-        note.embedded_content_hash = note.content_hash
+        _stamp_uncertified(note, inputs)
     return EmbedNoteResult(
         outcome=NoteEmbedOutcome.EMBEDDED,
         chunks_submitted=len(sent),
-        chunks_embedded=len(chunks),
+        chunks_embedded=len(specs),
         truncated=truncated,
     )
 
 
 async def _lookup_reusable_vectors(
     session: AsyncSession, note_id: int
-) -> dict[str, tuple[int, object]]:
-    """This note's stored vectors that may be reused, keyed by exact chunk text.
+) -> dict[tuple[str, str], tuple[int, object, str]]:
+    """This note's stored vectors that may be reused, keyed by the exact
+    embedded input `(embed_prefix, fmt[stamp](chunk_text))`, each with its row
+    id, vector and stored `chunk_text`.
 
     Empty — reuse disabled — unless the stored embedding fingerprint is
-    **present** and equal to `embedding_fingerprint()`. An absent fingerprint
-    claims nothing about the stored rows, an absent state table the same, and
-    a differing or unreadable one says they were built under something else.
+    **present** and equal to `embedding_fingerprint()` **and** the note's
+    `embedded_chunking_version` is a key of `EMBEDDED_TEXT_FORMATTERS` (#390,
+    D6; a NULL stamp never is). All of a note's rows are written under one
+    version, so the stamped version's frozen formatter reconstructs the
+    embedded text each stored vector was built from; the table's rule (a
+    prefix or separator change clears it) covers the rest of the input. An absent
+    fingerprint claims nothing about the stored rows, an absent state table
+    the same, and a differing or unreadable one says they were built under
+    something else. A row with a NULL prefix (pre-034) is never a candidate.
 
     **The transaction is ended before this returns, on every path.** A
     lookup that held `AccessShareLock` on `note_embeddings` across the
@@ -1428,30 +2721,44 @@ async def _lookup_reusable_vectors(
     pass has.
     """
     try:
-        found: dict[str, tuple[int, object]] = {}
+        found: dict[tuple[str, str], tuple[int, object, str]] = {}
         if await state_table_exists(session):
             verdict = compare_fingerprint(
                 await get_state(session, KEY_EMBEDDING_FINGERPRINT),
                 embedding_fingerprint(),
             )
+            version = None
             if verdict.status is FingerprintStatus.MATCH:
+                version = (
+                    await session.execute(
+                        select(NoteMetadata.embedded_chunking_version).where(
+                            NoteMetadata.id == note_id
+                        )
+                    )
+                ).scalar_one_or_none()
+            stamped = EMBEDDED_TEXT_FORMATTERS.get(version) if version is not None else None
+            if verdict.status is FingerprintStatus.MATCH and stamped is not None:
                 rows = (
                     await session.execute(
                         select(
                             NoteEmbedding.id,
                             NoteEmbedding.chunk_text,
+                            NoteEmbedding.embed_prefix,
                             NoteEmbedding.embedding,
                         )
-                        .where(NoteEmbedding.note_id == note_id)
+                        .where(
+                            NoteEmbedding.note_id == note_id,
+                            NoteEmbedding.embed_prefix.is_not(None),
+                        )
                         .order_by(NoteEmbedding.chunk_index, NoteEmbedding.id)
                     )
                 ).all()
-                for row_id, chunk, vector in rows:
-                    if chunk is None or vector is None:
+                for row_id, chunk, prefix, vector in rows:
+                    if chunk is None or prefix is None or vector is None:
                         continue
-                    # First occurrence wins; a duplicate text has one vector
-                    # per (model, text), so either would do.
-                    found.setdefault(chunk, (row_id, vector))
+                    # First occurrence wins; a duplicate input has one vector
+                    # per (model, input), so either would do.
+                    found.setdefault((prefix, stamped(chunk)), (row_id, vector, chunk))
     except BaseException:
         try:
             await session.rollback()
@@ -1462,69 +2769,132 @@ async def _lookup_reusable_vectors(
     return found
 
 
-async def semantic_search(
+def section_of(row, stale: bool) -> dict | None:
+    """The result's `section`, or None for a stale or pre-034 row (#355, D6)."""
+    path = getattr(row, "heading_path", None)
+    ordinal = getattr(row, "section_ordinal", None)
+    if stale or path is None or ordinal is None:
+        return None
+    return {"path": list(path), "ordinal": int(ordinal)}
+
+
+async def rechunk_pending_count(session: AsyncSession, user_id: int | None) -> int:
+    """Notes in `user_id`'s owner scope (total mapping: None is `IS NULL`) that
+    hold vectors of another chunking generation (`legacy_vectors_expr`, #355
+    D4 as amended). Read by the vector tools
+    in the same `REPEATABLE READ, READ ONLY` transaction as their query."""
+    from sqlalchemy import func
+
+    owner = (
+        NoteMetadata.user_id.is_(None)
+        if user_id is None
+        else NoteMetadata.user_id == user_id
+    )
+    return int(
+        (
+            await session.execute(
+                select(func.count(NoteMetadata.id)).where(owner, legacy_vectors_expr())
+            )
+        ).scalar()
+        or 0
+    )
+
+
+def transition_line(pending: int) -> str | None:
+    """The `index_transition:` line, or None at zero (#355, D4)."""
+    if pending <= 0:
+        return None
+    return (
+        f"index_transition: {pending} notes not yet re-chunked; cross-generation "
+        "ranking is approximate, re-run after the backlog drains"
+    )
+
+
+async def ensure_search_snapshot(session: AsyncSession, who: str) -> None:
+    """Open — or verify — the `REPEATABLE READ, READ ONLY` snapshot a vector
+    query and its owner-scoped transition count share (#355, D4), so the
+    `index_transition:` line describes exactly the index the page was ranked
+    against. It must be the transaction's first statement. Every production
+    caller hands in a fresh session; a caller that already opened a
+    transaction must have opened it with exactly this isolation, which is
+    verified rather than assumed — a silently weaker snapshot would let the
+    count and the page disagree."""
+    in_tx = getattr(session, "in_transaction", None)
+    if callable(in_tx) and in_tx():
+        isolation, read_only = (
+            await session.execute(
+                text(
+                    "SELECT current_setting('transaction_isolation'), "
+                    "current_setting('transaction_read_only')"
+                )
+            )
+        ).one()
+        if (isolation, read_only) != ("repeatable read", "on"):
+            raise RuntimeError(
+                f"{who} needs a REPEATABLE READ, READ ONLY snapshot: "
+                "hand it a fresh session, or open the transaction with "
+                f"exactly that isolation (found {isolation}, read_only={read_only})"
+            )
+    else:
+        await session.execute(
+            text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        )
+
+
+@dataclass
+class SemanticArm:
+    """The semantic ranking without its embedding call, `SET LOCAL`s,
+    truncation or telemetry (#354 D1): every note the overfetch reached, one
+    row each, in full-precision order."""
+
+    rows: list[dict]
+    #: How many chunk rows the ordered statement (or its exact re-run)
+    #: returned, before the per-note dedupe — `hybrid_search`'s `arm_depth`.
+    chunk_rows: int
+    exact_fallback: bool
+    #: `time.monotonic()` right after the last statement, before the Python
+    #: re-sort and dedupe — where `semantic_search`'s `db_ms` has always
+    #: stopped (#354 keeps its telemetry unchanged).
+    fetched_at: float = 0.0
+    #: Fork (P98): each row's `(distance, path)`, aligned with `rows`, and
+    #: each hidden private note's best one (`None` unless counted).
+    row_keys: list[tuple] = field(default_factory=list)
+    private_keys: list[tuple] | None = None
+
+
+async def semantic_arm_rows(
     session: AsyncSession,
-    query: str,
-    limit: int = 15,
+    query_embedding: list[float],
+    *,
+    overfetch: int,
     folder: str | None = None,
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
     user_id: int | None = None,
+    with_rerank_text: bool = False,
     hide_private: bool = False,
-    counts: dict | None = None,
-) -> list[dict]:
-    """Embed query and return the best-matching chunk per note (dedup), ordered by cosine distance.
+    count_private: bool = False,
+) -> SemanticArm:
+    """The ordered statement, the zero-row exact re-run, the full-precision
+    re-sort, the per-note dedupe (not truncated) and the stale/truncated
+    annotation — the statements `semantic_search` has always issued after its
+    three `SET LOCAL`s, and nothing else. The caller owns the transaction, the
+    settings and the telemetry.
 
-    `hide_private` (with private folders configured) leaves notes under a
-    private folder out inside the query, so the iterative scan still fills
-    the limit, and sets `counts["private_hidden"]` to the number of private
-    notes that would have been among these results (see the count below).
+    **The exact re-run leaves `enable_indexscan = off` set.** `semantic_search`
+    closes its session straight after; a caller that issues further statements
+    (`hybrid_search`) must restore it first (#354 D2).
 
-    The HNSW index picks the candidates; they are re-ranked by full-precision
-    distance, and we over-fetch chunks and dedup per note in Python
-    so a single verbose note can't dominate the result set. Each result is a pointer
-    to a note plus its most-relevant chunk as preview — the caller should `read_note`
-    for full content.
+    `hide_private` (with private folders configured, fork) leaves notes under
+    a private folder out inside the statement, so the iterative scan still
+    fills the overfetch; with `count_private` too, the same scan over private
+    notes only gives each private note's best `(distance, path)` in
+    `private_keys`, for `count_private_hidden`.
     """
     # Local, so this function's region is the only part of the module #283
     # touches (see the performance-2026-09 slice table).
     from src.services import vector_index
 
-    limit = max(1, min(limit, 50))
-    embed_start = time.monotonic()
-    query_embedding = await get_embedding(query)
-    timing.add_ms("embed_ms", time.monotonic() - embed_start)
-
-    db_start = time.monotonic()
-    # ef_search=80 lifts HNSW recall@10 to ~98% at modest latency cost.
-    # random_page_cost=1.1 is a planner correction, not a storage claim (D20).
-    # The planner costs the join's heap side at `relpages`, but every row this
-    # statement touches detoasts a vector (and `notes_metadata` a tsvector)
-    # from TOAST pages `relpages` does not count, so at the default of 4 it
-    # overprices the index path and picks a seq scan + sort that degrades
-    # linearly with the vault. The working set is mostly cached, so the lower
-    # page cost is right on an HDD too — `search.py` states the same
-    # rationale for its own hint. All three SET LOCALs scope to the current
-    # transaction.
-    await session.execute(text("SET LOCAL hnsw.ef_search = 80"))
-    await session.execute(text("SET LOCAL random_page_cost = 1.1"))
-    # iterative_scan (pgvector >= 0.8; guarded at startup by
-    # `_check_pgvector_version`) is what keeps a *filtered* search honest.
-    # Without it the HNSW scan hands the planner at most `ef_search`
-    # candidates, the folder/tags/frontmatter/user predicate throws most of
-    # them away, and nothing refills — 45 of 120 folder-filtered probes came
-    # back empty. `relaxed_order` lets the scan keep walking the graph until
-    # the LIMIT is satisfied *after* filtering. Recall is still bounded by
-    # `hnsw.max_scan_tuples` (20,000) and `hnsw.scan_mem_multiplier` (1);
-    # those are the next knobs if the vault outgrows them (~16.7k chunks
-    # today). `relaxed_order` may emit rows slightly out of distance order
-    # across iterations, so we re-sort below — that is presentation only, it
-    # cannot recover candidates the scan never returned.
-    await session.execute(text("SET LOCAL hnsw.iterative_scan = 'relaxed_order'"))
-
-    # Over-fetch by 5x: HNSW is logarithmic so this is essentially free, and it
-    # gives the per-note dedup enough headroom when a note contributes many chunks.
-    overfetch = max(limit * 5, 50)
     # Two expressions (#283, D19). `order` is the index expression verbatim —
     # `embedding::halfvec(D) <=> q::halfvec(D)` — so the planner can use the
     # half-precision HNSW index; it decides only *which* candidates are
@@ -1544,6 +2914,9 @@ async def semantic_search(
             NoteEmbedding.note_id,
             NoteEmbedding.chunk_index,
             NoteEmbedding.chunk_text,
+            # The locator (#355, D6). Never `embed_prefix`, never the vector.
+            NoteEmbedding.heading_path,
+            NoteEmbedding.section_ordinal,
             NoteMetadata.file_path,
             NoteMetadata.title,
             NoteMetadata.tags,
@@ -1554,6 +2927,14 @@ async def semantic_search(
         )
         .join(NoteMetadata, NoteEmbedding.note_id == NoteMetadata.id)
     )
+    if with_rerank_text:
+        # #402 (rerank-documents D6): only for `rerank=true`, exactly these two
+        # columns more, so each fetched row's embedding input can be rebuilt
+        # from storage. Never rendered or logged; the `rerank=false`
+        # statement is unchanged (the search-quality carve-out).
+        stmt = stmt.add_columns(
+            NoteEmbedding.embed_prefix, NoteMetadata.embedded_chunking_version
+        )
     private = "exclude" if hide_private and private_folders.enabled() else None
     filtered = apply_note_filters(
         stmt, folder=folder, tags=tags, frontmatter=frontmatter, user_id=user_id, private=private
@@ -1562,7 +2943,7 @@ async def semantic_search(
         apply_note_filters(
             stmt, folder=folder, tags=tags, frontmatter=frontmatter, user_id=user_id, private="only"
         ).order_by(order).limit(overfetch)
-        if private is not None and counts is not None else None
+        if private is not None and count_private else None
     )
     stmt = filtered.order_by(order).limit(overfetch)
 
@@ -1587,22 +2968,23 @@ async def semantic_search(
     # that query returned empty while NULL-owned matches existed.
     exact_fallback = False
     if not rows:
-        # Transaction-scoped, like the three SET LOCALs above: it applies to
-        # the re-run on the next line and dies with this transaction. The sole
-        # caller (`search_notes_impl`) closes the session as soon as this
-        # function returns, so nothing else can inherit the exact plan — do not
+        # Transaction-scoped, like the three SET LOCALs: it applies to the
+        # re-run on the next line and dies with this transaction.
+        # `semantic_search` closes the session as soon as it returns, so
+        # nothing else can inherit the exact plan there; `hybrid_search`
+        # issues `enable_indexscan = on` before its snippet statements. Do not
         # append further statements after the re-run without re-reading that.
         await session.execute(text("SET LOCAL enable_indexscan = off"))
         rows = (await session.execute(stmt)).fetchall()
         exact_fallback = True
+    chunk_rows = len(rows)
     private_rows = []
     if private_stmt is not None:
         # The private notes the results would have held: the same scan over
         # private notes only (after an exact fallback above, exact too). No
         # zero-row fallback of its own: an empty answer only undercounts.
         private_rows = (await session.execute(private_stmt)).fetchall()
-    timing.record("exact_fallback", exact_fallback)
-    timing.add_ms("db_ms", time.monotonic() - db_start)
+    fetched_at = time.monotonic()
 
     # Re-sort by the full-precision distance before dedupe/truncate:
     # `relaxed_order` does not promise a globally sorted stream, the scan was
@@ -1615,28 +2997,27 @@ async def semantic_search(
 
     seen: set[int] = set()
     deduped: list = []
+    #: #402: every fetched row per note, in this re-sort order (cosine-best
+    #: first), kept only for `rerank=true` — the rows the dedupe drops.
+    by_note: dict[int, list] = {}
     for row in rows:
+        if with_rerank_text:
+            by_note.setdefault(row.note_id, []).append(row)
         if row.note_id in seen:
             continue
         seen.add(row.note_id)
         deduped.append(row)
-        if len(deduped) >= limit:
-            break
+    private_keys = None
     if private_stmt is not None:
-        # Each private note's nearest chunk, counted when it ranks ahead of the
-        # last result shown (in the results' own order: distance, then path),
-        # or at all when the results did not fill the limit; at most `limit`.
+        # Each private note's nearest chunk, in the results' own order:
+        # distance, then path. `count_private_hidden` compares them with the
+        # last result shown.
         best: dict[int, tuple] = {}
         for row in private_rows:
             key = (row.distance, row.file_path)
             if row.note_id not in best or key < best[row.note_id]:
                 best[row.note_id] = key
-        if len(deduped) >= limit:
-            last = (deduped[-1].distance, deduped[-1].file_path)
-            ahead = [k for k in best.values() if k < last]
-        else:
-            ahead = list(best.values())
-        counts["private_hidden"] = min(len(ahead), limit)
+        private_keys = list(best.values())
 
     # ── Staleness and truncation, annotated from the already-hydrated row ──
     #
@@ -1680,8 +3061,13 @@ async def semantic_search(
             "path": row.file_path,
             "title": row.title,
             "tags": row.tags,
-            "chunk": None if stale else row.chunk_text[:500],
+            # Uncut (#355, D6): the renderer normalises to one line *then*
+            # cuts, so a run of leading whitespace cannot eat the preview.
+            "chunk": None if stale else row.chunk_text,
             "chunk_index": row.chunk_index,
+            # Withheld on a stale row (its positional ordinal describes
+            # superseded content) and absent on a pre-034 row.
+            "section": section_of(row, stale),
             # The database's own cosine distance, as `find_related` reports it
             # (#280, D7). The order above is this distance's order, so the
             # displayed similarity is monotone in the displayed order by
@@ -1702,9 +3088,202 @@ async def semantic_search(
             for row in deduped
         )
     ]
+    if with_rerank_text:
+        # #367 (D4): the reranker's candidate text, from the uncut projected
+        # chunk (never a preview cut), bounded so title + "\n\n" + text fits
+        # the 2,048-character document. A stale row carries none —
+        # superseded text never leaves the server — and is sent as its title.
+        # Python only: the statement and its projection are unchanged.
+        from src.services.rerank import bounded_text
+
+        for result, row in zip(results, deduped):
+            result["rerank_text"] = (
+                None if result["stale"] else bounded_text(row.title, row.chunk_text)
+            )
+            # #402 (D1/D2): the note's fetched rows as rerank documents, the
+            # cosine-best first; none for a stale note (#200: superseded text
+            # never leaves the server). Internal, never on a legacy row.
+            result["rerank_stamp"] = getattr(row, "embedded_chunking_version", None)
+            result["rerank_chunks"] = [] if result["stale"] else [
+                {
+                    "chunk_text": r.chunk_text,
+                    "chunk_index": r.chunk_index,
+                    "section": section_of(r, False),
+                    "distance": float(r.distance),
+                    "file_path": r.file_path,
+                    "embed_prefix": getattr(r, "embed_prefix", None),
+                }
+                for r in by_note.get(row.note_id, [row])
+            ]
+    return SemanticArm(rows=results, chunk_rows=chunk_rows, exact_fallback=exact_fallback,
+                       fetched_at=fetched_at,
+                       row_keys=[(row.distance, row.file_path) for row in deduped],
+                       private_keys=private_keys)
+
+
+def count_private_hidden(arm: SemanticArm, shown: int, limit: int) -> int | None:
+    """How many private notes would have been among the `shown` results (fork,
+    P98): each counted when its nearest chunk ranks ahead of the last result
+    shown, or at all when the results did not fill `limit`; at most `limit`.
+    `None` when the arm did not count private notes."""
+    if arm.private_keys is None:
+        return None
+    if shown >= limit and shown > 0:
+        last = arm.row_keys[shown - 1]
+        ahead = [k for k in arm.private_keys if k < last]
+    else:
+        ahead = arm.private_keys
+    return min(len(ahead), limit)
+
+
+async def semantic_search(
+    session: AsyncSession,
+    query: str,
+    limit: int = 15,
+    folder: str | None = None,
+    tags: list[str] | None = None,
+    frontmatter: dict | None = None,
+    user_id: int | None = None,
+    hide_private: bool = False,
+    counts: dict | None = None,
+) -> list[dict]:
+    """Embed query and return the best-matching chunk per note (dedup), ordered by cosine distance.
+
+    `hide_private` (with private folders configured, fork) leaves notes under
+    a private folder out inside the query, so the iterative scan still fills
+    the limit; with `counts` given it sets `counts["private_hidden"]` to the
+    number of private notes that would have been among these results
+    (`count_private_hidden`).
+
+    The HNSW index picks the candidates; they are re-ranked by full-precision
+    distance, and we over-fetch chunks and dedup per note in Python
+    so a single verbose note can't dominate the result set. Each result is a pointer
+    to a note plus its most-relevant chunk as preview — the caller should `read_note`
+    for full content.
+
+    The embedding call, the three `SET LOCAL`s, `semantic_arm_rows`, the
+    truncation to `limit` and the telemetry: the statements and their order
+    are what they were before the #354 extraction.
+    """
+    limit = max(1, min(limit, 50))
+    arm = await _semantic_overfetch(
+        session, query, limit=limit, folder=folder, tags=tags,
+        frontmatter=frontmatter, user_id=user_id,
+        hide_private=hide_private, count_private=counts is not None,
+    )
+    results = arm.rows[:limit]
+    hidden = count_private_hidden(arm, len(results), limit)
+    if counts is not None and hidden is not None:
+        counts["private_hidden"] = hidden
     # Result telemetry, recorded after the dedupe so the count and the paths
     # are what the tool actually returns (#161) — an overfetched, not-yet-
     # deduped row list would report a note twice. Bounds are enforced inside
     # `record_results`; no-op outside a tracked tool call.
     timing.record_results(r["path"] for r in results)
     return results
+
+
+@dataclass
+class SemanticCandidates:
+    """`semantic_search(rerank=true)`'s candidates (#367, D4): the per-note
+    deduped rows of the call's overfetch, in vector order, before truncation
+    to `limit`, capped at `RERANK_MAX_CANDIDATES`. Each row is a legacy result
+    row plus the internal `rerank_text`."""
+
+    rows: list[dict]
+    limit: int
+
+
+async def semantic_candidates(
+    session: AsyncSession,
+    query: str,
+    *,
+    limit: int = 15,
+    folder: str | None = None,
+    tags: list[str] | None = None,
+    frontmatter: dict | None = None,
+    user_id: int | None = None,
+    hide_private: bool = False,
+    counts: dict | None = None,
+) -> SemanticCandidates:
+    """The one candidate-fetch service the tool and the harness rerank arm
+    share (#367, D4). The embedding call, the three `SET LOCAL`s and the
+    statement are exactly `semantic_search`'s; the timing keys are recorded;
+    `record_results` is **not** called — the tool records the final order.
+    Because `limit ≤ 50` and the candidates are the first `min(50, n)` deduped
+    notes, every note of the unreranked page is a candidate."""
+    from src.services.rerank import RERANK_MAX_CANDIDATES
+
+    limit = max(1, min(limit, 50))
+    arm = await _semantic_overfetch(
+        session, query, limit=limit, folder=folder, tags=tags,
+        frontmatter=frontmatter, user_id=user_id, with_rerank_text=True,
+        hide_private=hide_private, count_private=counts is not None,
+    )
+    # Fork (P98): counted against the vector order of the unreranked page,
+    # the same notes the reranker then reorders.
+    hidden = count_private_hidden(arm, min(len(arm.rows), limit), limit)
+    if counts is not None and hidden is not None:
+        counts["private_hidden"] = hidden
+    return SemanticCandidates(rows=arm.rows[:RERANK_MAX_CANDIDATES], limit=limit)
+
+
+async def _semantic_overfetch(
+    session: AsyncSession,
+    query: str,
+    *,
+    limit: int,
+    folder: str | None,
+    tags: list[str] | None,
+    frontmatter: dict | None,
+    user_id: int | None,
+    with_rerank_text: bool = False,
+    hide_private: bool = False,
+    count_private: bool = False,
+) -> SemanticArm:
+    """`semantic_search`'s embedding call, `SET LOCAL`s, overfetch statement
+    and timing — shared verbatim with `semantic_candidates` (#367), so the
+    two issue the same statements in the same order."""
+    embed_start = time.monotonic()
+    query_embedding = await get_embedding(query, kind="query")
+    timing.add_ms("embed_ms", time.monotonic() - embed_start)
+
+    db_start = time.monotonic()
+    await ensure_search_snapshot(session, "semantic_search")
+    # ef_search=80 lifts HNSW recall@10 to ~98% at modest latency cost.
+    # random_page_cost=1.1 is a planner correction, not a storage claim (D20).
+    # The planner costs the join's heap side at `relpages`, but every row this
+    # statement touches detoasts a vector (and `notes_metadata` a tsvector)
+    # from TOAST pages `relpages` does not count, so at the default of 4 it
+    # overprices the index path and picks a seq scan + sort that degrades
+    # linearly with the vault. The working set is mostly cached, so the lower
+    # page cost is right on an HDD too — `search.py` states the same
+    # rationale for its own hint. All three SET LOCALs scope to the current
+    # transaction.
+    await session.execute(text("SET LOCAL hnsw.ef_search = 80"))
+    await session.execute(text("SET LOCAL random_page_cost = 1.1"))
+    # iterative_scan (pgvector >= 0.8; guarded at startup by
+    # `_check_pgvector_version`) is what keeps a *filtered* search honest.
+    # Without it the HNSW scan hands the planner at most `ef_search`
+    # candidates, the folder/tags/frontmatter/user predicate throws most of
+    # them away, and nothing refills — 45 of 120 folder-filtered probes came
+    # back empty. `relaxed_order` lets the scan keep walking the graph until
+    # the LIMIT is satisfied *after* filtering. Recall is still bounded by
+    # `hnsw.max_scan_tuples` (20,000) and `hnsw.scan_mem_multiplier` (1);
+    # those are the next knobs if the vault outgrows them (~16.7k chunks
+    # today). `relaxed_order` may emit rows slightly out of distance order
+    # across iterations, so we re-sort below — that is presentation only, it
+    # cannot recover candidates the scan never returned.
+    await session.execute(text("SET LOCAL hnsw.iterative_scan = 'relaxed_order'"))
+
+    # Over-fetch by 5x: HNSW is logarithmic so this is essentially free, and it
+    # gives the per-note dedup enough headroom when a note contributes many chunks.
+    overfetch = max(limit * 5, 50)
+    arm = await semantic_arm_rows(
+        session, query_embedding, overfetch=overfetch, folder=folder, tags=tags,
+        frontmatter=frontmatter, user_id=user_id, with_rerank_text=with_rerank_text,
+        hide_private=hide_private, count_private=count_private,
+    )
+    timing.record("exact_fallback", arm.exact_fallback)
+    timing.add_ms("db_ms", arm.fetched_at - db_start)
+    return arm

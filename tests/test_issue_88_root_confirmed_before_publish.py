@@ -64,6 +64,20 @@ from src.services import vault_fs
 from src.services.vault import UnconfirmedPublication, VaultAssignmentChanged
 
 
+@pytest.fixture(autouse=True)
+def _no_keyword_generation(monkeypatch):
+    """The fake sessions here are scripted by statement order. `move_note`'s
+    metadata transaction now opens with the index generation lock and the
+    keyword fingerprint re-read (#344, D6); both are pinned against a real
+    PostgreSQL in `tests/integration/test_keyword_ranking_pg.py`, so stand
+    them down here."""
+
+    async def _noop(_session):
+        return None
+
+    monkeypatch.setattr(tools, "_enter_keyword_generation", _noop)
+
+
 UID = 8801
 
 
@@ -208,6 +222,24 @@ def multi_user_vault(monkeypatch, tmp_path):
     monkeypatch.setattr(
         tools, "async_session", lambda: _MetadataSession(metadata)
     )
+    # The task tools (#428) read their settings, scan for duplicates and
+    # refresh the index around the same confirmed publication; those three
+    # database touches are stood in for like the note tools' metadata session,
+    # so the confirmation itself is what these tests exercise.
+    from src.services import task_index, task_settings, task_write
+
+    async def _task_defaults(_uid):
+        return task_settings.defaults()
+
+    async def _no_duplicates(*_a, **_k):
+        return [], [], False
+
+    async def _refreshed(**_k):
+        return task_index.RefreshResult(task_index.REFRESHED)
+
+    monkeypatch.setattr(tools, "_effective_task_settings", _task_defaults)
+    monkeypatch.setattr(task_write, "duplicate_scan", _no_duplicates)
+    monkeypatch.setattr(task_index, "refresh_note_tasks", _refreshed)
 
     logged: dict = {}
 
@@ -284,11 +316,23 @@ def seed(ctx) -> None:
     """The note and the file every refusal case must leave byte-identical."""
     (ctx.vault / "note.md").write_text("original body\n", encoding="utf-8")
     (ctx.vault / "picture.png").write_bytes(b"\x89PNG\r\n\x1a\npixels")
+    (ctx.vault / "tasks.md").write_text(TASKS_NOTE, encoding="utf-8")
+
+
+#: The note the task tools (#428) act on.
+TASKS_NOTE = "- [ ] water plants\n"
+
+
+def _task_id() -> str:
+    from src.services import task_line
+
+    return task_line.task_key("water plants")
 
 
 def untouched(ctx) -> None:
     """The former root is intact and nothing was created in the new one."""
     assert (ctx.vault / "note.md").read_text(encoding="utf-8") == "original body\n"
+    assert (ctx.vault / "tasks.md").read_text(encoding="utf-8") == TASKS_NOTE
     assert (ctx.vault / "picture.png").read_bytes() == b"\x89PNG\r\n\x1a\npixels"
     assert not (ctx.vault / ".trash").exists()
     assert sorted(p.name for p in ctx.other.iterdir()) == []
@@ -319,6 +363,12 @@ async def _call(ctx, name: str):
     if name == "delete_folder":
         (ctx.vault / "Empty").mkdir(exist_ok=True)
         return await tools.delete_folder_impl("Empty")
+    if name == "complete_task":
+        return await tools.complete_task_impl("tasks.md", _task_id())
+    if name == "update_task":
+        return await tools.update_task_impl("tasks.md", _task_id(), priority="high")
+    if name == "add_task":
+        return await tools.add_task_impl("tasks.md", "repot the fern")
     raise AssertionError(name)  # pragma: no cover
 
 
@@ -333,6 +383,9 @@ MUTATING_TOOLS = [
     "delete_file",
     "move_file",
     "delete_folder",
+    "complete_task",  # #428
+    "update_task",
+    "add_task",
 ]
 
 
@@ -1450,6 +1503,16 @@ def _reachable(name: str, seen: set[str] | None = None) -> set[str]:
 # at the *call site*, from the keyword.
 _CONDITIONAL_WRITE_GATE = "_mint_preflight"
 
+# `_tracked` (and the closures nested in it) runs `_require_write()` at the body
+# boundary for the tools in `tool_permissions.WRITE_REQUIRED_TOOLS` (#358). Every
+# impl is wrapped by it, so its presence says nothing about whether *this* tool
+# writes; the question here is what the tool's own body does.
+_DECORATOR_NODES = {
+    id(node)
+    for node in ast.walk(TOOLS_FUNCTIONS["_tracked"])
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+}
+
 
 def _needs_write(reachable: set[str]) -> bool:
     """Whether the tool gates on `_require_write`, directly or through the
@@ -1457,6 +1520,8 @@ def _needs_write(reachable: set[str]) -> bool:
     actually asks for write."""
     for name in reachable:
         node = TOOLS_FUNCTIONS[name]
+        if id(node) in _DECORATOR_NODES:
+            continue
         if name != _CONDITIONAL_WRITE_GATE and "_require_write" in _called_names(node):
             return True
         for call in ast.walk(node):
@@ -1595,6 +1660,9 @@ def test_the_write_tool_detector_finds_the_tools_we_know_about():
         "delete_folder",
         "import_from_url",
         "request_upload",
+        "complete_task",  # #428
+        "update_task",
+        "add_task",
     } <= found, found
     # A read-only mint shares `_mint_preflight` and must not be swept in.
     assert "request_download" not in found

@@ -406,8 +406,8 @@ _CORPUS = [
 
 
 def test_the_extraction_version_is_four():
-    # 4 is the task-rows backfill (migration 031); it shares the v1 cleaner.
-    assert indexer.CURRENT_EXTRACTION_VERSION == 4
+    # 3 → 4 for task extraction (#350); see `test_note_tasks_extractor.py`.
+    assert indexer.CURRENT_EXTRACTION_VERSION == 5
 
 
 def test_version_two_cleans_identically_to_version_one():

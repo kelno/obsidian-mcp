@@ -33,25 +33,22 @@ def vectors_not_current():
     """The one expression for "this note's stored vectors are not current".
 
     ``embedded_content_hash IS NULL OR embedded_content_hash IS DISTINCT FROM
-    content_hash`` — a note never embedded, a note whose certification was
-    invalidated (a move, a grammar bump), or a note edited since it was last
-    embedded.
-
-    **`IS DISTINCT FROM`, not `!=`.** A NULL `embedded_content_hash` under `!=`
-    yields NULL, which a `WHERE` reads as false, so every never-embedded note
-    would silently count as current — the exact inversion of what the count is
-    for. The explicit `IS NULL` arm is kept beside it because it is the arm a
-    reader checks first, and the two together say the predicate out loud.
+    content_hash OR embedded_chunking_version IS DISTINCT FROM
+    CHUNKING_VERSION`` — a note never embedded, a note whose certification was
+    invalidated (a move, a grammar bump), a note edited since it was last
+    embedded, or a note embedded under another chunking version (#355). The
+    expression itself is `embeddings.vectors_not_current_expr`, beside
+    `CHUNKING_VERSION`, so the embed backlog's SQL and this count are one
+    definition.
 
     Its callers scope it differently on purpose: the dashboard and
     `index_status` by owner, the panel's reset poller (admin-only) not at all.
     The *definition of pending* must not differ between them, which is why it
     is written once (design D8 of #201).
     """
-    return or_(
-        NoteMetadata.embedded_content_hash.is_(None),
-        NoteMetadata.embedded_content_hash.is_distinct_from(NoteMetadata.content_hash),
-    )
+    from src.services.embeddings import vectors_not_current_expr
+
+    return vectors_not_current_expr()
 
 
 def embedding_excluded(file_path: str, patterns: list[str] | None = None) -> bool:

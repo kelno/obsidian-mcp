@@ -755,6 +755,41 @@ this table.
   value carries its own 10-path / 2048-byte bound, and why `find_related`'s
   grouping key is the separate `source_path` and not the named `path`, which
   is cut at 200 characters and would collapse distinct long paths onto one row.
+- **`hybrid_search` (#354) reserves six more keys**, written through the same
+  holder: `arms` (string, `"both"` or `"keyword_only"`), `semantic_unavailable`
+  (string, `"provider_error"` or `"provider_input_rejected"`, present only on a
+  keyword-only row), `keyword_rows`, `semantic_rows` and `overlap` (ints: notes
+  in the keyword arm, in the semantic arm, and in both) and `rrf_k` (int, the
+  fusion constant used). Its `result_count` / `result_paths` are the rows it
+  **rendered** after the response bound, not the service's page. **A
+  keyword-only row carries no `error` marker**: the embedding provider failed
+  but a real, labelled result was returned, so the row stays analysable on
+  the panel and minable by the search-eval harness, unlike
+  `semantic_search`'s provider failure, which is a refusal or an exception.
+- **The reranker (#367) reserves five keys** on `semantic_search` and
+  `hybrid_search`: `rerank` (bool, the argument, on every row of both tools),
+  and on a `rerank=true` row `reranked` (bool, always), `rerank_reason`
+  (string, one closed code such as `timeout` or `not_configured`, only when
+  `reranked` is false), `rerank_ms` (int, the exchange time, only when a
+  request was sent), `rerank_candidates` (int, the candidate notes scored or
+  considered) and `rerank_documents` (int, #402: the documents allocated to
+  them, at most `RERANK_MAX_DOCUMENTS`). `result_paths` are the rendered rows in final, reranked order.
+  **`reranked: false` is not an error marker**: the call returned the honest,
+  labelled unreranked page, so the row stays analysable and minable.
+- **Search confidence (#389) reserves three keys**, on every **page** of
+  `semantic_search` and `hybrid_search` (the zero-result and keyword-only
+  pages included) and whatever `SEARCH_LOW_CONFIDENCE_SIMILARITY` is:
+  `confidence` (string, `"ok"` or `"low"`, the header token the page
+  carried), `top_similarity` (float rounded to three decimals: the best
+  similarity of the call's candidate set before rerank and the cap, present
+  only when a candidate existed — so absent on a keyword-only page and an
+  empty one) and, on `hybrid_search` only, `keyword_all` (int, the
+  `match: all` keyword note count, the rule's evidence). They are recorded
+  with the threshold at its default 0 so the calibration recipe has evidence
+  from day one. **None is an `error` marker**, and a refusal — including
+  `semantic_search`'s provider-input rejection — records none of them. A row
+  is "post-change" for the harness's `confidence` tabulation exactly when it
+  carries `confidence`; the search-eval export projects all three.
 
 **The identity rule for anything reading these keys: `(usage_logs.user_id,
 path)`, matched NULL-safely.** A path is unique only within an owner —
@@ -768,3 +803,57 @@ writes NULL on every log row and every note, and `usage_logs.user_id` is
 `ON DELETE SET NULL`, so a deleted user's rows join the ownerless slice rather
 than vanishing. That is the honest reading — those rows *are* now unattributed
 — and it is the same treatment the ownerless indexer passes get.
+
+## What the task tools log (#428)
+
+The task tools log through the same `_tracked` named-parameter list and the
+#310 renderer as every other tool. **Ids and flags, never task text.**
+
+| Tool | Logged arguments | Result-side keys |
+| --- | --- | --- |
+| `complete_task` | `path`, `id`, `done_on`, `dry_run`, `expected_hash` (as presence: `true` / `false`) | `task_refresh`, `task_write_attempts` |
+| `update_task` | `path`, `id`, `status`, `clear`, `dry_run`, `expected_hash` (presence) | `fields` (the **names** of the fields set), `task_refresh`, `task_write_attempts` |
+| `add_task` | `path`, `section`, `dry_run`, `allow_duplicate` | `similar_count`, `task_refresh`, `task_write_attempts` |
+| `task_agenda` | `date`, `days`, `folder`, `tags`, `exclude_tags`, `scope` | |
+| `list_tasks` | the #350 arguments plus every new one, `text` included | |
+
+- **Never logged**: the `text`, `append_context` and `context` of a write
+  tool, and any field value `update_task` sets (the due date, the rule
+  text): only the field names. A task's description is note content.
+- `list_tasks(text=…)` **is** logged, like `keyword_search`'s `query`: it is
+  the caller's search terms, not note content, cut at 200 characters as
+  every top-level string is.
+- `task_refresh` is `refreshed`, `lagged:<code>` (`lock_timeout`,
+  `root_changed`, `not_indexed`, `superseded`, `not_utf8`,
+  `derivation_failed`, `error`) or `skipped` (a dry run or a no-change call:
+  nothing was published). A lag is **not an error marker**: the write
+  stands, and the response said `index: may lag (<code>)`.
+- **Since #432 `edit_note`, `set_frontmatter`, `write_file` and
+  `delete_note` carry `task_refresh` too**, as `refreshed` or
+  `lagged:<code>`, and **only when a refresh (or `delete_note`'s clear)
+  was attempted**: a write to a note with no checkbox on either side logs
+  exactly the params it logged before. Their responses never mention it,
+  so the usage row is the only record of a lag.
+- `task_write_attempts` appears only when the in-call conflict retry ran (2
+  or 3); `similar_count` is the number of similar open tasks `add_task`
+  listed.
+- Attribution, actor columns and change-feed principals are exactly
+  `edit_note`'s, with `tool` set to the task tool's name.
+
+## The change feed's actor columns (#351)
+
+`note_events` carries its own denormalised attribution, written by the tool
+at call time rather than joined from `usage_logs` (whose row is written after
+the body, asynchronously committed, carries no path list for write tools and
+is pruned on its own schedule — a time join would be fuzzy by a tick and wrong
+whenever a person and an agent edit in the same tick). `actor_kind` and
+`actor_label` come from the same `actor_columns()` as `usage_logs` (same
+widths, same truncation), so a deleted key's events keep its name. **`actor_ref`
+is deliberately not copied**: the feed never renders it, and a column nobody
+reads is a column somebody later renders. `principal_kind` / `principal_ref`
+(`("api_key", id)` or `("oauth", grant_id)`, the rate-bucket identity) exist
+for one comparison — `get_changes(by="me")` and the `(you)` marker — and are
+**never rendered and never used for authorization**. A transfer upload's
+event carries the minting principal and the token row's actor. Index-pass
+events carry none of these columns (a CHECK enforces it) and render
+`human/sync`.

@@ -9,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy import text
@@ -23,6 +25,7 @@ from src.database import async_session, engine
 from src.limiter import limiter
 from src.mcp_server.auth import APIKeyMiddleware
 from src.mcp_server.server import mcp
+from src.oauth import resource as oauth_resource
 from src.oauth.routes import router as oauth_router
 from src import plugins
 from src.services import error_log, panel_csp, security_events, vault, vault_overlap
@@ -37,11 +40,13 @@ from src.services.index_state import (
     set_state,
     state_table_exists,
 )
-from src.services.embeddings import close_provider_client
+from src.services.embeddings import close_provider_client, verify_tei_server
+from src.services import rerank as rerank_service
 from src.services.indexer import run_indexer_loop
 from src.services.transport_security import (
     check_database_transport,
     log_embedding_transport,
+    log_rerank_transport,
 )
 from src.services.rate_limits import flush_all
 from src.services import body_budget
@@ -109,6 +114,14 @@ async def _check_embedding_dim() -> None:
 
 MIN_PGVECTOR_VERSION = (0, 8, 0)
 
+#: Below this, the server starts but logs one WARNING (#348). pgvector 0.8.3
+#: fixed possible HNSW index corruption during vacuum, and 0.8.4 fixed the
+#: `hnsw graph not repaired` and insert errors during HNSW vacuum (pgvector
+#: CHANGELOG). The vector index is an HNSW index rewritten continuously by
+#: the indexer, so it is exposed. Advisory only: never an exit, never
+#: `/health`.
+PGVECTOR_HNSW_VACUUM_FIXED_VERSION = (0, 8, 4)
+
 
 def _parse_pgvector_version(raw: str) -> tuple[int, ...] | None:
     """`'0.8.2'` → `(0, 8, 2)`. None when the string is not parseable.
@@ -162,6 +175,20 @@ async def _check_pgvector_version() -> None:
             ".".join(str(p) for p in MIN_PGVECTOR_VERSION),
         )
         sys.exit(1)
+    if parsed < PGVECTOR_HNSW_VACUUM_FIXED_VERSION:
+        from src.services.vector_index import INDEX_NAME
+
+        logging.getLogger(__name__).warning(
+            "pgvector %s predates the HNSW vacuum fixes of 0.8.3 (possible "
+            "index corruption) and %s; this server's vector index is HNSW and "
+            "is vacuumed continuously. Upgrade the extension binaries (the "
+            "database image), run ALTER EXTENSION vector UPDATE, then rebuild "
+            "the vector index once: REINDEX INDEX CONCURRENTLY %s. Starting "
+            "anyway.",
+            row[0],
+            ".".join(str(p) for p in PGVECTOR_HNSW_VACUUM_FIXED_VERSION),
+            INDEX_NAME,
+        )
 
 
 def _configure_body_budget() -> None:
@@ -413,6 +440,103 @@ async def _check_fts_fingerprint() -> None:
     )
 
 
+async def _warn_missing_keyword_excerpts() -> None:
+    """One WARNING naming how many keyword vectors have no stored excerpt
+    (#344, design D5): every row written before migration 031, until its note
+    is edited or `make rebuild-tsvectors` runs. Ranking is right regardless
+    (031 re-headed every vector in SQL); only `keyword_search`'s snippet is
+    missing for those rows, and the tool says so per call. Never a refusal,
+    never `/health`: an absent snippet is an ergonomic gap, not a wrong answer.
+    """
+    from sqlalchemy import text as _text
+
+    log = logging.getLogger(__name__)
+    async with async_session() as session:
+        if (await session.execute(
+            _text("SELECT to_regclass('notes_metadata')")
+        )).scalar() is None:
+            return
+        try:
+            count = (await session.execute(_text(
+                "SELECT count(*) FROM notes_metadata "
+                "WHERE content_tsvector IS NOT NULL AND body_excerpt IS NULL"
+            ))).scalar() or 0
+        except Exception as exc:  # the column is 031's; defer to alembic
+            log.debug("keyword excerpt count skipped: %s", exc)
+            return
+    if count:
+        log.warning(
+            "%d note(s) have a keyword vector but no stored excerpt (indexed before "
+            "migration 031): keyword_search shows no snippet for them until they are "
+            "edited or `make rebuild-tsvectors` (the Kubernetes rebuild Job) runs once. "
+            "Ranking is unaffected.",
+            count,
+        )
+
+
+OIDC_LOCKOUT_MESSAGE = (
+    "LOCAL_LOGIN_ENABLED=false and no active admin is linked to single sign-on "
+    "under OIDC_ISSUER: nobody can sign in to the panel as an administrator. "
+    "Recovery: set LOCAL_LOGIN_ENABLED=true, restart, sign in with a local admin "
+    "password and link an admin (user edit page, Single sign-on). The MCP "
+    "endpoint is unaffected."
+)
+
+
+async def _warn_oidc_lockout() -> None:
+    """#416 D13: with OIDC enabled and password sign-in disabled, count the
+    active admins bound under the configured issuer; zero logs one CRITICAL
+    naming the recovery step. **Never a refusal** — an outage of one login
+    method must not become an outage of `/mcp` — and a failure of the query
+    itself is a WARNING (class name only) and startup continues."""
+    if not (settings.oidc_enabled and not settings.local_login_enabled):
+        return
+    from sqlalchemy import func as _func, select as _select
+
+    from src.models.db import User
+
+    log = logging.getLogger(__name__)
+    try:
+        async with async_session() as session:
+            count = (await session.execute(
+                _select(_func.count(User.id)).where(
+                    User.is_admin.is_(True),
+                    User.is_active.is_(True),
+                    User.oidc_issuer == settings.oidc_issuer,
+                    User.oidc_subject.is_not(None),
+                )
+            )).scalar_one()
+    except Exception as exc:  # noqa: BLE001 - a warning, never a refusal
+        log.warning(
+            "OIDC lockout check skipped: the reachable-admin count failed (%s)",
+            type(exc).__name__,
+        )
+        return
+    if count == 0:
+        log.critical(OIDC_LOCKOUT_MESSAGE)
+
+
+def _log_index_exclusion() -> None:
+    """#392: say once at startup, where the operator looks, that the index
+    leaves sync-conflict copies out (the files themselves are untouched).
+    Nothing is logged while `INDEX_EXCLUDE_CONFLICT_FILES` is off."""
+    if settings.index_exclude_conflict_files:
+        logging.getLogger(__name__).info(
+            "Index exclusion: sync-conflict copies are not indexed "
+            "(INDEX_EXCLUDE_CONFLICT_FILES=true)"
+        )
+
+
+def _log_retrieval_fingerprint() -> None:
+    """One INFO line naming the non-stored retrieval fingerprint (heading-chunks
+    D7): the embedding fingerprint's fields, the chunking version and the
+    query instruction's digest — never the instruction text. Never compared,
+    so it can never refuse startup."""
+    from src.services.index_state import retrieval_fingerprint
+
+    logging.getLogger(__name__).info("Embedding retrieval: %s", retrieval_fingerprint())
+
+
 async def _warm_embedding_model() -> None:
     """Pre-load the embedding model so the first semantic_search after startup
     isn't a cold reload. Combined with OLLAMA_KEEP_ALIVE the model then stays
@@ -422,9 +546,11 @@ async def _warm_embedding_model() -> None:
     if settings.embedding_provider != "ollama":
         return
     try:
-        from src.services.embeddings import get_provider
+        from src.services.embeddings import get_embedding
 
-        await get_provider().embed_one("warmup")
+        # Through the shared layer, as a query: it warms the path a search
+        # takes, query instruction included (heading-chunks D7).
+        await get_embedding("warmup", kind="query")
         logging.getLogger(__name__).info(
             "Embedding model warm-up complete (keep_alive=%s)",
             settings.ollama_keep_alive,
@@ -586,6 +712,9 @@ async def lifespan(app: FastAPI):
             # No indexer runs here by design: `/health` says `disabled`, which
             # does not by itself make the top-level status `degraded`.
             indexer_health.mark_disabled()
+            # #367: no probe and no transport line; `/health` reads
+            # `disabled` when RERANK_URL is set, else `absent`.
+            rerank_service.mark_sandbox()
             # Sandbox mode still has to be *ready*: the admission gate refuses
             # every multi-user caller until a snapshot is published, and a
             # sandbox that never publishes one would refuse every registered
@@ -615,6 +744,8 @@ async def lifespan(app: FastAPI):
         # itself) and below the sandbox short-circuit.
         await check_database_role()
         log_embedding_transport()
+        _log_retrieval_fingerprint()
+        _log_index_exclusion()
         await _check_embedding_dim()
         await _check_pgvector_version()
         await _validate_fts_configs()
@@ -625,6 +756,27 @@ async def lifespan(app: FastAPI):
         # database to read a fingerprint from and nothing it could verify.
         await _check_embedding_fingerprint()
         await _check_fts_fingerprint()
+        # After the fingerprint guards, so their more specific "run the reset"
+        # message wins. Exits only on a proven mismatch: an unreachable server
+        # is logged and embedding stays withheld in the provider (#425 D1).
+        if settings.embedding_provider == "tei":
+            tei_check = await verify_tei_server()
+            if tei_check.status == "mismatch":
+                sys.exit(1)
+        # #344: a count, a WARNING, nothing else — see the function.
+        await _warn_missing_keyword_excerpts()
+        # #416 D13: one CRITICAL when password sign-in is off and no admin can
+        # sign in with SSO. Never exits.
+        await _warn_oidc_lockout()
+        # #367 (D8): the optional reranker. Its transport line, then one
+        # two-order probe that needs no database. A failure disables reranking
+        # with one CRITICAL and **never exits** — a reranker outage must not
+        # take down the vault — and starts the bounded background re-probe.
+        reprobe_task = None
+        if settings.rerank_url:
+            log_rerank_transport()
+            if not await rerank_service.startup_probe():
+                reprobe_task = asyncio.create_task(rerank_service.reprobe_loop())
         # E1 — **synchronously, before the app serves, and before the indexer
         # task exists.** An asynchronously-published snapshot is not startup
         # enforcement: a tool call between the first accepted connection and the
@@ -668,6 +820,14 @@ async def lifespan(app: FastAPI):
             except Exception as e:  # noqa: BLE001 - shutdown, never fatal
                 logging.getLogger(__name__).error(
                     f"Closing the embedding provider client failed: {e}"
+                )
+            # #367: the re-probe task first, then the rerank client.
+            try:
+                await rerank_service.stop_task(reprobe_task)
+                await rerank_service.close_rerank_client()
+            except Exception as e:  # noqa: BLE001 - shutdown, never fatal
+                logging.getLogger(__name__).error(
+                    f"Closing the rerank client failed: {type(e).__name__}"
                 )
             # The refusal coalescer's last flush, **before `engine.dispose()`**:
             # every window still holding a pending count writes the row it owes
@@ -732,6 +892,10 @@ def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
     except Exception:  # noqa: BLE001 - never let telemetry break a 429
         pass
     address = security_events.client_ip(request)
+    # The /token 429 carries the RFC 8707 class without reading the body
+    # (#357): a refused request spends nothing, so parsing its form here
+    # would hand an attacker CPU at the moment the limiter says no.
+    token_route = _route_path(request) == "/token"
     security_events.emit(
         "rate_limit_exceeded",
         subject=security_events.subject_for(ip=address),
@@ -740,12 +904,40 @@ def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
         client_ip=address,
         limit_count=limit_count,
         window_seconds=window_seconds,
+        resource_class=(
+            oauth_resource.UNCLASSIFIED_RATE_LIMITED if token_route else None
+        ),
     )
     return _rate_limit_exceeded_handler(request, exc)
 
 
+def _route_path(request: Request) -> str | None:
+    try:
+        return request.url.path
+    except Exception:  # noqa: BLE001 - telemetry may not raise
+        return None
+
+
+async def _validation_error_handler(request: Request, exc: RequestValidationError):
+    """FastAPI's 422, plus the RFC 8707 class on the OAuth routes (#357).
+
+    Route-aware: only `/authorize` and `/token` are touched. A `GET /authorize`
+    is classified from its **query string only**; `POST /authorize` and
+    `/token` are `unclassified_malformed` and their body is never read.
+    """
+    path = _route_path(request)
+    if path in ("/authorize", "/token"):
+        if path == "/authorize" and request.method == "GET":
+            oauth_resource.begin(request, request.query_params.getlist("resource"))
+        else:
+            oauth_resource.set_fixed(request, oauth_resource.UNCLASSIFIED_MALFORMED)
+        oauth_resource.finish(request)
+    return await request_validation_exception_handler(request, exc)
+
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
+app.add_exception_handler(RequestValidationError, _validation_error_handler)
 
 def _install_proxy_headers(target: FastAPI) -> list[str]:
     """Honour `X-Forwarded-Proto`/`-For` from the peers `TRUSTED_PROXY_IPS` names.
@@ -909,6 +1101,12 @@ async def health():
     the top-level `status` is `degraded` too.
     `disabled` (`MCP_SANDBOX_MODE`) does not by itself degrade the top level.
 
+    `rerank` (#367) is `enabled`, `disabled` (the probe failed or was skipped
+    in sandbox mode) or `absent` (no `RERANK_URL`). It never names the URL,
+    host, reason or a count, never probes, and `disabled` does **not** make
+    the top-level `status` `degraded`: reranking is an opt-in quality layer
+    and every `rerank=true` response states its absence.
+
     **The HTTP status is 200 in every case.** Kubernetes uses this endpoint
     for liveness, and a restart loop cannot repair vault content or an
     embedding-provider outage; monitors alert on the `status` field instead.
@@ -926,6 +1124,7 @@ async def health():
             "transfer_mount_check_available": (
                 vault_fs.mount_identity_available()
             ),
+            "rerank": rerank_service.health_state(),
         }
     )
 

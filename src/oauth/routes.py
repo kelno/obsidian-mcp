@@ -1,3 +1,4 @@
+import contextvars
 import hashlib
 import logging
 import os
@@ -10,14 +11,18 @@ from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, func, not_, select
+from sqlalchemy import null as sa_null
 from sqlalchemy import update as sa_update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.auth.session import get_active_session_user
 from src.config import settings
 from src.database import async_session
 from src.limiter import limiter
 from src.models.db import OAuthClient, OAuthCode, OAuthToken
+from src.oauth import cimd, client_assertion
+from src.oauth import resource as oauth_resource
 from src.oauth.grants import (
     clamp_token_expiry,
     consent_lifetimes,
@@ -38,6 +43,13 @@ from src.oauth.trust import (
     redirect_display_host,
 )
 from src.services import panel_csp, security_events
+
+# The caller's submitted client_id for the /token request in progress
+# (#357). `_token_refused` falls back to it when a call site passes none,
+# so no /token record can drop `cimd_host` / `cimd_ref`.
+_SUBMITTED_CLIENT_ID: contextvars.ContextVar = contextvars.ContextVar(
+    "oauth_submitted_client_id", default=None
+)
 
 # No module logger, deliberately. Everything this module records is an
 # authentication outcome a caller can drive on demand, so it goes through
@@ -136,16 +148,28 @@ def _token_refused(
     resolved neither — a missing field means the path did not have it, which is
     the honest answer.
     """
+    if submitted_client_id is None:
+        submitted_client_id = _SUBMITTED_CLIENT_ID.get()
+    submitted = cimd.submitted_fields(submitted_client_id, resolved=bool(client_id))
     security_events.emit(
         "oauth_token_refused",
         subject=security_events.subject_for(request=request),
         reason=reason,
         client_id=client_id,
-        client_id_submitted=None if client_id else submitted_client_id,
+        client_id_submitted=submitted.client_id_submitted,
+        cimd_host=submitted.cimd_host,
+        cimd_ref=submitted.cimd_ref,
         user_id=user_id,
         grant_id=grant_id,
         client_ip=security_events.client_ip(request),
+        resource_class=oauth_resource.resource_class(request),
+        resource_host=oauth_resource.resource_host(request),
     )
+
+
+def _submitted_now():
+    """The CIMD log fields of the caller's client_id for this /token request."""
+    return cimd.submitted_fields(_SUBMITTED_CLIENT_ID.get(), resolved=True)
 
 
 def _authorize_refused(
@@ -155,16 +179,73 @@ def _authorize_refused(
     client_id: str | None = None,
     submitted_client_id=None,
     user_id: int | None = None,
+    cimd_host: str | None = None,
 ) -> None:
-    """One `oauth_authorize_refused`. The rendered refusal is unchanged."""
+    """One `oauth_authorize_refused`. The rendered refusal is unchanged.
+
+    An `https://` client_id is never logged (#357): `cimd_host` and the 16-hex
+    `cimd_ref` stand in for it.
+    """
+    submitted = cimd.submitted_fields(submitted_client_id, resolved=bool(client_id))
     security_events.emit(
         "oauth_authorize_refused",
         subject=security_events.subject_for(request=request),
         reason=reason,
         client_id=client_id,
-        client_id_submitted=None if client_id else submitted_client_id,
+        client_id_submitted=submitted.client_id_submitted,
+        cimd_host=cimd_host or submitted.cimd_host,
+        cimd_ref=submitted.cimd_ref,
         user_id=user_id,
         client_ip=security_events.client_ip(request),
+        resource_class=oauth_resource.resource_class(request),
+        resource_host=oauth_resource.resource_host(request),
+    )
+
+
+def _cimd_refused(request, refusal, submitted_client_id, user_id=None) -> JSONResponse:
+    """A CIMD refusal at /authorize: one record, the constant response (D12)."""
+    _authorize_refused(
+        request,
+        f"client_metadata.{refusal.reason}",
+        submitted_client_id=submitted_client_id,
+        user_id=user_id,
+        cimd_host=refusal.host,
+    )
+    return _CIMD_REFUSAL()
+
+
+def _CIMD_REFUSAL() -> JSONResponse:
+    return JSONResponse({"error": "invalid_client"}, status_code=400)
+
+
+def _caller_matches_row(row_client_id: str, row_metadata_url, submitted) -> bool:
+    """Does a caller-supplied client_id name this row? One definition (D8).
+
+    A CIMD row matches only its URL; the internal `cimd_` id never matches.
+    """
+    if row_metadata_url is not None:
+        return submitted == row_metadata_url
+    return submitted == row_client_id
+
+
+async def _caller_matches(session, row_client_id: str, submitted) -> bool:
+    if not row_client_id.startswith(cimd.INTERNAL_PREFIX):
+        return submitted == row_client_id
+    url = (
+        await session.execute(
+            select(OAuthClient.client_id_metadata_url).where(
+                OAuthClient.client_id == row_client_id
+            )
+        )
+    ).scalar_one_or_none()
+    return _caller_matches_row(row_client_id, url, submitted)
+
+
+def _dcr_client_query(client_id):
+    """A lookup by a caller-submitted, non-URL id: never reaches a CIMD row."""
+    return select(OAuthClient).where(
+        OAuthClient.client_id == client_id,
+        OAuthClient.client_id_metadata_url.is_(None),
     )
 
 
@@ -185,16 +266,19 @@ def _registration_refused(request, reason: str) -> None:
 def _revoke_noop(request, reason: str, submitted_client_id=None) -> None:
     """One `oauth_revoke_noop`. RFC 7009 §2.2 forbids the *response* saying it.
 
-    The endpoint answers 200 with an empty body whether the token was unknown,
+    The endpoint answers the existing constant 200 `{}` response whether the token was unknown,
     foreign or already dead, so the log is the only place the distinction
     exists.
     """
+    submitted = cimd.submitted_fields(submitted_client_id)
     security_events.emit(
         "oauth_revoke_noop",
         level=logging.INFO,
         subject=security_events.subject_for(request=request),
         reason=reason,
-        client_id_submitted=submitted_client_id,
+        client_id_submitted=submitted.client_id_submitted,
+        cimd_host=submitted.cimd_host,
+        cimd_ref=submitted.cimd_ref,
         client_ip=security_events.client_ip(request),
     )
 
@@ -296,6 +380,68 @@ def _client_authenticated(client, client_secret) -> bool:
     return auth_method == "none"
 
 
+#: The sub a DCR client's failed authentication has always carried.
+_DCR_AUTH_FAILED = "authentication_failed"
+
+
+def _client_auth_failure(client, form, *, endpoint: str, now) -> str | None:
+    """The D6 dispatcher (#420): `None` when the client authenticated, else
+    the closed sub that becomes the refusal's reason.
+
+    One definition for the three call sites (`/token` both grants, `/revoke`),
+    each of which calls it at the position `_client_authenticated` held, on the
+    row the **credential** resolved inside the main transaction:
+
+    * a `private_key_jwt` row → `client_assertion.authenticate` against that
+      row's URL, snapshot and pinned alg (it checks `assertion_missing`, then
+      `secret_presented`, then D6 1–9); the sub is one of
+      `client_assertion.SUBS`;
+    * a `none` CIMD row → `assertion_unexpected` when either assertion
+      parameter is present, otherwise authenticated, as before;
+    * every DCR row → `_client_authenticated`, byte for byte; assertion
+      parameters are ignored (L6), and a failure is `authentication_failed`.
+    """
+    auth_method = getattr(client, "token_endpoint_auth_method", "client_secret_post")
+    metadata_url = getattr(client, "client_id_metadata_url", None)
+    if auth_method == cimd.AUTH_METHOD_PRIVATE_KEY_JWT:
+        try:
+            client_assertion.authenticate(
+                form,
+                metadata_url=metadata_url,
+                snapshot=getattr(client, "jwks_snapshot", None),
+                pinned_alg=getattr(client, "token_endpoint_auth_signing_alg", None),
+                endpoint=endpoint,
+                now=now,
+            )
+        except client_assertion.AssertionRefusal as refusal:
+            return refusal.sub
+        return None
+    if metadata_url is not None and auth_method == cimd.AUTH_METHOD_NONE:
+        if (
+            form.get("client_assertion") is not None
+            or form.get("client_assertion_type") is not None
+        ):
+            return "assertion_unexpected"
+        return None
+    if _client_authenticated(client, form.get("client_secret")):
+        return None
+    return _DCR_AUTH_FAILED
+
+
+async def _assertion_prephase(form, request, *, credential_kind: str, credential) -> None:
+    """D7: the JWKS refetch pre-phase, run **before** the handler's main
+    session is opened. Advisory: it never decides a response and never
+    raises (`client_assertion.prephase`'s contract); a request without an
+    assertion returns before any I/O."""
+    await client_assertion.prephase(
+        form,
+        credential_kind=credential_kind,
+        credential=credential,
+        route=_route(request),
+        client_ip=security_events.client_ip(request),
+    )
+
+
 def _cross_user_client_error(
     request=None,
     *,
@@ -319,6 +465,8 @@ def _cross_user_client_error(
         user_id=owner_user_id,
         route=_route(request),
         client_ip=security_events.client_ip(request),
+        resource_class=oauth_resource.resource_class(request),
+        resource_host=oauth_resource.resource_host(request),
     )
     return JSONResponse(
         {
@@ -418,18 +566,33 @@ def _state_serializer() -> URLSafeTimedSerializer:
 @router.get("/.well-known/oauth-authorization-server")
 async def oauth_metadata():
     base = settings.base_url
-    return JSONResponse({
+    metadata = {
         "issuer": base,
         "authorization_endpoint": f"{base}/authorize",
         "token_endpoint": f"{base}/token",
+        # DCR stays the fallback for clients that send no URL (#357).
         "registration_endpoint": f"{base}/register",
         "revocation_endpoint": f"{base}/revoke",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
+        # `none` is one of the two values Claude requires before it uses CIMD.
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
         "scopes_supported": ["read", "readwrite", "offline_access"],
-    })
+        # RFC 9207: every authorization response carries `iss`.
+        "authorization_response_iss_parameter_supported": True,
+    }
+    if settings.oauth_cimd_enabled:
+        metadata["client_id_metadata_document_supported"] = True
+        # #420 D9: `private_key_jwt` for CIMD clients only (`/register` still
+        # refuses it, L6). Disabled, the document is byte-identical to before.
+        metadata["token_endpoint_auth_methods_supported"] = [
+            "none", "client_secret_post", cimd.AUTH_METHOD_PRIVATE_KEY_JWT,
+        ]
+        metadata["token_endpoint_auth_signing_alg_values_supported"] = list(
+            cimd.SIGNING_ALGS
+        )
+    return JSONResponse(metadata)
 
 
 # RFC 9728 protected-resource metadata. MCP clients probe both the bare path
@@ -599,6 +762,7 @@ async def register_client(request: Request):
         scope=scope,
         count=len(redirect_uris),
         client_ip=security_events.client_ip(request),
+        registration_kind="dcr",
     )
 
     registration = {
@@ -618,6 +782,29 @@ async def register_client(request: Request):
 # --- Authorization Endpoint ---
 
 
+def _getlist(form, key: str) -> list:
+    """`form.getlist(key)`, tolerating the plain dicts tests pass as forms."""
+    try:
+        return list(form.getlist(key))
+    except AttributeError:
+        value = form.get(key) if hasattr(form, "get") else None
+        return [] if value is None else [value]
+
+
+def _query_resources(request) -> list:
+    try:
+        return request.query_params.getlist("resource")
+    except Exception:  # noqa: BLE001 - handlers are called with stand-ins
+        return []
+
+
+async def _form_resources(request) -> list:
+    try:
+        return _getlist(await request.form(), "resource")
+    except Exception:  # noqa: BLE001 - handlers are called with stand-ins
+        return []
+
+
 @router.get("/authorize", response_class=HTMLResponse)
 async def authorize_get(
     request: Request,
@@ -629,6 +816,36 @@ async def authorize_get(
     scope: str = Query("read"),
     state: str = Query(""),
 ):
+    # RFC 8707 classification (#357, D11): once at entry; the `finally`
+    # emits the classification-only record iff no record carried it.
+    oauth_resource.begin(request, _query_resources(request))
+    try:
+        return await _authorize_get(
+            request,
+            response_type=response_type,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method,
+            scope=scope,
+            state=state,
+        )
+    finally:
+        oauth_resource.finish(request)
+
+
+async def _authorize_get(
+    request,
+    *,
+    response_type,
+    client_id,
+    redirect_uri,
+    code_challenge,
+    code_challenge_method,
+    scope,
+    state,
+):
+    session_user_id: int | None = None
     # Multi-user mode: an end-user identity must exist on the request
     # session before we can stamp it onto the issued code/token. If there's
     # no session, bounce through login first and come back here. Single-
@@ -637,6 +854,8 @@ async def authorize_get(
     if settings.multi_user_mode:
         async with async_session() as session:
             current_user = await get_active_session_user(request, session)
+        if current_user is not None:
+            session_user_id = current_user.id
         if current_user is None:
             # Preserve the entire /authorize URL (path + query) so the
             # client doesn't have to re-issue the request after login.
@@ -667,10 +886,27 @@ async def authorize_get(
         _authorize_refused(request, "invalid_scope", submitted_client_id=client_id)
         return JSONResponse({"error": "invalid_scope", "error_description": str(exc)}, status_code=400)
 
-    async with async_session() as session:
-        result = await session.execute(
-            select(OAuthClient).where(OAuthClient.client_id == client_id)
+    # The synthetic CIMD id is never caller input (#357, D6): refused before
+    # any lookup, so the answer says nothing about which rows exist.
+    if cimd.is_internal_id(client_id):
+        return _cimd_refused(
+            request, cimd.CimdRefusal("internal_id_submitted"), client_id,
+            user_id=session_user_id,
         )
+    if cimd.is_cimd_client_id(client_id) and settings.oauth_cimd_enabled:
+        return await _authorize_get_cimd(
+            request,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method,
+            scope=scope,
+            state=state,
+            session_user_id=session_user_id,
+        )
+
+    async with async_session() as session:
+        result = await session.execute(_dcr_client_query(client_id))
         client = result.scalar_one_or_none()
 
     if client is None:
@@ -679,7 +915,7 @@ async def authorize_get(
         _authorize_refused(request, "unknown_client", submitted_client_id=client_id)
         return JSONResponse({"error": "invalid_client"}, status_code=400)
 
-    if redirect_uri not in client.redirect_uris:
+    if not cimd.redirect_uri_allowed(client.redirect_uris, redirect_uri, cimd=False):
         _authorize_refused(
             request, "invalid_redirect_uri", client_id=client.client_id
         )
@@ -746,6 +982,8 @@ async def authorize_get(
     # still decide where a code can go.
     panel_csp.mark_consent(request)
     response = templates.TemplateResponse(request, "authorize.html", {
+        "client_kind": "dcr",
+        "resources": _query_resources(request),
         "client_name": client.client_name,
         "redirect_host": redirect_host,
         "client_trust": client_trust,
@@ -777,6 +1015,105 @@ async def authorize_get(
     return response
 
 
+async def _authorize_get_cimd(
+    request,
+    *,
+    client_id,
+    redirect_uri,
+    code_challenge,
+    code_challenge_method,
+    scope,
+    state,
+    session_user_id,
+):
+    """The consent page for a Client ID Metadata Document client (#357).
+
+    The application identity is the **host of the client identifier URL**,
+    the one thing this server can vouch for (it fetched the document from
+    it); the document's self-declared `client_name` is not rendered (D10).
+    The authorization hash of the projection shown goes into the signed
+    state, and the POST refuses anything else (D7).
+    """
+    try:
+        projection = await cimd.resolve(client_id, security_events.client_ip(request))
+    except cimd.CimdRefusal as refusal:
+        return _cimd_refused(request, refusal, client_id, user_id=session_user_id)
+    client_host = cimd.host_for_log(client_id)
+    if not cimd.redirect_uri_allowed(projection.redirect_uris, redirect_uri, cimd=True):
+        return _cimd_refused(
+            request, cimd.CimdRefusal("redirect_uri_mismatch", client_host), client_id,
+            user_id=session_user_id,
+        )
+    # #420 D2: a `private_key_jwt` client's JWKS is resolved here too, so the
+    # user is never shown a consent that cannot complete. Its own cache and a
+    # second per-address charge on a miss; every refusal is the constant one.
+    if projection.auth_method == cimd.AUTH_METHOD_PRIVATE_KEY_JWT:
+        try:
+            await cimd.resolve_jwks(projection, security_events.client_ip(request))
+        except cimd.CimdRefusal as refusal:
+            return _cimd_refused(request, refusal, client_id, user_id=session_user_id)
+
+    # Prior approval comes only from (URL, authenticated user) (Codex R2-1).
+    row_id = cimd.cimd_row_id(client_id, session_user_id)
+    async with async_session() as session:
+        first_approved = (
+            await session.execute(
+                select(OAuthClient.created_at).where(OAuthClient.client_id == row_id)
+            )
+        ).scalar_one_or_none()
+    if first_approved is not None and first_approved.tzinfo is None:
+        first_approved = first_approved.replace(tzinfo=timezone.utc)
+
+    server_state = secrets.token_urlsafe(16)
+    signed_state = _state_serializer().dumps(
+        {"s": server_state, "m": projection.authorization_hash}
+    )
+    client_can_write = _client_can_write(projection.scope)
+    scope_parts = scope.split()
+    offline_access_requested = "offline_access" in scope_parts
+    requested_write = "readwrite" in scope_parts
+
+    panel_csp.mark_consent(request)
+    response = templates.TemplateResponse(request, "authorize.html", {
+        "client_kind": "cimd",
+        "resources": _query_resources(request),
+        "client_name": None,
+        "client_host": client_host,
+        "client_id_url": client_id,
+        "first_approved_at": (
+            first_approved.astimezone(timezone.utc).date().isoformat()
+            if first_approved is not None
+            else None
+        ),
+        "loopback_only": projection.loopback_only,
+        "redirect_host": redirect_display_host(redirect_uri),
+        "client_trust": "known" if known_redirect_host(redirect_uri) else "unverified",
+        "client_registered_at": None,
+        "scope": scope,
+        "client_can_write": client_can_write,
+        "requested_write": requested_write,
+        "write_unavailable": requested_write and not client_can_write,
+        "read_scope": "read offline_access" if offline_access_requested else "read",
+        "readwrite_scope": "readwrite offline_access" if offline_access_requested else "readwrite",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "code_challenge": code_challenge,
+        "code_challenge_method": code_challenge_method,
+        "state": server_state,
+        "client_state": state,
+        "lifetimes": consent_lifetimes(),
+    })
+    response.set_cookie(
+        "oauth_state",
+        signed_state,
+        httponly=True,
+        secure=settings.base_url.startswith("https://"),
+        samesite="lax",
+        max_age=600,
+    )
+    return response
+
+
 @router.post("/authorize")
 async def authorize_post(
     request: Request,
@@ -789,13 +1126,52 @@ async def authorize_post(
     state: str = Form(""),
     client_state: str = Form(""),
 ):
+    oauth_resource.begin(request, await _form_resources(request))
+    try:
+        return await _authorize_post(
+            request,
+            action=action,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method,
+            scope=scope,
+            state=state,
+            client_state=client_state,
+        )
+    finally:
+        oauth_resource.finish(request)
+
+
+async def _authorize_post(
+    request,
+    *,
+    action,
+    client_id,
+    redirect_uri,
+    code_challenge,
+    code_challenge_method,
+    scope,
+    state,
+    client_state,
+):
     # Verify CSRF state against the signed cookie
     signed_cookie = request.cookies.get("oauth_state", "")
     state_valid = False
+    bound_hash = None
     if signed_cookie and state:
         try:
-            expected_state = _state_serializer().loads(signed_cookie, max_age=600)
-            state_valid = secrets.compare_digest(expected_state, state)
+            expected = _state_serializer().loads(signed_cookie, max_age=600)
+            # A CIMD consent binds the authorization hash beside the state
+            # (#357, D7); a DCR consent carries the plain state string.
+            if isinstance(expected, dict):
+                expected_state = expected.get("s")
+                bound_hash = expected.get("m")
+            else:
+                expected_state = expected
+            state_valid = isinstance(expected_state, str) and secrets.compare_digest(
+                expected_state, state
+            )
         except (BadSignature, SignatureExpired):
             state_valid = False
 
@@ -813,6 +1189,21 @@ async def authorize_post(
     except ValueError as exc:
         _authorize_refused(request, "invalid_scope", submitted_client_id=client_id)
         return JSONResponse({"error": "invalid_scope", "error_description": str(exc)}, status_code=400)
+
+    if cimd.is_internal_id(client_id):
+        return _cimd_refused(request, cimd.CimdRefusal("internal_id_submitted"), client_id)
+    if cimd.is_cimd_client_id(client_id) and settings.oauth_cimd_enabled:
+        return await _authorize_post_cimd(
+            request,
+            action=action,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method,
+            scope=scope,
+            client_state=client_state,
+            bound_hash=bound_hash,
+        )
 
     async with async_session() as session:
         # GET already validates this identity, but the consent form can remain
@@ -836,9 +1227,7 @@ async def authorize_post(
         # redirect is possible unless we re-check before any redirect or code
         # minting. Load the client once and reuse it for the multi-user
         # first-authorizer binding below.
-        result = await session.execute(
-            select(OAuthClient).where(OAuthClient.client_id == client_id)
-        )
+        result = await session.execute(_dcr_client_query(client_id))
         client_row = result.scalar_one_or_none()
 
         if client_row is None:
@@ -850,7 +1239,7 @@ async def authorize_post(
             )
             return JSONResponse({"error": "invalid_client"}, status_code=400)
 
-        if redirect_uri not in client_row.redirect_uris:
+        if not cimd.redirect_uri_allowed(client_row.redirect_uris, redirect_uri, cimd=False):
             _authorize_refused(
                 request,
                 "invalid_redirect_uri",
@@ -891,9 +1280,15 @@ async def authorize_post(
                 client_id=resolved_client_id,
                 user_id=denied_user_id,
                 client_ip=security_events.client_ip(request),
+                resource_class=oauth_resource.resource_class(request),
+                resource_host=oauth_resource.resource_host(request),
             )
-            # Denied — redirect with error (redirect_uri now verified)
-            url = _append_query(redirect_uri, error="access_denied", state=client_state)
+            # Denied — redirect with error (redirect_uri now verified). RFC
+            # 9207 `iss` rides every authorization response (#357).
+            url = _append_query(
+                redirect_uri, error="access_denied", state=client_state,
+                iss=settings.base_url,
+            )
             return RedirectResponse(url, status_code=302)
 
         # Refuse cross-user reuse of a client somebody else already owns
@@ -991,6 +1386,10 @@ async def authorize_post(
                     # `oauth_cross_user_client_refused` record about a user who
                     # did nothing. The sweep's win is not a conflict; it gets
                     # the same `invalid_client` the stamp below returns.
+                    _authorize_refused(
+                        request, "client_vanished", submitted_client_id=client_id,
+                        user_id=session_user_id,
+                    )
                     return _client_vanished_error()
                 # Refuse unless the winner happens to be this same user, which
                 # is the ordinary case of one person opening two tabs.
@@ -1007,10 +1406,14 @@ async def authorize_post(
         # takes the row lock the sweep's `FOR UPDATE` contends for, so if the
         # sweep has already deleted this registration we learn it here, with
         # nothing written, instead of from a foreign-key violation on the
-        # INSERT. `_authorize_refused` is not emitted — the refusal is the
-        # sweep's ordinary work, not a rejected authorization attempt, and the
-        # sweep logs its own count.
+        # INSERT. Since #357 it is recorded as `oauth_authorize_refused`
+        # (`client_vanished`), so every /authorize refusal carries a record and
+        # its `resource_class`; the sweep still logs its own count.
         if not await _stamp_client_use(session, client_id):
+            _authorize_refused(
+                request, "client_vanished", submitted_client_id=client_id,
+                user_id=session_user_id,
+            )
             return _client_vanished_error()
 
         oauth_code = OAuthCode(
@@ -1038,9 +1441,282 @@ async def authorize_post(
         user_id=session_user_id,
         scope=scope,
         client_ip=security_events.client_ip(request),
+        registration_kind="dcr",
+        resource_class=oauth_resource.resource_class(request),
+        resource_host=oauth_resource.resource_host(request),
     )
 
-    url = _append_query(redirect_uri, code=code, state=client_state)
+    url = _append_query(
+        redirect_uri, code=code, state=client_state, iss=settings.base_url
+    )
+    return RedirectResponse(url, status_code=302)
+
+
+async def _authorize_post_cimd(
+    request,
+    *,
+    action,
+    client_id,
+    redirect_uri,
+    code_challenge,
+    code_challenge_method,
+    scope,
+    client_state,
+    bound_hash,
+):
+    """The consent POST for a CIMD client (#357, D6/D7).
+
+    Re-resolves the document under the cache and admission rules, refuses
+    unless its authorization hash is the one the page showed, then — on
+    approve, in the code's transaction — upserts the synthetic per-(URL,
+    user) row and stamps its use marker in the same statement.
+    """
+    session_user_id: int | None = None
+    if action == "approve" and settings.multi_user_mode:
+        async with async_session() as session:
+            current_user = await get_active_session_user(request, session)
+        if current_user is None:
+            _authorize_refused(request, "session_required", submitted_client_id=client_id)
+            return JSONResponse(
+                {"error": "login_required", "error_description": "Session required"},
+                status_code=401,
+            )
+        session_user_id = current_user.id
+
+    submitted = cimd.submitted_fields(client_id)
+    client_host, client_ref = submitted.cimd_host, submitted.cimd_ref
+    try:
+        projection = await cimd.resolve(client_id, security_events.client_ip(request))
+    except cimd.CimdRefusal as refusal:
+        return _cimd_refused(request, refusal, client_id, user_id=session_user_id)
+    if not isinstance(bound_hash, str) or not secrets.compare_digest(
+        bound_hash, projection.authorization_hash
+    ):
+        return _cimd_refused(
+            request, cimd.CimdRefusal("metadata_changed", client_host), client_id,
+            user_id=session_user_id,
+        )
+    if not cimd.redirect_uri_allowed(projection.redirect_uris, redirect_uri, cimd=True):
+        return _cimd_refused(
+            request, cimd.CimdRefusal("redirect_uri_mismatch", client_host), client_id,
+            user_id=session_user_id,
+        )
+    scope = _clamp_scope(scope, projection.scope)
+
+    if action != "approve":
+        denied_user_id: int | None = None
+        if settings.multi_user_mode:
+            try:
+                async with async_session() as session:
+                    denying_user = await get_active_session_user(request, session)
+                denied_user_id = None if denying_user is None else denying_user.id
+            except Exception:  # noqa: BLE001 - the deny is decided already
+                denied_user_id = None
+        security_events.emit(
+            "oauth_consent_denied",
+            level=logging.INFO,
+            subject=security_events.subject_for(user_id=denied_user_id, request=request),
+            user_id=denied_user_id,
+            cimd_host=client_host,
+            cimd_ref=client_ref,
+            client_ip=security_events.client_ip(request),
+            resource_class=oauth_resource.resource_class(request),
+            resource_host=oauth_resource.resource_host(request),
+        )
+        url = _append_query(
+            redirect_uri, error="access_denied", state=client_state,
+            iss=settings.base_url,
+        )
+        return RedirectResponse(url, status_code=302)
+
+    if not scope:
+        _authorize_refused(
+            request, "scope_clamped_empty", submitted_client_id=client_id,
+            user_id=session_user_id,
+        )
+        return JSONResponse(
+            {
+                "error": "invalid_scope",
+                "error_description": "This client is not registered for any vault access.",
+            },
+            status_code=400,
+        )
+
+    # #420 D2/D5: the POST writes the snapshot, so it resolves the JWKS too
+    # (normally a cache hit from the GET). Before the transaction: no session
+    # is open across a fetch.
+    snapshot = None
+    if projection.auth_method == cimd.AUTH_METHOD_PRIVATE_KEY_JWT:
+        try:
+            snapshot = await cimd.resolve_jwks(
+                projection, security_events.client_ip(request)
+            )
+        except cimd.CimdRefusal as refusal:
+            return _cimd_refused(request, refusal, client_id, user_id=session_user_id)
+
+    row_id = cimd.cimd_row_id(client_id, session_user_id)
+    code = secrets.token_hex(32)
+    async with async_session() as session:
+        existing = (
+            await session.execute(
+                select(OAuthClient).where(OAuthClient.client_id == row_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        # #420 D5: a key-holding row never becomes `none`. Refused under the
+        # row lock, before anything is written (L10: the way out is the
+        # panel's Delete, then a fresh consent).
+        if (
+            existing is not None
+            and getattr(existing, "token_endpoint_auth_method", None)
+            == cimd.AUTH_METHOD_PRIVATE_KEY_JWT
+            and projection.auth_method != cimd.AUTH_METHOD_PRIVATE_KEY_JWT
+        ):
+            await session.rollback()
+            return _cimd_refused(
+                request, cimd.CimdRefusal("auth_method_downgrade", client_host),
+                client_id, user_id=session_user_id,
+            )
+        if snapshot is not None:
+            key_source = {
+                "token_endpoint_auth_method": cimd.AUTH_METHOD_PRIVATE_KEY_JWT,
+                "jwks_uri": projection.jwks_uri,
+                "token_endpoint_auth_signing_alg": projection.signing_alg,
+                "jwks_snapshot": snapshot.as_json(),
+                # The origin fetch time, carried through a cache hit — never
+                # now(), or a 23 h-old cache entry would restart the clock.
+                "jwks_fetched_at": snapshot.fetched_at,
+            }
+            stored_at = getattr(existing, "jwks_fetched_at", None)
+            if stored_at is not None and stored_at.tzinfo is None:
+                stored_at = stored_at.replace(tzinfo=timezone.utc)
+            if (
+                existing is not None
+                and getattr(existing, "jwks_uri", None) == projection.jwks_uri
+                and getattr(existing, "jwks_snapshot", None) is not None
+                and stored_at is not None
+                and stored_at > snapshot.fetched_at
+            ):
+                # A refetch already stored a newer set of the same URI: a
+                # snapshot never moves backwards (the D7 CAS rule).
+                key_source["jwks_snapshot"] = existing.jwks_snapshot
+                key_source["jwks_fetched_at"] = stored_at
+        else:
+            key_source = {
+                "token_endpoint_auth_method": cimd.AUTH_METHOD_NONE,
+                "jwks_uri": None,
+                "token_endpoint_auth_signing_alg": None,
+                # SQL NULL, not JSON `null`: a JSONB column binds None as the
+                # JSON value, which the 038 shape CHECK (rightly) refuses.
+                "jwks_snapshot": sa_null(),
+                "jwks_fetched_at": None,
+            }
+        if existing is None:
+            outcome = "created"
+        elif (
+            existing.client_name == projection.client_name
+            and list(existing.redirect_uris or []) == list(projection.redirect_uris)
+            and existing.scope == projection.scope
+            and getattr(existing, "token_endpoint_auth_method", None)
+            == key_source["token_endpoint_auth_method"]
+            and getattr(existing, "jwks_uri", None) == key_source["jwks_uri"]
+            and getattr(existing, "token_endpoint_auth_signing_alg", None)
+            == key_source["token_endpoint_auth_signing_alg"]
+        ):
+            outcome = "unchanged"
+        else:
+            outcome = "refreshed"
+        # Create or refresh the row and stamp the #194 marker in one
+        # statement; a row the sweep just removed is simply re-created.
+        upsert = pg_insert(OAuthClient).values(
+            client_id=row_id,
+            client_secret_hash=None,
+            client_name=projection.client_name,
+            redirect_uris=list(projection.redirect_uris),
+            scope=projection.scope,
+            user_id=session_user_id,
+            client_id_metadata_url=client_id,
+            last_used_at=func.now(),
+            **key_source,
+        )
+        # The D7 compare-and-set, evaluated against the row as it stands at
+        # the conflict (not as the earlier read saw it): a stored, newer
+        # snapshot of the same jwks_uri is kept, so a racing approval cannot
+        # move the snapshot backwards either.
+        keep_stored_snapshot = and_(
+            OAuthClient.jwks_uri == upsert.excluded.jwks_uri,
+            OAuthClient.jwks_snapshot.is_not(None),
+            OAuthClient.jwks_fetched_at.is_not(None),
+            OAuthClient.jwks_fetched_at > upsert.excluded.jwks_fetched_at,
+        )
+        upsert = upsert.on_conflict_do_update(
+            index_elements=[OAuthClient.client_id],
+            set_={
+                "client_name": upsert.excluded.client_name,
+                "redirect_uris": upsert.excluded.redirect_uris,
+                "scope": upsert.excluded.scope,
+                "last_used_at": func.now(),
+                # #420 D5: the key source is refreshed with the row; a
+                # `none` → `private_key_jwt` upgrade takes effect here.
+                "token_endpoint_auth_method": upsert.excluded.token_endpoint_auth_method,
+                "jwks_uri": upsert.excluded.jwks_uri,
+                "token_endpoint_auth_signing_alg":
+                    upsert.excluded.token_endpoint_auth_signing_alg,
+                "jwks_snapshot": case(
+                    (keep_stored_snapshot, OAuthClient.jwks_snapshot),
+                    else_=upsert.excluded.jwks_snapshot,
+                ),
+                "jwks_fetched_at": case(
+                    (keep_stored_snapshot, OAuthClient.jwks_fetched_at),
+                    else_=upsert.excluded.jwks_fetched_at,
+                ),
+            },
+            # #420 D5 under concurrency: two first approvals for an absent row
+            # both see no row to lock, so the FOR UPDATE check above cannot
+            # serialise them. The conflict update itself refuses the
+            # downgrade: a committed private_key_jwt row is never overwritten
+            # by a `none` projection.
+            where=not_(and_(
+                OAuthClient.token_endpoint_auth_method
+                == cimd.AUTH_METHOD_PRIVATE_KEY_JWT,
+                upsert.excluded.token_endpoint_auth_method == cimd.AUTH_METHOD_NONE,
+            )),
+        ).returning(OAuthClient.client_id)
+        if (await session.execute(upsert)).scalar_one_or_none() is None:
+            # The guarded update affected no row: a concurrent approval
+            # committed a key-holding row first. Same refusal as above.
+            await session.rollback()
+            return _cimd_refused(
+                request, cimd.CimdRefusal("auth_method_downgrade", client_host),
+                client_id, user_id=session_user_id,
+            )
+        session.add(OAuthCode(
+            code_hash=_hash(code),
+            client_id=row_id,
+            redirect_uri=redirect_uri,
+            scope=scope,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            user_id=session_user_id,
+        ))
+        await session.commit()
+
+    security_events.emit(
+        "oauth_consent_granted",
+        level=logging.INFO,
+        subject=security_events.subject_for(user_id=session_user_id, request=request),
+        client_id=row_id,
+        user_id=session_user_id,
+        scope=scope,
+        client_ip=security_events.client_ip(request),
+        registration_kind="cimd",
+        cimd_host=client_host,
+        cimd_ref=client_ref,
+        outcome=outcome,
+        resource_class=oauth_resource.resource_class(request),
+        resource_host=oauth_resource.resource_host(request),
+    )
+    url = _append_query(redirect_uri, code=code, state=client_state, iss=settings.base_url)
     return RedirectResponse(url, status_code=302)
 
 
@@ -1050,20 +1726,31 @@ async def authorize_post(
 @router.post("/token")
 @limiter.limit("10/minute")
 async def token_endpoint(request: Request):
-    form = await request.form()
+    # A body that does not parse is classified without a re-read (#357).
+    oauth_resource.set_fixed(request, oauth_resource.UNCLASSIFIED_MALFORMED)
+    try:
+        form = await request.form()
+    except Exception:
+        oauth_resource.finish(request)
+        raise
     grant_type = form.get("grant_type")
-
-    if grant_type == "authorization_code":
-        return await _handle_auth_code(form, request)
-    elif grant_type == "refresh_token":
-        return await _handle_refresh(form, request)
-    else:
-        _token_refused(
-            request,
-            "unsupported_grant_type.grant_type_not_supported",
-            submitted_client_id=form.get("client_id"),
-        )
-        return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+    oauth_resource.begin(request, _getlist(form, "resource"))
+    token = _SUBMITTED_CLIENT_ID.set(form.get("client_id"))
+    try:
+        if grant_type == "authorization_code":
+            return await _handle_auth_code(form, request)
+        elif grant_type == "refresh_token":
+            return await _handle_refresh(form, request)
+        else:
+            _token_refused(
+                request,
+                "unsupported_grant_type.grant_type_not_supported",
+                submitted_client_id=form.get("client_id"),
+            )
+            return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+    finally:
+        _SUBMITTED_CLIENT_ID.reset(token)
+        oauth_resource.finish(request)
 
 
 def _unknown_code_response() -> JSONResponse:
@@ -1078,13 +1765,13 @@ def _unknown_code_response() -> JSONResponse:
 async def _handle_auth_code(form, request=None):
     code = form.get("code")
     client_id = form.get("client_id")
-    client_secret = form.get("client_secret")
     code_verifier = form.get("code_verifier")
     redirect_uri = form.get("redirect_uri")
 
     # The caller's `client_id` until a row resolves. Every refusal below that
     # has not yet read `oauth_clients` reports it as `client_id_submitted`.
     submitted_client_id = client_id
+    _SUBMITTED_CLIENT_ID.set(client_id)
 
     if not all([code, code_verifier]):
         _token_refused(
@@ -1093,6 +1780,11 @@ async def _handle_auth_code(form, request=None):
             submitted_client_id=submitted_client_id,
         )
         return JSONResponse({"error": "invalid_request"}, status_code=400)
+
+    # #420 D7: the JWKS refetch pre-phase, before the main session exists, so
+    # no lock is ever held across the hop. Advisory only: every check below
+    # runs as before, and the assertion is verified at the client step.
+    await _assertion_prephase(form, request, credential_kind="code", credential=code)
 
     async with async_session() as session:
         # Serialize against the single-user -> multi-user bootstrap before
@@ -1167,7 +1859,25 @@ async def _handle_auth_code(form, request=None):
             )
             return _unknown_code_response()
 
-        if client_id and oauth_code.client_id != client_id:
+        # The synthetic CIMD id is never caller input (#357, D6). At /token it
+        # is refused only here — after the code row resolved and at the point
+        # the caller's client_id is compared — so nothing about the code path
+        # before this moves. On a spent code it is one more failed
+        # revalidation, answered like an unknown code; nothing is revoked.
+        if client_id and cimd.is_internal_id(client_id):
+            if spent:
+                return _refuse_spent("internal_id_submitted")
+            _token_refused(
+                request,
+                "invalid_client.internal_id_submitted",
+                client_id=oauth_code.client_id,
+                user_id=oauth_code.user_id,
+            )
+            return JSONResponse({"error": "invalid_client"}, status_code=401)
+
+        if client_id and not await _caller_matches(
+            session, oauth_code.client_id, client_id
+        ):
             # The caller named a client the code was not issued to. Refused
             # with the same constant body the unknown-code refusal uses (this
             # case *was* reported as unknown before the lookup stopped
@@ -1198,14 +1908,26 @@ async def _handle_auth_code(form, request=None):
             )
             return JSONResponse({"error": "invalid_client"}, status_code=401)
 
-        if not _client_authenticated(client, client_secret):
-            # The presented `client_secret` is never recorded, in any form.
+        # Client authentication (D6, #420): the dispatcher, on the row the
+        # code resolved, at exactly the position it always held. A spent code
+        # failing it — including any assertion failure — answers like an
+        # unknown code and revokes nothing; only a spent code whose fresh
+        # assertion verified can go on to the replay branch.
+        auth_failure = _client_auth_failure(
+            client, form, endpoint="token", now=_now()
+        )
+        if auth_failure is not None:
+            # The presented `client_secret` / assertion is never recorded.
             if spent:
-                return _refuse_spent("authentication_failed")
+                return _refuse_spent(auth_failure)
             _token_refused(
                 request,
-                "invalid_client.authentication_failed",
+                f"invalid_client.{auth_failure}",
                 client_id=client.client_id,
+                # A private_key_jwt caller may omit client_id (RFC 7523): the
+                # row's URL stands in for it, as on /revoke.
+                submitted_client_id=_SUBMITTED_CLIENT_ID.get()
+                or getattr(client, "client_id_metadata_url", None),
                 user_id=oauth_code.user_id,
             )
             return JSONResponse({"error": "invalid_client"}, status_code=401)
@@ -1426,6 +2148,8 @@ async def _handle_auth_code(form, request=None):
     # public `client_id`, the owner, the grant family and the granted scope.
     security_events.emit(
         "oauth_token_issued",
+        cimd_host=_submitted_now().cimd_host,
+        cimd_ref=_submitted_now().cimd_ref,
         level=logging.INFO,
         subject=security_events.subject_for(user_id=issued_user_id, request=request),
         reason="authorization_code",
@@ -1434,6 +2158,8 @@ async def _handle_auth_code(form, request=None):
         grant_id=grant_id,
         scope=granted_scope,
         client_ip=security_events.client_ip(request),
+        resource_class=oauth_resource.resource_class(request),
+        resource_host=oauth_resource.resource_host(request),
     )
 
     return _oauth_json({
@@ -1506,6 +2232,8 @@ async def _replay_spent_code(session, oauth_code, request):
     if failure is not None:
         security_events.emit(
             "oauth_code_replay_revocation_failed",
+            cimd_host=_submitted_now().cimd_host,
+            cimd_ref=_submitted_now().cimd_ref,
             level=logging.ERROR,
             subject=security_events.subject_for(user_id=replay_user_id, request=request),
             client_id=replay_client_id,
@@ -1513,16 +2241,22 @@ async def _replay_spent_code(session, oauth_code, request):
             user_id=replay_user_id,
             client_ip=security_events.client_ip(request),
             error_type=failure,
+            resource_class=oauth_resource.resource_class(request),
+            resource_host=oauth_resource.resource_host(request),
         )
     elif revoked_count:
         security_events.emit(
             "oauth_code_replay_detected",
+            cimd_host=_submitted_now().cimd_host,
+            cimd_ref=_submitted_now().cimd_ref,
             subject=security_events.subject_for(user_id=replay_user_id, request=request),
             client_id=replay_client_id,
             grant_id=lineage,
             user_id=replay_user_id,
             revoked_tokens=revoked_count,
             client_ip=security_events.client_ip(request),
+            resource_class=oauth_resource.resource_class(request),
+            resource_host=oauth_resource.resource_host(request),
         )
     else:
         # A family with nothing live left (an operator revocation, or a
@@ -1540,7 +2274,6 @@ async def _replay_spent_code(session, oauth_code, request):
 async def _handle_refresh(form, request=None):
     refresh_token = form.get("refresh_token")
     client_id = form.get("client_id")
-    client_secret = form.get("client_secret")
 
     # Two provenances, kept apart deliberately (D15). `submitted_client_id` is
     # whatever the caller typed and may appear only under the `_submitted`
@@ -1549,6 +2282,7 @@ async def _handle_refresh(form, request=None):
     # in the rotation-failure handler below, where `client_id` may still hold
     # the caller's form value.
     submitted_client_id = client_id
+    _SUBMITTED_CLIENT_ID.set(client_id)
     resolved_client_id: str | None = None
     resolved_grant_id: str | None = None
     resolved_user_id: int | None = None
@@ -1560,6 +2294,13 @@ async def _handle_refresh(form, request=None):
             submitted_client_id=submitted_client_id,
         )
         return JSONResponse({"error": "invalid_request"}, status_code=400)
+
+    # #420 D7: the JWKS refetch pre-phase, before the main session exists. A
+    # rotated-away token is ineligible, so the #182 reuse branch below never
+    # causes a fetch and never sees a verified assertion.
+    await _assertion_prephase(
+        form, request, credential_kind="refresh_token", credential=refresh_token
+    )
 
     async with async_session() as session:
         try:
@@ -1732,6 +2473,8 @@ async def _handle_refresh(form, request=None):
                 if failure is not None:
                     security_events.emit(
                         "oauth_refresh_reuse_revocation_failed",
+                        cimd_host=_submitted_now().cimd_host,
+                        cimd_ref=_submitted_now().cimd_ref,
                         level=logging.ERROR,
                         subject=security_events.subject_for(
                             user_id=reused_user_id, request=request
@@ -1745,6 +2488,8 @@ async def _handle_refresh(form, request=None):
                         # parameters*, one of which is the token hash. For the
                         # same reason there is no `exc_info` here.
                         error_type=failure,
+                        resource_class=oauth_resource.resource_class(request),
+                        resource_host=oauth_resource.resource_host(request),
                     )
                 elif revoked_count:
                     # One record, on the path that actually killed live tokens.
@@ -1760,6 +2505,8 @@ async def _handle_refresh(form, request=None):
                     # outbox for one WARNING is not worth its own failure mode.
                     security_events.emit(
                         "oauth_refresh_reuse_detected",
+                        cimd_host=_submitted_now().cimd_host,
+                        cimd_ref=_submitted_now().cimd_ref,
                         subject=security_events.subject_for(
                             user_id=reused_user_id, request=request
                         ),
@@ -1768,6 +2515,8 @@ async def _handle_refresh(form, request=None):
                         user_id=reused_user_id,
                         revoked_tokens=revoked_count,
                         client_ip=security_events.client_ip(request),
+                        resource_class=oauth_resource.resource_class(request),
+                        resource_host=oauth_resource.resource_host(request),
                     )
                 else:
                     # Revoked, but nothing live was left to kill: an operator
@@ -1789,7 +2538,21 @@ async def _handle_refresh(form, request=None):
             # same refusal it has always been, and revokes nothing: a *live*
             # token presented with the wrong `client_id` is a misconfigured or
             # confused client, not evidence that the token leaked.
-            if client_id and old_token.client_id != client_id:
+            # After the credential lookup and the reuse decision above, and at
+            # the caller-client_id comparison (#357, D6): a replayed token
+            # under a `cimd_` id has already revoked its family by now.
+            if client_id and cimd.is_internal_id(client_id):
+                _token_refused(
+                    request,
+                    "invalid_client.internal_id_submitted",
+                    client_id=old_token.client_id,
+                    user_id=old_token.user_id,
+                    grant_id=grant_id,
+                )
+                return JSONResponse({"error": "invalid_client"}, status_code=401)
+            if client_id and not await _caller_matches(
+                session, old_token.client_id, client_id
+            ):
                 # The row's own identity resolved, so it is the one that may
                 # appear; what the caller claimed does not.
                 _token_refused(
@@ -1815,11 +2578,21 @@ async def _handle_refresh(form, request=None):
                 )
                 return JSONResponse({"error": "invalid_client"}, status_code=401)
 
-            if not _client_authenticated(client, client_secret):
+            # Client authentication (D6, #420) at its unchanged position: after
+            # the reuse branch and the identity checks, before #326 and the
+            # rotation. A failed or replayed assertion revokes nothing.
+            auth_failure = _client_auth_failure(
+                client, form, endpoint="token", now=_now()
+            )
+            if auth_failure is not None:
                 _token_refused(
                     request,
-                    "invalid_client.authentication_failed",
+                    f"invalid_client.{auth_failure}",
                     client_id=client.client_id,
+                    # A private_key_jwt caller may omit client_id (RFC 7523):
+                    # the row's URL stands in for it, as on /revoke.
+                    submitted_client_id=_SUBMITTED_CLIENT_ID.get()
+                    or getattr(client, "client_id_metadata_url", None),
                     user_id=old_token.user_id,
                     grant_id=grant_id,
                 )
@@ -2007,6 +2780,8 @@ async def _handle_refresh(form, request=None):
             # itself fails; only the identifiers that resolved from rows appear.
             security_events.emit(
                 "oauth_token_rotation_failed",
+                cimd_host=_submitted_now().cimd_host,
+                cimd_ref=_submitted_now().cimd_ref,
                 level=logging.ERROR,
                 # **Class only, no `exc_info`** — the same rule as
                 # `oauth_refresh_reuse_revocation_failed` two branches away,
@@ -2027,6 +2802,8 @@ async def _handle_refresh(form, request=None):
                 client_id=resolved_client_id,
                 grant_id=resolved_grant_id,
                 client_ip=security_events.client_ip(request),
+                resource_class=oauth_resource.resource_class(request),
+                resource_host=oauth_resource.resource_host(request),
             )
             await session.rollback()
             return JSONResponse({"error": "server_error", "error_description": "Token rotation failed"}, status_code=500)
@@ -2036,6 +2813,8 @@ async def _handle_refresh(form, request=None):
     # pair is in hand here and appears nowhere in the record.
     security_events.emit(
         "oauth_token_refreshed",
+        cimd_host=_submitted_now().cimd_host,
+        cimd_ref=_submitted_now().cimd_ref,
         level=logging.INFO,
         subject=security_events.subject_for(user_id=rotated_user_id, request=request),
         client_id=client_id,
@@ -2043,6 +2822,8 @@ async def _handle_refresh(form, request=None):
         grant_id=rotated_grant_id,
         scope=granted_scope,
         client_ip=security_events.client_ip(request),
+        resource_class=oauth_resource.resource_class(request),
+        resource_host=oauth_resource.resource_host(request),
     )
 
     return _oauth_json({
@@ -2069,12 +2850,21 @@ async def revoke_token(request: Request):
     form = await request.form()
     token = form.get("token")
     client_id = form.get("client_id")
-    client_secret = form.get("client_secret")
+
+    # The synthetic CIMD id is never caller input (#357, D6): before the token
+    # lookup, and still RFC 7009's constant 200 — the reason is log-only.
+    _SUBMITTED_CLIENT_ID.set(client_id)
+    if cimd.is_internal_id(client_id):
+        _revoke_noop(request, "internal_id_submitted", client_id)
+        return JSONResponse({})
 
     if not token:
         _revoke_noop(request, "missing_token", client_id)
 
     if token:
+        # #420 D7/D8: the JWKS refetch pre-phase, after the `cimd_` and
+        # missing-token checks and before the session. Advisory only.
+        await _assertion_prephase(form, request, credential_kind="token", credential=token)
         token_hash = _hash(token)
         async with async_session() as session:
             result = await session.execute(
@@ -2118,20 +2908,47 @@ async def revoke_token(request: Request):
                 if client is None:
                     _revoke_noop(request, "unknown_client", client_id)
                     return JSONResponse({})
-                if not client_id or client_id != oauth_token.client_id:
+                row_url = getattr(client, "client_id_metadata_url", None)
+                # #420 D8: a `private_key_jwt` caller may omit `client_id` —
+                # the assertion, verified against this credential-resolved
+                # row, identifies and authenticates it (its `iss`/`sub` must
+                # be this row's URL). Every other row keeps the hole closed:
+                # no `client_id` is the constant 200, as before.
+                key_authenticated = (
+                    not client_id
+                    and getattr(client, "token_endpoint_auth_method", None)
+                    == cimd.AUTH_METHOD_PRIVATE_KEY_JWT
+                )
+                if not key_authenticated and (
+                    not client_id
+                    or not _caller_matches_row(oauth_token.client_id, row_url, client_id)
+                ):
                     # Deliberately does **not** name the token's real owner or
                     # client: §2.2 hides that from the response, and a log an
                     # operator shares is not a reason to hand it back.
                     _revoke_noop(request, "client_mismatch", client_id)
                     return JSONResponse({})
-                if not _client_authenticated(client, client_secret):
+                auth_failure = _client_auth_failure(
+                    client, form, endpoint="revoke", now=_now()
+                )
+                if auth_failure is not None:
                     # The one case that is a real error rather than a no-op:
-                    # the right client was named and failed to authenticate.
+                    # the right client was named (or, for a key-holding
+                    # client, presented) and failed to authenticate. A secret
+                    # client keeps `client_auth_failed`; an assertion failure
+                    # is its sub (#420 D10). Nothing is revoked.
+                    submitted = cimd.submitted_fields(client_id or row_url, resolved=True)
                     security_events.emit(
                         "oauth_revoke_refused",
                         subject=security_events.subject_for(request=request),
-                        reason="client_auth_failed",
+                        reason=(
+                            "client_auth_failed"
+                            if auth_failure == _DCR_AUTH_FAILED
+                            else auth_failure
+                        ),
                         client_id=oauth_token.client_id,
+                        cimd_host=submitted.cimd_host,
+                        cimd_ref=submitted.cimd_ref,
                         client_ip=security_events.client_ip(request),
                     )
                     return JSONResponse({"error": "invalid_client"}, status_code=401)
@@ -2163,9 +2980,14 @@ async def revoke_token(request: Request):
                 # No `actor_user_id`: `/revoke` authenticates as the *client*,
                 # not as a person, so there is no acting human to name. The
                 # panel's revoke handler emits the same event *with* one.
+                # A key-authenticated caller without `client_id` (#420 D8) is
+                # named by its row's URL, the same fields a submitted one gets.
+                revoked_by = cimd.submitted_fields(client_id or row_url, resolved=True)
                 security_events.emit(
                     "oauth_grant_revoked",
                     level=logging.INFO,
+                    cimd_host=revoked_by.cimd_host,
+                    cimd_ref=revoked_by.cimd_ref,
                     subject=security_events.subject_for(
                         user_id=oauth_token.user_id, request=request
                     ),

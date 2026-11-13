@@ -3997,6 +3997,12 @@ def replace_section(text: str, heading: str, new_body: str, eol: str = "\n") -> 
     return new_text, None
 
 
+#: The shared inline-tag rule, run over code-masked text. Used by
+#: `extract_tags` for a note's tags and by `src.services.tasks` for a task's
+#: own tags (#350), so the two can never disagree about what a tag is.
+INLINE_TAG_RE = re.compile(r"(?:^|\s)#([a-zA-Z][a-zA-Z0-9_/-]*)")
+
+
 def extract_tags(
     body: str, frontmatter: dict, *, dropped: list[int] | None = None
 ) -> list[str]:
@@ -4052,7 +4058,7 @@ def extract_tags(
     from src.services.links import BODY, mask_code
 
     masked = mask_code(body, context=BODY)
-    for match in re.finditer(r"(?:^|\s)#([a-zA-Z][a-zA-Z0-9_/-]*)", masked):
+    for match in INLINE_TAG_RE.finditer(masked):
         tags.add(match.group(1))
     return sorted(_bounded_tags(tags, dropped))
 
