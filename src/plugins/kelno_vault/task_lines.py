@@ -69,7 +69,14 @@ async def check(write: plugins.NoteWrite) -> plugins.Refusal | None:
                 offending.append((number, line))
         return offending
 
-    offending = await asyncio.to_thread(offending_lines)
+    try:
+        offending = await asyncio.to_thread(offending_lines)
+    except task_ops.TaskOpError:
+        # Settings the task tools cannot apply (an unsupported file-name date
+        # format): skipped like unreadable settings; list_tasks names the problem.
+        logger.debug("%s: the hand-written task check was skipped (Tasks settings not applicable)", write.tool,
+                     exc_info=True)
+        return None
     if not offending:
         return None
     shown = "\n".join(f"- line {n}: {line.strip()[:300]}" for n, line in offending[:SHOWN])

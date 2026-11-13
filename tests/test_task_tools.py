@@ -782,6 +782,13 @@ def test_without_a_tasks_settings_file_checkboxes_are_not_checked(vault, kelno_v
     assert created.startswith("Created note")
 
 
+def test_settings_the_task_tools_cannot_apply_skip_the_check_quietly(vault, kelno_vault):
+    write_settings(vault, {**FILTERED, "useFilenameAsScheduledDate": True,
+                           "filenameAsScheduledDateFormat": "DD-MM-YYYY"})
+    created = asyncio.run(tools.create_note_impl("13-11-2026.md", "- [ ] #task anything\n"))
+    assert created.startswith("Created note") and "plugin_error" not in created
+
+
 class _Refused:
     """A string refusal, shaped for `code()`."""
 
