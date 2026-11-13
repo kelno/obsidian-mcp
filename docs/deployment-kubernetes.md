@@ -287,6 +287,7 @@ List-valued settings: `TRUSTED_PROXY_IPS`, `FTS_CONFIGS` and
 | `INDEX_FULL_HASH_INTERVAL_HOURS` | `24` | Backstop full-hash pass. One also runs at startup and on panel Reindex. |
 | `INDEXER_DEGRADED_AFTER_FAILURES` | `3` | Consecutive failed index, embedding or re-derive passes before `/health` reports `degraded`. |
 | `INDEXER_STALLED_AFTER_SECONDS` | `1800` | Seconds without an index stage or tick finishing before `/health` reports `index_stalled` (degraded). `0` disables. |
+| `EMBED_STUCK_AFTER_SECONDS` | `900` | Seconds with notes pending and none embedded before `/health` reports `embedding_stuck_scopes` (degraded). `0` disables. |
 | `INDEXER_QUARANTINE_RETRIES_PER_TICK` | `5` | Re-runs per user per pass while isolating notes whose database writes fail on their own data. |
 | `FTS_CONFIGS` | `english` | Postgres text-search configs for keyword search. A change needs `rebuild-tsvectors`. |
 | `EMBED_CHUNK_BUDGET_PER_USER` | `5000` | Chunks embedded per user per pass, so a backlog cannot hold the next index stage or another user back; a stop starts the next tick within seconds. |

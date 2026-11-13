@@ -258,6 +258,21 @@ class EmbedPassResult:
     #: non-zero streak does not re-tick promptly: the provider was failing
     #: when the clock ran out.
     provider_failure_streak: int = 0
+    #: Notes pending (vectors missing or not current) when the stage began,
+    #: for `indexer_health.record_embed_progress`; `None` when unknown.
+    pending_at_start: int | None = None
+    #: Backlog notes certified **with vectors** (`EMBEDDED`), the progress
+    #: clock's measure of progress. Not `embedded`: a note certified empty
+    #: makes no provider call, so counting it would let every new empty
+    #: note (a template, a daily note) hide a provider that is down.
+    embedded_with_vectors: int = 0
+    #: Backlog notes skipped because their bytes no longer hash to their row,
+    #: for a `(id, content_hash)` not skipped at the scope's previous stage
+    #: too: a note being edited, which the next index stage will refresh.
+    #: Taken off `pending_at_start` for the progress clock, so a note typed
+    #: in for twenty minutes is not "embedding failing"; a skip that repeats
+    #: on the same row is not taken off.
+    skipped_in_flux: int = 0
 
     def record_attempt(self) -> None:
         """One note issued a provider call. The only writer of `attempted`."""
@@ -6252,6 +6267,11 @@ _provider_failure_streaks: dict[int | None, int] = {}
 #: the rows still selected.
 _embed_failed_notes: dict[int | None, set[tuple[int, str]]] = {}
 
+#: Per scope, the `(note id, content_hash)` pairs the last embed stage skipped
+#: because the note's bytes no longer hashed to its row
+#: (`EmbedPassResult.skipped_in_flux`). In-process.
+_hash_skipped_notes: dict[int | None, set[tuple[int, str]]] = {}
+
 
 def _budget_for_pass(scope: int | None = None) -> EmbedBudget:
     chunk_budget = int(settings.embed_chunk_budget_per_user or 0)
@@ -6279,6 +6299,7 @@ def clear_embed_stop_state() -> None:
     the pending re-tick. Tests only; a restart does the same in production."""
     _provider_failure_streaks.clear()
     _embed_failed_notes.clear()
+    _hash_skipped_notes.clear()
     _embed_backlog_left.clear()
 
 
@@ -6378,7 +6399,19 @@ async def _embed_vault_pinned(
         # certification the lock will refuse. It records nothing: a skipped
         # stage did no work and had no failure.
         if not await _embedding_generation_current(session, log_suffix):
-            return EmbedPassResult()
+            # Nothing attempted, but the pending notes still count against
+            # the stage's progress (`indexer_health.record_embed_progress`):
+            # a configuration that skips every stage leaves them pending.
+            pending = (await session.execute(
+                select(func.count(NoteMetadata.id)).where(
+                    NoteMetadata.user_id.is_(None)
+                    if user_id is None
+                    else NoteMetadata.user_id == user_id,
+                    index_status.vectors_not_current(),
+                )
+            )).scalar()
+            await session.rollback()
+            return EmbedPassResult(pending_at_start=int(pending or 0))
 
         # Find notes without embeddings or with stale embeddings, scoped
         # to this user when set. We bind the user_id parameter even in
@@ -6430,7 +6463,11 @@ async def _embed_vault_pinned(
         # lands, so a note whose certification was rolled back is not reported
         # as embedded. `attempted` starts at zero and rises with each provider
         # call — never from `len(unembedded)`, which counts work contemplated.
-        outcome = EmbedPassResult()
+        outcome = EmbedPassResult(pending_at_start=len(unembedded))
+        # This stage's hash-mismatch skips, against the previous stage's
+        # (`EmbedPassResult.skipped_in_flux`).
+        hash_skipped_before = _hash_skipped_notes.get(user_id, set())
+        hash_skipped_now = _hash_skipped_notes[user_id] = set()
         # One accountant for this user's whole embed stage — the backlog loop
         # below and the reconciliation sweep after it — so the attempt and the
         # chunk debit are recorded where the provider call is *issued* rather
@@ -6549,6 +6586,10 @@ async def _embed_vault_pinned(
                 # Anyone removing this must re-gate `embed_vault` on settled
                 # provenance in the same change.
                 if await asyncio.to_thread(_content_hash, raw) != row.content_hash:
+                    key = (row.id, row.content_hash)
+                    if key not in hash_skipped_before:
+                        outcome.skipped_in_flux += 1
+                    hash_skipped_now.add(key)
                     logger.info(
                         "Skipping %s: its bytes no longer hash to the indexed "
                         "content_hash, so nothing may be certified against that "
@@ -6638,6 +6679,8 @@ async def _embed_vault_pinned(
                         note.chunks_truncated = bool(result.truncated)
                     await session.commit()
                     outcome.embedded += 1
+                    if result.outcome is NoteEmbedOutcome.EMBEDDED:
+                        outcome.embedded_with_vectors += 1
                     if result.truncated:
                         # **After the commit, never before** (D3). Logging it
                         # first would leave a permanent ERROR in a bounded,
@@ -8929,10 +8972,23 @@ def record_embed_outcome(
     """Record one embed stage's outcome for `indexer_health` (#308, D4).
 
     A stage that raised counts as one failed embed pass; one that returned
-    counts its `EmbedPassResult.failures`. A stage that stopped at its budget
+    counts its `EmbedPassResult.failures`. Either also feeds the scope's
+    progress clock (`indexer_health.record_embed_progress`): a raised stage
+    as no progress, a returned one by the backlog notes it certified with
+    vectors against what was pending when it began, less the notes skipped
+    mid-edit. A stage that stopped at its budget
     is noted for the loop's re-tick decision.
     """
     indexer_health.record_embed(user_id, 1 if raised else _embed_failures(result))
+    if raised:
+        indexer_health.record_embed_progress(user_id, 0, None)
+    elif isinstance(result, EmbedPassResult):
+        pending = result.pending_at_start
+        if pending is not None:
+            pending = max(0, pending - result.skipped_in_flux)
+        indexer_health.record_embed_progress(
+            user_id, result.embedded_with_vectors, pending
+        )
     if (
         isinstance(result, EmbedPassResult)
         and result.stopped is EmbedStop.BUDGET
@@ -9452,6 +9508,7 @@ async def run_embed_loop() -> None:
         this_trigger, trigger = trigger, "scheduled"
         if _is_paused():
             logger.info("Embedding tick skipped (paused)")
+            indexer_health.record_embed_paused()
             continue
         try:
             if settings.multi_user_mode:

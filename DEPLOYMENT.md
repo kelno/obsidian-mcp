@@ -776,7 +776,9 @@ deployment; on a compose-file deployment the equivalents are plain
   incomplete re-derives, or the tick's user enumeration) has reached
   `INDEXER_DEGRADED_AFTER_FAILURES` (default 3), a note is
   quarantined, or no index stage or tick has finished for
-  `INDEXER_STALLED_AFTER_SECONDS` (default 1800; `index_stalled`). **The HTTP code is 200 either way**, deliberately: the
+  `INDEXER_STALLED_AFTER_SECONDS` (default 1800; `index_stalled`), or
+  notes have stayed pending with none embedded for
+  `EMBED_STUCK_AFTER_SECONDS` (default 900; `embedding_stuck_scopes`). **The HTTP code is 200 either way**, deliberately: the
   Kubernetes manifests use `/health` as the liveness probe, and a
   restart loop cannot fix vault content or a provider outage. So point
   your uptime monitor at the **`status` field** — a keyword check for

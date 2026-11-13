@@ -28,6 +28,9 @@ can read it.
   so a fresh process over a pre-034 index does not claim `complete` before
   its first embed stage. Under `MCP_SANDBOX_MODE` no embed stage ever runs,
   and the state stays `complete` (nothing this process embeds is pending).
+- `embed_stuck_since`: when this scope's embed stages started ending with
+  notes pending and none embedded; cleared by a stage that embedded one or
+  found nothing pending (see "Embedding without progress" below).
 
 **Process-wide**: consecutive tick-level failures not attributable to a scope
 (user enumeration, root-overlap detection, a tick that raised outside any
@@ -49,6 +52,18 @@ is read (it is evaluated there, so a deployment that never polls `/health`
 never logs it), re-armed by the next stamp. A tick in progress for one scope stamps when that scope's
 index stage finishes, so a long multi-user tick is not a stall unless one
 scope's pass alone exceeds the threshold.
+
+**Embedding without progress** (fork, owner's report 2026-11-13). The failure
+counter above counts stages that *report* failed notes, and a stage can end
+cleanly while embedding nothing: a fingerprint skip, a note skipped because its
+bytes no longer match its row, a certification that lost its race, a failure
+on a path that does not count. On 2026-11-13 two notes stayed pending for half
+an hour while `/health` said `ok`. So each embed stage also reports how many
+notes it embedded and how many were pending when it began, and a scope whose
+stages have ended with notes pending and none embedded for
+`EMBED_STUCK_AFTER_SECONDS` is `embedding_stuck`, whatever the cause. A stage
+that raised counts as no progress with the backlog unknown. A paused tick
+clears the clock: a pause is an operator's choice, reported on its own.
 
 **In-process only and never persisted**: a restart starts clean, which is the
 same horizon as the task it describes. `/health` reads `snapshot()`, which
@@ -78,6 +93,7 @@ _INDEX = "index"
 _EMBED = "embed"
 _REDERIVE = "rederive"
 _WALK = "walk"
+_EMBED_STUCK = "embed_stuck"
 
 #: The start of the run-record line a pass that quarantined notes writes into
 #: `indexer_runs.error` (#308, D5). Produced by `indexer.format_quarantined`
@@ -123,6 +139,9 @@ class ScopeHealth:
     walk_incomplete: int = 0
     last_success_at: datetime | None = None
     last_failure_at: datetime | None = None
+    #: When this scope's embed stages started ending with notes pending and
+    #: none embedded; None while they make progress.
+    embed_stuck_since: datetime | None = None
     #: Counters whose CRITICAL line has fired this episode.
     alerted: set[str] = field(default_factory=set)
     #: Notes of this scope not yet re-chunked (#355, D4), as the scope's most
@@ -318,6 +337,62 @@ def record_embed(scope: Scope, failures: int) -> None:
         _reset(state, _EMBED, "embed_consecutive_failures")
 
 
+def record_embed_progress(scope: Scope, embedded: int, pending: int | None) -> None:
+    """One embed stage for `scope` ended having embedded `embedded` notes, with
+    `pending` notes to embed when it began (`None`: unknown, as for a stage
+    that raised).
+
+    Progress — any note embedded, or nothing pending — clears the scope's
+    stuck clock; anything else starts it, if it is not already running.
+    """
+    state = _scope(scope)
+    if embedded > 0 or pending == 0:
+        if state.embed_stuck_since is not None:
+            state.embed_stuck_since = None
+            state.alerted.discard(_EMBED_STUCK)
+        return
+    if state.embed_stuck_since is None:
+        state.embed_stuck_since = _now()
+
+
+def record_embed_paused() -> None:
+    """The embed loop skipped a tick because indexing is paused: no scope's
+    lack of progress is the embed stage's while it is."""
+    for state in _scopes.values():
+        state.embed_stuck_since = None
+        state.alerted.discard(_EMBED_STUCK)
+
+
+def _embed_stuck(now: datetime) -> tuple[int, int]:
+    """How many scopes have had notes pending and none embedded for
+    `EMBED_STUCK_AFTER_SECONDS`, and the longest such streak in whole seconds
+    (below the threshold too, 0 when none is running)."""
+    limit = settings.embed_stuck_after_seconds
+    stuck = 0
+    longest = 0
+    for scope, state in _scopes.items():
+        if state.embed_stuck_since is None:
+            continue
+        seconds = max(0, int((now - state.embed_stuck_since).total_seconds()))
+        longest = max(longest, seconds)
+        if not limit or seconds < limit or not _task_running or _disabled:
+            continue
+        stuck += 1
+        if _EMBED_STUCK not in state.alerted:
+            state.alerted.add(_EMBED_STUCK)
+            logger.critical(
+                "Embedding has made no progress for %ds (%s): notes are "
+                "pending and no embed stage has embedded one (threshold "
+                "EMBED_STUCK_AFTER_SECONDS=%d). Semantic search is not being "
+                "updated — check the embedding server and the embed stage's "
+                "log lines",
+                seconds,
+                _describe(scope),
+                limit,
+            )
+    return stuck, longest
+
+
 def record_rederive(scope: Scope, complete: bool | None) -> None:
     """A committed pass's re-derive outcome.
 
@@ -460,6 +535,7 @@ def snapshot() -> dict:
     quarantined = _quarantined_notes()
     stalled, since_progress = _index_stalled(_now())
     embed_stalled, since_embed_progress = _embed_stalled(_now())
+    embed_stuck, stuck_seconds = _embed_stuck(_now())
     successes = [s.last_success_at for s in states if s.last_success_at is not None]
     last_success = max(successes).isoformat() if successes else None
 
@@ -470,6 +546,7 @@ def snapshot() -> dict:
         or quarantined > 0
         or stalled
         or embed_stalled
+        or embed_stuck > 0
         or (not _task_running and not _disabled)
     )
     if degraded:
@@ -495,6 +572,8 @@ def snapshot() -> dict:
         # Exact per-owner counts live on the panel and in the owner-scoped
         # `index_transition:` line. Never part of `status`.
         "rechunk": _rechunk_state(states),
+        "embedding_stuck_scopes": embed_stuck,
+        "seconds_embedding_stuck": stuck_seconds,
     }
 
 

@@ -563,6 +563,13 @@ class Settings(BaseSettings):
     # safe; a healthy single-scope tick is the index stage plus at most the
     # embed time budget and one note. 0 disables the check.
     indexer_stalled_after_seconds: int = Field(1800, ge=0)
+    # Seconds during which a scope's embed stages have ended with notes
+    # pending and none embedded, after which `/health` reports
+    # `embedding_stuck` and `degraded` (fork, 2026-11-13). Catches embedding
+    # that makes no progress whatever the cause, including stages that end
+    # cleanly and count no failure. About three embed intervals at the
+    # default; 0 disables the check.
+    embed_stuck_after_seconds: int = Field(900, ge=0)
     # How many times one invocation of an index pass may roll back and re-run
     # a scope after quarantining a poison note (#308, D3). Beyond it the pass
     # fails as an ordinary failure; the notes already quarantined stay so.

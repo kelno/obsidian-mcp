@@ -58,6 +58,9 @@ class Health(BaseModel):
     task_running: bool
     #: The embedding server failed repeatedly for some vault on this server.
     embedding_failing: bool
+    #: Notes have been pending for a long time and no embedding stage embedded one, whatever the cause,
+    #: for some vault on this server.
+    embedding_stuck: bool = False
     #: No embedding stage has finished for a long time.
     embedding_stalled: bool
     #: No indexing stage has finished for a long time (new and edited notes are not picked up).

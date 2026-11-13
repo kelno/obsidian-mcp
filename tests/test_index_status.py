@@ -70,6 +70,18 @@ def test_summary_and_notes_follow_the_state():
     paused_notes = tools._index_status_notes(backlog, paused, health())
     assert "paused" in paused_notes[0] and not any("none was embedded" in n for n in paused_notes)
 
+    # Owner's report, 2026-11-13: pending notes no stage embeds are said
+    # plainly, in the summary too, without the "call again" hedge.
+    stuck_health = health(embedding_stuck=True, status="degraded")
+    stuck_notes = tools._index_status_notes(backlog, stuck, stuck_health, 25)
+    assert any(n.startswith("Embedding is failing: notes have been pending for 25 min") and "Tell the owner" in n
+               for n in stuck_notes)
+    assert not any("Call again" in n for n in stuck_notes)
+    assert tools._index_status_summary(backlog, NO_LEDGER, stuck, stuck_health).endswith(
+        " Embedding is failing: tell the owner.")
+    assert "failing" not in tools._index_status_summary(backlog, NO_LEDGER, stuck, health())
+    assert any(n.startswith("Embedding is failing") for n in failing)
+
     dead = tools._index_status_notes(counts(), progress(), health(task_running=False, status="degraded"))
     assert any("not running" in n for n in dead)
     assert tools._index_status_notes(counts(), progress(), health(task_running=False, status="disabled")) == []

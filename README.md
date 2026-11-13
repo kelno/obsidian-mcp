@@ -877,12 +877,15 @@ origin the mint tools refuse rather than emit a localhost link.
   `failing_scopes`, `embedding_failing_scopes`,
   `max_consecutive_failures`, `quarantined_notes`, `last_success_at`,
   `index_stalled`, `seconds_since_progress`, `embedding_stalled`,
-  `seconds_since_embedding_progress`), and the top-level `status`
+  `seconds_since_embedding_progress`, `embedding_stuck_scopes`,
+  `seconds_embedding_stuck`), and the top-level `status`
   becomes `"degraded"` when the indexer task has died, any index,
   embedding or enumeration failure counter — or a scope's run of
   incomplete re-derives — reaches `INDEXER_DEGRADED_AFTER_FAILURES`, a
-  note is quarantined, or no index stage or tick has finished for
-  `INDEXER_STALLED_AFTER_SECONDS` (a stage that never returns). **The HTTP
+  note is quarantined, no index stage or tick has finished for
+  `INDEXER_STALLED_AFTER_SECONDS` (a stage that never returns), or notes
+  have stayed pending with none embedded for `EMBED_STUCK_AFTER_SECONDS`
+  (embedding making no progress, whatever the cause). **The HTTP
   code stays 200** — a restart cannot repair vault content or a provider
   outage, and Kubernetes uses `/health` for liveness — so **monitor the
   `status` field** (a keyword or JSON check for `"status":"ok"`), not
@@ -2140,6 +2143,7 @@ reason.
 | `CHANGE_FEED_LOCK_TIMEOUT_MS` | `2000` | How long an event write waits for the user's feed lock (100–30,000). A timeout never fails a pass or a tool: a pass records a durable `gap`, a tool's change is recorded unattributed by the next pass. |
 | `INDEXER_DEGRADED_AFTER_FAILURES` | `3` | Consecutive failures of any indexer counter (a scope's index passes, its embed passes, its incomplete re-derives, or the tick's own user enumeration) at which `/health` reports `degraded` and one CRITICAL "manual intervention required" line is logged. |
 | `INDEXER_STALLED_AFTER_SECONDS` | `1800` | Seconds with no index stage or tick finishing after which `/health` reports `index_stalled` and `degraded`, and one CRITICAL line is logged: a stage that is running far longer than it should, rather than one that fails. `0` disables. |
+| `EMBED_STUCK_AFTER_SECONDS` | `900` | Seconds during which a scope's embed stages have ended with notes pending and none embedded, after which `/health` reports `embedding_stuck_scopes` and `degraded`, and one CRITICAL line is logged: embedding making no progress whatever the cause, including stages that end cleanly and count no failure. `0` disables. |
 | `EMBED_STOP_AFTER_PROVIDER_FAILURES` | `3` | Notes in a row that fail at the embedding provider before the embed stage stops for this pass, so a provider outage does not hold the next index stage (keyword search, backlinks) back. A note refused as too large does not count. `0` disables. |
 | `INDEXER_QUARANTINE_RETRIES_PER_TICK` | `5` | How many times one index pass may roll back and re-run a scope after quarantining a note the database refuses (a data-exception or program-limit error on its row, keyword vector, move or links). Beyond it the pass fails as an ordinary failure; the notes already found stay quarantined for the next tick. |
 | `MULTI_USER_MODE` | `false` | In-app login, per-user vaults. See [Multi-user mode](#multi-user-mode). |
