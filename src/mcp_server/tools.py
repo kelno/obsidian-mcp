@@ -7921,9 +7921,9 @@ async def delete_folder_impl(path: str) -> str:
 #
 # `list_tasks`, `create_task`, `edit_task` and `set_task_status` answer and
 # write as the owner's Obsidian Tasks plugin would. The format is ported in
-# `src/services/task_format.py`; which lines count, in `task_scan.py`; the
-# filters, in `task_query.py`; the text operations, in `task_ops.py`; the
-# index rows, in `task_index.py`. See docs/architecture/tasks.md.
+# `src/services/fork_tasks/format.py`; which lines count, in `fork_tasks/scan.py`; the
+# filters, in `fork_tasks/query.py`; the text operations, in `fork_tasks/ops.py`; the
+# index rows, in `fork_tasks/index.py`. See docs/architecture/tasks.md.
 
 from src.mcp_server.task_result import (  # noqa: E402
     StaleTask,
@@ -7932,11 +7932,11 @@ from src.mcp_server.task_result import (  # noqa: E402
     TaskProblem,
     TaskWriteResult,
 )
-from src.services import task_format as _tf, task_index as _task_index, task_ops as _task_ops  # noqa: E402
+from src.services.fork_tasks import format as _tf, index as _task_index, ops as _task_ops  # noqa: E402
 from src.services import ledger_citations as _ledger_citations, ledger_tasks as _ledger_tasks  # noqa: E402
-from src.services import task_query as _tq  # noqa: E402
-from src.services.task_scan import split_lines as _task_split_lines  # noqa: E402
-from src.services.task_settings import TasksSettingsError, read_settings as _read_task_settings  # noqa: E402
+from src.services.fork_tasks import query as _tq  # noqa: E402
+from src.services.fork_tasks.scan import split_lines as _task_split_lines  # noqa: E402
+from src.services.fork_tasks.settings import TasksSettingsError, read_settings as _read_task_settings  # noqa: E402
 
 _TYPED_OUTCOME_RESULTS = (*_TYPED_OUTCOME_RESULTS, TaskListResult, TaskWriteResult)
 
@@ -8089,7 +8089,7 @@ async def list_tasks_impl(
     """
     from sqlalchemy import select
 
-    from src.models.db import NoteMetadata, NoteTask
+    from src.models.db import NoteMetadata, ForkNoteTask
 
     def fail(prose, code="invalid_argument"):
         return _task_failed(TaskListResult, _body_refusal(prose, code))
@@ -8123,8 +8123,8 @@ async def list_tasks_impl(
 
     async with async_session() as session:
         rows = (await session.execute(
-            select(NoteMetadata.file_path, NoteTask.line_number, NoteTask.kind, NoteTask.line, NoteTask.reason)
-            .join(NoteMetadata, NoteMetadata.id == NoteTask.note_id)
+            select(NoteMetadata.file_path, ForkNoteTask.line_number, ForkNoteTask.kind, ForkNoteTask.line, ForkNoteTask.reason)
+            .join(NoteMetadata, NoteMetadata.id == ForkNoteTask.note_id)
             .where(_note_owner_predicate(uid))
         )).all()
 
@@ -8302,7 +8302,7 @@ async def _task_ledger_refs(uid, line_text: str, note_path: str, note_text: str,
     if not _ledger_citations.bracketed(line_text) and not _ledger_citations.bare(line_text):
         return [], []
     try:
-        from src.services.task_scan import scan_note
+        from src.services.fork_tasks.scan import scan_note
 
         normalised = note_text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
         scanned = await asyncio.to_thread(lambda: scan_note(normalised).lines)
@@ -8644,7 +8644,7 @@ async def set_task_status_impl(
 
 # ── Agent ledger (fork) ─────────────────────────────────────────────────────
 #
-# Eight tools over the `ledger_*` tables (migration 032): what agents write
+# Eight tools over the `ledger_*` tables (migration 1002): what agents write
 # for each other — quirks, feedback, proposals — with topics and summary
 # views. Primary data, not derived from the vault. The rules live in
 # `src/services/ledger.py` (entries), `ledger_views.py` (topics, views) and

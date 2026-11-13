@@ -60,7 +60,7 @@ DIM = 64  # irrelevant here; keeps the migration cheap.
 # The current head. Every case that migrates forward asserts it, so adding a
 # revision without teaching this module about it fails loudly rather than
 # leaving the new migration unexercised.
-HEAD_REVISION = "032"
+HEAD_REVISION = "1002"
 
 # Every test builds and drops its own database, nothing is module-scoped:
 # pytest-xdist may share the tests out one by one (see tests/conftest.py).
@@ -6657,7 +6657,7 @@ def test_downgrade_030_leaves_a_column_it_did_not_create():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 031 — note_tasks (task tools)
+# 031 — fork_note_tasks (task tools)
 # ══════════════════════════════════════════════════════════════════════════
 #
 # A marker-owned table: columns, primary key, the id serial, the foreign key
@@ -6666,16 +6666,16 @@ def test_downgrade_030_leaves_a_column_it_did_not_create():
 # constraint; the CHECK predicates, the FK's ON DELETE and the default are
 # asserted here.
 
-NOTE_TASKS_MARKER_031 = "task lines and near misses per note (031_note_tasks)"
+NOTE_TASKS_MARKER_031 = "task lines and near misses per note (1001_fork_note_tasks)"
 
 
-def note_tasks_constraints(url):
+def fork_note_tasks_constraints(url):
     return {
         row["conname"]: row["def"]
         for row in fetch(
             url,
             "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint "
-            "WHERE conrelid = 'public.note_tasks'::regclass",
+            "WHERE conrelid = 'public.fork_note_tasks'::regclass",
         )
     }
 
@@ -6683,7 +6683,7 @@ def note_tasks_constraints(url):
 def refuse_031(url, *, must_mention):
     _harness.run_alembic(url, "stamp", "030", dimensions=DIM)
     result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
-    assert result.returncode != 0, "031 should have refused"
+    assert result.returncode != 0, "1001 should have refused"
     combined = result.stdout + result.stderr
     for phrase in must_mention:
         assert phrase in combined, f"refusal did not mention {phrase!r}:\n{combined}"
@@ -6691,113 +6691,113 @@ def refuse_031(url, *, must_mention):
     return combined
 
 
-def test_031_creates_the_marked_table_with_its_constraints():
-    with throwaway_db("schema_031_fresh") as url:
+def test_1001_creates_the_marked_table_with_its_constraints():
+    with throwaway_db("schema_1001_fresh") as url:
         assert alembic_version(url) == HEAD_REVISION
         assert fetchval(
-            url, "SELECT obj_description('public.note_tasks'::regclass, 'pg_class')"
+            url, "SELECT obj_description('public.fork_note_tasks'::regclass, 'pg_class')"
         ) == NOTE_TASKS_MARKER_031
-        constraints = note_tasks_constraints(url)
-        assert constraints["fk_note_tasks_note_id"] == (
+        constraints = fork_note_tasks_constraints(url)
+        assert constraints["fk_fork_note_tasks_note_id"] == (
             "FOREIGN KEY (note_id) REFERENCES notes_metadata(id) ON DELETE CASCADE"
         )
-        assert "'task'" in constraints["ck_note_tasks_kind"]
-        assert constraints["ck_note_tasks_line_number"] == "CHECK ((line_number >= 1))"
-        assert constraints["uq_note_tasks_note_line"] == "UNIQUE (note_id, line_number)"
+        assert "'task'" in constraints["ck_fork_note_tasks_kind"]
+        assert constraints["ck_fork_note_tasks_line_number"] == "CHECK ((line_number >= 1))"
+        assert constraints["uq_fork_note_tasks_note_line"] == "UNIQUE (note_id, line_number)"
         assert_alembic_check_clean(url, DIM)
 
 
-def test_031_chains_from_030():
+def test_1001_chains_from_030():
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
     config = Config()
     config.set_main_option("script_location", str(_harness.ROOT / "alembic"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_revision("031").down_revision == "030"
-    assert script.get_revision("032").down_revision == "031"
-    assert script.get_current_head() == HEAD_REVISION == "032"
+    assert script.get_revision("1001").down_revision == "030"
+    assert script.get_revision("1002").down_revision == "1001"
+    assert script.get_current_head() == HEAD_REVISION == "1002"
 
 
-def test_031_rows_cascade_with_their_note_and_the_checks_hold():
-    with throwaway_db("schema_031_cascade") as url:
+def test_1001_rows_cascade_with_their_note_and_the_checks_hold():
+    with throwaway_db("schema_1001_cascade") as url:
         insert_stat_note(url, 1, "a.md", (1, 2, 3, 4))
-        sql(url, "INSERT INTO note_tasks (note_id, line_number, kind, line) VALUES (1, 1, 'task', '- [ ] a')")
+        sql(url, "INSERT INTO fork_note_tasks (note_id, line_number, kind, line) VALUES (1, 1, 'task', '- [ ] a')")
         for bad in (
-            "INSERT INTO note_tasks (note_id, line_number, kind, line) VALUES (1, 2, 'other', 'x')",
-            "INSERT INTO note_tasks (note_id, line_number, kind, line) VALUES (1, 0, 'task', 'x')",
-            "INSERT INTO note_tasks (note_id, line_number, kind, line) VALUES (1, 1, 'task', 'dup')",
+            "INSERT INTO fork_note_tasks (note_id, line_number, kind, line) VALUES (1, 2, 'other', 'x')",
+            "INSERT INTO fork_note_tasks (note_id, line_number, kind, line) VALUES (1, 0, 'task', 'x')",
+            "INSERT INTO fork_note_tasks (note_id, line_number, kind, line) VALUES (1, 1, 'task', 'dup')",
         ):
             with pytest.raises(asyncpg.PostgresError):
                 sql(url, bad)
         sql(url, "DELETE FROM notes_metadata WHERE id = 1")
-        assert fetchval(url, "SELECT count(*) FROM note_tasks") == 0
+        assert fetchval(url, "SELECT count(*) FROM fork_note_tasks") == 0
 
 
-def test_031_stamp_back_rerun_accepts_its_own_table():
-    with throwaway_db("schema_031_rerun") as url:
+def test_1001_stamp_back_rerun_accepts_its_own_table():
+    with throwaway_db("schema_1001_rerun") as url:
         insert_stat_note(url, 1, "a.md", (1, 2, 3, 4))
-        sql(url, "INSERT INTO note_tasks (note_id, line_number, kind, line) VALUES (1, 1, 'task', '- [ ] a')")
+        sql(url, "INSERT INTO fork_note_tasks (note_id, line_number, kind, line) VALUES (1, 1, 'task', '- [ ] a')")
         _harness.run_alembic(url, "stamp", "030", dimensions=DIM)
         _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
         assert alembic_version(url) == HEAD_REVISION
-        assert fetchval(url, "SELECT count(*) FROM note_tasks") == 1
+        assert fetchval(url, "SELECT count(*) FROM fork_note_tasks") == 1
         assert_alembic_check_clean(url, DIM)
 
 
 @pytest.mark.parametrize(
     "label,ddl,fragment",
     [
-        ("unmarked", [], "does not carry 031's comment marker"),
+        ("unmarked", [], "does not carry 1001's comment marker"),
         (
             "no_cascade",
             [
-                "ALTER TABLE note_tasks DROP CONSTRAINT fk_note_tasks_note_id",
-                "ALTER TABLE note_tasks ADD CONSTRAINT fk_note_tasks_note_id "
+                "ALTER TABLE fork_note_tasks DROP CONSTRAINT fk_fork_note_tasks_note_id",
+                "ALTER TABLE fork_note_tasks ADD CONSTRAINT fk_fork_note_tasks_note_id "
                 "FOREIGN KEY (note_id) REFERENCES notes_metadata(id)",
             ],
-            "fk_note_tasks_note_id",
+            "fk_fork_note_tasks_note_id",
         ),
         (
             "weak_check",
             [
-                "ALTER TABLE note_tasks DROP CONSTRAINT ck_note_tasks_kind",
-                "ALTER TABLE note_tasks ADD CONSTRAINT ck_note_tasks_kind CHECK (true)",
+                "ALTER TABLE fork_note_tasks DROP CONSTRAINT ck_fork_note_tasks_kind",
+                "ALTER TABLE fork_note_tasks ADD CONSTRAINT ck_fork_note_tasks_kind CHECK (true)",
             ],
-            "ck_note_tasks_kind",
+            "ck_fork_note_tasks_kind",
         ),
-        ("extra_column", ["ALTER TABLE note_tasks ADD COLUMN extra text"], "its columns are"),
+        ("extra_column", ["ALTER TABLE fork_note_tasks ADD COLUMN extra text"], "its columns are"),
     ],
 )
-def test_031_refuses_a_pre_existing_table_of_another_shape(label, ddl, fragment):
-    with throwaway_db(f"schema_031_foreign_{label}") as url:
+def test_1001_refuses_a_pre_existing_table_of_another_shape(label, ddl, fragment):
+    with throwaway_db(f"schema_1001_foreign_{label}") as url:
         if label == "unmarked":
-            sql(url, "COMMENT ON TABLE note_tasks IS 'somebody else'")
+            sql(url, "COMMENT ON TABLE fork_note_tasks IS 'somebody else'")
         for statement in ddl:
             sql(url, statement)
         refuse_031(url, must_mention=[fragment, "Nothing has been changed"])
 
 
-def test_downgrade_031_drops_the_marked_table_and_upgrade_rebuilds_it():
-    with throwaway_db("schema_031_downgrade") as url:
+def test_downgrade_1001_drops_the_marked_table_and_upgrade_rebuilds_it():
+    with throwaway_db("schema_1001_downgrade") as url:
         _harness.run_alembic(url, "downgrade", "030", dimensions=DIM)
         assert alembic_version(url) == "030"
-        assert fetchval(url, "SELECT to_regclass('public.note_tasks')") is None
+        assert fetchval(url, "SELECT to_regclass('public.fork_note_tasks')") is None
         _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
         assert alembic_version(url) == HEAD_REVISION
         assert_alembic_check_clean(url, DIM)
 
 
-def test_downgrade_031_refuses_a_table_it_did_not_create():
-    with throwaway_db("schema_031_downgrade_foreign") as url:
-        sql(url, "COMMENT ON TABLE note_tasks IS 'somebody else'")
+def test_downgrade_1001_refuses_a_table_it_did_not_create():
+    with throwaway_db("schema_1001_downgrade_foreign") as url:
+        sql(url, "COMMENT ON TABLE fork_note_tasks IS 'somebody else'")
         result = _harness.run_alembic(url, "downgrade", "030", dimensions=DIM, check=False)
         assert result.returncode != 0
         assert "did not create it and will not drop it" in (result.stdout + result.stderr)
         assert alembic_version(url) == HEAD_REVISION
 
 
-# ── 032: the agent ledger ───────────────────────────────────────────────────
+# ── 1002: the agent ledger ───────────────────────────────────────────────────
 #
 # Its own module (`test_ledger_pg.py`) checks the shape constraint by
 # constraint against the model, the triggers and every refusal. The gate
@@ -6806,37 +6806,37 @@ def test_downgrade_031_refuses_a_table_it_did_not_create():
 # table is refused rather than adopted, and the downgrade refuses while an
 # entry exists, since nothing can rebuild one.
 
-LEDGER_ENTRY_032 = (
+LEDGER_ENTRY_1002 = (
     "INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
     "certainty) VALUES ('quirk', 1, 'Q1', 'current', 't', '2026-11-05', 'gate', 'h', 'tested')"
 )
 
 
-def test_032_fresh_head_is_clean_and_marked():
-    with throwaway_db("schema_032_fresh") as url:
-        assert alembic_version(url) == HEAD_REVISION == "032"
+def test_1002_fresh_head_is_clean_and_marked():
+    with throwaway_db("schema_1002_fresh") as url:
+        assert alembic_version(url) == HEAD_REVISION == "1002"
         assert fetchval(
             url, "SELECT obj_description('public.ledger_entries'::regclass, 'pg_class')"
         ) == "agent ledger entries, primary data (032_agent_ledger)"
-        sql(url, LEDGER_ENTRY_032)
+        sql(url, LEDGER_ENTRY_1002)
         with pytest.raises(asyncpg.PostgresError, match="refused"):
             sql(url, "DELETE FROM ledger_entries")
         assert_alembic_check_clean(url, DIM)
 
 
-def test_032_refuses_a_pre_existing_ledger_table():
-    with throwaway_db("schema_032_foreign", revision="031") as url:
+def test_1002_refuses_a_pre_existing_ledger_table():
+    with throwaway_db("schema_1002_foreign", revision="1001") as url:
         sql(url, "CREATE TABLE ledger_topics (id serial PRIMARY KEY)")
         result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
         assert result.returncode != 0
         assert "will not adopt pre-existing tables (ledger_topics)" in (result.stdout + result.stderr)
-        assert alembic_version(url) == "031"
+        assert alembic_version(url) == "1001"
 
 
-def test_032_stamp_back_rerun_adopts_its_own_ledger_and_keeps_the_entries():
-    with throwaway_db("schema_032_rerun") as url:
-        sql(url, LEDGER_ENTRY_032)
-        _harness.run_alembic(url, "stamp", "031", dimensions=DIM)
+def test_1002_stamp_back_rerun_adopts_its_own_ledger_and_keeps_the_entries():
+    with throwaway_db("schema_1002_rerun") as url:
+        sql(url, LEDGER_ENTRY_1002)
+        _harness.run_alembic(url, "stamp", "1001", dimensions=DIM)
         _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
         assert alembic_version(url) == HEAD_REVISION
         assert fetchval(url, "SELECT count(*) FROM ledger_entries") == 1
@@ -6865,22 +6865,22 @@ def test_032_stamp_back_rerun_adopts_its_own_ledger_and_keeps_the_entries():
         ),
     ],
 )
-def test_032_stamp_back_rerun_refuses_an_altered_ledger(label, ddl, fragment):
-    with throwaway_db(f"schema_032_altered_{label}") as url:
+def test_1002_stamp_back_rerun_refuses_an_altered_ledger(label, ddl, fragment):
+    with throwaway_db(f"schema_1002_altered_{label}") as url:
         for statement in ddl:
             sql(url, statement)
-        _harness.run_alembic(url, "stamp", "031", dimensions=DIM)
+        _harness.run_alembic(url, "stamp", "1001", dimensions=DIM)
         result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
         assert result.returncode != 0
         assert "will not adopt pre-existing ledger objects that differ" in (result.stdout + result.stderr)
         assert fragment in (result.stdout + result.stderr)
-        assert alembic_version(url) == "031"
+        assert alembic_version(url) == "1001"
 
 
-def test_downgrade_032_refuses_while_an_entry_exists_and_drops_an_empty_ledger():
-    with throwaway_db("schema_032_downgrade") as url:
-        sql(url, LEDGER_ENTRY_032)
-        result = _harness.run_alembic(url, "downgrade", "031", dimensions=DIM, check=False)
+def test_downgrade_1002_refuses_while_an_entry_exists_and_drops_an_empty_ledger():
+    with throwaway_db("schema_1002_downgrade") as url:
+        sql(url, LEDGER_ENTRY_1002)
+        result = _harness.run_alembic(url, "downgrade", "1001", dimensions=DIM, check=False)
         assert result.returncode != 0
         assert "holds 1 entries, which nothing can rebuild" in (result.stdout + result.stderr)
         assert alembic_version(url) == HEAD_REVISION
@@ -6889,7 +6889,7 @@ def test_downgrade_032_refuses_while_an_entry_exists_and_drops_an_empty_ledger()
                 await conn.execute("SET LOCAL ledger.allow_delete = 'on'")
                 await conn.execute("DELETE FROM ledger_entries")
         asyncio.run(_run(url, empty))
-        _harness.run_alembic(url, "downgrade", "031", dimensions=DIM)
+        _harness.run_alembic(url, "downgrade", "1001", dimensions=DIM)
         assert fetchval(url, "SELECT to_regclass('public.ledger_entries')") is None
         assert fetchval(url, "SELECT to_regprocedure('public.ledger_refuse_change()')") is None
         _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)

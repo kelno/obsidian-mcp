@@ -2428,11 +2428,11 @@ are pinned against PostgreSQL in
 ### Version 4 adds a derived kind: task lines (task tools)
 
 No grammar moved. Version 4 exists because the task tools added a derived
-table, `note_tasks` (migration 031), and every existing note needs its rows
+table, `fork_note_tasks` (migration 1001), and every existing note needs its rows
 derived once; the marker is the mechanism that makes an unchanged note
 "changed" for one pass. It shares version 3's cleaner
 (`_EXTRACTION_CLEANERS[4]`), so no note is re-embedded, which
-`tests/integration/test_task_tools_pg.py` pins against PostgreSQL.
+`tests/integration/test_fork_task_tools_pg.py` pins against PostgreSQL.
 
 In the pass, the scan computes each changed note's task lines
 (`task_scan.scan_note`) from the same raw text the body came from, and

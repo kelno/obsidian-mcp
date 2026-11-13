@@ -38,7 +38,8 @@ from src.plugins.kelno_vault import open_area as kelno_open_area
 from src.mcp_server import tools
 from src.mcp_server.auth import current_permission
 from src.models.db import Base, LedgerEmbedding, LedgerEntry
-from src.services import indexer, ledger, ledger_embed, task_ops
+from src.services import indexer, ledger, ledger_embed
+from src.services.fork_tasks import ops as task_ops
 from src.services import vault as vault_service
 import _harness
 from fakes import FakeProvider
@@ -1310,7 +1311,7 @@ async def test_open_area_flags_feedback_whose_tasks_the_owner_ticked(sessionmake
     other = await tools.ledger_add_impl("feedback", "Still going", area="home", details={"subtype": "friction"})
     with open(ctx / "plans.md", "a", encoding="utf-8") as f:            # ticked by hand, no tool ran
         f.write(f"- [x] #task Fixed it [{fb.ref}] ✅ 2026-11-11\n- [ ] #task Not yet [{other.ref}]\n")
-    from src.services import task_index
+    from src.services.fork_tasks import index as task_index
     await task_index.reindex_note_tasks_now(None, "plans.md", (ctx / "plans.md").read_text(encoding="utf-8"))
     result = await open_area_impl(area="home")
     flag = next(n for n in result.notes if n.startswith("Feedback of this area whose citing tasks are all done"))

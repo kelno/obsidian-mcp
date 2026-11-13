@@ -27,10 +27,10 @@ from pathlib import PurePosixPath
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from src.services import task_format as tf
-from src.services.task_query import QueryError, resolve_date
-from src.services.task_scan import _toggles_comment, scan_note, split_lines
-from src.services.task_settings import TasksSettings
+from src.services.fork_tasks import format as tf
+from src.services.fork_tasks.query import QueryError, resolve_date
+from src.services.fork_tasks.scan import _toggles_comment, scan_note, split_lines
+from src.services.fork_tasks.settings import TasksSettings
 
 
 class TaskOpError(Exception):

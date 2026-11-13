@@ -1,4 +1,4 @@
-"""Which lines of a note are task lines (`src/services/task_scan.py`).
+"""Which lines of a note are task lines (`src/services/fork_tasks/scan.py`).
 
 The Tasks plugin only sees list items Obsidian's own parser marks as tasks, so
 code blocks, frontmatter and lines that are not list items never count. What
@@ -9,7 +9,7 @@ answer of `not done` over the note.
 
 import pytest
 
-from src.services import task_scan as ts
+from src.services.fork_tasks import scan as ts
 
 
 def kinds(text):

@@ -70,7 +70,7 @@ _mcp_starlette = mcp.streamable_http_app()
 
 
 #: Every vector column the configured dimension applies to: the notes', and
-#: the agent ledger's (migration 032), which `make reset-embeddings` resets
+#: the agent ledger's (migration 1002), which `make reset-embeddings` resets
 #: together.
 EMBEDDING_COLUMNS = ("note_embeddings", "ledger_embeddings")
 
@@ -547,7 +547,7 @@ def _check_tasks_timezone() -> None:
     time, instead of on the owner's first voice request. Needs no database and
     no vault.
     """
-    from src.services.task_ops import TaskOpError, owner_today
+    from src.services.fork_tasks.ops import TaskOpError, owner_today
 
     try:
         owner_today(settings.tasks_timezone)

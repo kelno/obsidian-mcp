@@ -38,7 +38,7 @@ from datetime import date, timedelta
 from pathlib import PurePosixPath
 from typing import Callable
 
-from src.services import task_format as tf
+from src.services.fork_tasks import format as tf
 
 
 class QueryError(ValueError):

@@ -3,7 +3,7 @@
 A vault task cites an entry in its text as `[F12]`, `[Q14]` or `[P35, P48]`
 (the form and its matching rules: `ledger_citations`). That citation is the
 only link anyone writes: the server reads it back from the task index
-(`note_tasks`, migration 031) whenever a ledger or task tool needs it, so it
+(`fork_note_tasks`, migration 1001) whenever a ledger or task tool needs it, so it
 never goes stale against a second, hand-written copy. Nothing is stored and
 no foreign key points into the index tables: the ledger stays primary data
 that no reindex can reach.
@@ -32,7 +32,7 @@ from typing import Callable, Iterable
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.db import LedgerEntry, NoteMetadata, NoteTask
+from src.models.db import LedgerEntry, NoteMetadata, ForkNoteTask
 from src.services import ledger_citations as citations
 from src.services.ledger_citations import Ref
 
@@ -68,10 +68,10 @@ async def citing_rows(session: AsyncSession, uid: int | None) -> list:
     """The caller's indexed task lines that may cite a ledger entry."""
     owner = NoteMetadata.user_id.is_(None) if uid is None else NoteMetadata.user_id == uid
     return (await session.execute(
-        select(NoteMetadata.file_path, NoteTask.line_number, NoteTask.line)
-        .join(NoteMetadata, NoteMetadata.id == NoteTask.note_id)
-        .where(owner, NoteTask.kind == "task", NoteTask.line.op("~")(citations.SQL_BRACKET_PREFILTER))
-        .order_by(NoteMetadata.file_path, NoteTask.line_number)
+        select(NoteMetadata.file_path, ForkNoteTask.line_number, ForkNoteTask.line)
+        .join(NoteMetadata, NoteMetadata.id == ForkNoteTask.note_id)
+        .where(owner, ForkNoteTask.kind == "task", ForkNoteTask.line.op("~")(citations.SQL_BRACKET_PREFILTER))
+        .order_by(NoteMetadata.file_path, ForkNoteTask.line_number)
     )).all()
 
 

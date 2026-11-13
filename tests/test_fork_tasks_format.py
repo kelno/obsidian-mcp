@@ -1,4 +1,4 @@
-"""The Tasks plugin's emoji format, ported (`src/services/task_format.py`).
+"""The Tasks plugin's emoji format, ported (`src/services/fork_tasks/format.py`).
 
 Every expectation here is the behaviour of the Tasks plugin 8.6.0 source, the
 version the reference deployment's vault runs. The golden lines are the
@@ -11,8 +11,8 @@ from datetime import date
 
 import pytest
 
-from src.services import task_format as tf
-from src.services.task_settings import TasksSettings
+from src.services.fork_tasks import format as tf
+from src.services.fork_tasks.settings import TasksSettings
 
 REGISTRY = tf.StatusRegistry.from_settings(TasksSettings.plugin_defaults())
 

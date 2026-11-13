@@ -40,7 +40,7 @@ docs/architecture/agent-ledger.md.
 
 Every table carries a `COMMENT ON TABLE` marker, mirrored in
 `src/models/db.py`. Pre-existing tables are adopted only when they are
-exactly 032's own — every table and both functions present, and the
+exactly 1002's own — every table and both functions present, and the
 catalog (columns, constraints, indexes, triggers, markers, function
 bodies) identical to a scratch build of this migration, made in a
 throwaway schema inside a savepoint and rolled back — which is what a
@@ -48,10 +48,10 @@ stamp-back rerun finds. Anything else (a stray table, a partial set, one
 altered constraint) is refused: rows the server did not write would be
 served as the ledger. `downgrade()` refuses while any entry exists, since the ledger cannot be
 rebuilt. `search_path` is pinned; `lock_timeout` / `statement_timeout` are set
-and `RESET`, for 013's to 031's reasons.
+and `RESET`, for 013's to 030's reasons.
 
-Revision ID: 032
-Revises: 031
+Revision ID: 1002
+Revises: 1001
 Create Date: 2026-11-05
 """
 from typing import Sequence, Union
@@ -59,8 +59,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "032"
-down_revision: Union[str, None] = "031"
+revision: str = "1002"
+down_revision: Union[str, None] = "1001"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -500,12 +500,12 @@ def _create(dim: int) -> None:
         op.execute(statement)
 
 
-#: The throwaway schema a stamp-back rerun builds 032 in, to compare with.
+#: The throwaway schema a stamp-back rerun builds 1002 in, to compare with.
 SCRATCH = "ledger_032_shape"
 
 
 def _shape(bind, schema: str) -> dict:
-    """Everything about the ledger's objects in `schema` that 032 decides.
+    """Everything about the ledger's objects in `schema` that 1002 decides.
 
     Read with `search_path` set to `pg_catalog` alone, so every name prints
     schema-qualified, and the scratch build's schema name is then rewritten
@@ -554,7 +554,7 @@ def _as_public(value):
 
 
 def _verify_own(bind, dim: int) -> None:
-    """Accept the ledger already in `public` only if it is exactly 032's."""
+    """Accept the ledger already in `public` only if it is exactly 1002's."""
     op.execute(f"SAVEPOINT {SCRATCH}")
     op.execute(f"CREATE SCHEMA {SCRATCH}")
     op.execute(f"SET LOCAL search_path TO {SCRATCH}, public")
@@ -569,7 +569,7 @@ def _verify_own(bind, dim: int) -> None:
     differing = sorted(name for name in expected if expected[name] != live[name])
     if differing:
         raise RuntimeError(
-            f"032 will not adopt pre-existing ledger objects that differ from what it creates "
+            f"1002 will not adopt pre-existing ledger objects that differ from what it creates "
             f"({', '.join(differing)}): the ledger is primary data, and rows this server did not "
             "write would be served as agents' records. Inspect them, move them aside by hand, "
             "then re-run. Nothing has been changed."
@@ -595,13 +595,13 @@ def upgrade() -> None:
         _verify_own(bind, dim)
     elif present:
         raise RuntimeError(
-            f"032 will not adopt pre-existing tables ({', '.join(present)}): the ledger is "
+            f"1002 will not adopt pre-existing tables ({', '.join(present)}): the ledger is "
             "primary data, and rows this server did not write would be served as agents' "
             "records. Inspect them, move them aside by hand, then re-run. Nothing has been changed."
         )
     elif functions:
         raise RuntimeError(
-            f"032 found a function public.{functions[0]}() it did not create. Drop it by "
+            f"1002 found a function public.{functions[0]}() it did not create. Drop it by "
             "hand, then re-run. Nothing has been changed."
         )
     else:
@@ -630,14 +630,14 @@ def downgrade() -> None:
         ).scalar()
         if comment != MARKERS[table]:
             raise RuntimeError(
-                f"{table} does not carry 032's marker, so 032 did not create it and will not "
+                f"{table} does not carry 1002's marker, so 1002 did not create it and will not "
                 "drop it. Nothing has been changed."
             )
     if "ledger_entries" in present:
         count = bind.execute(sa.text("SELECT count(*) FROM ledger_entries")).scalar()
         if count:
             raise RuntimeError(
-                f"ledger_entries holds {count} entries, which nothing can rebuild. 032's "
+                f"ledger_entries holds {count} entries, which nothing can rebuild. 1002's "
                 "downgrade refuses to drop them; export them (scripts/ledger_export.py) and "
                 "remove them by hand if you mean to. Nothing has been changed."
             )

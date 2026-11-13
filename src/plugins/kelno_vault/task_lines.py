@@ -22,9 +22,9 @@ from collections import Counter
 
 from src import plugins
 from src.config import settings
-from src.services import task_format, task_ops
-from src.services.task_scan import scan_note
-from src.services.task_settings import TasksSettingsError, read_settings
+from src.services.fork_tasks import format as task_format, ops as task_ops
+from src.services.fork_tasks.scan import scan_note
+from src.services.fork_tasks.settings import TasksSettingsError, read_settings
 from src.services.vault import _vault_root
 
 logger = logging.getLogger(__name__)

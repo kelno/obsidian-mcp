@@ -557,14 +557,14 @@ and `RESET`. Its gate cases cover the fresh
 shape, the chain from 029, no backfill, stamp-back with a recorded marker
 kept, four impostor-column refusals, and both downgrade directions.
 
-## 031: `note_tasks` (task tools)
+## 1001: `fork_note_tasks` (task tools)
 
 One row per task line or task-like problem line of an indexed note, derived
 by the index pass next to the note's links (see [task tools](tasks.md)).
 `(id serial PK, note_id → notes_metadata.id ON DELETE CASCADE, line_number,
-kind, line, reason)`, with `ck_note_tasks_kind` (`kind IN ('task',
-'problem')`), `ck_note_tasks_line_number` (`>= 1`) and the unique
-`uq_note_tasks_note_line` on `(note_id, line_number)`, which is also the
+kind, line, reason)`, with `ck_fork_note_tasks_kind` (`kind IN ('task',
+'problem')`), `ck_fork_note_tasks_line_number` (`>= 1`) and the unique
+`uq_fork_note_tasks_note_line` on `(note_id, line_number)`, which is also the
 per-note index.
 
 - **No backfill in the migration.** The same change raises
@@ -572,7 +572,7 @@ per-note index.
   once and writes its rows; the version-4 cleaner is version 3's, so no note
   is re-embedded.
 - **Marker-owned, verified, not adopted** (021's shape): a pre-existing
-  `note_tasks` must match the whole shape — columns, primary key, the id
+  `fork_note_tasks` must match the whole shape — columns, primary key, the id
   serial, the foreign key's definition including `ON DELETE CASCADE`, both
   CHECKs by definition (scratch TEMP table), the unique constraint, no other
   constraint — or the upgrade is refused by name. `downgrade()` drops only a
@@ -581,9 +581,15 @@ per-note index.
   returns as bytes: it is cast to text before it is compared. The stamp-back
   re-run in the gate is what caught it.
 
-The gate's head literal is `031`; its cases cover the fresh shape, the chain
-from 030, the cascade and both CHECKs, stamp-back with a row kept, four
-impostor-table refusals, and both downgrade directions.
+Its gate cases cover the fresh shape, the chain from 030, the cascade and both
+CHECKs, stamp-back with a row kept, four impostor-table refusals, and both
+downgrade directions.
+
+## Fork migrations (1001 and up)
+
+The fork's own migrations take revision ids from 1001 up (`CLAUDE.md`, "Following upstream"), so upstream's next number never collides with one of them. 1001 (`fork_note_tasks`) and 1002 (the agent ledger) form a branch of their own from 030, beside upstream's 031 onward; a merge revision joins the two branches into the single head that `alembic upgrade head`, `alembic check` and the schema gate expect, and each resync that brings upstream migrations adds the next one. A new fork migration follows the current head.
+
+1001 and 1002 were first numbered 031 and 032, which upstream later used for its own migrations (031 keyword head and excerpt, 032 its `note_tasks`). A database migrated under the old ids is converted once, before the first image with the new ids starts against it, by `docker/upgrade-fork-revisions.sql`: it refuses unless the database is exactly at the old 032, renames `note_tasks` to `fork_note_tasks` with its constraints, sequence and marker, and sets `alembic_version` to 1002. `alembic upgrade head` then runs upstream's migrations from 031 and the merge revision. Run it while the old image is still serving, then let the new one start: the old image's task tools fail in between, nothing else does.
 
 ## The session TimeZone is UTC
 

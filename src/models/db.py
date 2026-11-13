@@ -632,18 +632,18 @@ class NoteLink(Base):
     )
 
 
-# Migration 031's ownership marker for `note_tasks`, mirrored here so `alembic
+# Migration 1001's ownership marker for `fork_note_tasks`, mirrored here so `alembic
 # check` compares it. Keep byte identical to `MARKER` in
-# `alembic/versions/031_note_tasks.py`.
-_NOTE_TASKS_TABLE_MARKER = "task lines and near misses per note (031_note_tasks)"
+# `alembic/versions/1001_fork_note_tasks.py`.
+_NOTE_TASKS_TABLE_MARKER = "task lines and near misses per note (1001_fork_note_tasks)"
 
-#: `note_tasks.kind`: a line the Tasks plugin reads as a task, or one that
+#: `fork_note_tasks.kind`: a line the Tasks plugin reads as a task, or one that
 #: looks like a task but may not be one (`task_scan` names the reason).
 NOTE_TASK_KINDS = ("task", "problem")
 
 
-class NoteTask(Base):
-    """One task line (or near miss) of an indexed note (migration 031).
+class ForkNoteTask(Base):
+    """One task line (or near miss) of an indexed note (migration 1001).
 
     Derived data, written by the index pass in the same transaction as the
     note's links and keyword vector, and by the task tools for the one note
@@ -657,7 +657,7 @@ class NoteTask(Base):
     quarantine, provenance discard, user deletion).
     """
 
-    __tablename__ = "note_tasks"
+    __tablename__ = "fork_note_tasks"
 
     _TABLE_MARKER: ClassVar[str] = _NOTE_TASKS_TABLE_MARKER
 
@@ -675,10 +675,10 @@ class NoteTask(Base):
     reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
-        CheckConstraint("kind IN ('task', 'problem')", name="ck_note_tasks_kind"),
-        CheckConstraint("line_number >= 1", name="ck_note_tasks_line_number"),
+        CheckConstraint("kind IN ('task', 'problem')", name="ck_fork_note_tasks_kind"),
+        CheckConstraint("line_number >= 1", name="ck_fork_note_tasks_line_number"),
         # Also the index every per-note read and delete uses.
-        UniqueConstraint("note_id", "line_number", name="uq_note_tasks_note_line"),
+        UniqueConstraint("note_id", "line_number", name="uq_fork_note_tasks_note_line"),
         {"comment": _NOTE_TASKS_TABLE_MARKER},
     )
 
@@ -1509,7 +1509,7 @@ class ConcurrencyRun(Base):
     )
 
 
-# ── The agent ledger (migration 032) ─────────────────────────────────────────
+# ── The agent ledger (migration 1002) ─────────────────────────────────────────
 #
 # Primary data: what agents write for each other, reached only through the
 # `ledger_*` tools. Nothing in the vault rebuilds it, so it is backed up, never
@@ -1634,7 +1634,7 @@ class LedgerEntry(Base):
     sources: Mapped[str | None] = mapped_column(Text, nullable=True)
     subtype: Mapped[str | None] = mapped_column(String(32), nullable=True)
     component: Mapped[str | None] = mapped_column(String(300), nullable=True)
-    # Column `fix` (032): the name a stamp-back rerun of 032 checks; agents see `leads`.
+    # Column `fix` (1002): the name a stamp-back rerun of 1002 checks; agents see `leads`.
     leads: Mapped[str | None] = mapped_column("fix", Text, nullable=True)
     target: Mapped[str | None] = mapped_column(String(500), nullable=True)
     proposed_text: Mapped[str | None] = mapped_column(Text, nullable=True)

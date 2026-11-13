@@ -75,8 +75,8 @@ from src.services.links import (
     extract_links_bounded,
     resolve_target,
 )
-from src.services.task_index import delete_task_rows, insert_task_rows, task_rows
-from src.services.task_scan import scan_note
+from src.services.fork_tasks.index import delete_task_rows, insert_task_rows, task_rows
+from src.services.fork_tasks.scan import scan_note
 from src.oauth.grants import lock_account_guard
 from src.services import vault_overlap
 from src.services.transfer import canonical_vault_root
@@ -822,7 +822,7 @@ def _content_hash(content: str) -> str:
 # Version 3 rejects links whose deciding target/href was changed by code
 # masking (#218). It also shares the version-1/2 cleaner: unchanged bytes
 # need repaired link rows, but no embedding invalidation from this bump.
-# Version 4 adds a derived kind, `note_tasks` (migration 031, the task tools):
+# Version 4 adds a derived kind, `fork_note_tasks` (migration 1001, the task tools):
 # no grammar changed, but every existing note needs its task rows derived
 # once, and this marker is the mechanism that makes an unchanged note
 # "changed" for one pass. It shares the version-1/2/3 cleaner, so nothing is
@@ -3504,7 +3504,7 @@ async def _index_vault_attempt(
                 # Off the loop for `extract_tags`' reason. Line numbers are
                 # over the whole note, so the scan takes the raw text, not
                 # the body.
-                note_tasks = await asyncio.to_thread(lambda: scan_note(raw).lines)
+                fork_note_tasks = await asyncio.to_thread(lambda: scan_note(raw).lines)
             except Exception as e:
                 logger.warning(f"Failed to parse {rel_path}: {e}")
                 entry = f"{rel_path} (parse: {e})"
@@ -3514,7 +3514,7 @@ async def _index_vault_attempt(
                     withholding.append(entry)
                 continue
             path_to_content[rel_path] = content
-            path_to_tasks[rel_path] = note_tasks
+            path_to_tasks[rel_path] = fork_note_tasks
             title = _note_title(frontmatter, found.name)
 
             # Grammar-attributable embedding invalidation, scoped to notes
@@ -4033,7 +4033,7 @@ async def _index_vault_attempt(
             skips.extend(link_skips)
             withholding.extend(link_skips)
 
-        # ── Task lines for changed notes (task tools, migration 031) ─────
+        # ── Task lines for changed notes (task tools, migration 1001) ─────
         # The links' rule exactly: every changed or moved note's rows are
         # replaced from this pass's own read, in this transaction, each
         # note's insert in its own poison savepoint; a skip withholds.
@@ -4442,13 +4442,13 @@ async def _update_tasks_for_changed(
     poisoned: list[tuple[str, str]],
     skipped_paths: set[str] | None,
 ) -> None:
-    """Replace the `note_tasks` rows of every changed or moved note.
+    """Replace the `fork_note_tasks` rows of every changed or moved note.
 
     The task lines come from `path_to_tasks`, the scan's own read of the bytes
     this pass hashed, so the rows describe exactly the content the row's
     `content_hash` names. Bounded per note by `task_scan.MAX_TASK_ROWS_PER_NOTE`
     (a capped note says so in its last row). Deleted notes need nothing here:
-    `note_tasks.note_id` cascades with the prune.
+    `fork_note_tasks.note_id` cascades with the prune.
     """
     if not changed_paths:
         return

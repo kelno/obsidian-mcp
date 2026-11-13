@@ -222,7 +222,7 @@ _EXTRACTION_CLEANERS = {
     # Version 3 only rejects mask-decided link targets (#218). Re-deriving
     # their graph rows must preserve version-2 embedding certification.
     3: clean_for_embedding,
-    # Version 4 adds `note_tasks` rows (task tools, migration 031). No grammar
+    # Version 4 adds `fork_note_tasks` rows (task tools, migration 1001). No grammar
     # moved, so nothing may be re-embedded on its account.
     4: clean_for_embedding,
 }

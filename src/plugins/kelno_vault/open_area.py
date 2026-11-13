@@ -180,7 +180,7 @@ async def _open_area_tasks(tag: str, uid, notes: list[str]) -> tuple[list[AreaTa
     """
     from sqlalchemy import select
 
-    from src.models.db import NoteMetadata, NoteTask
+    from src.models.db import NoteMetadata, ForkNoteTask
 
     try:
         task_settings, registry, today = await _task_context(uid)
@@ -190,9 +190,9 @@ async def _open_area_tasks(tag: str, uid, notes: list[str]) -> tuple[list[AreaTa
     wanted = "#" + tag.casefold()
     async with database.async_session() as session:
         rows = (await session.execute(
-            select(NoteMetadata.file_path, NoteTask.line_number, NoteTask.line)
-            .join(NoteMetadata, NoteMetadata.id == NoteTask.note_id)
-            .where(_note_owner_predicate(uid), NoteTask.kind == "task", NoteTask.line.ilike(f"%{wanted}%"))
+            select(NoteMetadata.file_path, ForkNoteTask.line_number, ForkNoteTask.line)
+            .join(NoteMetadata, NoteMetadata.id == ForkNoteTask.note_id)
+            .where(_note_owner_predicate(uid), ForkNoteTask.kind == "task", ForkNoteTask.line.ilike(f"%{wanted}%"))
         )).all()
 
     def select_open():

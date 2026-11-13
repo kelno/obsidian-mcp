@@ -1,4 +1,4 @@
-"""Writing a note's `note_tasks` rows: one implementation, two callers.
+"""Writing a note's `fork_note_tasks` rows: one implementation, two callers.
 
 - **The index pass** (`indexer._update_tasks_for_changed`) replaces the rows of
   every changed or moved note inside its own transaction, under the
@@ -25,9 +25,9 @@ import time
 
 from sqlalchemy import delete, insert, select, text, update
 
-from src.models.db import NoteMetadata, NoteTask
+from src.models.db import NoteMetadata, ForkNoteTask
 from src.services.index_state import INDEX_GENERATION_LOCK_KEY
-from src.services.task_scan import ScannedLine, scan_note
+from src.services.fork_tasks.scan import ScannedLine, scan_note
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +52,12 @@ def task_rows(note_id: int, lines: tuple[ScannedLine, ...] | list[ScannedLine]) 
 
 async def insert_task_rows(session, rows: list[dict]) -> None:
     for start in range(0, len(rows), _INSERT_BATCH):
-        await session.execute(insert(NoteTask).values(rows[start:start + _INSERT_BATCH]))
+        await session.execute(insert(ForkNoteTask).values(rows[start:start + _INSERT_BATCH]))
 
 
 async def delete_task_rows(session, note_ids: list[int]) -> None:
     if note_ids:
-        await session.execute(delete(NoteTask).where(NoteTask.note_id.in_(note_ids)))
+        await session.execute(delete(ForkNoteTask).where(ForkNoteTask.note_id.in_(note_ids)))
 
 
 async def _try_generation_lock(session, deadline: float) -> bool:

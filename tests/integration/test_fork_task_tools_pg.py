@@ -2,7 +2,7 @@
 
 What needs a database:
 
-* the index pass writes a note's `note_tasks` rows in its own transaction,
+* the index pass writes a note's `fork_note_tasks` rows in its own transaction,
   replaces them when the note changes, and loses them with the note (cascade);
 * a moved note keeps its rows (same id) and they answer under the new path;
 * the extraction-version bump backfills rows for an unchanged note and
@@ -27,9 +27,10 @@ from src.auth.session import current_user_id
 from src.config import settings
 from src.mcp_server import tools
 from src.mcp_server.auth import current_permission
-from src.models.db import NoteMetadata, NoteTask
+from src.models.db import NoteMetadata, ForkNoteTask
 from src.services import embeddings as embeddings_service
-from src.services import indexer, task_ops
+from src.services import indexer
+from src.services.fork_tasks import ops as task_ops
 from src.services import vault as vault_service
 import _harness
 
@@ -76,7 +77,7 @@ async def vault(sessionmaker, monkeypatch, tmp_path):
 
     monkeypatch.setattr(tools, "_log_usage", no_log)
     async with sessionmaker() as session:
-        for table in ("note_tasks", "note_links", "note_embeddings", "notes_metadata", "users"):
+        for table in ("fork_note_tasks", "note_links", "note_embeddings", "notes_metadata", "users"):
             await session.execute(text(f"DELETE FROM {table}"))
         await session.commit()
     permission = current_permission.set("readwrite")
@@ -95,9 +96,9 @@ def write(root, rel, body):
 async def task_rows(sessionmaker):
     async with sessionmaker() as session:
         result = await session.execute(
-            select(NoteMetadata.file_path, NoteTask.line_number, NoteTask.kind, NoteTask.line, NoteTask.reason)
-            .join(NoteMetadata, NoteMetadata.id == NoteTask.note_id)
-            .order_by(NoteMetadata.file_path, NoteTask.line_number)
+            select(NoteMetadata.file_path, ForkNoteTask.line_number, ForkNoteTask.kind, ForkNoteTask.line, ForkNoteTask.reason)
+            .join(NoteMetadata, NoteMetadata.id == ForkNoteTask.note_id)
+            .order_by(NoteMetadata.file_path, ForkNoteTask.line_number)
         )
         return [tuple(r) for r in result.all()]
 
@@ -198,7 +199,7 @@ async def test_list_tasks_only_reads_the_callers_rows(sessionmaker, vault, monke
             "VALUES (77, 'mine.md', 't', '{}', '{}', 'h') RETURNING id"
         ))).scalar()
         await session.execute(text(
-            "INSERT INTO note_tasks (note_id, line_number, kind, line) VALUES (:id, 1, 'task', '- [ ] theirs')"
+            "INSERT INTO fork_note_tasks (note_id, line_number, kind, line) VALUES (:id, 1, 'task', '- [ ] theirs')"
         ), {"id": note_id})
         await session.commit()
     result = await tools.list_tasks_impl()

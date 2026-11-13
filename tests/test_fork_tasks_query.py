@@ -1,4 +1,4 @@
-"""`list_tasks` filters, each the Tasks query line it equals (`task_query.py`).
+"""`list_tasks` filters, each the Tasks query line it equals (`fork_tasks/query.py`).
 
 Parity cases: each test names the Tasks query and the tasks the plugin returns
 for it, from the plugin's 8.6.0 filter code.
@@ -9,9 +9,9 @@ import random
 
 import pytest
 
-from src.services import task_format as tf
-from src.services import task_query as tq
-from src.services.task_settings import TasksSettings
+from src.services.fork_tasks import format as tf
+from src.services.fork_tasks import query as tq
+from src.services.fork_tasks.settings import TasksSettings
 
 SETTINGS = TasksSettings.plugin_defaults()
 REG = tf.StatusRegistry.from_settings(SETTINGS)

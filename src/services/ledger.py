@@ -45,7 +45,7 @@ from src.models.db import (
     LedgerTopic,
     NoteMetadata,
 )
-from src.services import task_ops, task_query
+from src.services.fork_tasks import ops as task_ops, query as task_query
 
 # ── Limits ───────────────────────────────────────────────────────────────────
 
@@ -977,7 +977,7 @@ async def update_entry(session: AsyncSession, uid: int | None, **kw) -> UpdateOu
 
     Autoflush is off for the whole change, so the entry reaches the database
     in one UPDATE with its revision already bumped: the history trigger
-    (migration 032) refuses at commit any change to an entry that did not go
+    (migration 1002) refuses at commit any change to an entry that did not go
     up exactly one revision with the old version kept.
     """
     with session.no_autoflush:

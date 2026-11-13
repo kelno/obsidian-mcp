@@ -27,7 +27,7 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import date
 
-from src.services.task_settings import StatusConfig, TasksSettings
+from src.services.fork_tasks.settings import StatusConfig, TasksSettings
 
 # ECMAScript WhiteSpace + LineTerminator: what `\s` and `trim()` mean in JS.
 JS_WHITESPACE = (

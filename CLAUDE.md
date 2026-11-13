@@ -90,7 +90,7 @@ This fork follows `maxkuminov/obsidian-mcp` under kelno's rules for forks, kept 
 
 - The record of how the fork differs is `FORK.md`, "What differs from upstream": one row per difference, saying what differs and why.
 - An upstream tool the owner hasn't decided on is switched off by naming it in a `SWITCHED_OFF` list in `src/mcp_server/server.py`: its code stays, it is not registered, and its tests run with it registered. The first resync that leaves a tool off adds the list. Any other upstream feature stays off through its own setting.
-- A fork migration's revision id comes from 1001 up (file `1001_<name>.py`, revision `"1001"`), chained after the current head, never upstream's next number. Migrations 031 and 032 predate this and share their ids with upstream's 031 and 032; the next resync renumbers them, with a one-time fix of the live database's migration record.
+- A fork migration's revision id comes from 1001 up (file `1001_<name>.py`, revision `"1001"`), never upstream's next number. The fork's migrations are a branch of their own beside upstream's, joined by a merge revision at each resync that brings upstream migrations; a new one follows the current head. See `docs/architecture/schema-and-migrations.md`, "Fork migrations".
 - A resync is a piece of work like any other here: the full checks above before its push to `main`, and the adversarial review below, since it changes the write tools.
 
 ## Review and checks
@@ -392,7 +392,7 @@ update it in the same change.** What stays here is the short list:
 - **Private folders are one definition and one argument** (fork, owner's decision P98, 2026-11-13). `PRIVATE_FOLDER_NAMES` (folder-name globs, empty by default) is read only through `src/services/private_folders.py`; `keyword_search`, `semantic_search` and `find_related` leave private notes out inside the query (so the limit fills) and end with the owner's line, "2 matches in private folders not shown."; `list_tasks`, `ledger_get`, `ledger_update` and `open_area` list their lines without text. `include_private` on the first six opens them, and without the setting no tool shows it (`_drop_include_private`). Private notes are embedded and filtered at search time. See "Private folders" in [search](docs/architecture/search.md).
 - Wikilink graph extracted from note bodies into `note_links`; resolved at index time with same-folder-first preference
 - **The agent ledger is primary data: backed up, never rebuilt from the
-  vault** (fork, owner's design, migration 032). The `ledger_*` tables hold
+  vault** (fork, owner's design, migration 1002). The `ledger_*` tables hold
   what agents write for each other (quirks, feedback, proposals); nothing in
   the vault can re-derive them, so a restore of last night's dump loses the
   day's entries — backups protect them. The database itself enforces the
@@ -457,9 +457,9 @@ conversion in `src/services/page_text.py`.
 
 **Tasks** (fork) — `list_tasks`, `create_task`, `edit_task`,
 `set_task_status`: the Obsidian Tasks plugin's emoji format, ported from the
-plugin's 8.6.0 source (`src/services/task_format.py`) and following the
-plugin's settings file in the vault. `list_tasks` answers from `note_tasks`
-(migration 031, filled by the index pass next to the links) and checks each
+plugin's 8.6.0 source (`src/services/fork_tasks/format.py`) and following the
+plugin's settings file in the vault. `list_tasks` answers from `fork_note_tasks`
+(migration 1001, filled by the index pass next to the links) and checks each
 returned line on disk; the writers change one line through the same ladder as
 `edit_note`, read it back first, and re-index that note's task rows at once.
 Recurring tasks are read, never changed. Read
@@ -470,14 +470,14 @@ Recurring tasks are read, never changed. Read
 **Agent ledger** (fork) — `ledger_search`, `ledger_get`, `ledger_add`,
 `ledger_update`, `ledger_digest`, `ledger_digest_edit`, `ledger_topics`,
 `ledger_topic_edit`: what agents log for each other, in the `ledger_*`
-tables (migration 032), never in the vault. Every change names the revision
+tables (migration 1002), never in the vault. Every change names the revision
 it read and a reason, and keeps the previous version; nothing is deleted.
 What an agent needs is where it already is (fork, owner's decision 2026-11-10, ledger F34): `ledger_add` and `ledger_update` publish each rule and its allowed values in the parameter schema (describing only; the server decides), one refusal lists every problem (`problems`), and `ledger_search` results, a topic-less `ledger_add` and `get_vault_guide` carry the area and topic names.
 Search returns two separate lists, by words and by meaning (an area search also finds entries tied to the area by a topic). A vault task
 citing `[F12]` (any kind, several as `[P35, P48]`; `src/services/ledger_citations.py`) is the only link between an entry and the work on it: the ledger and task tools derive the other direction from
-`note_tasks` at read time (`src/services/ledger_tasks.py`), nothing stored. Writes show the current state of every entry their text cites, and an update what cites the entry (fork, owner's tenet 2026-11-11, F60: compute is cheap, so the tool shows an agent what it needs at the moment of choice);
+`fork_note_tasks` at read time (`src/services/ledger_tasks.py`), nothing stored. Writes show the current state of every entry their text cites, and an update what cites the entry (fork, owner's tenet 2026-11-11, F60: compute is cheap, so the tool shows an agent what it needs at the moment of choice);
 feedback's ideas live in `leads` (stored in the column `fix`, which a
-032 stamp-back rerun requires). The four
+1002 stamp-back rerun requires). The four
 writers draw on the write budget (`write_class`) though they change no
 vault byte. Structured results (`src/mcp_server/ledger_result.py`), services
 in `src/services/ledger*.py`, import and export in `scripts/ledger_*.py`.
@@ -503,9 +503,9 @@ summaries.
 | [rate-limits.md](docs/architecture/rate-limits.md) | `src/services/rate_limits.py`, `src/services/concurrency.py`, `src/services/pool_budget.py`, `src/services/concurrency_counters.py`, `src/services/concurrency_readiness.py`, `src/services/refusals.py`, the pool subclass in `src/database.py`, the failed-auth budget in `APIKeyMiddleware`, the gate order in `_tracked`, the worker count, the key-creation budget and active-key cap (`src/services/api_keys.py`), and every `MCP_RATE_LIMIT_*` / `MCP_AUTH_FAILURE_*` / `MCP_CONCURRENCY_*` / `KEY_CREATION_*` / `KEY_MAX_ACTIVE_PER_ACCOUNT` / `DEFAULT_DAILY_REQUEST_LIMIT` setting |
 | [usage-attribution.md](docs/architecture/usage-attribution.md) | `usage_logs`, `_log_usage`, actor columns |
 | [control-panel.md](docs/architecture/control-panel.md) | panel templates, flash messages, admin guards, the Danger zone |
-| [tasks.md](docs/architecture/tasks.md) | the four task tools, `src/services/task_*.py`, `note_tasks` / migration 031, and any Tasks plugin upgrade |
+| [tasks.md](docs/architecture/tasks.md) | the four task tools, `src/services/fork_tasks/`, `fork_note_tasks` / migration 1001, and any Tasks plugin upgrade |
 | [plugins.md](docs/architecture/plugins.md) | `src/plugins/`, the `PLUGINS` setting, the plugin calls in the note writers, and moving a vault-specific behaviour out of the core |
-| [agent-ledger.md](docs/architecture/agent-ledger.md) | the eight `ledger_*` tools, `src/services/ledger*.py`, the `ledger_*` tables / migration 032, `scripts/ledger_import.py` / `ledger_export.py`, and the ledger's vectors in the reset and the embed stage |
+| [agent-ledger.md](docs/architecture/agent-ledger.md) | the eight `ledger_*` tools, `src/services/ledger*.py`, the `ledger_*` tables / migration 1002, `scripts/ledger_import.py` / `ledger_export.py`, and the ledger's vectors in the reset and the embed stage |
 
 Formal requirements live in `openspec/specs/`; the change history and its
 reasoning in `openspec/changes/archive/`.

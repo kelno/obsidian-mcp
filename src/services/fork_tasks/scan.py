@@ -45,7 +45,7 @@ import re
 from dataclasses import dataclass
 
 from src.services.links import FULL_NOTE, scan_fences, split_lines as _offsets
-from src.services.task_format import INDENTATION, LIST_MARKER, TASK_RE, JS_WHITESPACE
+from src.services.fork_tasks.format import INDENTATION, LIST_MARKER, TASK_RE, JS_WHITESPACE
 
 #: A task line longer than this is stored as a problem, its text truncated.
 MAX_TASK_LINE_CHARS = 10_000

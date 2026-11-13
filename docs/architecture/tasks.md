@@ -1,6 +1,6 @@
 # Task tools: the Tasks plugin's format, read and written server-side
 
-> Read before touching `list_tasks`, `create_task`, `edit_task`, `set_task_status`, `src/services/task_*.py`, `note_tasks` or migration 031. The write tools are on the destructive-write surface: [vault tools](vault-tools.md) applies to them in full.
+> Read before touching `list_tasks`, `create_task`, `edit_task`, `set_task_status`, `src/services/fork_tasks/`, `fork_note_tasks` or migration 1001. The write tools are on the destructive-write surface: [vault tools](vault-tools.md) applies to them in full.
 
 Four tools let an agent read and change the to-dos in the vault, written in the [Obsidian Tasks plugin](https://publish.obsidian.md/tasks/)'s emoji format (`- [ ] Call the bank ⏫ 📅 2026-11-05`). Fork-only (see `FORK.md`).
 
@@ -18,20 +18,20 @@ Set by the owner, and they outweigh any technical choice below:
 
 | File | What it holds |
 | --- | --- |
-| `src/services/task_format.py` | The port of the plugin's parser, serializer, status change, urgency and default sort. Pure. |
-| `src/services/task_scan.py` | Which lines of a note are task lines, and which only look like one (problems). |
-| `src/services/task_settings.py` | Reading the plugin's `data.json` from the vault. |
-| `src/services/task_query.py` | `list_tasks`' filters, each one a Tasks query line, and areas. |
-| `src/services/task_ops.py` | What a write does to a note's text, without I/O; "today". |
-| `src/services/task_index.py` | Writing `note_tasks` rows: the pass and the tools share it. |
+| `src/services/fork_tasks/format.py` | The port of the plugin's parser, serializer, status change, urgency and default sort. Pure. |
+| `src/services/fork_tasks/scan.py` | Which lines of a note are task lines, and which only look like one (problems). |
+| `src/services/fork_tasks/settings.py` | Reading the plugin's `data.json` from the vault. |
+| `src/services/fork_tasks/query.py` | `list_tasks`' filters, each one a Tasks query line, and areas. |
+| `src/services/fork_tasks/ops.py` | What a write does to a note's text, without I/O; "today". |
+| `src/services/fork_tasks/index.py` | Writing `fork_note_tasks` rows: the pass and the tools share it. |
 | `src/mcp_server/tools.py` (end), `server.py`, `task_result.py` | The four tools and their structured results. |
-| `alembic/versions/031_note_tasks.py` | The table. |
+| `alembic/versions/1001_fork_note_tasks.py` | The table. |
 
 ## Ported from the plugin's source, not its documentation
 
-The plugin's documentation does not say enough to reproduce it exactly (field order on write, what happens to trailing tags, which status types count as done, the default sort). So `task_format.py` is a function-by-function port of the plugin's TypeScript at **version 8.6.0**, the version installed in the reference vault, with each function naming what it mirrors (`DefaultTaskSerializer.deserialize`, `Task.handleNewStatus`, `Urgency.calculate`, `Sort.defaultSorters`, …). JavaScript semantics that differ from Python's are reproduced on purpose: ECMAScript whitespace for `\s` and `trim()`, `.` not matching U+2028/U+2029, ASCII-only `\d`, first-match `replace`.
+The plugin's documentation does not say enough to reproduce it exactly (field order on write, what happens to trailing tags, which status types count as done, the default sort). So `fork_tasks/format.py` is a function-by-function port of the plugin's TypeScript at **version 8.6.0**, the version installed in the reference vault, with each function naming what it mirrors (`DefaultTaskSerializer.deserialize`, `Task.handleNewStatus`, `Urgency.calculate`, `Sort.defaultSorters`, …). JavaScript semantics that differ from Python's are reproduced on purpose: ECMAScript whitespace for `\s` and `trim()`, `.` not matching U+2028/U+2029, ASCII-only `\d`, first-match `replace`.
 
-**When the plugin is upgraded**, re-read these files in its source and compare: `src/Task/TaskRegularExpressions.ts`, `src/TaskSerializer/DefaultTaskSerializer.ts`, `src/Layout/TaskLayoutOptions.ts` (field order), `src/Task/Task.ts` (`fromLine`, `handleNewStatus`), `src/Task/OnCompletion.ts`, `src/Task/Urgency.ts`, `src/Query/Sort/Sort.ts`, `src/Statuses/StatusRegistry.ts`, `src/Query/Filter/*` for the filters in `task_query.py`, `src/ui/EditableTask.ts` and `src/Commands/CreateOrEditTaskParser.ts` (the dialog).
+**When the plugin is upgraded**, re-read these files in its source and compare: `src/Task/TaskRegularExpressions.ts`, `src/TaskSerializer/DefaultTaskSerializer.ts`, `src/Layout/TaskLayoutOptions.ts` (field order), `src/Task/Task.ts` (`fromLine`, `handleNewStatus`), `src/Task/OnCompletion.ts`, `src/Task/Urgency.ts`, `src/Query/Sort/Sort.ts`, `src/Statuses/StatusRegistry.ts`, `src/Query/Filter/*` for the filters in `fork_tasks/query.py`, `src/ui/EditableTask.ts` and `src/Commands/CreateOrEditTaskParser.ts` (the dialog).
 
 What the port says that is easy to get wrong:
 
@@ -55,7 +55,7 @@ The API functions run inside Obsidian (the dialogs need its window), so they are
 
 ## Which lines are tasks
 
-The plugin reads only list items Obsidian's own parser marks as tasks, then applies its line pattern (indentation of spaces, tabs or `>`; a marker `-` `*` `+` `1.` `1)`; one or more spaces, not tabs; `[c]` with any one character). Obsidian's parser is not open source, so `task_scan.py` rebuilds the part of its decision that matters:
+The plugin reads only list items Obsidian's own parser marks as tasks, then applies its line pattern (indentation of spaces, tabs or `>`; a marker `-` `*` `+` `1.` `1)`; one or more spaces, not tabs; `[c]` with any one character). Obsidian's parser is not open source, so `fork_tasks/scan.py` rebuilds the part of its decision that matters:
 
 - frontmatter is skipped, through the repo's one partition;
 - fenced code is skipped, through the repo's one fence grammar (`links.scan_fences`), never a private one. Its inline-code masking is not used, since a task may hold inline code;
@@ -86,7 +86,7 @@ Read from the vault on every call (`TASKS_PLUGIN_SETTINGS_PATH`, default `.obsid
 
 ## `list_tasks`
 
-Each argument is one Tasks query line (the table is in `task_query.py`), and the result's `query` field is the whole block, so the same question can be pasted into Obsidian. `tags include` is a case-insensitive substring of any tag (`#area/x` matches `#area/x-y`); `path includes` a case-insensitive substring anywhere in the path, `.md` included; dates follow `DateField` (a missing date matches only `starts`; an invalid one never compares); `happens` is any of start, scheduled and due. Tags in a note's frontmatter do not count: the plugin's tags are the line's.
+Each argument is one Tasks query line (the table is in `fork_tasks/query.py`), and the result's `query` field is the whole block, so the same question can be pasted into Obsidian. `tags include` is a case-insensitive substring of any tag (`#area/x` matches `#area/x-y`); `path includes` a case-insensitive substring anywhere in the path, `.md` included; dates follow `DateField` (a missing date matches only `starts`; an invalid one never compares); `happens` is any of start, scheduled and due. Tags in a note's frontmatter do not count: the plugin's tags are the line's.
 
 The default sort is the plugin's (status type, urgency, due, priority, path), so "the first five" agree; `limit` applies after it.
 
@@ -122,14 +122,14 @@ An area's tag is declared once, in its main note's frontmatter: `area_tag: area/
 
 ## The index
 
-`note_tasks` (migration 031): one row per task line or problem of an indexed note — `note_id` (cascades with the note), `line_number` (1-based over the whole file), `kind`, the exact `line`, `reason`. The pass writes a changed or moved note's rows next to its links, in the same transaction, each note's insert in its own poison savepoint (site `tasks`), a skip withholding the re-derive stamp exactly as a link skip does. `CURRENT_EXTRACTION_VERSION` 4 derived every existing note's rows once; it shares the version-3 cleaner, so nothing was re-embedded. Owner scoping is through `notes_metadata.user_id`, as for `note_links`.
+`fork_note_tasks` (migration 1001): one row per task line or problem of an indexed note — `note_id` (cascades with the note), `line_number` (1-based over the whole file), `kind`, the exact `line`, `reason`. The pass writes a changed or moved note's rows next to its links, in the same transaction, each note's insert in its own poison savepoint (site `tasks`), a skip withholding the re-derive stamp exactly as a link skip does. `CURRENT_EXTRACTION_VERSION` 4 derived every existing note's rows once; it shares the version-3 cleaner, so nothing was re-embedded. Owner scoping is through `notes_metadata.user_id`, as for `note_links`.
 
 ## Choices made by the agent that built this (not requirements)
 
 Recorded so they are never mistaken for the owner's rules; each can be changed.
 
 1. **Rows store a line's text, not its meaning.** Status types, the global filter, file-name dates and "today" come from the settings and the clock, so `list_tasks` parses at query time; a settings change needs no reindex.
-2. **Immediate re-index of the written note's task rows only.** After a write, the tool replaces that note's `note_tasks` rows from the bytes it just published, in its own transaction under the index generation lock, waiting at most 5 s (`IMMEDIATE_INDEX_WAIT_SECONDS`); the note's other derived data waits for the next pass. The result says `indexed` and why not. **Until that pass, the note row's `notes_metadata.content_hash` lags the file.** No write precondition ever uses it: every write compares the caller's `expected_hash` with the hash of the bytes it reads from disk in that call, `list_tasks` returns the hash of the bytes it reads from disk, and a write returns the hash of the bytes it published. A note not yet in the index (a new inbox) gets its rows at the next pass. Change 2 (a file watcher with per-path passes) is where the tools would switch to a real per-note pass.
+2. **Immediate re-index of the written note's task rows only.** After a write, the tool replaces that note's `fork_note_tasks` rows from the bytes it just published, in its own transaction under the index generation lock, waiting at most 5 s (`IMMEDIATE_INDEX_WAIT_SECONDS`); the note's other derived data waits for the next pass. The result says `indexed` and why not. **Until that pass, the note row's `notes_metadata.content_hash` lags the file.** No write precondition ever uses it: every write compares the caller's `expected_hash` with the hash of the bytes it reads from disk in that call, `list_tasks` returns the hash of the bytes it reads from disk, and a write returns the hash of the bytes it published. A note not yet in the index (a new inbox) gets its rows at the next pass. Change 2 (a file watcher with per-path passes) is where the tools would switch to a real per-note pass.
 3. **`list_tasks` verifies returned lines on disk** (freshness, above).
 4. **`create_task` creates a missing note only when it is the inbox** (`TASKS_INBOX_PATH`) with no heading, so a typo does not create a note.
 5. **`create_task`'s `expected_hash` is optional**; it only adds a line, and the in-call compare covers its own read-to-write window.

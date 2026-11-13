@@ -3,7 +3,7 @@
 Offline: the vault is a tmp dir, usage logging is stubbed, and the two
 database touches — the area index and the immediate task re-index — are
 replaced by fakes, so these tests are about the bytes written. The database
-side (the rows, `list_tasks`) is in tests/integration/test_task_tools_pg.py.
+side (the rows, `list_tasks`) is in tests/integration/test_fork_task_tools_pg.py.
 """
 
 import asyncio
@@ -17,7 +17,8 @@ from src.config import settings
 from src import plugins
 from src.mcp_server import tools
 from src.mcp_server.auth import current_permission
-from src.services import task_ops, task_query, vault as vault_service
+from src.services import vault as vault_service
+from src.services.fork_tasks import ops as task_ops, query as task_query
 from src.services.vault import content_hash_for_bytes
 
 

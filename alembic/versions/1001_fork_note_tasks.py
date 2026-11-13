@@ -1,4 +1,4 @@
-"""`note_tasks`: the task lines of every indexed note (task tools).
+"""`fork_note_tasks`: the task lines of every indexed note (task tools).
 
 `list_tasks` answers "which tasks match this Tasks query?" over the whole
 vault within the time a connector call allows, so the task lines are derived
@@ -12,11 +12,11 @@ docs/architecture/tasks.md.
 CASCADE, line_number integer NOT NULL, kind varchar(16) NOT NULL, line text
 NOT NULL, reason varchar(32) NULL)`, plus:
 
-- `ck_note_tasks_kind`: `kind IN ('task', 'problem')`. A kind the reader does
+- `ck_fork_note_tasks_kind`: `kind IN ('task', 'problem')`. A kind the reader does
   not know is a row `list_tasks` would silently skip.
-- `ck_note_tasks_line_number`: `line_number >= 1`. The tools address a task as
+- `ck_fork_note_tasks_line_number`: `line_number >= 1`. The tools address a task as
   `path:line`, 1-based; a zero would name no line.
-- `uq_note_tasks_note_line` on `(note_id, line_number)`: one row per line, and
+- `uq_fork_note_tasks_note_line` on `(note_id, line_number)`: one row per line, and
   the index every per-note read and delete uses.
 
 The rows hold a line's **text**, never its parsed meaning (status type, global
@@ -39,7 +39,7 @@ refused, naming what disagreed, rather than adopted. `downgrade()` drops only
 a marked table. `search_path` is pinned and asserted; `lock_timeout` /
 `statement_timeout` are set and `RESET`, for 013's to 030's reasons.
 
-Revision ID: 031
+Revision ID: 1001
 Revises: 030
 Create Date: 2026-10-31
 """
@@ -48,19 +48,19 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "031"
+revision: str = "1001"
 down_revision: Union[str, None] = "030"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-TABLE = "note_tasks"
-QUALIFIED = "public.note_tasks"
+TABLE = "fork_note_tasks"
+QUALIFIED = "public.fork_note_tasks"
 
-KIND_CHECK = "ck_note_tasks_kind"
-LINE_CHECK = "ck_note_tasks_line_number"
-UNIQUE = "uq_note_tasks_note_line"
-FOREIGN_KEY = "fk_note_tasks_note_id"
+KIND_CHECK = "ck_fork_note_tasks_kind"
+LINE_CHECK = "ck_fork_note_tasks_line_number"
+UNIQUE = "uq_fork_note_tasks_note_line"
+FOREIGN_KEY = "fk_fork_note_tasks_note_id"
 
 # Written out as literals, not imported from the model: a migration keeps
 # describing the schema it created after the model moves on (019's rule).
@@ -68,7 +68,7 @@ KIND_PREDICATE = "kind IN ('task', 'problem')"
 LINE_PREDICATE = "line_number >= 1"
 
 # Byte identical to `_NOTE_TASKS_TABLE_MARKER` in `src/models/db.py`.
-MARKER = "task lines and near misses per note (031_note_tasks)"
+MARKER = "task lines and near misses per note (1001_fork_note_tasks)"
 
 EXPECTED_COLUMNS = (
     ("id", "integer", True),
@@ -142,7 +142,7 @@ def _column_default(bind, column: str):
 
 
 def _canonical_definitions(bind) -> dict:
-    """How this server renders 031's constraints, measured off a scratch table.
+    """How this server renders 1001's constraints, measured off a scratch table.
 
     013's device: a hand-written expected string pins the migration to one
     PostgreSQL major's normalisation; a TEMP table carrying the identical
@@ -196,7 +196,7 @@ def _assert_is_the_qualified_table(bind) -> None:
     unqualified = _oid(bind, TABLE)
     if qualified is None or qualified != unqualified:
         raise RuntimeError(
-            f"031's {TABLE} is not the table {QUALIFIED} resolves to "
+            f"1001's {TABLE} is not the table {QUALIFIED} resolves to "
             f"(search_path-relative oid {unqualified!r}, qualified oid "
             f"{qualified!r}). Set the migration role's search_path so "
             "`public` comes first, then re-run."
@@ -223,10 +223,10 @@ def _create() -> None:
 
 
 def _verify(bind) -> None:
-    """Accept a pre-existing table only if it is exactly 031's."""
+    """Accept a pre-existing table only if it is exactly 1001's."""
     problems = []
     if _table_comment(bind) != MARKER:
-        problems.append("it does not carry 031's comment marker")
+        problems.append("it does not carry 1001's comment marker")
     columns = _columns(bind)
     if columns != list(EXPECTED_COLUMNS):
         problems.append(f"its columns are {columns}, not {list(EXPECTED_COLUMNS)}")
@@ -246,19 +246,19 @@ def _verify(bind) -> None:
             problems.append(f"its constraint {name} is NOT VALID")
     extra = sorted(set(live) - set(canonical) - set(primary))
     if extra:
-        problems.append(f"it carries constraints 031 does not create: {extra}")
+        problems.append(f"it carries constraints 1001 does not create: {extra}")
 
     live_id = _column_default(bind, "id")
     canonical_id = _canonical_id_default(bind)
     if canonical_id is None or live_id != canonical_id:
-        problems.append(f"its id default is {live_id!r}, not the serial 031 creates")
+        problems.append(f"its id default is {live_id!r}, not the serial 1001 creates")
 
     if problems:
         raise RuntimeError(
-            f"{TABLE} already exists but {'; '.join(problems)}. 031 will not "
+            f"{TABLE} already exists but {'; '.join(problems)}. 1001 will not "
             "adopt a table of unknown provenance: list_tasks answers from it, "
             "and rows it did not derive would be returned as the vault's tasks. "
-            "Resolve by hand — drop it and let 031 create it — then re-run. "
+            "Resolve by hand — drop it and let 1001 create it — then re-run. "
             "Nothing has been changed."
         )
 
@@ -282,7 +282,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the table only if it carries 031's marker.
+    """Drop the table only if it carries 1001's marker.
 
     Losing it loses derived data only: a re-upgrade starts empty and the next
     pass after `CURRENT_EXTRACTION_VERSION` moves re-derives it. The previous
@@ -296,7 +296,7 @@ def downgrade() -> None:
     _assert_is_the_qualified_table(bind)
     if _table_comment(bind) != MARKER:
         raise RuntimeError(
-            f"{TABLE} does not carry 031's comment marker ({MARKER!r}), so 031 "
+            f"{TABLE} does not carry 1001's comment marker ({MARKER!r}), so 1001 "
             "did not create it and will not drop it. Nothing has been changed. "
             "Remove it by hand if you mean to."
         )
