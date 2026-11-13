@@ -53,6 +53,14 @@ async def _full_path_links(write: plugins.NoteWrite, new: str) -> tuple[str, lin
     when the note list cannot be read, `new` is returned as is with a line
     saying so.
     """
+    if "\n" not in new and "\r" in new:
+        # A note with lone-CR line endings: work on LF and give its CRs back,
+        # as the title heading does, so the lines compare one by one.
+        old_lf = write.old.replace("\r", "\n") if write.old is not None else None
+        text, report, failure = await _full_path_links(
+            plugins.NoteWrite(write.tool, write.path, old_lf, new.replace("\r", "\n"), write.dry_run, write.user_id),
+            new.replace("\r", "\n"))
+        return text.replace("\n", "\r"), report, failure
     if not link_paths.needs_check(write.old, new):
         return new, None, ""
     try:

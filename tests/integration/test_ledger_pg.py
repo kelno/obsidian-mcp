@@ -1342,6 +1342,12 @@ async def test_note_writers_give_bare_name_links_their_full_path(sessionmaker, c
     assert "links_rewritten:" in written
     assert (ctx / "w.md").read_text(encoding="utf-8") == "[[projects/Home/Home|home]]\n"
 
+    # A lone-CR note is read line by line: the line the write adds gets the path, the kept one stays bare.
+    (ctx / "cr.md").write_bytes(b"Old [[Home]]\r")
+    cr = await tools.edit_note_impl("cr.md", "New [[Home]]", append=True)
+    assert "links_rewritten:" in cr and "plugin_error" not in cr
+    assert (ctx / "cr.md").read_bytes() == b"Old [[Home]]\r\rNew [[projects/Home/Home|Home]]"
+
 
 
 # ── Dated note names, where the folder notes declare them ────────────────────
