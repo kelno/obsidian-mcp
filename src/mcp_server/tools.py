@@ -10475,7 +10475,7 @@ async def edit_task_impl(
                 description=_task_ops.edited_description(old, description, task_settings),
                 priority=priority, on_completion=on_completion,
                 dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
-                clear=clear, recurrence=recurrence,
+                clear=clear, recurrence=recurrence, settings=task_settings,
             )
             new_line = _tf.to_file_line(updated)
             if new_line == expected_line:
@@ -10580,6 +10580,17 @@ async def set_task_status_impl(
             written.notes = (written.notes or []) + [
                 f"This task repeats: its next occurrence was written at line {next_line} ({where}), as the "
                 f"Tasks plugin writes it.{tail}"]
+            upcoming = result[change.next_index]
+            first = next((d for d in (upcoming.due, upcoming.scheduled, upcoming.start) if d is not None), None)
+            if first is not None and first.value is not None and first.value < today:
+                written.notes.append(
+                    f"Its next occurrence's date, {first.text}, is already past: the Tasks plugin counts it from "
+                    "the task's old date, not from today (a rule ending in `when done` would). Tell the owner "
+                    "rather than ticking it again to catch up.")
+        elif located.task.recurrence is not None and located.task.status.type == "DONE" and new_status.type != "DONE":
+            written.notes = (written.notes or []) + [
+                "This task repeats: if its next occurrence was written when it was ticked done, that line is still "
+                "in the note. If the tick was a mistake, it may need removing: ask the owner."]
         return written
 
 

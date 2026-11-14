@@ -1798,7 +1798,9 @@ async def set_task_status(
     line above it (below, if the plugin is set so), with its dates moved on as
     the plugin moves them. The result's `line` and `text` are then the ticked
     task's, where it is now; `next_occurrence` and `next_occurrence_line` the
-    new one's; lines below move down by one. The rules followed are those
+    new one's; lines below move down by one. The plugin counts the next date
+    from the old one, so a late tick can give a date already past: the
+    result says so. The rules followed are those
     `create_task`'s `recurrence` lists; any other is refused
     (`recurring_task`): tick that one in Obsidian, or ask the owner whether
     to replace its rule with `edit_task(…, recurrence=…)` first.

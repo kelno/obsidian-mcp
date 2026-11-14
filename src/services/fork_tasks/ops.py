@@ -243,14 +243,27 @@ def recurring_unsupported(rule: str, reason: str, *, action: str) -> TaskOpError
     )
 
 
+def recurring_dates_unsupported(rule: str, reason: str) -> TaskOpError:
+    """The refusal for a tick the rule allows but the task's dates don't."""
+    return TaskOpError(
+        "recurring_task",
+        f"this task repeats (🔁 {rule}), a rule the task tools follow, but they cannot move its dates on "
+        f"({reason}); tick it in Obsidian, so the Tasks plugin handles its next occurrence. Nothing was written.",
+    )
+
+
 def apply_fields(task: tf.Task, *, today: date, description: str | None = None, priority: str | None = None,
                  on_completion: str | None = None, dates: dict[str, str | None] | None = None,
-                 clear: list[str] | None = None, recurrence: str | None = None) -> tf.Task:
+                 clear: list[str] | None = None, recurrence: str | None = None,
+                 settings: TasksSettings | None = None) -> tf.Task:
     """The dialog's `applyEdits` for the fields the tools expose.
 
     A `🔁` rule, given or already on the task, is written in the plugin's
     wording, as the dialog saves it; the dialog refuses a repeating task with
-    no due, scheduled or start date, and so do the tools.
+    no due, scheduled or start date, and so do the tools. With `settings`,
+    a write that sets the rule or a date also refuses dates the rule cannot
+    be followed from (yearly from February 29), so the problem shows when
+    the task is written rather than when it is ticked.
     """
     changes: dict = {}
     if description is not None:
@@ -291,6 +304,20 @@ def apply_fields(task: tf.Task, *, today: date, description: str | None = None, 
             "a repeating task needs a due, scheduled or start date, which its next occurrence is counted "
             "from (the Tasks plugin's dialog refuses one without); give one. Nothing was written.",
         )
+    touches_dates = recurrence is not None or any(v is not None for v in (dates or {}).values()) or any(
+        name in EDIT_DATE_FIELDS for name in (clear or ()))
+    if updated.recurrence is not None and settings is not None and touches_dates:
+        try:
+            _recurrence.next_occurrence(updated, _recurrence.parse(updated.recurrence), updated.status, today,
+                                        settings)
+        except _recurrence.RecurrenceUnsupported as exc:
+            when = ", ".join(f"{name} {d.text}" for name in ("start", "scheduled", "due")
+                             if (d := getattr(updated, name)) is not None)
+            raise TaskOpError(
+                "invalid_argument",
+                f"the 🔁 rule {updated.recurrence!r} cannot be followed from this task's dates ({when}: {exc}), so "
+                "ticking it would be refused; change the date or the rule. Nothing was written.",
+            ) from None
     return updated
 
 
@@ -356,7 +383,7 @@ def new_task(*, description: str, settings: TasksSettings, registry: tf.StatusRe
     base = tf.Task(indentation="", list_marker="-", status=todo, description=text, created=created,
                    tags=tf.extract_hashtags(text))
     task = apply_fields(base, today=today, priority=priority, on_completion=on_completion, dates=dates,
-                        recurrence=recurrence)
+                        recurrence=recurrence, settings=settings)
     if status is not None:
         if task.recurrence is not None and status.type == "DONE":
             raise TaskOpError(
@@ -389,6 +416,8 @@ def new_status_tasks(task: tf.Task, status: tf.Status, today: date, settings: Ta
     """The replacement tasks, None when nothing changes."""
     try:
         result = tf.apply_status(task, status, today, settings, registry)
+    except _recurrence.RecurrenceDatesUnsupported as exc:
+        raise recurring_dates_unsupported(task.recurrence, str(exc)) from None
     except tf.RecurrenceUnsupported as exc:
         raise recurring_unsupported(task.recurrence, str(exc), action="tick") from None
     if result == [task]:

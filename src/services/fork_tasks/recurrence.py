@@ -48,6 +48,11 @@ class RecurrenceUnsupported(Exception):
     """A rule, or a rule with these dates, outside what the tools can follow."""
 
 
+class RecurrenceDatesUnsupported(RecurrenceUnsupported):
+    """The rule is one the tools follow, but not from this task's dates (yearly from February 29, a
+    scheduled date taken from the file name, a date that is not a real one)."""
+
+
 def parse(text: str) -> _engine.Rule:
     """The rule in `text`, or `RecurrenceUnsupported` naming why not."""
     rule = _engine.parse_rule(text)
@@ -149,10 +154,10 @@ def next_occurrence(task, rule: _engine.Rule, next_status, today: date, settings
     from src.services.fork_tasks import format as tf
 
     if task.scheduled_inferred:
-        raise RecurrenceUnsupported("its scheduled date comes from the file name, which the tools do not shift")
+        raise RecurrenceDatesUnsupported("its scheduled date comes from the file name, which the tools do not shift")
     dates = {"start": task.start, "scheduled": task.scheduled, "due": task.due}
     if any(d is not None and d.value is None for d in dates.values()):
-        raise RecurrenceUnsupported("one of its dates is not a real calendar date")
+        raise RecurrenceDatesUnsupported("one of its dates is not a real calendar date")
     # `Occurrence.getDatePriorityOrder`.
     order = (("due", "start", "scheduled") if settings.remove_scheduled_date_on_recurrence
              else ("due", "scheduled", "start"))
@@ -162,13 +167,13 @@ def next_occurrence(task, rule: _engine.Rule, next_status, today: date, settings
         # `Recurrence.nextReferenceDate`: from the reference date, or from today `when done`.
         nxt = _engine.next_date(rule, today if rule.when_done else reference)
         if isinstance(nxt, _engine.Unsupported):
-            raise RecurrenceUnsupported(nxt.reason)
+            raise RecurrenceDatesUnsupported(nxt.reason)
         try:
             for name, value in dates.items():
                 if value is not None:
                     shifted[name] = tf.TaskDate.of(value.value + (nxt - reference))
         except OverflowError:
-            raise RecurrenceUnsupported("the next date is out of range") from None
+            raise RecurrenceDatesUnsupported("the next date is out of range") from None
         # `Occurrence.next`: the setting drops ⏳ only when 🛫 or 📅 is there.
         if settings.remove_scheduled_date_on_recurrence and (task.start is not None or task.due is not None):
             shifted["scheduled"] = None

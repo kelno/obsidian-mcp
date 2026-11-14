@@ -397,6 +397,43 @@ async def test_recurring_tick_lines_count_the_lines_the_stamp_adds(vault, monkey
     assert result.line == 5 and lines[4] == result.text
 
 
+async def test_a_rule_whose_dates_cannot_be_followed_is_refused_when_written(vault):
+    # Yearly from February 29: the rule is fine, the date isn't (review 2, point 2).
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("leap", path="n.md", due="2028-02-29", recurrence="every year")
+    assert code(result) == "invalid_argument"
+    assert "date" in result.error and "2028-02-29" in result.error
+    assert read(vault, "n.md") == "# T\n"
+
+
+async def test_ticking_a_task_whose_dates_the_rule_cannot_follow_blames_the_dates(vault):
+    text = "- [ ] leap 🔁 every year 📅 2024-02-29"
+    result = await status(vault, text + "\n", 1, text, status="done")
+    assert code(result) == "recurring_task"
+    assert "dates" in result.error and "replace the rule" not in result.error
+    assert read(vault, "n.md") == text + "\n"
+
+
+async def test_an_overdue_recurring_tick_says_its_next_date_is_past(vault):
+    text = "- [ ] pills 🔁 every day 📅 2026-10-01"
+    result = await status(vault, text + "\n", 1, text, status="done")
+    assert result.next_occurrence == "- [ ] pills 🔁 every day 📅 2026-10-02"
+    assert any("2026-10-02" in n and "already past" in n for n in result.notes)
+
+
+async def test_an_on_time_recurring_tick_says_nothing_about_the_past(vault):
+    text = "- [ ] pills 🔁 every day 📅 2026-10-31"
+    result = await status(vault, text + "\n", 1, text, status="done")
+    assert not any("already past" in n for n in result.notes)
+
+
+async def test_unticking_a_recurring_task_mentions_its_next_occurrence(vault):
+    text = "- [x] a 🔁 every day 📅 2026-10-30 ✅ 2026-10-30"
+    result = await status(vault, text + "\n", 1, text, status="todo")
+    assert read(vault, "n.md") == "- [ ] a 🔁 every day 📅 2026-10-30\n"
+    assert any("next occurrence" in n and "mistake" in n for n in result.notes)
+
+
 async def test_cancelling_a_recurring_task_writes_no_next_occurrence(vault):
     text = "- [ ] a 🔁 every Monday 📅 2026-11-02"
     result = await status(vault, text + "\n", 1, text, status="cancelled")
