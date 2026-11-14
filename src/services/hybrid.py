@@ -42,13 +42,13 @@ mode.
 
 **Private folders (fork, P98).** With `hide_private` and private folders
 configured, both arms leave notes under a private folder out inside their own
-statements (so each still fills its 50), and each arm runs a second time
-unfiltered, in the same snapshot: the keyword arm right after step 4, the
-semantic arm right after its filtered run in step 5 (exact too after an exact
-re-run). Those two are the arms an unfiltered call would have fused, in their
-own order; the service fuses them and counts the private notes ranked ahead
-of the furthest note on the page (`count_private_hidden`). Nothing from the
-unfiltered runs reaches the result but that number.
+statements (so each still fills its 50; steps 4 and 5 differ from upstream's
+by that argument only), and after step 7c each arm runs a second time
+unfiltered, in the same snapshot (`_private_hidden_count`). Those two are the
+arms an unfiltered call would have fused, in their own order; the service
+fuses them and counts the private notes ranked ahead of the furthest note on
+the page (`count_private_hidden`). Nothing from the unfiltered runs reaches
+the result but that number.
 
 The service records the timing keys but **not** `record_results`: the tool
 records the paths it actually rendered (D7), which the response bound can make
@@ -224,6 +224,28 @@ def count_private_hidden(page: list[str], keyword: list[str], semantic: list[str
     return min(len(hidden), limit)
 
 
+async def _private_hidden_count(session, query: str, query_embedding: list[float] | None,
+                                page: list[str], *, filters: dict, k: int, limit: int) -> int:
+    """The fork's step after 7c (P98): both arms run again unfiltered, in the
+    call's snapshot, after every statement of upstream's sequence, and only
+    `count_private_hidden` reads them. The keyword arm keeps the database's
+    own order (rank ties fall to its collation); the semantic arm runs only
+    when the call's did (`query_embedding`), with the index scans upstream's
+    step 5 has already restored, and restores them after an exact re-run of
+    its own, so nothing after this inherits the exact plan."""
+    k_all = [r["path"] for r in (
+        await search.keyword_arm_rows(session, query, limit=HYBRID_ARM_DEPTH, **filters)).rows]
+    s_all: list[str] = []
+    if query_embedding is not None:
+        s_arm = await embeddings.semantic_arm_rows(
+            session, query_embedding, overfetch=HYBRID_ARM_DEPTH, **filters)
+        s_all = [r["path"] for r in s_arm.rows]
+        if s_arm.exact_fallback:
+            await session.execute(text("SET LOCAL enable_indexscan = on"))
+    private = {path for path in (*k_all, *s_all) if private_folders.is_private(path)}
+    return count_private_hidden(page, k_all, s_all, private, k=k, limit=limit)
+
+
 async def hybrid_search(
     session,
     query: str,
@@ -292,15 +314,8 @@ async def hybrid_search(
 
     # ── 4. The keyword arm (the snapshot is taken here) ─────────────────────
     k_arm = await search.keyword_arm_rows(
-        session, query, limit=HYBRID_ARM_DEPTH, with_excerpt_flag=True,
-        **filters, **({"private": "exclude"} if hiding else {}),
-    )
-    # The keyword arm an unfiltered call would have fused (P98), in the
-    # database's own order (rank ties fall to its collation), before the
-    # semantic arm and its exact plan. Only the count reads it.
-    k_unfiltered = (
-        await search.keyword_arm_rows(session, query, limit=HYBRID_ARM_DEPTH, **filters)
-        if hiding else None
+        session, query, limit=HYBRID_ARM_DEPTH, with_excerpt_flag=True, **filters,
+        **({"private": "exclude"} if hiding else {}),
     )
 
     if _between_arms_hook is not None:
@@ -310,7 +325,6 @@ async def hybrid_search(
     s_rows: list[dict] = []
     s_chunks = 0
     exact_fallback = False
-    s_unfiltered: list[str] = []
     if unavailable is None:
         s_arm = await embeddings.semantic_arm_rows(
             session, query_embedding, overfetch=HYBRID_ARM_DEPTH,
@@ -320,18 +334,7 @@ async def hybrid_search(
         s_rows, s_chunks, exact_fallback = (
             s_arm.rows, s_arm.chunk_rows, s_arm.exact_fallback
         )
-        index_scan_off = exact_fallback
-        if hiding:
-            # The semantic arm an unfiltered call would have fused (P98).
-            # After an exact re-run above, this one is exact too; a re-run of
-            # its own leaves the same setting, restored below with the other.
-            # `exact_fallback` (telemetry) stays about the arm shown.
-            s_all = await embeddings.semantic_arm_rows(
-                session, query_embedding, overfetch=HYBRID_ARM_DEPTH, **filters
-            )
-            s_unfiltered = [r["path"] for r in s_all.rows]
-            index_scan_off = index_scan_off or s_all.exact_fallback
-        if index_scan_off:
+        if exact_fallback:
             await session.execute(text("SET LOCAL enable_indexscan = on"))
 
     # ── 6. Fusion ───────────────────────────────────────────────────────────
@@ -386,19 +389,17 @@ async def hybrid_search(
     # ── 7c. Candidate text for rows without a usable semantic chunk (#367) ──
     if rerank_candidates:
         await _fill_excerpts(session, page, user_id=user_id)
-    timing.add_ms("db_ms", time.monotonic() - db_start)
-
+    # ── Fork (P98): the private notes left out, counted in this snapshot ────
     private_hidden = None
     if hiding:
         # The page as the other searches count it: the first `limit` rows,
         # before any rerank reorders the candidates and before the response
-        # cap drops any (P98).
-        k_all = [r["path"] for r in k_unfiltered.rows]
-        private_hidden = count_private_hidden(
-            [path for path, *_ in fused[:limit]], k_all, s_unfiltered,
-            {p for p in (*k_all, *s_unfiltered) if private_folders.is_private(p)},
-            k=k, limit=limit,
+        # cap drops any.
+        private_hidden = await _private_hidden_count(
+            session, query, query_embedding, [path for path, *_ in fused[:limit]],
+            filters=filters, k=k, limit=limit,
         )
+    timing.add_ms("db_ms", time.monotonic() - db_start)
 
     overlap = len(k_by_path.keys() & s_by_path.keys())
     keyword_any = sum(1 for r in k_arm.rows if r["match"] == "any")

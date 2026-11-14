@@ -145,6 +145,101 @@ def test_the_hybrid_count_is_the_private_notes_ranked_ahead_of_the_last_shown():
     assert count([], [], [], set(), k=60, limit=10) == 0
 
 
+# ── hybrid_search's statements, on upstream's scripted session ───────────────
+
+
+@pytest.fixture
+def scripted(monkeypatch):
+    """Upstream's offline setting for `tests/test_hybrid_search_offline.py`'s
+    scripted session (its autouse fixture is not imported here)."""
+    from tests import test_hybrid_search_offline as upstream
+
+    monkeypatch.setattr("src.services.search.combined_tsquery", lambda _q: "tsq")
+    monkeypatch.setattr(settings, "fts_configs", ["simple"], raising=False)
+    monkeypatch.setattr(settings, "keyword_snippet_rows", 20, raising=False)
+
+    async def _embed(_text, **_kw):
+        return [1.0, 0.0, 0.0]
+
+    monkeypatch.setattr("src.services.embeddings.get_embedding", _embed)
+    return upstream
+
+
+def _hybrid_log(upstream, *, ranked, semantic, hide_private, limit=10):
+    import asyncio
+
+    from src.services import timing
+
+    session = upstream._Session(ranked=ranked, semantic=semantic,
+                                snippet=[[upstream.snip(1, hl="x \x02y\x03")]])
+    token = timing.begin()
+    try:
+        result = asyncio.run(hybrid.hybrid_search(session, "q", limit=limit, hide_private=hide_private))
+        holder = dict(timing.current())
+    finally:
+        timing.clear(token)
+    return result, session.log, holder
+
+
+def test_hybrid_counts_after_upstream_s_last_statement(scripted, owner_setting):
+    up = scripted
+    result, log, holder = _hybrid_log(
+        up, hide_private=True,
+        ranked=[[up.kw_row(1, "a.md")], [up.kw_row(1, "a.md"), up.kw_row(4, "Diary (private)/q.md")]],
+        # The filtered scan finds nothing and re-runs exact; the unfiltered one does not.
+        semantic=[[], [up.sem_row(2, "b.md")], [up.sem_row(3, "Diary (private)/p.md")]],
+    )
+    sqls = [sql for _, sql in log]
+    kinds = [k for k, _ in log]
+    filtered = ["~*" in sql for sql in sqls]
+    semantic = [i for i, k in enumerate(kinds) if k == "semantic"]
+    off, on = sqls.index("SET LOCAL enable_indexscan = off"), sqls.index("SET LOCAL enable_indexscan = on")
+    # Upstream's step 5: the filtered scan, off, its identical re-run, on.
+    assert semantic[:2] == [off - 1, off + 1] and on == off + 2
+    assert filtered[semantic[0]] and filtered[semantic[1]]
+    # The unfiltered runs come after every upstream statement (the snippets,
+    # the transition count), keyword first, with the index scans back on.
+    upstream_last = max(i for i, k in enumerate(kinds) if k in ("snippet", "rechunk"))
+    ranked = [i for i, k in enumerate(kinds) if k == "ranked"]
+    assert filtered[ranked[0]] and not filtered[ranked[1]]
+    assert upstream_last < ranked[1] < semantic[2] and not filtered[semantic[2]]
+    assert sqls.count("SET LOCAL enable_indexscan = on") == 1, "no exact re-run of its own, nothing to restore"
+    assert [r.path for r in result.rows] == ["a.md", "b.md"]
+    assert result.private_hidden == 2
+    assert holder["exact_fallback"] is True
+
+
+def test_an_exact_rerun_of_the_unfiltered_scan_is_restored(scripted, owner_setting):
+    up = scripted
+    result, log, holder = _hybrid_log(
+        up, hide_private=True,
+        ranked=[[up.kw_row(1, "a.md")], [up.kw_row(1, "a.md")]],
+        semantic=[[up.sem_row(2, "b.md")], [], [up.sem_row(3, "Diary (private)/p.md")]],
+    )
+    sqls = [sql for _, sql in log]
+    # The count's last statements: the unfiltered scan, off, its re-run, on.
+    assert sqls[-1] == "SET LOCAL enable_indexscan = on", "nothing after the count inherits the exact plan"
+    assert sqls[-2] == sqls[-4] and "~*" not in sqls[-2], "the identical unfiltered re-run"
+    assert sqls[-3] == "SET LOCAL enable_indexscan = off"
+    assert holder["exact_fallback"] is False, "the telemetry is about the arm shown"
+    assert result.private_hidden == 1
+
+
+def test_without_hiding_the_statements_are_upstream_s(scripted, monkeypatch):
+    up = scripted
+
+    def statements(names, hide):
+        monkeypatch.setattr(settings, "private_folder_names", names)
+        result, log, _ = _hybrid_log(up, hide_private=hide, ranked=[[up.kw_row(1, "a.md")]],
+                                     semantic=[[], [up.sem_row(2, "b.md")]])
+        assert result.private_hidden is None
+        return [sql for _, sql in log]
+
+    upstream_statements = statements([], False)
+    assert statements([], True) == upstream_statements                   # no private folders
+    assert statements(["* (private)"], False) == upstream_statements     # include_private=true
+
+
 def test_the_hybrid_page_keeps_the_private_line_inside_the_response_cap(monkeypatch):
     rows = [HybridRow(path=f"{i:02d}-" + "p" * 80 + ".md", title="t" * 80, tags=[], score=1 / 61,
                       keyword_rank=1, match="all") for i in range(50)]
