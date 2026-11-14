@@ -335,8 +335,8 @@ def check_task_ids(before: tf.Task | None, after: tf.Task, links: list[TaskLink]
             raise TaskOpError(
                 "invalid_argument",
                 f"other tasks wait for this one's 🆔 {before.id} ({_refs(waiting)}); changing or removing it would "
-                "unblock them without anyone asking. Change or clear their depends_on first, or keep the id. "
-                "Nothing was written.",
+                "unblock them without anyone asking. To rename it, clear it from their depends_on, rename it, then "
+                "name the new id there; otherwise keep the id. Nothing was written.",
             )
     had = set(before.depends_on) if before is not None else set()
     new = [i for i in after.depends_on if i not in had]
