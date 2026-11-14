@@ -95,7 +95,13 @@ class TaskWriteResult(_OmitNone):
     previous_text: str | None = None
     #: The line(s) now at `line`; empty when `🏁 delete` removed the task.
     text: str | None = None
+    #: True when `🏁 delete` removed the task (for a recurring task, its
+    #: completed instance: its next occurrence then stands in its place).
     removed: bool | None = None
+    #: A recurring task ticked done: the new occurrence's line, as written,
+    #: and its 1-based line number, placed as the Tasks plugin's settings say.
+    next_occurrence: str | None = None
+    next_occurrence_line: int | None = None
     changed: bool | None = None
     created_note: bool | None = None
     content_hash: str | None = None

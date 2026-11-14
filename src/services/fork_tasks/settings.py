@@ -72,6 +72,7 @@ class TasksSettings:
     filename_as_scheduled_date_format: str = ""
     filename_as_date_folders: tuple[str, ...] = ()
     recurrence_on_next_line: bool = False
+    remove_scheduled_date_on_recurrence: bool = False
     statuses: tuple[StatusConfig, ...] = ()
     #: "file" when read from the vault, "plugin defaults" when the file is absent.
     source: str = "plugin defaults"
@@ -117,6 +118,7 @@ class TasksSettings:
             filename_as_scheduled_date_format=get("filenameAsScheduledDateFormat", str, ""),
             filename_as_date_folders=tuple(folders),
             recurrence_on_next_line=get("recurrenceOnNextLine", bool, False),
+            remove_scheduled_date_on_recurrence=get("removeScheduledDateOnRecurrence", bool, False),
             statuses=statuses,
             source=source,
             raw=data,
@@ -132,6 +134,8 @@ class TasksSettings:
             "set_done_date": self.set_done_date,
             "set_cancelled_date": self.set_cancelled_date,
             "use_filename_as_scheduled_date": self.use_filename_as_scheduled_date,
+            "recurrence_on_next_line": self.recurrence_on_next_line,
+            "remove_scheduled_date_on_recurrence": self.remove_scheduled_date_on_recurrence,
             "statuses": [
                 {"symbol": s.symbol, "name": s.name, "type": s.type} for s in self.statuses
             ],

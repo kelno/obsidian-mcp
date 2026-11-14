@@ -1665,6 +1665,7 @@ async def create_task(
     scheduled: str | None = None,
     due: str | None = None,
     on_completion: str | None = None,
+    recurrence: str | None = None,
     expected_hash: str | None = None,
 ) -> TaskWriteResult:
     """Add a task, written exactly as the Tasks plugin's "Create task" dialog writes it.
@@ -1698,13 +1699,20 @@ async def create_task(
             or `yesterday` (the owner's local day).
         on_completion: `keep` or `delete` (🏁: delete removes the line when
             the task is done).
+        recurrence: a repeat rule (🔁) in the plugin's words: `every day`,
+            `every 3 days`, `every weekday`, `every week`, `every 2 weeks`,
+            `every week on Monday, Thursday`, `every month`, `every month on
+            the 15th`, `every month on the last`, `every year`, `every March
+            on the 1st`; add `when done` to count from completion. Needs a
+            due, scheduled or start date. Written in the plugin's own wording
+            (`every Monday` becomes `every week on Monday`).
         expected_hash: optional; the note's `content_hash`, to refuse if it
             changed since you read it.
     """
     return await create_task_impl(
         description, path=path, heading=heading, areas=areas, status=status, priority=priority,
         created=created, start=start, scheduled=scheduled, due=due, on_completion=on_completion,
-        expected_hash=expected_hash,
+        recurrence=recurrence, expected_hash=expected_hash,
     )
 
 
@@ -1721,6 +1729,7 @@ async def edit_task(
     scheduled: str | None = None,
     due: str | None = None,
     on_completion: str | None = None,
+    recurrence: str | None = None,
     clear: list[str] | None = None,
 ) -> TaskWriteResult:
     """Change one task's description or fields, as the Tasks plugin's "Edit task" dialog does.
@@ -1728,13 +1737,15 @@ async def edit_task(
     Requires write permission. Counterpart: the Tasks plugin's "edit task" dialog.
     Postpone a task by setting `scheduled` (⏳). Only that line changes; it
     is written back in the plugin's field order, as the plugin itself does on
-    any edit. Status changes go through `set_task_status`. Recurring tasks
-    (🔁) are refused for now: edit them in Obsidian. If the line cites
-    agent-ledger entries (`[F12]`), the result lists them as they stand now.
+    any edit, a repeat rule (🔁) in the plugin's own wording. Status changes
+    go through `set_task_status`. If the line cites agent-ledger entries
+    (`[F12]`), the result lists them as they stand now.
 
     Refused, writing nothing, when the note changed since `expected_hash`
     (`stale_precondition`), when line `line` is not `expected_line`
-    (`line_mismatch`), or when it is not a task (`not_a_task`).
+    (`line_mismatch`), when it is not a task (`not_a_task`), or when it
+    repeats by a rule these tools cannot follow (`recurring_task`: edit it
+    in Obsidian, or replace the rule with `recurrence`).
 
     Args:
         path / line / expected_line / expected_hash: the task's `path`,
@@ -1746,13 +1757,14 @@ async def edit_task(
         created / start / scheduled / due: `YYYY-MM-DD`, `today`, `tomorrow`
             or `yesterday`.
         on_completion: `keep`, `delete` or `none`.
-        clear: fields to remove: any of priority, on_completion, created,
-            start, scheduled, due.
+        recurrence: a repeat rule (🔁), as in `create_task`.
+        clear: fields to remove: any of priority, on_completion, recurrence,
+            created, start, scheduled, due.
     """
     return await edit_task_impl(
         path, line, expected_line, expected_hash, description=description, priority=priority,
         created=created, start=start, scheduled=scheduled, due=due, on_completion=on_completion,
-        clear=clear,
+        recurrence=recurrence, clear=clear,
     )
 
 
@@ -1777,9 +1789,11 @@ async def set_task_status(
     now, and when this closes the last open task citing feedback, its `notes`
     say whether to close that entry as handled.
 
-    **Recurring tasks (🔁) are refused** (`recurring_task`): ticking one must
-    also create its next occurrence, which these tools do not do yet. Tick it
-    in Obsidian instead.
+    **A recurring task (🔁) ticked done also gets its next occurrence**, a new
+    line above it (below, if the plugin is set so), with its dates moved on as
+    the plugin moves them; the result gives `next_occurrence` and its line,
+    and lines below move down by one. A rule these tools cannot follow is
+    refused (`recurring_task`): tick that one in Obsidian.
 
     Refused, writing nothing, when the note changed since `expected_hash`
     (`stale_precondition`), when line `line` is not `expected_line`

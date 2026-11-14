@@ -15,10 +15,11 @@ JavaScript semantics that differ from Python's and are reproduced on purpose:
 - `\\d` in the field patterns is ASCII only.
 - `line.match(re)` / `line.replace(re, '')` act on the first match only.
 
-Recurrence is deliberately not ported: a `🔁` rule is read and kept as text,
-and every status change on a recurring task raises `RecurrenceUnsupported`
-(the owner's decision for the first version: a task must never be ticked
-without its next occurrence).
+A `🔁` rule is read and kept as text. Rewriting a recurring task's line (a
+status change, an edit) goes through `fork_tasks.recurrence`, which writes the
+rule in the plugin's own wording and computes the next occurrence; a rule
+outside what it can follow raises `RecurrenceUnsupported`, so a task is never
+ticked without its next occurrence.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import date
 
+from src.services.fork_tasks import recurrence as _recurrence
+from src.services.fork_tasks.recurrence import RecurrenceUnsupported  # noqa: F401 - raised by apply_status
 from src.services.fork_tasks.settings import StatusConfig, TasksSettings
 
 # ECMAScript WhiteSpace + LineTerminator: what `\s` and `trim()` mean in JS.
@@ -180,6 +183,26 @@ class StatusRegistry:
         # `getNextStatusOrCreate`.
         found = self.by_symbol(status.next_symbol) if status.next_symbol else None
         return found or Status(status.next_symbol, "Unknown", "x", False, "TODO")
+
+    def next_recurrence_status(self, status: Status) -> Status:
+        """`getNextRecurrenceStatusOrCreate`: a recurring task's next occurrence status.
+
+        The status after `status` in the cycle when it is a TODO, else the
+        first TODO, then IN_PROGRESS, found by following the cycle from there;
+        otherwise the plain `' '` status.
+        """
+        start = self.next_status(status)
+        for wanted in ("TODO", "IN_PROGRESS"):
+            current = start
+            if current.type == wanted:
+                return current
+            # `getNextRecurrenceStatusOfType`: at most one step fewer than the
+            # number of registered statuses.
+            for _ in range(len(self._statuses) - 1):
+                current = self.next_status(current)
+                if current.type == wanted:
+                    return current
+        return self.by_symbol_or_create(" ")
 
     def first_of_type(self, status_type: str) -> Status | None:
         for status in self._statuses:
@@ -427,29 +450,42 @@ def to_file_line(task: Task) -> str:
 
 # --- status changes ----------------------------------------------------------
 
-class RecurrenceUnsupported(Exception):
-    """A status change on a task with a `🔁` rule: not implemented yet."""
+def apply_status(task: Task, new_status: Status, today: date, settings: TasksSettings,
+                 registry: StatusRegistry) -> list[Task]:
+    """`handleNewStatusWithRecurrenceInUsersOrder`.
 
-
-def apply_status(task: Task, new_status: Status, today: date, settings: TasksSettings) -> list[Task]:
-    """`handleNewStatusWithRecurrenceInUsersOrder` for a non-recurring task.
-
-    Returns the tasks that replace the line: `[task]` unchanged when the
-    status is identical, `[]` when `🏁 delete` removes a completed task,
-    otherwise the one changed task. Raises `RecurrenceUnsupported` for a task
-    with a recurrence rule, before anything is computed.
+    Returns the tasks that replace the line, in the order they are written:
+    `[task]` unchanged when the status is identical; otherwise the changed
+    task, preceded by its next occurrence when a recurring task becomes DONE
+    from another type (followed by it when the plugin's "next recurrence on
+    the line below" is on), without the completed one when `🏁 delete`
+    removes it. A recurring task's rule is written in the plugin's wording;
+    a rule the tools cannot follow raises `RecurrenceUnsupported` before
+    anything is computed.
     """
-    if task.recurrence is not None:
-        raise RecurrenceUnsupported()
     if new_status.identical_to(task.status):
         return [task]
+    rule = None
+    if task.recurrence is not None:
+        rule = _recurrence.parse(task.recurrence)
+        task = replace(task, recurrence=_recurrence.canonical_text(rule))
     done = _new_date(task, new_status, "DONE", task.done, settings.set_done_date, today)
     cancelled = _new_date(task, new_status, "CANCELLED", task.cancelled, settings.set_cancelled_date, today)
     changed = replace(task, status=new_status, done=done, cancelled=cancelled)
-    # `handleOnCompletion`: delete only when the type becomes DONE from not DONE.
-    if task.on_completion == "delete" and new_status.type == "DONE" and task.status.type != "DONE":
-        return []
-    return [changed]
+    completes = new_status.type == "DONE" and task.status.type != "DONE"
+    tasks = [changed]
+    if rule is not None and completes:
+        # `handleNewStatus` → `[createNextOccurrence(…), toggled]`.
+        upcoming = _recurrence.next_occurrence(
+            task, rule, registry.next_recurrence_status(new_status), today, settings)
+        tasks = [upcoming, changed]
+    # `handleOnCompletion`: delete the completed one only when its type becomes DONE.
+    if task.on_completion == "delete" and completes:
+        tasks = tasks[:-1]
+    # `putRecurrenceInUsersOrder`.
+    if settings.recurrence_on_next_line:
+        tasks.reverse()
+    return tasks
 
 
 def _new_date(task: Task, new_status: Status, status_type: str, old: TaskDate | None, enabled: bool, today: date):

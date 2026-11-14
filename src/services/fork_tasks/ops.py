@@ -6,7 +6,9 @@ anchored write path (`tools.py`). Keeping the text work pure makes every rule
 below testable on strings:
 
 - **Only that line changes, or one line is added, or (`🏁 delete`) that line
-  is removed.** Every other byte, terminators included, is copied.
+  is removed, or (a recurring task ticked done) that line becomes two: its
+  next occurrence and itself.** Every other byte, terminators included, is
+  copied.
 - **The new line is the plugin's**: `task_format` writes it in canonical order,
   exactly as the plugin's dialog and toggle do (they re-serialize the whole
   line too).
@@ -28,6 +30,7 @@ import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.services.fork_tasks import format as tf
+from src.services.fork_tasks import recurrence as _recurrence
 from src.services.fork_tasks.query import QueryError, resolve_date
 from src.services.fork_tasks.scan import _toggles_comment, scan_note, split_lines
 from src.services.fork_tasks.settings import TasksSettings
@@ -50,7 +53,7 @@ DAMAGING_WARNINGS = {
 
 STATUS_NAMES = {"todo": "TODO", "done": "DONE", "cancelled": "CANCELLED", "in_progress": "IN_PROGRESS"}
 EDIT_DATE_FIELDS = ("created", "start", "scheduled", "due")
-CLEARABLE = ("priority", "on_completion", *EDIT_DATE_FIELDS)
+CLEARABLE = ("priority", "on_completion", "recurrence", *EDIT_DATE_FIELDS)
 
 
 def owner_today(timezone_name: str, now: datetime | None = None) -> date:
@@ -217,10 +220,36 @@ def _description_arg(value: str) -> str:
     return trimmed
 
 
+def _recurrence_arg(value: str) -> str:
+    try:
+        return _recurrence.canonical(value)
+    except _recurrence.RecurrenceUnsupported as exc:
+        raise TaskOpError(
+            "invalid_argument",
+            f"recurrence {value!r} is not a rule the task tools can follow ({exc}). Supported: "
+            f"{_recurrence.SUPPORTED}.",
+        ) from None
+
+
+def recurring_unsupported(rule: str, reason: str, *, action: str) -> TaskOpError:
+    """The refusal for a task whose own `🔁` rule the tools cannot follow."""
+    return TaskOpError(
+        "recurring_task",
+        f"this task repeats (🔁 {rule}), and that rule is not one the task tools can follow ({reason}); "
+        f"{action} it in Obsidian, so the Tasks plugin handles its next occurrence. Supported rules: "
+        f"{_recurrence.SUPPORTED}. Nothing was written.",
+    )
+
+
 def apply_fields(task: tf.Task, *, today: date, description: str | None = None, priority: str | None = None,
                  on_completion: str | None = None, dates: dict[str, str | None] | None = None,
-                 clear: list[str] | None = None) -> tf.Task:
-    """The dialog's `applyEdits` for the fields the tools expose."""
+                 clear: list[str] | None = None, recurrence: str | None = None) -> tf.Task:
+    """The dialog's `applyEdits` for the fields the tools expose.
+
+    A `🔁` rule, given or already on the task, is written in the plugin's
+    wording, as the dialog saves it; the dialog refuses a repeating task with
+    no due, scheduled or start date, and so do the tools.
+    """
     changes: dict = {}
     if description is not None:
         changes["description"] = description
@@ -228,6 +257,8 @@ def apply_fields(task: tf.Task, *, today: date, description: str | None = None, 
         changes["priority"] = _priority_arg(priority)
     if on_completion is not None:
         changes["on_completion"] = _on_completion_arg(on_completion)
+    if recurrence is not None:
+        changes["recurrence"] = _recurrence_arg(recurrence)
     for name, value in (dates or {}).items():
         if value is not None:
             changes[name] = _date_arg(name, value, today)
@@ -241,9 +272,23 @@ def apply_fields(task: tf.Task, *, today: date, description: str | None = None, 
         changes[name] = tf.Priority.NONE if name == "priority" else "" if name == "on_completion" else None
         if name == "scheduled":
             changes["scheduled_inferred"] = False
+    if "recurrence" not in changes and task.recurrence is not None:
+        try:
+            changes["recurrence"] = _recurrence.canonical(task.recurrence)
+        except _recurrence.RecurrenceUnsupported as exc:
+            raise recurring_unsupported(task.recurrence, str(exc), action="edit") from None
     updated = replace(task, **changes)
     if "description" in changes:
         updated = replace(updated, tags=tf.extract_hashtags(updated.description))
+    if updated.recurrence is not None and all(
+        d is None for d in (updated.start, None if updated.scheduled_inferred else updated.scheduled, updated.due)
+    ):
+        # `EditableTask.parseAndValidateRecurrence`: "due, scheduled or start date required".
+        raise TaskOpError(
+            "invalid_argument",
+            "a repeating task needs a due, scheduled or start date, which its next occurrence is counted "
+            "from (the Tasks plugin's dialog refuses one without); give one. Nothing was written.",
+        )
     return updated
 
 
@@ -294,7 +339,7 @@ def _without_global_filter(description: str, gf: str) -> str:
 
 def new_task(*, description: str, settings: TasksSettings, registry: tf.StatusRegistry, today: date,
              area_tags: list[str], status: tf.Status | None, priority: str | None, on_completion: str | None,
-             dates: dict[str, str | None]) -> tf.Task:
+             dates: dict[str, str | None], recurrence: str | None = None) -> tf.Task:
     """`createTaskLineModal`: the dialog's new task, as it would be saved."""
     text = _description_arg(description)
     if settings.global_filter:
@@ -308,9 +353,16 @@ def new_task(*, description: str, settings: TasksSettings, registry: tf.StatusRe
     created = tf.TaskDate.of(today) if settings.set_created_date else None
     base = tf.Task(indentation="", list_marker="-", status=todo, description=text, created=created,
                    tags=tf.extract_hashtags(text))
-    task = apply_fields(base, today=today, priority=priority, on_completion=on_completion, dates=dates)
+    task = apply_fields(base, today=today, priority=priority, on_completion=on_completion, dates=dates,
+                        recurrence=recurrence)
     if status is not None:
-        result = tf.apply_status(task, status, today, settings)
+        if task.recurrence is not None and status.type == "DONE":
+            raise TaskOpError(
+                "invalid_argument",
+                "a new repeating task cannot start done: ticking it would also write its next occurrence. "
+                "Create it, then tick it with set_task_status. Nothing was written.",
+            )
+        result = tf.apply_status(task, status, today, settings, registry)
         if not result:
             raise TaskOpError(
                 "invalid_argument",
@@ -321,33 +373,43 @@ def new_task(*, description: str, settings: TasksSettings, registry: tf.StatusRe
     return task
 
 
-def new_status_tasks(task: tf.Task, status: tf.Status, today: date, settings: TasksSettings) -> list[tf.Task] | None:
-    """The replacement tasks, `[]` for `🏁 delete`, None when nothing changes."""
+@dataclass(frozen=True)
+class StatusChange:
+    """What a status change writes in place of the task's line."""
+
+    tasks: list[tf.Task]            # in the order written; [] when `🏁 delete` removed it
+    #: Index in `tasks` of a recurring task's new occurrence, None when there is none.
+    next_index: int | None = None
+
+
+def new_status_tasks(task: tf.Task, status: tf.Status, today: date, settings: TasksSettings,
+                     registry: tf.StatusRegistry) -> StatusChange | None:
+    """The replacement tasks, None when nothing changes."""
     try:
-        result = tf.apply_status(task, status, today, settings)
-    except tf.RecurrenceUnsupported:
-        raise TaskOpError(
-            "recurring_task",
-            "this task repeats (🔁). Recurring tasks are not supported by the task tools yet: "
-            "tick it in Obsidian, so its next occurrence is created. Nothing was written.",
-        ) from None
+        result = tf.apply_status(task, status, today, settings, registry)
+    except tf.RecurrenceUnsupported as exc:
+        raise recurring_unsupported(task.recurrence, str(exc), action="tick") from None
     if result == [task]:
         return None
-    return result
+    completes = task.recurrence is not None and status.type == "DONE" and task.status.type != "DONE"
+    next_index = next((i for i, t in enumerate(result) if t.status.type != "DONE"), None) if completes else None
+    return StatusChange(result, next_index)
 
 
 def splice(lines: list[tuple[str, str]], index: int, new_lines: list[str]) -> str:
-    """The note with line `index` replaced by `new_lines` (each taking its terminator).
+    """The note with line `index` replaced by `new_lines`.
 
-    Removing the last line of a note that has no final terminator also removes
-    the terminator before it — the plugin's `lines.splice(…).join('\\n')`.
+    The last new line takes the replaced line's terminator, so a note with no
+    final terminator still has none; the lines before it take the replaced
+    line's terminator, or the note's usual one when it had none. Removing the
+    last line of a note that has no final terminator also removes the
+    terminator before it — the plugin's `lines.splice(…).join('\\n')`.
     """
     out = list(lines)
     content, terminator = out[index]
     if new_lines:
-        out[index:index + 1] = [(new_lines[0], terminator)] + [
-            (line, terminator or _dominant_terminator(lines)) for line in new_lines[1:]
-        ]
+        between = terminator or _dominant_terminator(lines)
+        out[index:index + 1] = [(line, between) for line in new_lines[:-1]] + [(new_lines[-1], terminator)]
     else:
         del out[index]
         if not terminator and index > 0:
@@ -458,7 +520,8 @@ def verify_written(new_text: str, line_number: int, intended: tf.Task, path: str
         )
 
 
-def verify_other_lines(old_text: str, new_text: str, line_number: int, delta: int, path: str) -> None:
+def verify_other_lines(old_text: str, new_text: str, line_number: int, delta: int, path: str, *,
+                       replaced: bool = False) -> None:
     """Every other line must be read exactly as before the write.
 
     The bytes of the other lines are copied, but their *meaning* can still
@@ -468,13 +531,18 @@ def verify_other_lines(old_text: str, new_text: str, line_number: int, delta: in
     written one must keep its kind, reason and text, at its shifted number.
 
     `delta` is +1 when a line was inserted at `line_number`, -1 when the line
-    at `line_number` was removed, 0 when it was replaced.
+    at `line_number` was removed, 0 when it was replaced, and +1 with
+    `replaced=True` when it was replaced by two lines (a recurring task and
+    its next occurrence).
     """
     rows_old, unmatched_old = _scanned(old_text)
     rows_new, unmatched_new = _scanned(new_text)
     if delta == 0:
         before = _project(rows_old, skip=line_number)
         after = _project(rows_new, skip=line_number)
+    elif delta == 1 and replaced:
+        before = _project(rows_old, skip=line_number, shift_from=line_number + 1, shift=1)
+        after = _project(rows_new, skip=line_number, skip_also=line_number + 1)
     elif delta == 1:
         before = _project(rows_old, shift_from=line_number, shift=1)
         after = _project(rows_new, skip=line_number)
@@ -494,11 +562,12 @@ def _scanned(text: str) -> tuple[list[tuple], int]:
     return [(s.line_number, s.kind, s.reason, s.text) for s in scan.lines], len(scan.unmatched_fence_lines)
 
 
-def _project(rows: list[tuple], *, skip: int | None = None, shift_from: int | None = None, shift: int = 0) -> set:
-    """`rows` without line `skip`, lines from `shift_from` on moved by `shift`."""
+def _project(rows: list[tuple], *, skip: int | None = None, skip_also: int | None = None,
+             shift_from: int | None = None, shift: int = 0) -> set:
+    """`rows` without lines `skip` and `skip_also`, lines from `shift_from` on moved by `shift`."""
     out = set()
     for number, kind, reason, text in rows:
-        if number == skip:
+        if number in (skip, skip_also):
             continue
         if shift_from is not None and number >= shift_from:
             number += shift

@@ -10320,7 +10320,7 @@ def _task_refused(exc: "_task_ops.TaskOpError") -> TaskWriteResult:
 @_tracked(
     "create_task",
     ["path", "heading", "areas", "status", "priority", "created", "start", "scheduled", "due",
-     "on_completion", "expected_hash"],
+     "on_completion", "recurrence", "expected_hash"],
     refusal_result=_task_write_refusal,
     write_class=True,
 )
@@ -10336,6 +10336,7 @@ async def create_task_impl(
     scheduled: str | None = None,
     due: str | None = None,
     on_completion: str | None = None,
+    recurrence: str | None = None,
     expected_hash: str | None = None,
 ) -> TaskWriteResult:
     """Add one task line, as the plugin's `createTaskLineModal()` dialog writes it.
@@ -10365,6 +10366,7 @@ async def create_task_impl(
             description=description, settings=task_settings, registry=registry, today=today,
             area_tags=area_tags, status=new_status, priority=priority, on_completion=on_completion,
             dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
+            recurrence=recurrence,
         )
     except _task_ops.TaskOpError as exc:
         return _task_refused(exc)
@@ -10430,7 +10432,7 @@ async def _existing_task(tool, uid, target, path, line, expected_line, expected_
 @_tracked(
     "edit_task",
     ["path", "line", "description", "priority", "created", "start", "scheduled", "due",
-     "on_completion", "clear", "expected_hash"],
+     "on_completion", "recurrence", "clear", "expected_hash"],
     refusal_result=_task_write_refusal,
     write_class=True,
 )
@@ -10446,12 +10448,14 @@ async def edit_task_impl(
     scheduled: str | None = None,
     due: str | None = None,
     on_completion: str | None = None,
+    recurrence: str | None = None,
     clear: list[str] | None = None,
 ) -> TaskWriteResult:
     """Change one task's description or fields, as `editTaskLineModal(line)` returns it."""
     if err := _task_write_parameters("edit_task", expected_hash, path):
         return _task_failed(TaskWriteResult, err)
-    if all(v is None for v in (description, priority, created, start, scheduled, due, on_completion)) and not clear:
+    if all(v is None for v in (description, priority, created, start, scheduled, due, on_completion,
+                               recurrence)) and not clear:
         return _task_failed(TaskWriteResult, _body_refusal(
             "edit_task was given nothing to change. Nothing was written.", "invalid_argument"))
     uid = current_user_id.get()
@@ -10465,18 +10469,13 @@ async def edit_task_impl(
         if err:
             return _task_failed(TaskWriteResult, err)
         old = located.task
-        if old.recurrence is not None:
-            return _task_failed(TaskWriteResult, _body_refusal(
-                "This task repeats (🔁). Editing recurring tasks is not supported by the task tools yet: "
-                "the Tasks plugin rewrites the rule in its own wording when it saves, which these tools "
-                "cannot reproduce. Edit it in Obsidian. Nothing was written.", "recurring_task"))
         try:
             updated = _task_ops.apply_fields(
                 old, today=today,
                 description=_task_ops.edited_description(old, description, task_settings),
                 priority=priority, on_completion=on_completion,
                 dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
-                clear=clear,
+                clear=clear, recurrence=recurrence,
             )
             new_line = _tf.to_file_line(updated)
             if new_line == expected_line:
@@ -10494,8 +10493,13 @@ async def edit_task_impl(
         err, new_text, shift = await _publish_task_text(uid, target, path, new_text, existing)
         if err:
             return _task_failed(TaskWriteResult, err)
-        return await _task_written(uid, target, line + shift, expected_line, new_line, new_text, today,
-                                   task_settings=task_settings, registry=registry, changed=True)
+        result = await _task_written(uid, target, line + shift, expected_line, new_line, new_text, today,
+                                     task_settings=task_settings, registry=registry, changed=True)
+        if recurrence is None and old.recurrence not in (None, updated.recurrence) and updated.recurrence:
+            result.notes = (result.notes or []) + [
+                f"The 🔁 rule was rewritten in the Tasks plugin's own wording ({old.recurrence!r} → "
+                f"{updated.recurrence!r}), as the plugin does whenever it saves the line; it means the same."]
+        return result
 
 
 @_tracked(
@@ -10527,29 +10531,44 @@ async def set_task_status_impl(
             return _task_failed(TaskWriteResult, err)
         try:
             new_status = _task_ops.resolve_status(registry, status, symbol)
-            result = _task_ops.new_status_tasks(located.task, new_status, today, task_settings)
-            if result is None:
+            change = _task_ops.new_status_tasks(located.task, new_status, today, task_settings, registry)
+            if change is None:
                 return TaskWriteResult(
                     path=target.rel, ref=f"{target.rel}:{line}", line=line, previous_text=expected_line,
                     text=expected_line, changed=False, content_hash=content_hash_for_bytes(existing),
                     today=today.isoformat(),
                 )
+            result = change.tasks
             new_lines = [_tf.to_file_line(t) for t in result]
             new_text = _task_ops.splice(located.lines, located.index, new_lines)
-            if result:
-                _task_ops.verify_written(new_text, line, result[0], path, task_settings, registry,
+            for offset, written_task in enumerate(result):
+                _task_ops.verify_written(new_text, line + offset, written_task, path, task_settings, registry,
                                          allow_field_text=True)
-            _task_ops.verify_other_lines(located.text, new_text, line, 0 if result else -1, path)
+            _task_ops.verify_other_lines(located.text, new_text, line, len(result) - 1, path,
+                                         replaced=len(result) == 2)
         except _task_ops.TaskOpError as exc:
             return _task_refused(exc)
         err, new_text, shift = await _publish_task_text(uid, target, path, new_text, existing)
         if err:
             return _task_failed(TaskWriteResult, err)
-        return await _task_written(
+        # A completed instance `🏁 delete` removed: none written with the new status.
+        removed = located.task.on_completion == "delete" and not any(t.status == new_status for t in result)
+        extra: dict = {}
+        if change.next_index is not None:
+            next_line = line + shift + change.next_index
+            extra = {"next_occurrence": new_lines[change.next_index], "next_occurrence_line": next_line}
+        written = await _task_written(
             uid, target, line + shift, expected_line, "\n".join(new_lines), new_text, today,
             task_settings=task_settings, registry=registry,
-            changed=True, removed=True if not result else None,
+            changed=True, removed=True if removed else None, **extra,
         )
+        if change.next_index is not None:
+            where = ("below it" if change.next_index > 0 else "above it") if len(result) == 2 else "in its place"
+            moved = " Lines below it moved down by one." if len(result) == 2 else ""
+            written.notes = (written.notes or []) + [
+                f"This task repeats: its next occurrence was written at line {next_line} ({where}), as the "
+                f"Tasks plugin writes it.{moved}"]
+        return written
 
 
 # ── Agent ledger (fork) ─────────────────────────────────────────────────────

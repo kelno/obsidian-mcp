@@ -191,7 +191,9 @@ TODAY = date(2026, 10, 31)
 
 def _status(line, symbol, settings=OWNER_STATUSES, today=TODAY):
     task = tf.parse_task_line(line, OWNER)
-    return [tf.to_file_line(t) for t in tf.apply_status(task, OWNER.by_symbol_or_create(symbol), today, settings)]
+    registry = tf.StatusRegistry.from_settings(settings)
+    return [tf.to_file_line(t) for t in tf.apply_status(task, registry.by_symbol_or_create(symbol), today, settings,
+                                                        registry)]
 
 
 def test_done_adds_done_date():
@@ -221,7 +223,7 @@ def test_in_progress_has_no_date():
 
 def test_same_status_changes_nothing():
     task = tf.parse_task_line("- [x] a ✅ 2026-10-01", OWNER)
-    out = tf.apply_status(task, OWNER.by_symbol_or_create("x"), TODAY, OWNER_STATUSES)
+    out = tf.apply_status(task, OWNER.by_symbol_or_create("x"), TODAY, OWNER_STATUSES, OWNER)
     assert out == [task]
 
 
@@ -237,10 +239,112 @@ def test_on_completion_keep_keeps_the_line():
     assert _status("- [ ] a 🏁 keep", "x") == ["- [x] a 🏁 keep ✅ 2026-10-31"]
 
 
-def test_recurring_task_status_change_is_refused():
-    task = tf.parse_task_line("- [ ] a 🔁 every day 📅 2026-10-31", OWNER)
+# --- recurring tasks (`handleNewStatus`, `createNextOccurrence`, docs Recurring Tasks.md) ---
+
+
+def test_ticking_a_recurring_task_writes_its_next_occurrence_above_it():
+    # The docs' basic example, ticked on 2021-04-24; the plugin writes the rule
+    # in rrule's wording (`every Sunday` -> `every week on Sunday`).
+    out = _status("- [ ] take out the trash 🔁 every Sunday 📅 2021-04-25", "x", today=date(2021, 4, 24))
+    assert out == [
+        "- [ ] take out the trash 🔁 every week on Sunday 📅 2021-05-02",
+        "- [x] take out the trash 🔁 every week on Sunday 📅 2021-04-25 ✅ 2021-04-24",
+    ]
+
+
+def test_next_occurrence_goes_below_with_the_plugin_setting():
+    below = TasksSettings.from_mapping({**OWNER_STATUSES.raw, "recurrenceOnNextLine": True})
+    out = _status("- [ ] a 🔁 every day 📅 2026-10-31", "x", settings=below)
+    assert out == ["- [x] a 🔁 every day 📅 2026-10-31 ✅ 2026-10-31", "- [ ] a 🔁 every day 📅 2026-11-01"]
+
+
+def test_other_dates_keep_their_distance_from_the_reference():
+    # Recurring Tasks.md: `⏳ 2021-10-28 📅 2021-10-30` every 2 weeks.
+    out = _status("- [ ] a 🔁 every 2 weeks ⏳ 2021-10-28 📅 2021-10-30", "x", today=date(2021, 10, 29))
+    assert out[0] == "- [ ] a 🔁 every 2 weeks ⏳ 2021-11-11 📅 2021-11-13"
+
+
+def test_a_recurring_task_without_dates_still_gets_its_next_occurrence():
+    # tests/Task/Task.test.ts, "order of recurring tasks".
+    out = _status("- [ ] this is a recurring task 🔁 every day", "x", today=date(2023, 5, 16))
+    assert out == ["- [ ] this is a recurring task 🔁 every day",
+                   "- [x] this is a recurring task 🔁 every day ✅ 2023-05-16"]
+
+
+def test_when_done_counts_from_the_completion_day():
+    out = _status("- [ ] a 🔁 every 3 days when done 📅 2026-10-01", "x")
+    assert out[0] == "- [ ] a 🔁 every 3 days when done 📅 2026-11-03"
+
+
+def test_missed_occurrences_are_not_skipped():
+    out = _status("- [ ] a 🔁 every week 📅 2026-10-01", "x")
+    assert out[0] == "- [ ] a 🔁 every week 📅 2026-10-08"
+
+
+def test_on_completion_delete_keeps_only_the_next_occurrence():
+    # On Completion.md: the next instance replaces the completed one.
+    out = _status("- [ ] a 📅 2021-05-20 🔁 every day when done 🏁 delete", "x", today=date(2021, 5, 20))
+    assert out == ["- [ ] a 🔁 every day when done 🏁 delete 📅 2021-05-21"]
+
+
+def test_next_occurrence_drops_id_dependencies_block_link_and_dates_done():
+    out = _status("- [ ] a 🆔 abc ⛔ x 🔁 every day ➕ 2026-01-01 📅 2026-10-31 ^blk", "x")
+    assert out == [
+        "- [ ] a 🔁 every day 📅 2026-11-01",
+        "- [x] a 🆔 abc ⛔ x 🔁 every day ➕ 2026-01-01 📅 2026-10-31 ✅ 2026-10-31 ^blk",
+    ]
+
+
+def test_next_occurrence_gets_todays_created_date_when_the_setting_is_on():
+    on = TasksSettings.from_mapping({**OWNER_STATUSES.raw, "setCreatedDate": True})
+    out = _status("- [ ] a 🔁 every day ➕ 2026-01-01 📅 2026-10-31", "x", settings=on)
+    assert out[0] == "- [ ] a 🔁 every day ➕ 2026-10-31 📅 2026-11-01"
+
+
+def test_remove_scheduled_date_on_recurrence():
+    # Occurrence.next: ⏳ goes only when 🛫 or 📅 is there; the reference order
+    # becomes due, start, scheduled.
+    on = TasksSettings.from_mapping({**OWNER_STATUSES.raw, "removeScheduledDateOnRecurrence": True})
+    assert _status("- [ ] a 🔁 every day ⏳ 2026-10-30 📅 2026-10-31", "x", settings=on)[0] == \
+        "- [ ] a 🔁 every day 📅 2026-11-01"
+    assert _status("- [ ] a 🔁 every day ⏳ 2026-10-30", "x", settings=on)[0] == "- [ ] a 🔁 every day ⏳ 2026-10-31"
+    assert _status("- [ ] a 🔁 every week 🛫 2026-10-20 ⏳ 2026-10-30", "x", settings=on)[0] == \
+        "- [ ] a 🔁 every week 🛫 2026-10-27"
+
+
+def test_cancelling_a_recurring_task_writes_no_next_occurrence_and_words_the_rule():
+    assert _status("- [ ] a 🔁 every Monday 📅 2026-11-02", "-") == \
+        ["- [-] a 🔁 every week on Monday 📅 2026-11-02 ❌ 2026-10-31"]
+
+
+def test_unticking_a_recurring_task_writes_no_next_occurrence():
+    assert _status("- [x] a 🔁 every day 📅 2026-10-30 ✅ 2026-10-30", " ") == ["- [ ] a 🔁 every day 📅 2026-10-30"]
+
+
+def test_next_occurrence_status_follows_the_cycle_to_a_todo():
+    # Done's next symbol is the in-progress status, whose next is done: no
+    # TODO is reachable, so the first IN_PROGRESS is used.
+    cycle = TasksSettings.from_mapping({**OWNER_STATUSES.raw, "statusSettings": {
+        "coreStatuses": [
+            {"symbol": " ", "name": "Todo", "nextStatusSymbol": "x", "availableAsCommand": True, "type": "TODO"},
+            {"symbol": "x", "name": "Done", "nextStatusSymbol": "/", "availableAsCommand": True, "type": "DONE"},
+        ],
+        "customStatuses": [
+            {"symbol": "/", "name": "Doing", "nextStatusSymbol": "x", "availableAsCommand": True, "type": "IN_PROGRESS"},
+        ],
+    }})
+    assert _status("- [ ] a 🔁 every day 📅 2026-10-31", "x", settings=cycle)[0] == "- [/] a 🔁 every day 📅 2026-11-01"
+
+
+@pytest.mark.parametrize("line", [
+    "- [ ] a 🔁 every weekend 📅 2026-10-31",          # rrule rewrites it as `every week`: lossy
+    "- [ ] a 🔁 every 2 weeks on Monday 📅 2026-10-31",
+    "- [ ] a 🔁 every year 📅 2024-02-29",              # yearly from Feb 29: not verified
+])
+def test_a_rule_the_tools_cannot_follow_is_refused(line):
+    task = tf.parse_task_line(line, OWNER)
     with pytest.raises(tf.RecurrenceUnsupported):
-        tf.apply_status(task, OWNER.by_symbol_or_create("x"), TODAY, OWNER_STATUSES)
+        tf.apply_status(task, OWNER.by_symbol_or_create("x"), TODAY, OWNER_STATUSES, OWNER)
 
 
 def test_toggle_follows_next_status_symbol():

@@ -120,6 +120,34 @@ async def test_create_appends_the_dialog_line_in_canonical_order(vault):
     assert result.indexed is True
 
 
+async def test_create_with_a_rule_writes_it_in_the_plugins_wording(vault):
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("water plants", path="n.md", due="2026-11-02", recurrence="every Monday")
+    assert result.error is None
+    assert read(vault, "n.md") == "# T\n- [ ] water plants 🔁 every week on Monday 📅 2026-11-02\n"
+
+
+async def test_create_with_a_rule_and_no_date_is_refused(vault):
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("water plants", path="n.md", recurrence="every week")
+    assert code(result) == "invalid_argument"
+    assert read(vault, "n.md") == "# T\n"
+
+
+async def test_create_a_recurring_task_already_done_is_refused(vault):
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("a", path="n.md", due="today", recurrence="every day", status="done")
+    assert code(result) == "invalid_argument"
+    assert read(vault, "n.md") == "# T\n"
+
+
+async def test_create_with_an_unsupported_rule_is_refused(vault):
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("a", path="n.md", due="today", recurrence="every weekend")
+    assert code(result) == "invalid_argument"
+    assert read(vault, "n.md") == "# T\n"
+
+
 async def test_create_in_inbox_creates_it_when_missing(vault):
     result = await tools.create_task_impl("first")
     assert read(vault, "Tasks inbox.md") == "- [ ] first\n"
@@ -311,12 +339,56 @@ async def test_on_completion_keep_keeps_it(vault):
     assert read(vault, "n.md") == "- [x] a 🏁 keep ✅ 2026-10-31\n"
 
 
-async def test_recurring_task_is_refused(vault):
-    text = "- [ ] water plants 🔁 every week 📅 2026-10-31\n"
+async def test_unsupported_recurring_rule_is_refused(vault):
+    text = "- [ ] water plants 🔁 every weekend 📅 2026-10-31\n"
     result = await status(vault, text, 1, text.rstrip("\n"), status="done")
     assert code(result) == "recurring_task"
-    assert "Obsidian" in result.error
+    assert "Obsidian" in result.error and "every weekend" in result.error
     assert read(vault, "n.md") == text
+
+
+async def test_ticking_a_recurring_task_writes_its_next_occurrence_above_it(vault):
+    text = "# Chores\n- [ ] water plants 🔁 every week 📅 2026-10-31\n- [ ] other\n"
+    result = await status(vault, text, 2, "- [ ] water plants 🔁 every week 📅 2026-10-31", status="done")
+    assert result.error is None
+    assert read(vault, "n.md") == (
+        "# Chores\n- [ ] water plants 🔁 every week 📅 2026-11-07\n"
+        "- [x] water plants 🔁 every week 📅 2026-10-31 ✅ 2026-10-31\n- [ ] other\n")
+    assert result.next_occurrence == "- [ ] water plants 🔁 every week 📅 2026-11-07"
+    assert result.next_occurrence_line == 2
+    assert result.line == 2 and result.removed is None
+    assert any("next occurrence" in n and "moved down by one" in n for n in result.notes)
+    assert REINDEXED == [("n.md", read(vault, "n.md"))]
+
+
+async def test_next_occurrence_below_with_the_plugin_setting(vault):
+    write_settings(vault, {**OWNER_SETTINGS, "recurrenceOnNextLine": True})
+    text = "- [ ] a 🔁 every day 📅 2026-10-31"
+    result = await status(vault, text + "\n", 1, text, status="done")
+    assert read(vault, "n.md") == "- [x] a 🔁 every day 📅 2026-10-31 ✅ 2026-10-31\n- [ ] a 🔁 every day 📅 2026-11-01\n"
+    assert result.next_occurrence_line == 2
+
+
+async def test_recurring_last_line_without_terminator_stays_without_one(vault):
+    text = "- [ ] b\r\n- [ ] a 🔁 every day 📅 2026-10-31"
+    await status(vault, text, 2, "- [ ] a 🔁 every day 📅 2026-10-31", status="done")
+    assert read(vault, "n.md") == (
+        "- [ ] b\r\n- [ ] a 🔁 every day 📅 2026-11-01\r\n- [x] a 🔁 every day 📅 2026-10-31 ✅ 2026-10-31")
+
+
+async def test_recurring_on_completion_delete_leaves_the_next_occurrence(vault):
+    text = "- [ ] a 🔁 every day when done 🏁 delete 📅 2026-10-20"
+    result = await status(vault, text + "\n- [ ] b\n", 1, text, status="done")
+    assert read(vault, "n.md") == "- [ ] a 🔁 every day when done 🏁 delete 📅 2026-11-01\n- [ ] b\n"
+    assert result.removed is True
+    assert result.next_occurrence_line == 1
+
+
+async def test_cancelling_a_recurring_task_writes_no_next_occurrence(vault):
+    text = "- [ ] a 🔁 every Monday 📅 2026-11-02"
+    result = await status(vault, text + "\n", 1, text, status="cancelled")
+    assert read(vault, "n.md") == "- [-] a 🔁 every week on Monday 📅 2026-11-02 ❌ 2026-10-31\n"
+    assert result.next_occurrence is None
 
 
 async def test_changed_hash_is_refused(vault):
@@ -465,10 +537,46 @@ async def test_edit_nothing_given_is_refused(vault):
     assert code(result) == "invalid_argument"
 
 
-async def test_edit_recurring_is_refused(vault):
-    text = "- [ ] a 🔁 every day"
+async def test_edit_recurring_task_writes_the_rule_in_the_plugins_wording(vault):
+    text = "- [ ] a 🔁 every Monday 📅 2026-11-02"
+    result = await edit(vault, text + "\n", 1, text, priority="high")
+    assert read(vault, "n.md") == "- [ ] a ⏫ 🔁 every week on Monday 📅 2026-11-02\n"
+    assert any("every week on Monday" in n for n in result.notes)
+
+
+async def test_edit_recurring_with_an_unsupported_rule_is_refused(vault):
+    text = "- [ ] a 🔁 every weekend 📅 2026-11-02"
     result = await edit(vault, text + "\n", 1, text, due="today")
     assert code(result) == "recurring_task"
+    assert read(vault, "n.md") == text + "\n"
+
+
+async def test_edit_can_replace_or_clear_an_unsupported_rule(vault):
+    text = "- [ ] a 🔁 every weekend 📅 2026-11-02"
+    await edit(vault, text + "\n", 1, text, recurrence="every Saturday, Sunday")
+    assert read(vault, "n.md") == "- [ ] a 🔁 every week on Saturday, Sunday 📅 2026-11-02\n"
+    await edit(vault, text + "\n", 1, text, clear=["recurrence"])
+    assert read(vault, "n.md") == "- [ ] a 📅 2026-11-02\n"
+
+
+async def test_edit_sets_a_rule(vault):
+    text = "- [ ] a 📅 2026-11-02"
+    await edit(vault, text + "\n", 1, text, recurrence="every month on the last when done")
+    assert read(vault, "n.md") == "- [ ] a 🔁 every month on the last when done 📅 2026-11-02\n"
+
+
+async def test_edit_refuses_a_rule_without_a_date(vault):
+    text = "- [ ] a 🔁 every day 📅 2026-11-02"
+    result = await edit(vault, text + "\n", 1, text, clear=["due"])
+    assert code(result) == "invalid_argument"
+    assert "due, scheduled or start date" in result.error
+    assert read(vault, "n.md") == text + "\n"
+
+
+async def test_edit_refuses_an_unknown_rule(vault):
+    result = await edit(vault, "- [ ] a 📅 2026-11-02\n", 1, "- [ ] a 📅 2026-11-02", recurrence="every 2nd moon")
+    assert code(result) == "invalid_argument"
+    assert "every weekday" in result.error
 
 
 async def test_edit_no_change_writes_nothing(vault):

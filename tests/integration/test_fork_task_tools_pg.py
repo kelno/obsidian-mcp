@@ -178,6 +178,22 @@ async def test_list_tasks_answers_from_the_index_and_writes_reindex_at_once(sess
     assert json.loads(again.error.rsplit("\n", 1)[-1].removeprefix("MCP-REFUSAL "))["code"] == "stale_precondition"
 
 
+async def test_ticking_a_recurring_task_lists_its_next_occurrence_at_once(sessionmaker, vault):
+    write(vault, "chores.md", "# Chores\n- [ ] water plants 🔁 every week 📅 2026-10-31\n- [ ] other\n")
+    await indexer.index_vault(user_id=None)
+    [plants] = (await tools.fork_list_tasks_impl(text="water")).tasks
+    done = await tools.set_task_status_impl(plants.path, plants.line, plants.text, plants.content_hash, status="done")
+    assert done.indexed is True and done.next_occurrence_line == 2, done
+    listed = await tools.fork_list_tasks_impl(path="chores.md", status="any")
+    assert [(t.line, t.status_type, t.due) for t in listed.tasks if "water" in t.text] == [
+        (2, "TODO", "2026-11-07"), (3, "DONE", "2026-10-31")]
+    assert await task_rows(sessionmaker) == [
+        ("chores.md", 2, "task", "- [ ] water plants 🔁 every week 📅 2026-11-07", None),
+        ("chores.md", 3, "task", "- [x] water plants 🔁 every week 📅 2026-10-31 ✅ 2026-10-31", None),
+        ("chores.md", 4, "task", "- [ ] other", None),
+    ]
+
+
 async def test_task_writes_record_attributed_feed_events_and_refresh_upstreams_rows(sessionmaker, vault):
     """Like every other note writer (#351, #432): an event attributed to the
     tool, so the next pass records nothing of its own, and upstream's
