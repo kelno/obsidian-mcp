@@ -1758,8 +1758,10 @@ async def edit_task(
         on_completion: `keep`, `delete` or `none`.
         id: a name for this task (🆔), as in `create_task`. An id other
             tasks wait for is not changed or cleared until their `depends_on`
-            no longer names it: to rename it, clear it from their
-            `depends_on`, rename it here, then name the new id there.
+            no longer names it: to rename it, give those tasks their
+            `depends_on` without it (clear only where it is the only one),
+            rename it here, then add the new id to theirs. A done task's id
+            blocks no one, so it can be changed freely.
         depends_on: the ids it waits for (⛔), replacing the whole list it
             had (pass the ones to keep too); as in `create_task`. A task that
             already waits for this one is refused (it would block both).

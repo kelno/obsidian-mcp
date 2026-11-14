@@ -318,14 +318,16 @@ def check_task_ids(before: tf.Task | None, after: tf.Task, links: list[TaskLink]
     - a changed or removed id that open tasks wait for (they would be
       unblocked without anyone asking);
     - a new dependency on an id no task has;
-    - a dependency on an open task that waits for this one (a direct cycle),
-      checked for every dependency when the task takes a new id, since open
-      tasks may already name that id.
+    - a dependency that leads, through open tasks waiting for one another,
+      back to this one (a cycle, however long), checked for every dependency
+      when the task takes a new id, since open tasks may already name it.
 
-    A finished task waits for nothing (`Task.isBlocked` is false when done),
-    so it neither stops a rename nor closes a cycle. A dependency the task
-    already had is otherwise kept unchecked. The one note: open tasks that
-    already named the new id, now blocked by this task.
+    A finished task waits for nothing and blocks nobody (`Task.isBlocked`
+    looks only for open carriers, `isBlocking` is false when done): a done
+    waiter neither stops a rename nor closes a cycle, and a done task being
+    written is free to change its id, can't close a cycle and blocks no one.
+    A dependency the task already had is otherwise kept unchecked. The one
+    note: open tasks that already named the new id, now blocked by this task.
     """
     carriers: dict[str, list[str]] = {}
     for ref, task_id, _deps, _done in links:
@@ -339,14 +341,15 @@ def check_task_ids(before: tf.Task | None, after: tf.Task, links: list[TaskLink]
             f"another task already has 🆔 {after.id} ({_refs(carriers[after.id])}); task ids are unique across "
             "the vault, so the tasks that depend on it would be ambiguous. Choose another id. Nothing was written.",
         )
-    if before is not None and before.id and after.id != before.id:
+    if before is not None and before.id and after.id != before.id and not before.is_done:
         waiting = [ref for ref, _id, deps in open_links if before.id in deps]
         if waiting:
             raise TaskOpError(
                 "invalid_argument",
                 f"other tasks wait for this one's 🆔 {before.id} ({_refs(waiting)}); changing or removing it would "
-                "unblock them without anyone asking. To rename it, clear it from their depends_on, rename it, then "
-                "name the new id there; otherwise keep the id. Nothing was written.",
+                "unblock them without anyone asking. To rename it: give those tasks their depends_on without it "
+                "(clear=[\"depends_on\"] only where it is the only one), rename it here, then add the new id to "
+                "their depends_on; otherwise keep the id. Nothing was written.",
             )
     had = set(before.depends_on) if before is not None else set()
     new = [i for i in after.depends_on if i not in had]
@@ -359,14 +362,13 @@ def check_task_ids(before: tf.Task | None, after: tf.Task, links: list[TaskLink]
             "a new note in the last minutes may not count yet. Nothing was written.",
         )
     notes: list[str] = []
-    if after.id:
-        checked = set(after.depends_on) if new_id else set(new)
-        cycle = [ref for ref, task_id, deps in open_links if task_id in checked and after.id in deps]
+    if after.id and not after.is_done:
+        cycle = _cycle_path(after.id, set(after.depends_on) if new_id else set(new), open_links)
         if cycle:
             raise TaskOpError(
                 "invalid_argument",
-                f"the task you would wait for already waits for this one (🆔 {after.id}: {_refs(cycle)}); both "
-                "would stay blocked for ever. Nothing was written.",
+                f"the tasks this one would wait for already wait for it, through {_refs(cycle)} (🆔 {after.id}); "
+                "they would all stay blocked for ever. Nothing was written.",
             )
         if new_id:
             named = [ref for ref, _id, deps in open_links if after.id in deps]
@@ -374,6 +376,41 @@ def check_task_ids(before: tf.Task | None, after: tf.Task, links: list[TaskLink]
                 notes.append(f"Open tasks already waited for 🆔 {after.id} ({_refs(named)}): they are blocked by "
                              "this task now, until it is done.")
     return notes
+
+
+def _cycle_path(target: str, start: set[str], open_links: list[tuple[str, str, tuple[str, ...]]]) -> list[str]:
+    """The refs of open tasks leading from the ids in `start` back to `target`, or [].
+
+    A walk over the open tasks carrying each id, following their dependencies;
+    the first chain that names `target` is the cycle a write would close.
+    """
+    by_id: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
+    for ref, task_id, deps in open_links:
+        if task_id:
+            by_id.setdefault(task_id, []).append((ref, deps))
+    queue = [(task_id, []) for task_id in sorted(start)]
+    seen: set[str] = set()
+    while queue:
+        task_id, path = queue.pop(0)
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+        for ref, deps in by_id.get(task_id, ()):
+            if target in deps:
+                return path + [ref]
+            queue.extend((dep, path + [ref]) for dep in deps if dep not in seen)
+    return []
+
+
+def dropped_dependency_notes(before: tf.Task | None, after: tf.Task) -> list[str]:
+    """`depends_on` replaces the whole list: say which ids a replacement left out."""
+    if before is None or not after.depends_on:
+        return []
+    dropped = [i for i in before.depends_on if i not in after.depends_on]
+    if not dropped:
+        return []
+    return [f"depends_on was replaced: this task no longer waits for 🆔 {', '.join(dropped)}. To add a dependency, "
+            "pass every id it should keep waiting for too."]
 
 
 def edited_description(task: tf.Task, description: str | None, settings: TasksSettings) -> str | None:

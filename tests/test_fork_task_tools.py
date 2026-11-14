@@ -1071,6 +1071,51 @@ async def test_taking_an_id_open_tasks_already_wait_for_says_so(vault):
     assert any("o.md:2" in n and "blocked" in n for n in result.notes)
 
 
+async def test_a_done_task_can_change_its_id_though_open_tasks_name_it(vault):
+    # A finished task blocks nobody (`isBlocked` looks only for open carriers):
+    # the open task is already unblocked (review 2, point 1).
+    INDEXED_DEPS.append(("o.md:2", "", ("bins",)))
+    text = "- [x] bins 🆔 bins ✅ 2026-10-01"
+    for change, line in (({"clear": ["id"]}, "- [x] bins ✅ 2026-10-01"),
+                         ({"id": "bins-old"}, "- [x] bins 🆔 bins-old ✅ 2026-10-01")):
+        result = await edit(vault, text + "\n", 1, text, **change)
+        assert result.error is None, result.error
+        assert read(vault, "n.md") == line + "\n"
+
+
+async def test_a_done_task_cannot_close_a_cycle_or_block_anyone(vault):
+    INDEXED_DEPS.append(("o.md:1", "b", ("a",)))
+    text = "- [x] a 🆔 a ✅ 2026-10-01"
+    result = await edit(vault, text + "\n", 1, text, depends_on=["b"])
+    assert result.error is None, result.error
+    INDEXED_DEPS[:] = [("o.md:2", "", ("x",))]
+    text = "- [x] y ✅ 2026-10-01"
+    result = await edit(vault, text + "\n", 1, text, id="x")
+    assert result.error is None, result.error
+    assert not any("blocked" in n for n in result.notes or [])
+
+
+async def test_a_longer_cycle_is_refused(vault):
+    # b waits for c, c waits for a: a waiting for b would lock all three (point 6).
+    INDEXED_DEPS.extend([("o.md:1", "b", ("c",)), ("o.md:2", "c", ("a",))])
+    text = "- [ ] a 🆔 a"
+    result = await edit(vault, text + "\n", 1, text, depends_on=["b"])
+    assert code(result) == "invalid_argument"
+    assert "o.md:1" in result.error and "o.md:2" in result.error
+    assert read(vault, "n.md") == text + "\n"
+
+
+async def test_replacing_depends_on_names_the_ids_it_drops(vault):
+    # depends_on replaces the list: the result says what is no longer waited for (point 5).
+    INDEXED_IDS["c"] = ["o.md:5"]
+    text = "- [ ] x ⛔ a,b"
+    result = await edit(vault, text + "\n", 1, text, depends_on=["c"])
+    assert read(vault, "n.md") == "- [ ] x ⛔ c\n"
+    assert any("a, b" in n and "no longer" in n for n in result.notes)
+    result = await edit(vault, text + "\n", 1, text, depends_on=["a"])
+    assert any("🆔 b" in n and "no longer" in n for n in result.notes)
+
+
 async def test_edit_refuses_a_dependency_cycle(vault):
     # B already waits for A; making A wait for B would block both for ever.
     INDEXED_DEPS.append(("o.md:1", "b", ("a",)))

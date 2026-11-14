@@ -9625,13 +9625,14 @@ async def _check_task_ids(uid, before, after, path: str, note_text: str, task_se
     note from the text just read; its notes for the result. Only when the
     write sets, changes or removes an id or adds a dependency, so other
     writes never touch the index."""
+    notes = _task_ops.dropped_dependency_notes(before, after)
     id_changed = after.id != (before.id if before is not None else "")
     new_deps = set(after.depends_on) - set(before.depends_on if before is not None else ())
     if not (id_changed or new_deps):
-        return []
+        return notes
     links = await _task_ids_in_index(uid, path)
     links += _task_ops.task_links_in_note(note_text, path, task_settings, registry, except_line=except_line)
-    return _task_ops.check_task_ids(before, after, links)
+    return _task_ops.check_task_ids(before, after, links) + notes
 
 
 def _task_item(entry: _tq.Entry, content_hash: str, today) -> TaskItem:
