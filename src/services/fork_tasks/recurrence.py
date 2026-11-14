@@ -77,8 +77,32 @@ def _every(interval: int, unit: str) -> str:
     return f"every {interval} {unit}s"
 
 
+def _meaning(rule: _engine.Rule) -> tuple:
+    """What a rule says, whatever kind expresses it: five weekdays are `every
+    weekday`, all seven `every day`, as rrule's `toText` writes them."""
+    if rule.kind == _engine.WEEK_ON and rule.weekdays == frozenset(range(5)):
+        return (_engine.WEEKDAY, rule.interval, frozenset(), None, None, rule.when_done)
+    if rule.kind == _engine.WEEK_ON and rule.weekdays == frozenset(range(7)):
+        return (_engine.DAY, rule.interval, frozenset(), None, None, rule.when_done)
+    return (rule.kind, rule.interval, rule.weekdays, rule.day, rule.month, rule.when_done)
+
+
 def canonical_text(rule: _engine.Rule) -> str:
-    """`Recurrence.toText()`: rrule's `toText()`, plus ` when done`."""
+    """`Recurrence.toText()`: rrule's `toText()`, plus ` when done`.
+
+    The wording must read back as the same rule, or the rule is refused: a
+    field the wording does not carry (an interval on `every week on Monday`,
+    which upstream may add at a resync) would otherwise be dropped from the
+    owner's line on the next write, with no error.
+    """
+    text = _wording(rule)
+    back = _engine.parse_rule(text)
+    if isinstance(back, _engine.Unsupported) or _meaning(back) != _meaning(rule):
+        raise RecurrenceUnsupported("its wording would not keep every part of the rule")
+    return text
+
+
+def _wording(rule: _engine.Rule) -> str:
     if rule.kind == _engine.DAY:
         text = _every(rule.interval, "day")
     elif rule.kind == _engine.WEEKDAY:

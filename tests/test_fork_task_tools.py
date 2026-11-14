@@ -386,6 +386,17 @@ async def test_recurring_on_completion_delete_leaves_the_next_occurrence(vault):
     assert result.next_occurrence_line == 1
 
 
+async def test_recurring_tick_lines_count_the_lines_the_stamp_adds(vault, monkeypatch):
+    monkeypatch.setattr(tools.settings, "last_ai_edit_field", "last_ai_edit")
+    monkeypatch.setattr(tools.settings, "last_ai_edit_exclude", [])
+    text = "- [ ] a 🔁 every day 📅 2026-10-31"
+    result = await status(vault, text + "\n- [ ] b\n", 1, text, status="done")
+    lines = read(vault, "n.md").split("\n")
+    assert lines[0] == "---"                      # the stamp's new block: three lines above
+    assert result.next_occurrence_line == 4 and lines[3] == result.next_occurrence
+    assert result.line == 5 and lines[4] == result.text
+
+
 async def test_cancelling_a_recurring_task_writes_no_next_occurrence(vault):
     text = "- [ ] a 🔁 every Monday 📅 2026-11-02"
     result = await status(vault, text + "\n", 1, text, status="cancelled")

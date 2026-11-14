@@ -820,6 +820,19 @@ async def test_a_task_citing_feedback_is_linked_both_ways(sessionmaker, ctx):
     assert code(bad) == "invalid_argument"
 
 
+async def test_ticking_a_recurring_task_citing_feedback_does_not_say_close_it(sessionmaker, ctx):
+    """Its next occurrence still cites the entry, open: no "now all done" nudge."""
+    await _task_note(sessionmaker, ctx)
+    entry = await tools.ledger_add_impl("feedback", "Weekly chore", area="home", details={"subtype": "friction"})
+    created = await tools.create_task_impl(f"Water the plants [{entry.ref}]", path="t.md", due="2026-10-31",
+                                           recurrence="every week")
+    assert created.error is None, created.error
+    done = await tools.set_task_status_impl("t.md", created.line, created.text, created.content_hash, status="done")
+    assert done.error is None and done.next_occurrence, done
+    assert done.ledger_refs[0]["tasks"] == "open"
+    assert not any("all done" in note for note in (done.notes or []))
+
+
 async def test_a_task_in_a_note_the_index_lacks_still_counts(sessionmaker, ctx):
     """The adversarial review's case: an open task added where the immediate
     re-index cannot run (a new inbox, not yet indexed) beside a done one must

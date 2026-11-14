@@ -10,6 +10,7 @@ been run here (declared as T13 in docs/architecture/tasks.md).
 
 import pytest
 
+from src.services import task_recurrence as engine
 from src.services.fork_tasks import recurrence
 
 RRULE_RUN = [
@@ -73,6 +74,23 @@ def test_the_plugins_wording_reads_back_as_itself(given, written):
 def test_rules_outside_the_list_are_refused(rule):
     with pytest.raises(recurrence.RecurrenceUnsupported):
         recurrence.canonical(rule)
+
+
+@pytest.mark.parametrize("rule", [
+    engine.Rule(engine.WEEK_ON, interval=2, weekdays=frozenset({0})),
+    engine.Rule(engine.MONTH_ON_DAY, interval=3, day=15),
+    engine.Rule(engine.YEAR_ON, interval=2, day=15, month=1),
+    engine.Rule(engine.WEEKDAY, interval=2),
+    engine.Rule(engine.MONTH_ON_LAST, interval=2),
+    engine.Rule(engine.DAY, interval=1, weekdays=frozenset({1})),
+], ids=["2 weeks on Monday", "3 months on the 15th", "2 years on Jan 15", "2 weekdays", "2 months on the last",
+        "day with a weekday"])
+def test_a_rule_whose_wording_would_drop_a_field_is_refused(rule):
+    # Upstream may give its kinds more fields at a resync (its tier 2:
+    # `every N weeks on D`); a wording that dropped one would silently change
+    # the owner's rule on the next write.
+    with pytest.raises(recurrence.RecurrenceUnsupported):
+        recurrence.canonical_text(rule)
 
 
 def test_every_canonical_wording_fits_the_plugins_rule_characters():

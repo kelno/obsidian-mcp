@@ -879,9 +879,12 @@ conversion in `src/services/page_text.py`.
 plugin's 8.6.0 source (`src/services/fork_tasks/format.py`) and following the
 plugin's settings file in the vault. `list_tasks` answers from `fork_note_tasks`
 (migration 1001, filled by the index pass next to the links) and checks each
-returned line on disk; the writers change one line through the same ladder as
-`edit_note`, read it back first, and re-index that note's task rows at once.
-Recurring tasks are read, never changed. Read
+returned line on disk; the writers change one line (two when a recurring task
+is ticked) through the same ladder as `edit_note`, read it back first, and
+re-index that note's task rows at once. A recurring task (`🔁`) is ticked with
+its next occurrence and its rule written as the plugin writes them, the dates
+from upstream's `src/services/task_recurrence.py`, used unchanged; a rule
+outside that engine's list is refused (`recurring_task`). Read
 [task tools](docs/architecture/tasks.md) first.
 
 **`open_area`** (fork; a tool of the `kelno_vault` plugin, served only with it loaded): the one call an agent makes when it opens an area (by name or by a folder outside the vault, through the list of areas `Areas/Areas.md`): the main note without its Tasks section, related folders, active ledger entries and open tasks, then three instruction lines. Class `scan`. Read [open_area](docs/architecture/open-area.md) first.
