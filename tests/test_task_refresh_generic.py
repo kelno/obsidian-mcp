@@ -527,6 +527,10 @@ def test_the_only_callers_of_the_generic_refresh_are_the_four_writers():
         ("tools.py", "set_frontmatter_impl"),
         ("tools.py", "write_file_impl"),
         ("tools.py", "delete_note_impl"),
+        # Fork: the fork's task writers (`create_task`, `edit_task`,
+        # `set_task_status`) publish through this one, which refreshes like
+        # every other note writer.
+        ("tools.py", "_publish_task_text_unstamped"),
     }, callers
 
 
