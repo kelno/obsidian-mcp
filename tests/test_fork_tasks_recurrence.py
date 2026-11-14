@@ -8,6 +8,8 @@ docs it cites); `FROM_TOTEXT_SOURCE` follows rrule's `totext.ts` without having
 been run here (declared as T13 in docs/architecture/tasks.md).
 """
 
+import dataclasses
+
 import pytest
 
 from src.services import task_recurrence as engine
@@ -91,6 +93,17 @@ def test_a_rule_whose_wording_would_drop_a_field_is_refused(rule):
     # the owner's rule on the next write.
     with pytest.raises(recurrence.RecurrenceUnsupported):
         recurrence.canonical_text(rule)
+
+
+def test_a_field_upstream_adds_to_rule_itself_is_kept_or_refused():
+    # Its tier 2 ("every month on the 2nd Wednesday") may add a field to
+    # Rule and reuse a kind; the wording carries none of it, so it is refused.
+    @dataclasses.dataclass(frozen=True)
+    class RuleWithNth(engine.Rule):
+        nth: int | None = None
+
+    with pytest.raises(recurrence.RecurrenceUnsupported):
+        recurrence.canonical_text(RuleWithNth(engine.MONTH_ON_DAY, day=15, nth=2))
 
 
 def test_every_canonical_wording_fits_the_plugins_rule_characters():

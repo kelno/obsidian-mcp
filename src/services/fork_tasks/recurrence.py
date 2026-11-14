@@ -77,14 +77,15 @@ def _every(interval: int, unit: str) -> str:
     return f"every {interval} {unit}s"
 
 
-def _meaning(rule: _engine.Rule) -> tuple:
-    """What a rule says, whatever kind expresses it: five weekdays are `every
-    weekday`, all seven `every day`, as rrule's `toText` writes them."""
-    if rule.kind == _engine.WEEK_ON and rule.weekdays == frozenset(range(5)):
-        return (_engine.WEEKDAY, rule.interval, frozenset(), None, None, rule.when_done)
-    if rule.kind == _engine.WEEK_ON and rule.weekdays == frozenset(range(7)):
-        return (_engine.DAY, rule.interval, frozenset(), None, None, rule.when_done)
-    return (rule.kind, rule.interval, rule.weekdays, rule.day, rule.month, rule.when_done)
+def _meaning(rule: _engine.Rule) -> _engine.Rule:
+    """What a rule says, whatever kind expresses it: every field but its text
+    (so a field upstream adds to `Rule` later is compared too), with five
+    weekdays as `every weekday` and all seven as `every day`, as rrule's
+    `toText` writes them."""
+    if rule.kind == _engine.WEEK_ON and rule.weekdays in (frozenset(range(5)), frozenset(range(7))):
+        kind = _engine.WEEKDAY if len(rule.weekdays) == 5 else _engine.DAY
+        rule = replace(rule, kind=kind, weekdays=frozenset())
+    return replace(rule, text="")
 
 
 def canonical_text(rule: _engine.Rule) -> str:
