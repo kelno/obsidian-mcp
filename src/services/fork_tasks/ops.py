@@ -278,44 +278,84 @@ def apply_fields(task: tf.Task, *, today: date, description: str | None = None, 
     return updated
 
 
-def task_ids_in_note(text: str, path: str, settings: TasksSettings, registry: tf.StatusRegistry,
-                     *, except_line: int | None = None) -> dict[str, list[str]]:
-    """`{id: ["path:line", …]}` for the tasks of one note, as its text reads now."""
-    out: dict[str, list[str]] = {}
+#: A task with an id or dependencies, somewhere in the vault: `("path:line", id or "", depends_on)`.
+TaskLink = tuple[str, str, tuple[str, ...]]
+
+
+def task_links_in_note(text: str, path: str, settings: TasksSettings, registry: tf.StatusRegistry,
+                       *, except_line: int | None = None) -> list[TaskLink]:
+    """The tasks of one note that carry 🆔 or ⛔, as its text reads now."""
+    out: list[TaskLink] = []
     for scanned in scan_note(text).lines:
-        if scanned.kind != "task" or scanned.line_number == except_line or "🆔" not in scanned.text:
+        if scanned.kind != "task" or scanned.line_number == except_line:
+            continue
+        if "🆔" not in scanned.text and "⛔" not in scanned.text:
             continue
         task = parse_line(scanned.text, path, settings, registry)
-        if task is not None and task.id:
-            out.setdefault(task.id, []).append(f"{path}:{scanned.line_number}")
+        if task is not None and (task.id or task.depends_on):
+            out.append((f"{path}:{scanned.line_number}", task.id, task.depends_on))
     return out
 
 
-def check_task_ids(before: tf.Task | None, after: tf.Task, known: dict[str, list[str]]) -> None:
-    """Refuse an id another task carries, or a new dependency on an id no task carries.
+def _refs(refs: list[str]) -> str:
+    return ", ".join(refs[:5]) + (f" and {len(refs) - 5} more" if len(refs) > 5 else "")
 
-    `known` maps each id to the tasks carrying it in the vault, the task being
-    written left out. The plugin does not check either (ids are "intended to
-    be unique across the whole vault", and an unknown dependency blocks
-    nothing), but each is almost always a typo that would silently not chain
-    the tasks, so the tools refuse rather than write it. A dependency the task
-    already had is kept unchecked.
+
+def check_task_ids(before: tf.Task | None, after: tf.Task, links: list[TaskLink]) -> None:
+    """Refuse a write that would leave tasks wrongly chained.
+
+    `links` are the vault's other tasks with an id or dependencies (the task
+    being written left out). The plugin checks none of these: ids are
+    "intended to be unique across the whole vault", a dependency on an id no
+    task has blocks nothing, and two tasks waiting for each other are blocked
+    for ever. Each is almost always a mistake that would silently unchain or
+    lock the tasks, so the tools refuse rather than write it:
+
+    - a new id another task already has;
+    - a changed or removed id that other tasks wait for (they would be
+      unblocked without anyone asking);
+    - a new dependency on an id no task has;
+    - a new dependency on a task that waits for this one (a direct cycle).
+
+    A dependency the task already had is kept unchecked.
     """
-    if after.id and (before is None or after.id != before.id) and after.id in known:
-        where = ", ".join(known[after.id][:5])
+    carriers: dict[str, list[str]] = {}
+    for ref, task_id, _deps in links:
+        if task_id:
+            carriers.setdefault(task_id, []).append(ref)
+    if after.id and (before is None or after.id != before.id) and after.id in carriers:
         raise TaskOpError(
             "invalid_argument",
-            f"another task already has 🆔 {after.id} ({where}); task ids are unique across the vault, so the "
-            "tasks that depend on it would be ambiguous. Choose another id. Nothing was written.",
+            f"another task already has 🆔 {after.id} ({_refs(carriers[after.id])}); task ids are unique across "
+            "the vault, so the tasks that depend on it would be ambiguous. Choose another id. Nothing was written.",
         )
+    if before is not None and before.id and after.id != before.id:
+        waiting = [ref for ref, _id, deps in links if before.id in deps]
+        if waiting:
+            raise TaskOpError(
+                "invalid_argument",
+                f"other tasks wait for this one's 🆔 {before.id} ({_refs(waiting)}); changing or removing it would "
+                "unblock them without anyone asking. Change or clear their depends_on first, or keep the id. "
+                "Nothing was written.",
+            )
     had = set(before.depends_on) if before is not None else set()
-    missing = [i for i in after.depends_on if i not in had and i not in known]
+    new = [i for i in after.depends_on if i not in had]
+    missing = [i for i in new if i not in carriers]
     if missing:
         raise TaskOpError(
             "invalid_argument",
             f"no task in the vault has 🆔 {', '.join(missing)}, so depending on it would block nothing. Give "
-            "the task this one waits for an id first (edit_task(…, id=…)), then name it here. Nothing was written.",
+            "the task this one waits for an id first (edit_task(…, id=…)), then name it here. A task written to "
+            "a new note in the last minutes may not count yet. Nothing was written.",
         )
+    if after.id:
+        cycle = [ref for ref, task_id, deps in links if task_id in new and after.id in deps]
+        if cycle:
+            raise TaskOpError(
+                "invalid_argument",
+                f"the task you would wait for already waits for this one (🆔 {after.id}: {_refs(cycle)}); both "
+                "would stay blocked for ever. Nothing was written.",
+            )
 
 
 def edited_description(task: tf.Task, description: str | None, settings: TasksSettings) -> str | None:

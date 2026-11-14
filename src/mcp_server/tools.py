@@ -9594,10 +9594,11 @@ async def _area_index(uid: int | None) -> _tq.AreaIndex:
     return _tq.AreaIndex.from_rows([(r.file_path, r.frontmatter) for r in rows])
 
 
-async def _task_ids_in_index(uid: int | None, exclude_path: str) -> dict[str, list[str]]:
-    """`{id: ["path:line", …]}`: the 🆔 of every indexed task of the caller's
-    notes but `exclude_path`, whose current text the caller reads itself."""
-    from sqlalchemy import select
+async def _task_ids_in_index(uid: int | None, exclude_path: str) -> list:
+    """`[("path:line", id, depends_on), …]`: every indexed task of the
+    caller's notes but `exclude_path` (whose current text the caller reads
+    itself) that carries 🆔 or ⛔."""
+    from sqlalchemy import or_, select
 
     from src.models.db import ForkNoteTask, NoteMetadata
 
@@ -9607,29 +9608,29 @@ async def _task_ids_in_index(uid: int | None, exclude_path: str) -> dict[str, li
             select(NoteMetadata.file_path, ForkNoteTask.line_number, ForkNoteTask.line)
             .join(NoteMetadata, NoteMetadata.id == ForkNoteTask.note_id)
             .where(_note_owner_predicate(uid), ForkNoteTask.kind == "task",
-                   ForkNoteTask.line.contains("🆔"), NoteMetadata.file_path != exclude_path)
+                   or_(ForkNoteTask.line.contains("🆔"), ForkNoteTask.line.contains("⛔")),
+                   NoteMetadata.file_path != exclude_path)
         )).all()
-    out: dict[str, list[str]] = {}
+    out = []
     for row in rows:
         task = _task_ops.parse_line(row.line, row.file_path, task_settings, registry)
-        if task is not None and task.id:
-            out.setdefault(task.id, []).append(f"{row.file_path}:{row.line_number}")
+        if task is not None and (task.id or task.depends_on):
+            out.append((f"{row.file_path}:{row.line_number}", task.id, task.depends_on))
     return out
 
 
 async def _check_task_ids(uid, before, after, path: str, note_text: str, task_settings, registry,
                           except_line: int | None) -> None:
     """`check_task_ids` against the vault: other notes from the index, this
-    note from the text just read. Only when the write names an id or a
-    dependency the task did not have, so other writes never touch the index."""
-    if not ((after.id and (before is None or after.id != before.id))
-            or set(after.depends_on) - set(before.depends_on if before is not None else ())):
+    note from the text just read. Only when the write sets, changes or removes
+    an id or adds a dependency, so other writes never touch the index."""
+    id_changed = after.id != (before.id if before is not None else "")
+    new_deps = set(after.depends_on) - set(before.depends_on if before is not None else ())
+    if not (id_changed or new_deps):
         return
-    known = await _task_ids_in_index(uid, path)
-    for task_id, refs in _task_ops.task_ids_in_note(note_text, path, task_settings, registry,
-                                                    except_line=except_line).items():
-        known.setdefault(task_id, []).extend(refs)
-    _task_ops.check_task_ids(before, after, known)
+    links = await _task_ids_in_index(uid, path)
+    links += _task_ops.task_links_in_note(note_text, path, task_settings, registry, except_line=except_line)
+    _task_ops.check_task_ids(before, after, links)
 
 
 def _task_item(entry: _tq.Entry, content_hash: str, today) -> TaskItem:

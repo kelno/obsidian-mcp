@@ -1699,11 +1699,13 @@ async def create_task(
             or `yesterday` (the owner's local day).
         on_completion: `keep` or `delete` (🏁: delete removes the line when
             the task is done).
-        id: a name for this task (🆔: letters, digits, `-`, `_`), unique in
-            the vault, such as `mum-backup`, so other tasks can wait for it.
-        depends_on: ids of tasks this one waits for (⛔); the plugin shows it
-            as blocked until they are done. Each must already be on a task:
-            give that task an id first with `edit_task(…, id=…)`.
+        id: a name for this task (🆔: letters, digits, `-`, `_`), such as
+            `mum-backup`, so other tasks can wait for it. Unique in the vault:
+            an id another task has is refused, naming where.
+        depends_on: a list of ids of tasks this one waits for (⛔); the plugin
+            shows it as blocked until they are done. Each must already be on
+            a task, open or done, in any note: give that task an id first with
+            `edit_task(…, id=…)`. An id no task has is refused.
         expected_hash: optional; the note's `content_hash`, to refuse if it
             changed since you read it.
     """
@@ -1754,9 +1756,12 @@ async def edit_task(
         created / start / scheduled / due: `YYYY-MM-DD`, `today`, `tomorrow`
             or `yesterday`.
         on_completion: `keep`, `delete` or `none`.
-        id: a name for this task (🆔), as in `create_task`.
-        depends_on: the ids it waits for (⛔), replacing any it had; as in
-            `create_task`.
+        id: a name for this task (🆔), as in `create_task`. An id other
+            tasks wait for is not changed or cleared until their `depends_on`
+            no longer names it.
+        depends_on: the ids it waits for (⛔), replacing the whole list it
+            had (pass the ones to keep too); as in `create_task`. A task that
+            already waits for this one is refused (it would block both).
         clear: fields to remove: any of priority, on_completion, id,
             depends_on, created, start, scheduled, due.
     """

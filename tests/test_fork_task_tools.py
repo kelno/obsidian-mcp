@@ -48,6 +48,8 @@ REINDEXED: list = []
 
 #: Task ids the fake index knows in other notes: `{id: ["path:line", …]}`.
 INDEXED_IDS: dict = {}
+#: Other indexed tasks with dependencies: `("path:line", id or "", (depends_on, …))`.
+INDEXED_DEPS: list = []
 
 AREAS = [
     ("projects/Area X/Area X.md", {"area_tag": "area/area-x"}),
@@ -83,12 +85,14 @@ def vault(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tools, "_area_index", areas)
 
-    async def indexed_ids(uid, exclude_path):
-        # The fake index: task ids carried by other notes, `{id: [ref, …]}`.
-        return {k: v for k, v in INDEXED_IDS.items() if not any(r.startswith(exclude_path + ":") for r in v)}
+    async def indexed_tasks(uid, exclude_path):
+        # The fake index: other notes' tasks with an id or dependencies, `(ref, id, depends_on)`.
+        rows = [(ref, i, ()) for i, refs in INDEXED_IDS.items() for ref in refs] + list(INDEXED_DEPS)
+        return [r for r in rows if not r[0].startswith(exclude_path + ":")]
 
-    monkeypatch.setattr(tools, "_task_ids_in_index", indexed_ids, raising=False)
+    monkeypatch.setattr(tools, "_task_ids_in_index", indexed_tasks, raising=False)
     INDEXED_IDS.clear()
+    INDEXED_DEPS.clear()
 
     async def reindex(uid, rel, text):
         REINDEXED.append((rel, text))
@@ -1013,3 +1017,29 @@ async def test_edit_refuses_an_unknown_dependency(vault):
     result = await edit(vault, text + "\n", 1, text, depends_on=["missing"])
     assert code(result) == "invalid_argument"
     assert read(vault, "n.md") == text + "\n"
+
+
+async def test_edit_refuses_changing_an_id_other_tasks_wait_for(vault):
+    INDEXED_DEPS.append(("o.md:2", "", ("mum-backup",)))
+    text = "- [ ] back up 🆔 mum-backup"
+    for change in ({"id": "backup-1"}, {"clear": ["id"]}):
+        result = await edit(vault, text + "\n", 1, text, **change)
+        assert code(result) == "invalid_argument"
+        assert "o.md:2" in result.error
+        assert read(vault, "n.md") == text + "\n"
+
+
+async def test_edit_refuses_changing_an_id_a_task_in_the_same_note_waits_for(vault):
+    text = "- [ ] back up 🆔 mum-backup"
+    result = await edit(vault, text + "\n- [ ] wipe ⛔ mum-backup\n", 1, text, clear=["id"])
+    assert code(result) == "invalid_argument"
+    assert "n.md:2" in result.error
+
+
+async def test_edit_refuses_a_dependency_cycle(vault):
+    # B already waits for A; making A wait for B would block both for ever.
+    INDEXED_DEPS.append(("o.md:1", "b", ("a",)))
+    text = "- [ ] a 🆔 a"
+    result = await edit(vault, text + "\n", 1, text, depends_on=["b"])
+    assert code(result) == "invalid_argument"
+    assert "o.md:1" in result.error
