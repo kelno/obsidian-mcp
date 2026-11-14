@@ -42,12 +42,13 @@ mode.
 
 **Private folders (fork, P98).** With `hide_private` and private folders
 configured, both arms leave notes under a private folder out inside their own
-statements (so each still fills its 50), and two more statements run in the
-same snapshot: the keyword arm restricted to private notes, right after step
-4, and the semantic arm's private-only scan, inside step 5. From the public
-and the private lists the service rebuilds the two arms an unfiltered call
-would have fused, fuses them, and counts the private notes ranked ahead of the
-furthest note on the page (`count_private_hidden`).
+statements (so each still fills its 50), and each arm runs a second time
+unfiltered, in the same snapshot: the keyword arm right after step 4, the
+semantic arm right after its filtered run in step 5 (exact too after an exact
+re-run). Those two are the arms an unfiltered call would have fused, in their
+own order; the service fuses them and counts the private notes ranked ahead
+of the furthest note on the page (`count_private_hidden`). Nothing from the
+unfiltered runs reaches the result but that number.
 
 The service records the timing keys but **not** `record_results`: the tool
 records the paths it actually rendered (D7), which the response bound can make
@@ -204,39 +205,16 @@ def fuse(
     return [t[:4] for t in out]
 
 
-def _unfiltered_keyword_paths(public: list[dict], private: list[dict], depth: int) -> list[str]:
-    """The keyword arm an unfiltered call would have returned, from the public
-    and the private-only arms (P98): every `all` row before every `any` row,
-    each block by rank DESC then path, cut to `depth` — the statements' own
-    order. Exact: each list was fetched to `depth` within its block, and an
-    `any` row's rank is against the same fallback query in both. Only a tie
-    between a public and a private note may order differently, since Python
-    compares paths by code point and the database by its collation."""
-    def block(match: str) -> list[dict]:
-        rows = [r for r in (*public, *private) if r["match"] == match]
-        return sorted(rows, key=lambda r: (-r["rank"], r["path"]))
-
-    return [r["path"] for r in (*block("all"), *block("any"))][:depth]
-
-
-def _unfiltered_semantic_paths(public: list[tuple], private: list[tuple], depth: int) -> list[str]:
-    """The semantic arm an unfiltered call would have returned, from the
-    public and private-only scans' `(distance, path, chunk_index)` keys (P98):
-    the `depth` nearest chunks of the two, deduped per note in that order.
-    Approximate as the arm itself is: each scan's window was picked by the
-    half-precision index and holds `depth` chunks of its own side."""
-    window = sorted((*public, *private))[:depth]
-    return list(dict.fromkeys(path for _, path, _ in window))
-
-
 def count_private_hidden(page: list[str], keyword: list[str], semantic: list[str],
                          private: set[str], *, k: int, limit: int) -> int:
     """How many private notes the page would have held (fork, P98), as the
-    other searches count them: fused unfiltered (`keyword` and `semantic`,
-    both arms rebuilt with the private notes in), each private note ranked
-    ahead of the furthest note of `page` in that order, or every one when
-    `page` did not fill `limit`; at most `limit`. A page note the unfiltered
-    arms no longer reach ranks after all of them."""
+    other searches count them: `keyword` and `semantic` (the arms run
+    unfiltered) fused, each private note ranked ahead of the furthest note of
+    `page` in that order, or every one when `page` did not fill `limit`; at
+    most `limit`. The furthest, not the last: leaving private notes out moves
+    public notes up by different amounts in each arm, so the page's own order
+    can differ. A page note the unfiltered arms no longer reach ranks after
+    all of them."""
     order = [path for path, *_ in fuse(keyword, semantic, k)]
     hidden = [i for i, path in enumerate(order) if path in private]
     if len(page) >= limit:
@@ -317,12 +295,11 @@ async def hybrid_search(
         session, query, limit=HYBRID_ARM_DEPTH, with_excerpt_flag=True,
         **filters, **({"private": "exclude"} if hiding else {}),
     )
-    # The private notes the keyword arm would have held (P98): the same arm
-    # over private notes only, before the semantic arm and its exact plan.
-    k_private = (
-        await search.keyword_arm_rows(
-            session, query, limit=HYBRID_ARM_DEPTH, private="only", **filters
-        )
+    # The keyword arm an unfiltered call would have fused (P98), in the
+    # database's own order (rank ties fall to its collation), before the
+    # semantic arm and its exact plan. Only the count reads it.
+    k_unfiltered = (
+        await search.keyword_arm_rows(session, query, limit=HYBRID_ARM_DEPTH, **filters)
         if hiding else None
     )
 
@@ -333,17 +310,28 @@ async def hybrid_search(
     s_rows: list[dict] = []
     s_chunks = 0
     exact_fallback = False
-    s_arm = None
+    s_unfiltered: list[str] = []
     if unavailable is None:
         s_arm = await embeddings.semantic_arm_rows(
             session, query_embedding, overfetch=HYBRID_ARM_DEPTH,
             with_rerank_text=rerank_candidates, **filters,
-            **({"hide_private": True, "count_private": True} if hiding else {}),
+            **({"hide_private": True} if hiding else {}),
         )
         s_rows, s_chunks, exact_fallback = (
             s_arm.rows, s_arm.chunk_rows, s_arm.exact_fallback
         )
-        if exact_fallback:
+        index_scan_off = exact_fallback
+        if hiding:
+            # The semantic arm an unfiltered call would have fused (P98).
+            # After an exact re-run above, this one is exact too; a re-run of
+            # its own leaves the same setting, restored below with the other.
+            # `exact_fallback` (telemetry) stays about the arm shown.
+            s_all = await embeddings.semantic_arm_rows(
+                session, query_embedding, overfetch=HYBRID_ARM_DEPTH, **filters
+            )
+            s_unfiltered = [r["path"] for r in s_all.rows]
+            index_scan_off = index_scan_off or s_all.exact_fallback
+        if index_scan_off:
             await session.execute(text("SET LOCAL enable_indexscan = on"))
 
     # ── 6. Fusion ───────────────────────────────────────────────────────────
@@ -403,15 +391,12 @@ async def hybrid_search(
     private_hidden = None
     if hiding:
         # The page as the other searches count it: the first `limit` rows,
-        # before any rerank reorders the candidates (P98).
-        private_keys = s_arm.private_chunk_keys if s_arm is not None else []
+        # before any rerank reorders the candidates and before the response
+        # cap drops any (P98).
+        k_all = [r["path"] for r in k_unfiltered.rows]
         private_hidden = count_private_hidden(
-            [path for path, *_ in fused[:limit]],
-            _unfiltered_keyword_paths(k_arm.rows, k_private.rows, HYBRID_ARM_DEPTH),
-            _unfiltered_semantic_paths(
-                s_arm.chunk_keys if s_arm is not None else [], private_keys, HYBRID_ARM_DEPTH
-            ),
-            {r["path"] for r in k_private.rows} | {path for _, path, _ in private_keys},
+            [path for path, *_ in fused[:limit]], k_all, s_unfiltered,
+            {p for p in (*k_all, *s_unfiltered) if private_folders.is_private(p)},
             k=k, limit=limit,
         )
 

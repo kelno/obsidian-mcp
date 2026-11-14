@@ -2856,26 +2856,10 @@ class SemanticArm:
     #: re-sort and dedupe — where `semantic_search`'s `db_ms` has always
     #: stopped (#354 keeps its telemetry unchanged).
     fetched_at: float = 0.0
-    #: Fork (P98): each row's `(distance, path)`, aligned with `rows`.
+    #: Fork (P98): each row's `(distance, path)`, aligned with `rows`, and
+    #: each hidden private note's best one (`None` unless counted).
     row_keys: list[tuple] = field(default_factory=list)
-    #: Fork (P98): every fetched chunk's `(distance, path, chunk_index)`, in
-    #: the re-sorted order, and the same for the private-only scan (`None`
-    #: unless counted). `hybrid_search` rebuilds the unfiltered window from
-    #: the two.
-    chunk_keys: list[tuple] = field(default_factory=list)
-    private_chunk_keys: list[tuple] | None = None
-
-    @property
-    def private_keys(self) -> list[tuple] | None:
-        """Each hidden private note's nearest chunk as `(distance, path)`, the
-        results' own order (`None` unless counted)."""
-        if self.private_chunk_keys is None:
-            return None
-        best: dict[str, tuple] = {}
-        for distance, path, _ in self.private_chunk_keys:
-            if path not in best or (distance, path) < best[path]:
-                best[path] = (distance, path)
-        return list(best.values())
+    private_keys: list[tuple] | None = None
 
 
 async def semantic_arm_rows(
@@ -3023,15 +3007,17 @@ async def semantic_arm_rows(
             continue
         seen.add(row.note_id)
         deduped.append(row)
-    # The private notes the results would have held, in the results' own
-    # order: distance, then path, then chunk. `count_private_hidden` compares
-    # each note's nearest with the last result shown; `hybrid_search` merges
-    # them with `chunk_keys`. Paths are unique within the owner scope both
-    # statements filter by.
-    private_chunk_keys = (
-        sorted((row.distance, row.file_path, row.chunk_index) for row in private_rows)
-        if private_stmt is not None else None
-    )
+    private_keys = None
+    if private_stmt is not None:
+        # Each private note's nearest chunk, in the results' own order:
+        # distance, then path. `count_private_hidden` compares them with the
+        # last result shown.
+        best: dict[int, tuple] = {}
+        for row in private_rows:
+            key = (row.distance, row.file_path)
+            if row.note_id not in best or key < best[row.note_id]:
+                best[row.note_id] = key
+        private_keys = list(best.values())
 
     # ── Staleness and truncation, annotated from the already-hydrated row ──
     #
@@ -3132,8 +3118,7 @@ async def semantic_arm_rows(
     return SemanticArm(rows=results, chunk_rows=chunk_rows, exact_fallback=exact_fallback,
                        fetched_at=fetched_at,
                        row_keys=[(row.distance, row.file_path) for row in deduped],
-                       chunk_keys=[(row.distance, row.file_path, row.chunk_index) for row in rows],
-                       private_chunk_keys=private_chunk_keys)
+                       private_keys=private_keys)
 
 
 def count_private_hidden(arm: SemanticArm, shown: int, limit: int) -> int | None:

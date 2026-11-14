@@ -59,6 +59,16 @@ NOTES = [
 ]
 PRIVATE = {"Diary (private)/b.md", "Deep/People (Private)/c.md"}
 
+# Equal keyword ranks (the same body, no embedding), under `Tie/`: by code
+# point the private path sorts first ("D" < "a"), by a linguistic collation
+# (the test image's en_US) last. The database's order decides the count.
+TIE_NOTES = [
+    ("Tie/alpha.md", "kiwi", None),
+    ("Tie/beta.md", "kiwi", None),
+    ("Tie/Diary (private)/x.md", "kiwi", None),
+]
+TIE_PRIVATE = {"Tie/Diary (private)/x.md"}
+
 
 @pytest.fixture(scope="module")
 def migrated_url():
@@ -71,14 +81,15 @@ async def sessionmaker(migrated_url):
     maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     fragment, cfg_params = index_tsvector_sql(tags_bind=None)
     async with maker() as session:
-        for path, body, vec in NOTES:
+        for path, body, vec in NOTES + TIE_NOTES:
             note_id = (await session.execute(text(
                 "INSERT INTO notes_metadata (user_id, file_path, title, tags, frontmatter, content_hash, "
                 f"embedded_content_hash, content_tsvector) VALUES (NULL, :p, :t, '{{}}', '{{}}', :h, :h, {fragment}) "
                 "RETURNING id"), {"p": path, "t": path.rsplit("/", 1)[-1], "h": path, "content": body,
                                   "title": path.rsplit("/", 1)[-1], "aliases": "", **cfg_params},
             )).scalar_one()
-            session.add(NoteEmbedding(note_id=note_id, chunk_index=0, chunk_text=body, embedding=vec))
+            if vec is not None:
+                session.add(NoteEmbedding(note_id=note_id, chunk_index=0, chunk_text=body, embedding=vec))
         await session.commit()
     yield maker
     await engine.dispose()
@@ -224,6 +235,25 @@ async def test_hybrid_count_matches_the_unfiltered_fusion(wired, query, limit):
     assert result.private_hidden == _expected_hybrid_hidden(unfiltered, shown, limit)
 
 
+@pytest.mark.parametrize("limit", [1, 2, 3])
+async def test_hybrid_count_follows_the_database_order_on_rank_ties(wired, limit):
+    # Review: re-sorting tied keyword rows in Python put the private note
+    # ahead of `alpha.md` and counted it. The count must agree with
+    # keyword_search's, whose comparison runs in the database.
+    async with wired() as session:
+        counts: dict = {}
+        keyword = await full_text_search(session, "kiwi", folder="Tie/", limit=limit, hide_private=True,
+                                         counts=counts)
+    async with wired() as session:
+        result = await hybrid.hybrid_search(session, "kiwi", folder="Tie/", limit=limit, hide_private=True)
+    assert [r.path for r in result.rows] == [r["path"] for r in keyword]   # no vectors: keyword order
+    assert result.private_hidden == counts["private_hidden"]
+    async with wired() as session:
+        linguistic = (await session.execute(text("SELECT 'Tie/alpha.md' < 'Tie/Diary (private)/x.md'"))).scalar()
+    if linguistic:
+        assert result.private_hidden == (0 if limit < 3 else 1)
+
+
 async def test_hybrid_search_without_hiding_is_unchanged(wired):
     async with wired() as session:
         result = await hybrid.hybrid_search(session, "apple", limit=50)
@@ -267,4 +297,4 @@ async def test_the_sql_predicate_agrees_with_is_private(wired):
         rows = (await session.execute(
             text("SELECT file_path FROM notes_metadata WHERE file_path ~* :r"),
             {"r": private_folders.path_regex()})).scalars().all()
-    assert set(rows) == PRIVATE == {p for p, _, _ in NOTES if private_folders.is_private(p)}
+    assert set(rows) == PRIVATE | TIE_PRIVATE == {p for p, _, _ in NOTES + TIE_NOTES if private_folders.is_private(p)}

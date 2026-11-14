@@ -128,27 +128,6 @@ def test_related_hidden_count_counts_only_what_would_have_been_listed():
 # ── hybrid_search's count: the private notes the unfiltered fusion ranks ahead ─
 
 
-def _kw(path, rank, match="all"):
-    return {"path": path, "rank": rank, "match": match}
-
-
-def test_the_unfiltered_keyword_arm_is_both_blocks_merged_then_cut_to_depth():
-    public = [_kw("p1", 0.5), _kw("p2", 0.1), _kw("p3", 0.9, "any")]
-    private = [_kw("s1", 0.3), _kw("s2", 0.1), _kw("s3", 0.95, "any")]
-    # `all` before `any` whatever the ranks; rank, then path within a block.
-    assert hybrid._unfiltered_keyword_paths(public, private, 50) == ["p1", "s1", "p2", "s2", "s3", "p3"]
-    assert hybrid._unfiltered_keyword_paths(public, private, 3) == ["p1", "s1", "p2"]
-    assert hybrid._unfiltered_keyword_paths(public, [], 50) == ["p1", "p2", "p3"]
-
-
-def test_the_unfiltered_semantic_arm_is_the_chunk_window_deduped_per_note():
-    public = [(0.1, "a", 0), (0.3, "a", 1), (0.4, "b", 0)]
-    private = [(0.2, "s", 0), (0.25, "s", 1), (0.35, "t", 0)]
-    assert hybrid._unfiltered_semantic_paths(public, private, 50) == ["a", "s", "t", "b"]
-    # Four chunks: a, s, s, a. `t` and `b` are past the window.
-    assert hybrid._unfiltered_semantic_paths(public, private, 4) == ["a", "s"]
-
-
 def test_the_hybrid_count_is_the_private_notes_ranked_ahead_of_the_last_shown():
     # Unfiltered: s1 is in both arms (2/61), p1 and p2 one each (1/62): s1, p1, p2.
     keyword, semantic, private = ["s1", "p1"], ["s1", "p2"], {"s1"}
