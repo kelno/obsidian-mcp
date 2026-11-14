@@ -356,8 +356,10 @@ async def test_ticking_a_recurring_task_writes_its_next_occurrence_above_it(vaul
         "- [x] water plants 🔁 every week 📅 2026-10-31 ✅ 2026-10-31\n- [ ] other\n")
     assert result.next_occurrence == "- [ ] water plants 🔁 every week 📅 2026-11-07"
     assert result.next_occurrence_line == 2
-    assert result.line == 2 and result.removed is None
-    assert any("next occurrence" in n and "moved down by one" in n for n in result.notes)
+    # `line`, `ref` and `text` are the ticked task's, now below its next occurrence.
+    assert result.line == 3 and result.ref == "n.md:3" and result.removed is None
+    assert result.text == "- [x] water plants 🔁 every week 📅 2026-10-31 ✅ 2026-10-31"
+    assert any("line 2" in n and "now at line 3" in n and "moved down by one" in n for n in result.notes)
     assert REINDEXED == [("n.md", read(vault, "n.md"))]
 
 
@@ -366,7 +368,7 @@ async def test_next_occurrence_below_with_the_plugin_setting(vault):
     text = "- [ ] a 🔁 every day 📅 2026-10-31"
     result = await status(vault, text + "\n", 1, text, status="done")
     assert read(vault, "n.md") == "- [x] a 🔁 every day 📅 2026-10-31 ✅ 2026-10-31\n- [ ] a 🔁 every day 📅 2026-11-01\n"
-    assert result.next_occurrence_line == 2
+    assert result.next_occurrence_line == 2 and result.line == 1
 
 
 async def test_recurring_last_line_without_terminator_stays_without_one(vault):
@@ -380,7 +382,7 @@ async def test_recurring_on_completion_delete_leaves_the_next_occurrence(vault):
     text = "- [ ] a 🔁 every day when done 🏁 delete 📅 2026-10-20"
     result = await status(vault, text + "\n- [ ] b\n", 1, text, status="done")
     assert read(vault, "n.md") == "- [ ] a 🔁 every day when done 🏁 delete 📅 2026-11-01\n- [ ] b\n"
-    assert result.removed is True
+    assert result.removed is True and result.text == ""
     assert result.next_occurrence_line == 1
 
 

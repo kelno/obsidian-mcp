@@ -1703,9 +1703,11 @@ async def create_task(
             `every 3 days`, `every weekday`, `every week`, `every 2 weeks`,
             `every week on Monday, Thursday`, `every month`, `every month on
             the 15th`, `every month on the last`, `every year`, `every March
-            on the 1st`; add `when done` to count from completion. Needs a
-            due, scheduled or start date. Written in the plugin's own wording
-            (`every Monday` becomes `every week on Monday`).
+            on the 1st`; add `when done` to count from completion. Other
+            wordings of these rules are accepted and written in the plugin's
+            own words (`every Monday` is written `every week on Monday`);
+            any other rule (`every weekend`, `every 3 weeks on Friday`) is
+            refused. Needs a due, scheduled or start date: refused without.
         expected_hash: optional; the note's `content_hash`, to refuse if it
             changed since you read it.
     """
@@ -1744,8 +1746,10 @@ async def edit_task(
     Refused, writing nothing, when the note changed since `expected_hash`
     (`stale_precondition`), when line `line` is not `expected_line`
     (`line_mismatch`), when it is not a task (`not_a_task`), or when it
-    repeats by a rule these tools cannot follow (`recurring_task`: edit it
-    in Obsidian, or replace the rule with `recurrence`).
+    repeats by a rule these tools cannot follow (`recurring_task`). Such a
+    task's rule can still be replaced here (`recurrence`) or removed
+    (`clear`), which changes the owner's rule, so ask them first; otherwise
+    edit it in Obsidian.
 
     Args:
         path / line / expected_line / expected_hash: the task's `path`,
@@ -1791,9 +1795,12 @@ async def set_task_status(
 
     **A recurring task (🔁) ticked done also gets its next occurrence**, a new
     line above it (below, if the plugin is set so), with its dates moved on as
-    the plugin moves them; the result gives `next_occurrence` and its line,
-    and lines below move down by one. A rule these tools cannot follow is
-    refused (`recurring_task`): tick that one in Obsidian.
+    the plugin moves them. The result's `line` and `text` are then the ticked
+    task's, where it is now; `next_occurrence` and `next_occurrence_line` the
+    new one's; lines below move down by one. The rules followed are those
+    `create_task`'s `recurrence` lists; any other is refused
+    (`recurring_task`): tick that one in Obsidian, or ask the owner whether
+    to replace its rule with `edit_task(…, recurrence=…)` first.
 
     Refused, writing nothing, when the note changed since `expected_hash`
     (`stale_precondition`), when line `line` is not `expected_line`

@@ -68,7 +68,13 @@ def _ordinal(k: int) -> str:
 
 
 def _every(interval: int, unit: str) -> str:
-    return f"every {unit}" if interval == 1 else f"every {interval} {unit}s"
+    if interval == 1:
+        return f"every {unit}"
+    if interval % 100 == 1:
+        # rrule's `ToText.plural` is `n % 100 !== 1`, so it writes `every 101
+        # day`, a wording upstream's parser does not read back.
+        raise RecurrenceUnsupported(f"rrule writes an interval of {interval} in the singular")
+    return f"every {interval} {unit}s"
 
 
 def canonical_text(rule: _engine.Rule) -> str:

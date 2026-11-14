@@ -94,6 +94,8 @@ class TaskWriteResult(_OmitNone):
     line: int | None = None
     previous_text: str | None = None
     #: The line(s) now at `line`; empty when `🏁 delete` removed the task.
+    #: For a recurring task ticked done, `line`, `ref` and `text` are the
+    #: ticked task's own; its next occurrence is `next_occurrence`.
     text: str | None = None
     #: True when `🏁 delete` removed the task (for a recurring task, its
     #: completed instance: its next occurrence then stands in its place).

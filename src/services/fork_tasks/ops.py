@@ -236,7 +236,9 @@ def recurring_unsupported(rule: str, reason: str, *, action: str) -> TaskOpError
     return TaskOpError(
         "recurring_task",
         f"this task repeats (🔁 {rule}), and that rule is not one the task tools can follow ({reason}); "
-        f"{action} it in Obsidian, so the Tasks plugin handles its next occurrence. Supported rules: "
+        f"{action} it in Obsidian, so the Tasks plugin handles its next occurrence, or, if the owner agrees "
+        "(it changes their rule), first replace the rule with edit_task(…, recurrence=…) or remove it with "
+        "edit_task(…, clear=[\"recurrence\"]). Supported rules: "
         f"{_recurrence.SUPPORTED}. Nothing was written.",
     )
 

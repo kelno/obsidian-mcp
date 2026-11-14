@@ -63,6 +63,9 @@ def test_the_plugins_wording_reads_back_as_itself(given, written):
     "every April and December on the 1st and 24th",
     "every day for 3 times",
     "every month on the 22th",        # wrong suffix
+    "every 101 days",                 # rrule writes `every 101 day`, which upstream's parser can't read back
+    "every 201 weeks",
+    "every 301 months",
     "every February on the 30th",
     "each day",
     "",

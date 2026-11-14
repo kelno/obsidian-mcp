@@ -10554,20 +10554,32 @@ async def set_task_status_impl(
         # A completed instance `🏁 delete` removed: none written with the new status.
         removed = located.task.on_completion == "delete" and not any(t.status == new_status for t in result)
         extra: dict = {}
+        reported_line, reported_text = line + shift, "\n".join(new_lines)
         if change.next_index is not None:
             next_line = line + shift + change.next_index
             extra = {"next_occurrence": new_lines[change.next_index], "next_occurrence_line": next_line}
+            # `line`, `ref` and `text` stay the ticked task's: where it is now,
+            # or nothing when `🏁 delete` left only its next occurrence.
+            if len(result) == 2:
+                done_index = 1 - change.next_index
+                reported_line, reported_text = line + shift + done_index, new_lines[done_index]
+            else:
+                reported_text = ""
         written = await _task_written(
-            uid, target, line + shift, expected_line, "\n".join(new_lines), new_text, today,
+            uid, target, reported_line, expected_line, reported_text, new_text, today,
             task_settings=task_settings, registry=registry,
             changed=True, removed=True if removed else None, **extra,
         )
         if change.next_index is not None:
-            where = ("below it" if change.next_index > 0 else "above it") if len(result) == 2 else "in its place"
-            moved = " Lines below it moved down by one." if len(result) == 2 else ""
+            if len(result) == 2:
+                where = "below it" if change.next_index > 0 else "above it"
+                tail = (f" The task you ticked is now at line {reported_line} (`line`, `text`). Lines below "
+                        "moved down by one.")
+            else:
+                where, tail = "in its place", " 🏁 delete removed the task you ticked."
             written.notes = (written.notes or []) + [
                 f"This task repeats: its next occurrence was written at line {next_line} ({where}), as the "
-                f"Tasks plugin writes it.{moved}"]
+                f"Tasks plugin writes it.{tail}"]
         return written
 
 
