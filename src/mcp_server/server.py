@@ -1707,7 +1707,8 @@ async def create_task(
             wordings of these rules are accepted and written in the plugin's
             own words (`every Monday` is written `every week on Monday`);
             any other rule (`every weekend`, `every 3 weeks on Friday`) is
-            refused. Needs a due, scheduled or start date: refused without.
+            refused. Needs a due, scheduled or start date, usually the first
+            occurrence (for `every Monday`, the next Monday): refused without.
         expected_hash: optional; the note's `content_hash`, to refuse if it
             changed since you read it.
     """
