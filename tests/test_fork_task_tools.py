@@ -46,6 +46,9 @@ OWNER_SETTINGS = {
 #: The fake immediate re-index's record of calls: `(rel_path, text)`.
 REINDEXED: list = []
 
+#: Task ids the fake index knows in other notes: `{id: ["path:line", …]}`.
+INDEXED_IDS: dict = {}
+
 AREAS = [
     ("projects/Area X/Area X.md", {"area_tag": "area/area-x"}),
     ("projects/Other/Other.md", {"area_tag": "area/other"}),
@@ -79,6 +82,14 @@ def vault(tmp_path, monkeypatch):
         return task_query.AreaIndex.from_rows(AREAS)
 
     monkeypatch.setattr(tools, "_area_index", areas)
+
+    async def indexed_ids(uid, exclude_path):
+        # The fake index: task ids carried by other notes, `{id: [ref, …]}`.
+        return {k: v for k, v in INDEXED_IDS.items() if not any(r.startswith(exclude_path + ":") for r in v)}
+
+    monkeypatch.setattr(tools, "_task_ids_in_index", indexed_ids, raising=False)
+    INDEXED_IDS.clear()
+
     async def reindex(uid, rel, text):
         REINDEXED.append((rel, text))
         return True, "task index updated"
@@ -914,3 +925,91 @@ def test_the_rule_nudge_numbers_lines_as_written_when_the_stamp_adds_a_block(vau
 def test_without_the_vault_plugin_no_rule_nudge(vault):
     created = asyncio.run(tools.create_note_impl("_/agent/Unset.md", "- A new rule.\n"))
     assert "rule_change_unlogged" not in created
+
+
+# --- dependencies: 🆔 and ⛔ (ledger F9) ------------------------------------------
+
+async def test_create_with_an_id_and_dependencies_writes_them_in_the_plugins_order(vault):
+    INDEXED_IDS["backup"] = ["mum.md:3"]
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("retry the cleanup", path="n.md", id="retry", depends_on=["backup"],
+                                          due="2026-11-05", priority="high")
+    assert result.error is None, result.error
+    assert read(vault, "n.md") == "# T\n- [ ] retry the cleanup 🆔 retry ⛔ backup ⏫ 📅 2026-11-05\n"
+
+
+async def test_create_depending_on_a_task_in_the_same_note(vault):
+    note(vault, "n.md", "- [ ] first 🆔 first\n")
+    await tools.create_task_impl("second", path="n.md", depends_on=["first", "first"])
+    assert read(vault, "n.md") == "- [ ] first 🆔 first\n- [ ] second ⛔ first\n"
+
+
+async def test_create_refuses_an_id_another_task_already_has(vault):
+    INDEXED_IDS["backup"] = ["mum.md:3"]
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("x", path="n.md", id="backup")
+    assert code(result) == "invalid_argument"
+    assert "mum.md:3" in result.error
+    assert read(vault, "n.md") == "# T\n"
+
+
+async def test_create_refuses_an_id_already_in_the_same_note(vault):
+    note(vault, "n.md", "- [x] old 🆔 a ✅ 2026-10-01\n")
+    result = await tools.create_task_impl("x", path="n.md", id="a")
+    assert code(result) == "invalid_argument"
+    assert "n.md:1" in result.error
+
+
+async def test_create_refuses_a_dependency_no_task_carries(vault):
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("x", path="n.md", depends_on=["nobody"])
+    assert code(result) == "invalid_argument"
+    assert "nobody" in result.error and "edit_task" in result.error
+    assert read(vault, "n.md") == "# T\n"
+
+
+@pytest.mark.parametrize("bad", ["a b", "é", "a,b", "", "🆔"])
+async def test_create_refuses_an_id_outside_the_plugins_characters(vault, bad):
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("x", path="n.md", id=bad)
+    assert code(result) == "invalid_argument"
+
+
+async def test_create_refuses_a_task_depending_on_itself(vault):
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("x", path="n.md", id="x", depends_on=["x"])
+    assert code(result) == "invalid_argument"
+
+
+async def test_edit_sets_an_id(vault):
+    text = "- [ ] back up the mailbox 📅 2026-11-05"
+    result = await edit(vault, text + "\n", 1, text, id="mum-backup")
+    assert result.error is None, result.error
+    assert read(vault, "n.md") == "- [ ] back up the mailbox 🆔 mum-backup 📅 2026-11-05\n"
+
+
+async def test_edit_replaces_dependencies_checking_only_the_new_ones(vault):
+    INDEXED_IDS["a"] = ["o.md:1"]
+    text = "- [ ] b ⛔ gone"
+    await edit(vault, text + "\n", 1, text, depends_on=["gone", "a"])
+    assert read(vault, "n.md") == "- [ ] b ⛔ gone,a\n"
+
+
+async def test_edit_keeping_its_own_id_is_not_a_duplicate(vault):
+    text = "- [ ] a 🆔 a"
+    result = await edit(vault, text + "\n", 1, text, id="a", description="renamed")
+    assert result.error is None, result.error
+    assert read(vault, "n.md") == "- [ ] renamed 🆔 a\n"
+
+
+async def test_edit_clears_id_and_dependencies(vault):
+    text = "- [ ] a 🆔 a ⛔ b 🔼"
+    await edit(vault, text + "\n", 1, text, clear=["id", "depends_on"])
+    assert read(vault, "n.md") == "- [ ] a 🔼\n"
+
+
+async def test_edit_refuses_an_unknown_dependency(vault):
+    text = "- [ ] a"
+    result = await edit(vault, text + "\n", 1, text, depends_on=["missing"])
+    assert code(result) == "invalid_argument"
+    assert read(vault, "n.md") == text + "\n"

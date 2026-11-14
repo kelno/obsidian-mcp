@@ -50,7 +50,7 @@ DAMAGING_WARNINGS = {
 
 STATUS_NAMES = {"todo": "TODO", "done": "DONE", "cancelled": "CANCELLED", "in_progress": "IN_PROGRESS"}
 EDIT_DATE_FIELDS = ("created", "start", "scheduled", "due")
-CLEARABLE = ("priority", "on_completion", *EDIT_DATE_FIELDS)
+CLEARABLE = ("priority", "on_completion", "id", "depends_on", *EDIT_DATE_FIELDS)
 
 
 def owner_today(timezone_name: str, now: datetime | None = None) -> date:
@@ -217,10 +217,35 @@ def _description_arg(value: str) -> str:
     return trimmed
 
 
+def _id_arg(value: str) -> str:
+    if not tf.TASK_ID_RE.match(value) or not value:
+        raise TaskOpError(
+            "invalid_argument",
+            f"a task id is one or more letters, digits, '-' or '_', as the Tasks plugin reads 🆔 (got {value!r})",
+        )
+    return value
+
+
+def _depends_on_arg(values: list[str]) -> tuple[str, ...]:
+    if not values:
+        raise TaskOpError("invalid_argument", "depends_on needs at least one task id; to remove them, use clear")
+    out: list[str] = []
+    for value in values:
+        if _id_arg(value) not in out:
+            out.append(value)
+    return tuple(out)
+
+
 def apply_fields(task: tf.Task, *, today: date, description: str | None = None, priority: str | None = None,
                  on_completion: str | None = None, dates: dict[str, str | None] | None = None,
-                 clear: list[str] | None = None) -> tf.Task:
-    """The dialog's `applyEdits` for the fields the tools expose."""
+                 clear: list[str] | None = None, id: str | None = None,
+                 depends_on: list[str] | None = None) -> tf.Task:
+    """The dialog's `applyEdits` for the fields the tools expose.
+
+    `id` (🆔) and `depends_on` (⛔) are checked for their characters and
+    against each other here; whether other tasks in the vault carry them is
+    `check_task_ids`' question, which needs the index.
+    """
     changes: dict = {}
     if description is not None:
         changes["description"] = description
@@ -228,6 +253,10 @@ def apply_fields(task: tf.Task, *, today: date, description: str | None = None, 
         changes["priority"] = _priority_arg(priority)
     if on_completion is not None:
         changes["on_completion"] = _on_completion_arg(on_completion)
+    if id is not None:
+        changes["id"] = _id_arg(id)
+    if depends_on is not None:
+        changes["depends_on"] = _depends_on_arg(depends_on)
     for name, value in (dates or {}).items():
         if value is not None:
             changes[name] = _date_arg(name, value, today)
@@ -238,13 +267,55 @@ def apply_fields(task: tf.Task, *, today: date, description: str | None = None, 
             raise TaskOpError("invalid_argument", f"clear accepts {', '.join(CLEARABLE)} (got {name!r})")
         if name in changes:
             raise TaskOpError("invalid_argument", f"{name} is both set and cleared")
-        changes[name] = tf.Priority.NONE if name == "priority" else "" if name == "on_completion" else None
+        changes[name] = {"priority": tf.Priority.NONE, "on_completion": "", "id": "", "depends_on": ()}.get(name)
         if name == "scheduled":
             changes["scheduled_inferred"] = False
     updated = replace(task, **changes)
     if "description" in changes:
         updated = replace(updated, tags=tf.extract_hashtags(updated.description))
+    if updated.id and updated.id in updated.depends_on:
+        raise TaskOpError("invalid_argument", f"a task cannot depend on itself (🆔 {updated.id} is in its depends_on)")
     return updated
+
+
+def task_ids_in_note(text: str, path: str, settings: TasksSettings, registry: tf.StatusRegistry,
+                     *, except_line: int | None = None) -> dict[str, list[str]]:
+    """`{id: ["path:line", …]}` for the tasks of one note, as its text reads now."""
+    out: dict[str, list[str]] = {}
+    for scanned in scan_note(text).lines:
+        if scanned.kind != "task" or scanned.line_number == except_line or "🆔" not in scanned.text:
+            continue
+        task = parse_line(scanned.text, path, settings, registry)
+        if task is not None and task.id:
+            out.setdefault(task.id, []).append(f"{path}:{scanned.line_number}")
+    return out
+
+
+def check_task_ids(before: tf.Task | None, after: tf.Task, known: dict[str, list[str]]) -> None:
+    """Refuse an id another task carries, or a new dependency on an id no task carries.
+
+    `known` maps each id to the tasks carrying it in the vault, the task being
+    written left out. The plugin does not check either (ids are "intended to
+    be unique across the whole vault", and an unknown dependency blocks
+    nothing), but each is almost always a typo that would silently not chain
+    the tasks, so the tools refuse rather than write it. A dependency the task
+    already had is kept unchecked.
+    """
+    if after.id and (before is None or after.id != before.id) and after.id in known:
+        where = ", ".join(known[after.id][:5])
+        raise TaskOpError(
+            "invalid_argument",
+            f"another task already has 🆔 {after.id} ({where}); task ids are unique across the vault, so the "
+            "tasks that depend on it would be ambiguous. Choose another id. Nothing was written.",
+        )
+    had = set(before.depends_on) if before is not None else set()
+    missing = [i for i in after.depends_on if i not in had and i not in known]
+    if missing:
+        raise TaskOpError(
+            "invalid_argument",
+            f"no task in the vault has 🆔 {', '.join(missing)}, so depending on it would block nothing. Give "
+            "the task this one waits for an id first (edit_task(…, id=…)), then name it here. Nothing was written.",
+        )
 
 
 def edited_description(task: tf.Task, description: str | None, settings: TasksSettings) -> str | None:
@@ -294,7 +365,8 @@ def _without_global_filter(description: str, gf: str) -> str:
 
 def new_task(*, description: str, settings: TasksSettings, registry: tf.StatusRegistry, today: date,
              area_tags: list[str], status: tf.Status | None, priority: str | None, on_completion: str | None,
-             dates: dict[str, str | None]) -> tf.Task:
+             dates: dict[str, str | None], id: str | None = None,
+             depends_on: list[str] | None = None) -> tf.Task:
     """`createTaskLineModal`: the dialog's new task, as it would be saved."""
     text = _description_arg(description)
     if settings.global_filter:
@@ -308,7 +380,8 @@ def new_task(*, description: str, settings: TasksSettings, registry: tf.StatusRe
     created = tf.TaskDate.of(today) if settings.set_created_date else None
     base = tf.Task(indentation="", list_marker="-", status=todo, description=text, created=created,
                    tags=tf.extract_hashtags(text))
-    task = apply_fields(base, today=today, priority=priority, on_completion=on_completion, dates=dates)
+    task = apply_fields(base, today=today, priority=priority, on_completion=on_completion, dates=dates,
+                        id=id, depends_on=depends_on)
     if status is not None:
         result = tf.apply_status(task, status, today, settings)
         if not result:

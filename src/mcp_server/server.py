@@ -1664,6 +1664,8 @@ async def create_task(
     scheduled: str | None = None,
     due: str | None = None,
     on_completion: str | None = None,
+    id: str | None = None,
+    depends_on: list[str] | None = None,
     expected_hash: str | None = None,
 ) -> TaskWriteResult:
     """Add a task, written exactly as the Tasks plugin's "Create task" dialog writes it.
@@ -1697,13 +1699,18 @@ async def create_task(
             or `yesterday` (the owner's local day).
         on_completion: `keep` or `delete` (🏁: delete removes the line when
             the task is done).
+        id: a name for this task (🆔: letters, digits, `-`, `_`), unique in
+            the vault, such as `mum-backup`, so other tasks can wait for it.
+        depends_on: ids of tasks this one waits for (⛔); the plugin shows it
+            as blocked until they are done. Each must already be on a task:
+            give that task an id first with `edit_task(…, id=…)`.
         expected_hash: optional; the note's `content_hash`, to refuse if it
             changed since you read it.
     """
     return await create_task_impl(
         description, path=path, heading=heading, areas=areas, status=status, priority=priority,
         created=created, start=start, scheduled=scheduled, due=due, on_completion=on_completion,
-        expected_hash=expected_hash,
+        id=id, depends_on=depends_on, expected_hash=expected_hash,
     )
 
 
@@ -1720,6 +1727,8 @@ async def edit_task(
     scheduled: str | None = None,
     due: str | None = None,
     on_completion: str | None = None,
+    id: str | None = None,
+    depends_on: list[str] | None = None,
     clear: list[str] | None = None,
 ) -> TaskWriteResult:
     """Change one task's description or fields, as the Tasks plugin's "Edit task" dialog does.
@@ -1745,13 +1754,16 @@ async def edit_task(
         created / start / scheduled / due: `YYYY-MM-DD`, `today`, `tomorrow`
             or `yesterday`.
         on_completion: `keep`, `delete` or `none`.
-        clear: fields to remove: any of priority, on_completion, created,
-            start, scheduled, due.
+        id: a name for this task (🆔), as in `create_task`.
+        depends_on: the ids it waits for (⛔), replacing any it had; as in
+            `create_task`.
+        clear: fields to remove: any of priority, on_completion, id,
+            depends_on, created, start, scheduled, due.
     """
     return await edit_task_impl(
         path, line, expected_line, expected_hash, description=description, priority=priority,
         created=created, start=start, scheduled=scheduled, due=due, on_completion=on_completion,
-        clear=clear,
+        id=id, depends_on=depends_on, clear=clear,
     )
 
 

@@ -9594,6 +9594,44 @@ async def _area_index(uid: int | None) -> _tq.AreaIndex:
     return _tq.AreaIndex.from_rows([(r.file_path, r.frontmatter) for r in rows])
 
 
+async def _task_ids_in_index(uid: int | None, exclude_path: str) -> dict[str, list[str]]:
+    """`{id: ["path:line", …]}`: the 🆔 of every indexed task of the caller's
+    notes but `exclude_path`, whose current text the caller reads itself."""
+    from sqlalchemy import select
+
+    from src.models.db import ForkNoteTask, NoteMetadata
+
+    task_settings, registry, _today = await _task_context(uid)
+    async with async_session() as session:
+        rows = (await session.execute(
+            select(NoteMetadata.file_path, ForkNoteTask.line_number, ForkNoteTask.line)
+            .join(NoteMetadata, NoteMetadata.id == ForkNoteTask.note_id)
+            .where(_note_owner_predicate(uid), ForkNoteTask.kind == "task",
+                   ForkNoteTask.line.contains("🆔"), NoteMetadata.file_path != exclude_path)
+        )).all()
+    out: dict[str, list[str]] = {}
+    for row in rows:
+        task = _task_ops.parse_line(row.line, row.file_path, task_settings, registry)
+        if task is not None and task.id:
+            out.setdefault(task.id, []).append(f"{row.file_path}:{row.line_number}")
+    return out
+
+
+async def _check_task_ids(uid, before, after, path: str, note_text: str, task_settings, registry,
+                          except_line: int | None) -> None:
+    """`check_task_ids` against the vault: other notes from the index, this
+    note from the text just read. Only when the write names an id or a
+    dependency the task did not have, so other writes never touch the index."""
+    if not ((after.id and (before is None or after.id != before.id))
+            or set(after.depends_on) - set(before.depends_on if before is not None else ())):
+        return
+    known = await _task_ids_in_index(uid, path)
+    for task_id, refs in _task_ops.task_ids_in_note(note_text, path, task_settings, registry,
+                                                    except_line=except_line).items():
+        known.setdefault(task_id, []).extend(refs)
+    _task_ops.check_task_ids(before, after, known)
+
+
 def _task_item(entry: _tq.Entry, content_hash: str, today) -> TaskItem:
     task = entry.task
 
@@ -10294,7 +10332,7 @@ def _task_refused(exc: "_task_ops.TaskOpError") -> TaskWriteResult:
 @_tracked(
     "create_task",
     ["path", "heading", "areas", "status", "priority", "created", "start", "scheduled", "due",
-     "on_completion", "expected_hash"],
+     "on_completion", "id", "depends_on", "expected_hash"],
     refusal_result=_task_write_refusal,
     write_class=True,
 )
@@ -10310,6 +10348,8 @@ async def create_task_impl(
     scheduled: str | None = None,
     due: str | None = None,
     on_completion: str | None = None,
+    id: str | None = None,
+    depends_on: list[str] | None = None,
     expected_hash: str | None = None,
 ) -> TaskWriteResult:
     """Add one task line, as the plugin's `createTaskLineModal()` dialog writes it.
@@ -10339,6 +10379,7 @@ async def create_task_impl(
             description=description, settings=task_settings, registry=registry, today=today,
             area_tags=area_tags, status=new_status, priority=priority, on_completion=on_completion,
             dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
+            id=id, depends_on=depends_on,
         )
     except _task_ops.TaskOpError as exc:
         return _task_refused(exc)
@@ -10362,7 +10403,7 @@ async def create_task_impl(
             if err := _precondition_error("create_task", path, None, expected_hash,
                                           no_incumbent=True, enforceable=False):
                 return _task_failed(TaskWriteResult, err)
-            existing, new_text, number = None, new_line + "\n", 1
+            existing, new_text, number, old_text = None, new_line + "\n", 1, ""
         else:
             err, existing, old_text = await _read_task_note("create_task", target, path, expected_hash)
             if err:
@@ -10372,6 +10413,10 @@ async def create_task_impl(
                 new_text, number = _task_ops.insert_line(old_text, new_line, heading, path)
             except _task_ops.TaskOpError as exc:
                 return _task_refused(exc)
+        try:
+            await _check_task_ids(uid, None, task, target.rel, old_text, task_settings, registry, except_line=None)
+        except _task_ops.TaskOpError as exc:
+            return _task_refused(exc)
         try:
             _task_ops.verify_written(new_text, number, task, path, task_settings, registry, allow_field_text=False)
             if existing is not None:
@@ -10404,7 +10449,7 @@ async def _existing_task(tool, uid, target, path, line, expected_line, expected_
 @_tracked(
     "edit_task",
     ["path", "line", "description", "priority", "created", "start", "scheduled", "due",
-     "on_completion", "clear", "expected_hash"],
+     "on_completion", "id", "depends_on", "clear", "expected_hash"],
     refusal_result=_task_write_refusal,
     write_class=True,
 )
@@ -10420,12 +10465,15 @@ async def edit_task_impl(
     scheduled: str | None = None,
     due: str | None = None,
     on_completion: str | None = None,
+    id: str | None = None,
+    depends_on: list[str] | None = None,
     clear: list[str] | None = None,
 ) -> TaskWriteResult:
     """Change one task's description or fields, as `editTaskLineModal(line)` returns it."""
     if err := _task_write_parameters("edit_task", expected_hash, path):
         return _task_failed(TaskWriteResult, err)
-    if all(v is None for v in (description, priority, created, start, scheduled, due, on_completion)) and not clear:
+    if all(v is None for v in (description, priority, created, start, scheduled, due, on_completion,
+                               id, depends_on)) and not clear:
         return _task_failed(TaskWriteResult, _body_refusal(
             "edit_task was given nothing to change. Nothing was written.", "invalid_argument"))
     uid = current_user_id.get()
@@ -10450,8 +10498,10 @@ async def edit_task_impl(
                 description=_task_ops.edited_description(old, description, task_settings),
                 priority=priority, on_completion=on_completion,
                 dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
-                clear=clear,
+                clear=clear, id=id, depends_on=depends_on,
             )
+            await _check_task_ids(uid, old, updated, target.rel, located.text, task_settings, registry,
+                                  except_line=line)
             new_line = _tf.to_file_line(updated)
             if new_line == expected_line:
                 return TaskWriteResult(

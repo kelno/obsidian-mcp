@@ -135,13 +135,14 @@ Recorded so they are never mistaken for the owner's rules; each can be changed.
 5. **`create_task`'s `expected_hash` is optional**; it only adds a line, and the in-call compare covers its own read-to-write window.
 6. **`edit_task` refuses recurring tasks too**, because the plugin rewrites the rule through its own parser on save (`Recurrence.toText()`), which is not ported.
 7. **`list_tasks` defaults to `status="not_done"`**, shown in `query`; the plugin's own default is no filter.
-8. **Writing 🆔 / ⛔ / 🔁 is not offered** (read only): the plugin's dialog edits other tasks' lines for dependencies, and recurrence is out of scope.
+8. **Writing 🔁 is not offered** (read only): recurrence is out of scope.
 9. **Statuses by name** (`todo`, `done`, `cancelled`, `in_progress`) mean the first registered status of that type; any other is by `symbol`; an unregistered symbol is refused (the plugin would invent an Unknown status).
 10. **A global query is applied only when every line is one the tools implement**; otherwise `list_tasks` refuses.
 11. **A description holding a field emoji is refused** on create (and on edit, unless the line already had one), because the plugin reads it as text, which is almost always an agent mistake.
 12. **Writes refuse what changes another line's reading** (`verify_other_lines`), and an unpaired `%%` in a written line, though the plugin itself would write both.
 13. **`area` overlap is reported, not refused**: `tags include #area/x` also matches `#area/x-y` (the plugin's meaning); `list_tasks` names the overlapping declared tags in `notes`.
 14. **Path sorting approximates JS `localeCompare`** (case-insensitive, numeric runs as numbers) without ICU.
+15. **🆔 and ⛔ are written on the task being written only, and checked against the vault.** `create_task` and `edit_task` take `id` (the plugin's characters, `[a-zA-Z0-9-_]+`) and `depends_on` (ids, written without spaces and once each, as the plugin writes them; on `edit_task` it replaces the list). The plugin's dialog, given a dependency on a task with no id, makes one up and writes it into that other task's line, possibly in another note; the tools never change a second line, so the agent gives that task an id first (`edit_task(…, id=…)`), then names it. Two refusals the plugin does not make, since each is almost always a typo that would leave the tasks unchained: an id another task already carries (ids are "intended to be unique across the whole vault", plugin docs), naming where; and a new dependency on an id no task carries (it would block nothing). A dependency the task already had is kept unchecked. The vault is read from the index for other notes and from the note's own text for the note written, so a task written in another note since the last pass (by hand, or a device's unsynced edit) is not seen (T4); a task can't depend on itself.
 
 ## Declared divergences and accepted limitations
 
