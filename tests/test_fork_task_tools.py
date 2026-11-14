@@ -48,7 +48,7 @@ REINDEXED: list = []
 
 #: Task ids the fake index knows in other notes: `{id: ["path:line", …]}`.
 INDEXED_IDS: dict = {}
-#: Other indexed tasks with dependencies: `("path:line", id or "", (depends_on, …))`.
+#: Other indexed tasks with dependencies: `("path:line", id or "", (depends_on, …)[, done])`.
 INDEXED_DEPS: list = []
 
 AREAS = [
@@ -87,7 +87,8 @@ def vault(tmp_path, monkeypatch):
 
     async def indexed_tasks(uid, exclude_path):
         # The fake index: other notes' tasks with an id or dependencies, `(ref, id, depends_on)`.
-        rows = [(ref, i, ()) for i, refs in INDEXED_IDS.items() for ref in refs] + list(INDEXED_DEPS)
+        rows = [(ref, i, (), False) for i, refs in INDEXED_IDS.items() for ref in refs]
+        rows += [r if len(r) == 4 else (*r, False) for r in INDEXED_DEPS]
         return [r for r in rows if not r[0].startswith(exclude_path + ":")]
 
     monkeypatch.setattr(tools, "_task_ids_in_index", indexed_tasks, raising=False)
@@ -1034,6 +1035,40 @@ async def test_edit_refuses_changing_an_id_a_task_in_the_same_note_waits_for(vau
     result = await edit(vault, text + "\n- [ ] wipe ⛔ mum-backup\n", 1, text, clear=["id"])
     assert code(result) == "invalid_argument"
     assert "n.md:2" in result.error
+
+
+async def test_a_done_task_waiting_for_an_id_does_not_stop_its_rename(vault):
+    # The plugin never blocks a finished task (`Task.isBlocked` is false when done).
+    INDEXED_DEPS.append(("o.md:3", "", ("report",), True))
+    text = "- [ ] report 🆔 report"
+    result = await edit(vault, text + "\n", 1, text, id="report-2026")
+    assert result.error is None, result.error
+    assert read(vault, "n.md") == "- [ ] report 🆔 report-2026\n"
+
+
+async def test_a_done_task_cannot_close_a_cycle(vault):
+    INDEXED_DEPS.append(("o.md:1", "b", ("a",), True))
+    text = "- [ ] a 🆔 a"
+    result = await edit(vault, text + "\n", 1, text, depends_on=["b"])
+    assert result.error is None, result.error
+
+
+async def test_taking_an_id_that_closes_a_cycle_through_a_dangling_dependency_is_refused(vault):
+    # B waits for an id no task had (its task was removed by 🏁 delete); A
+    # already waits for B. Giving A that id would lock both.
+    INDEXED_DEPS.append(("o.md:1", "b", ("a",)))
+    text = "- [ ] x ⛔ b"
+    result = await edit(vault, text + "\n", 1, text, id="a")
+    assert code(result) == "invalid_argument"
+    assert "o.md:1" in result.error
+
+
+async def test_taking_an_id_open_tasks_already_wait_for_says_so(vault):
+    INDEXED_DEPS.append(("o.md:2", "", ("a",)))
+    text = "- [ ] x"
+    result = await edit(vault, text + "\n", 1, text, id="a")
+    assert result.error is None, result.error
+    assert any("o.md:2" in n and "blocked" in n for n in result.notes)
 
 
 async def test_edit_refuses_a_dependency_cycle(vault):

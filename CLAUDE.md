@@ -881,8 +881,10 @@ plugin's settings file in the vault. `list_tasks` answers from `fork_note_tasks`
 (migration 1001, filled by the index pass next to the links) and checks each
 returned line on disk; the writers change one line through the same ladder as
 `edit_note`, read it back first, and re-index that note's task rows at once.
-Recurring tasks are read, never changed. Read
-[task tools](docs/architecture/tasks.md) first.
+Recurring tasks are read, never changed. Dependencies (`🆔` / `⛔`) are written
+on the task being written only, and checked against the vault's other tasks
+(unique ids, no dependency on a missing id, no direct cycle, no silent unblock
+of open tasks). Read [task tools](docs/architecture/tasks.md) first.
 
 **`open_area`** (fork; a tool of the `kelno_vault` plugin, served only with it loaded): the one call an agent makes when it opens an area (by name or by a folder outside the vault, through the list of areas `Areas/Areas.md`): the main note without its Tasks section, related folders, active ledger entries and open tasks, then two instruction lines. Class `scan`. Read [open_area](docs/architecture/open-area.md) first.
 

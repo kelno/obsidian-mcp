@@ -278,8 +278,10 @@ def apply_fields(task: tf.Task, *, today: date, description: str | None = None, 
     return updated
 
 
-#: A task with an id or dependencies, somewhere in the vault: `("path:line", id or "", depends_on)`.
-TaskLink = tuple[str, str, tuple[str, ...]]
+#: A task with an id or dependencies, somewhere in the vault:
+#: `("path:line", id or "", depends_on, done)`, `done` being the plugin's
+#: `isDone` (DONE, CANCELLED or NON_TASK), which never waits for anything.
+TaskLink = tuple[str, str, tuple[str, ...], bool]
 
 
 def task_links_in_note(text: str, path: str, settings: TasksSettings, registry: tf.StatusRegistry,
@@ -293,7 +295,7 @@ def task_links_in_note(text: str, path: str, settings: TasksSettings, registry: 
             continue
         task = parse_line(scanned.text, path, settings, registry)
         if task is not None and (task.id or task.depends_on):
-            out.append((f"{path}:{scanned.line_number}", task.id, task.depends_on))
+            out.append((f"{path}:{scanned.line_number}", task.id, task.depends_on, task.is_done))
     return out
 
 
@@ -301,8 +303,8 @@ def _refs(refs: list[str]) -> str:
     return ", ".join(refs[:5]) + (f" and {len(refs) - 5} more" if len(refs) > 5 else "")
 
 
-def check_task_ids(before: tf.Task | None, after: tf.Task, links: list[TaskLink]) -> None:
-    """Refuse a write that would leave tasks wrongly chained.
+def check_task_ids(before: tf.Task | None, after: tf.Task, links: list[TaskLink]) -> list[str]:
+    """Refuse a write that would leave tasks wrongly chained; the notes to give otherwise.
 
     `links` are the vault's other tasks with an id or dependencies (the task
     being written left out). The plugin checks none of these: ids are
@@ -311,26 +313,34 @@ def check_task_ids(before: tf.Task | None, after: tf.Task, links: list[TaskLink]
     for ever. Each is almost always a mistake that would silently unchain or
     lock the tasks, so the tools refuse rather than write it:
 
-    - a new id another task already has;
-    - a changed or removed id that other tasks wait for (they would be
+    - a new id another task already has (any task, done or not: the plugin
+      blocks on any open task with the id, so a reused one could re-block);
+    - a changed or removed id that open tasks wait for (they would be
       unblocked without anyone asking);
     - a new dependency on an id no task has;
-    - a new dependency on a task that waits for this one (a direct cycle).
+    - a dependency on an open task that waits for this one (a direct cycle),
+      checked for every dependency when the task takes a new id, since open
+      tasks may already name that id.
 
-    A dependency the task already had is kept unchecked.
+    A finished task waits for nothing (`Task.isBlocked` is false when done),
+    so it neither stops a rename nor closes a cycle. A dependency the task
+    already had is otherwise kept unchecked. The one note: open tasks that
+    already named the new id, now blocked by this task.
     """
     carriers: dict[str, list[str]] = {}
-    for ref, task_id, _deps in links:
+    for ref, task_id, _deps, _done in links:
         if task_id:
             carriers.setdefault(task_id, []).append(ref)
-    if after.id and (before is None or after.id != before.id) and after.id in carriers:
+    open_links = [(ref, task_id, deps) for ref, task_id, deps, done in links if not done]
+    new_id = bool(after.id) and (before is None or after.id != before.id)
+    if new_id and after.id in carriers:
         raise TaskOpError(
             "invalid_argument",
             f"another task already has 🆔 {after.id} ({_refs(carriers[after.id])}); task ids are unique across "
             "the vault, so the tasks that depend on it would be ambiguous. Choose another id. Nothing was written.",
         )
     if before is not None and before.id and after.id != before.id:
-        waiting = [ref for ref, _id, deps in links if before.id in deps]
+        waiting = [ref for ref, _id, deps in open_links if before.id in deps]
         if waiting:
             raise TaskOpError(
                 "invalid_argument",
@@ -348,14 +358,22 @@ def check_task_ids(before: tf.Task | None, after: tf.Task, links: list[TaskLink]
             "the task this one waits for an id first (edit_task(…, id=…)), then name it here. A task written to "
             "a new note in the last minutes may not count yet. Nothing was written.",
         )
+    notes: list[str] = []
     if after.id:
-        cycle = [ref for ref, task_id, deps in links if task_id in new and after.id in deps]
+        checked = set(after.depends_on) if new_id else set(new)
+        cycle = [ref for ref, task_id, deps in open_links if task_id in checked and after.id in deps]
         if cycle:
             raise TaskOpError(
                 "invalid_argument",
                 f"the task you would wait for already waits for this one (🆔 {after.id}: {_refs(cycle)}); both "
                 "would stay blocked for ever. Nothing was written.",
             )
+        if new_id:
+            named = [ref for ref, _id, deps in open_links if after.id in deps]
+            if named:
+                notes.append(f"Open tasks already waited for 🆔 {after.id} ({_refs(named)}): they are blocked by "
+                             "this task now, until it is done.")
+    return notes
 
 
 def edited_description(task: tf.Task, description: str | None, settings: TasksSettings) -> str | None:

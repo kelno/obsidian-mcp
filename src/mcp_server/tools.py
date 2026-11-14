@@ -9615,22 +9615,23 @@ async def _task_ids_in_index(uid: int | None, exclude_path: str) -> list:
     for row in rows:
         task = _task_ops.parse_line(row.line, row.file_path, task_settings, registry)
         if task is not None and (task.id or task.depends_on):
-            out.append((f"{row.file_path}:{row.line_number}", task.id, task.depends_on))
+            out.append((f"{row.file_path}:{row.line_number}", task.id, task.depends_on, task.is_done))
     return out
 
 
 async def _check_task_ids(uid, before, after, path: str, note_text: str, task_settings, registry,
-                          except_line: int | None) -> None:
+                          except_line: int | None) -> list[str]:
     """`check_task_ids` against the vault: other notes from the index, this
-    note from the text just read. Only when the write sets, changes or removes
-    an id or adds a dependency, so other writes never touch the index."""
+    note from the text just read; its notes for the result. Only when the
+    write sets, changes or removes an id or adds a dependency, so other
+    writes never touch the index."""
     id_changed = after.id != (before.id if before is not None else "")
     new_deps = set(after.depends_on) - set(before.depends_on if before is not None else ())
     if not (id_changed or new_deps):
-        return
+        return []
     links = await _task_ids_in_index(uid, path)
     links += _task_ops.task_links_in_note(note_text, path, task_settings, registry, except_line=except_line)
-    _task_ops.check_task_ids(before, after, links)
+    return _task_ops.check_task_ids(before, after, links)
 
 
 def _task_item(entry: _tq.Entry, content_hash: str, today) -> TaskItem:
@@ -10415,7 +10416,8 @@ async def create_task_impl(
             except _task_ops.TaskOpError as exc:
                 return _task_refused(exc)
         try:
-            await _check_task_ids(uid, None, task, target.rel, old_text, task_settings, registry, except_line=None)
+            link_notes = await _check_task_ids(uid, None, task, target.rel, old_text, task_settings, registry,
+                                               except_line=None)
         except _task_ops.TaskOpError as exc:
             return _task_refused(exc)
         try:
@@ -10427,9 +10429,9 @@ async def create_task_impl(
         err, new_text, shift = await _publish_task_text(uid, target, path, new_text, existing)
         if err:
             return _task_failed(TaskWriteResult, err)
-        return await _task_written(uid, target, number + shift, None, new_line, new_text, today,
-                                   task_settings=task_settings, registry=registry,
-                                   changed=True, created_note=True if existing is None else None)
+        return _with_notes(await _task_written(uid, target, number + shift, None, new_line, new_text, today,
+                                               task_settings=task_settings, registry=registry, changed=True,
+                                               created_note=True if existing is None else None), link_notes)
 
 
 async def _existing_task(tool, uid, target, path, line, expected_line, expected_hash):
@@ -10501,8 +10503,8 @@ async def edit_task_impl(
                 dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
                 clear=clear, id=id, depends_on=depends_on,
             )
-            await _check_task_ids(uid, old, updated, target.rel, located.text, task_settings, registry,
-                                  except_line=line)
+            link_notes = await _check_task_ids(uid, old, updated, target.rel, located.text, task_settings, registry,
+                                               except_line=line)
             new_line = _tf.to_file_line(updated)
             if new_line == expected_line:
                 return TaskWriteResult(
@@ -10519,8 +10521,16 @@ async def edit_task_impl(
         err, new_text, shift = await _publish_task_text(uid, target, path, new_text, existing)
         if err:
             return _task_failed(TaskWriteResult, err)
-        return await _task_written(uid, target, line + shift, expected_line, new_line, new_text, today,
-                                   task_settings=task_settings, registry=registry, changed=True)
+        return _with_notes(await _task_written(uid, target, line + shift, expected_line, new_line, new_text, today,
+                                               task_settings=task_settings, registry=registry, changed=True),
+                           link_notes)
+
+
+def _with_notes(result: TaskWriteResult, notes: list[str]) -> TaskWriteResult:
+    """`result` with `notes` added after its own."""
+    if notes:
+        result.notes = (result.notes or []) + notes
+    return result
 
 
 @_tracked(
