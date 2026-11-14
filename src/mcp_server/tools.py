@@ -3201,7 +3201,7 @@ async def get_recent_impl(
 
 @_tracked(
     "semantic_search",
-    ["query", "limit", "folder", "tags", "frontmatter", "rerank"],
+    ["query", "limit", "folder", "tags", "frontmatter", "include_private", "rerank"],
     arg_char_caps={"query": MAX_SEARCH_QUERY_CHARS},
 )
 async def semantic_search_impl(
@@ -3338,11 +3338,15 @@ async def _semantic_search_reranked(query, limit, folder, tags, frontmatter, uid
         ]
     page = [candidates[i] for i in outcome.order][:limit]
     scores = [outcome.scores[i] for i in outcome.order][:limit] if outcome.reranked else None
-    rendered, paths = render_semantic_rerank_results(query, page, outcome, scores=scores,
-                                                     pending=pending, confidence=confidence)
+    # The private-folder line (P98) is reserved in the response budget, as
+    # on hybrid's page (`_hybrid_response`).
+    hidden = _private_hidden_suffix(counts)
+    rendered, paths = render_semantic_rerank_results(
+        query, page, outcome, scores=scores, pending=pending, confidence=confidence,
+        budget=settings.max_read_response_chars - len(hidden))
     _record_rerank(outcome)
     timing.record_results(paths)
-    return rendered + _private_hidden_suffix(counts)
+    return rendered + hidden
 
 
 def _record_confidence(confidence: str, top_similarity: float | None) -> None:

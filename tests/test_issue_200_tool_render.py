@@ -347,6 +347,8 @@ async def test_semantic_search_adds_no_usage_params_key(monkeypatch, captured):
         "rerank",
         # #389: the confidence evidence, on every page whatever the threshold.
         "confidence", "top_similarity",
+        # Fork (P98): the logged argument, as on the other searches.
+        "include_private",
     }
 
 
