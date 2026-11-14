@@ -40,6 +40,15 @@ snippet statements. A database error in either arm propagates: the arms share
 one transaction, so there is no partial result, and there is no semantic-only
 mode.
 
+**Private folders (fork, P98).** With `hide_private` and private folders
+configured, both arms leave notes under a private folder out inside their own
+statements (so each still fills its 50), and two more statements run in the
+same snapshot: the keyword arm restricted to private notes, right after step
+4, and the semantic arm's private-only scan, inside step 5. From the public
+and the private lists the service rebuilds the two arms an unfiltered call
+would have fused, fuses them, and counts the private notes ranked ahead of the
+furthest note on the page (`count_private_hidden`).
+
 The service records the timing keys but **not** `record_results`: the tool
 records the paths it actually rendered (D7), which the response bound can make
 a prefix of this page.
@@ -54,7 +63,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import text
 
 from src.config import settings
-from src.services import embeddings, refusals, search, timing
+from src.services import embeddings, private_folders, refusals, search, timing
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +153,10 @@ class HybridResult:
     #: response cap (#389, D1). `None` when the arm returned no note or did
     #: not run. One input of the `confidence` token, with `keyword_all`.
     top_similarity: float | None = None
+    #: Fork (P98): how many private notes the page would have held
+    #: (`count_private_hidden`, over the first `limit` rows before any
+    #: rerank); `None` when private notes were not left out.
+    private_hidden: int | None = None
 
 
 async def _fill_excerpts(session, page: list[HybridRow], *, user_id: int | None) -> None:
@@ -191,6 +204,48 @@ def fuse(
     return [t[:4] for t in out]
 
 
+def _unfiltered_keyword_paths(public: list[dict], private: list[dict], depth: int) -> list[str]:
+    """The keyword arm an unfiltered call would have returned, from the public
+    and the private-only arms (P98): every `all` row before every `any` row,
+    each block by rank DESC then path, cut to `depth` — the statements' own
+    order. Exact: each list was fetched to `depth` within its block, and an
+    `any` row's rank is against the same fallback query in both. Only a tie
+    between a public and a private note may order differently, since Python
+    compares paths by code point and the database by its collation."""
+    def block(match: str) -> list[dict]:
+        rows = [r for r in (*public, *private) if r["match"] == match]
+        return sorted(rows, key=lambda r: (-r["rank"], r["path"]))
+
+    return [r["path"] for r in (*block("all"), *block("any"))][:depth]
+
+
+def _unfiltered_semantic_paths(public: list[tuple], private: list[tuple], depth: int) -> list[str]:
+    """The semantic arm an unfiltered call would have returned, from the
+    public and private-only scans' `(distance, path, chunk_index)` keys (P98):
+    the `depth` nearest chunks of the two, deduped per note in that order.
+    Approximate as the arm itself is: each scan's window was picked by the
+    half-precision index and holds `depth` chunks of its own side."""
+    window = sorted((*public, *private))[:depth]
+    return list(dict.fromkeys(path for _, path, _ in window))
+
+
+def count_private_hidden(page: list[str], keyword: list[str], semantic: list[str],
+                         private: set[str], *, k: int, limit: int) -> int:
+    """How many private notes the page would have held (fork, P98), as the
+    other searches count them: fused unfiltered (`keyword` and `semantic`,
+    both arms rebuilt with the private notes in), each private note ranked
+    ahead of the furthest note of `page` in that order, or every one when
+    `page` did not fill `limit`; at most `limit`. A page note the unfiltered
+    arms no longer reach ranks after all of them."""
+    order = [path for path, *_ in fuse(keyword, semantic, k)]
+    hidden = [i for i, path in enumerate(order) if path in private]
+    if len(page) >= limit:
+        position = {path: i for i, path in enumerate(order)}
+        last = max(position.get(path, len(order)) for path in page)
+        hidden = [i for i in hidden if i < last]
+    return min(len(hidden), limit)
+
+
 async def hybrid_search(
     session,
     query: str,
@@ -202,13 +257,19 @@ async def hybrid_search(
     user_id: int | None = None,
     rrf_k: int | None = None,
     rerank_candidates: bool = False,
+    hide_private: bool = False,
 ) -> HybridResult:
     """Both arms in one read-only repeatable-read snapshot, fused (D1–D4).
 
     With `rerank_candidates` (#367, D6) the page is the first
     `RERANK_MAX_CANDIDATES` fused rows (never fewer than `limit`), each with
     its `rerank_text`; the caller reranks and truncates. Without it, nothing
-    here changes."""
+    here changes.
+
+    `hide_private` (with private folders configured, fork, P98) leaves notes
+    under a private folder out of both arms, inside their statements, and
+    sets `private_hidden` to how many the first `limit` rows would have held.
+    Off, or without private folders, the statements are upstream's."""
     limit = max(1, min(limit, HYBRID_MAX_LIMIT))
     depth = limit
     if rerank_candidates:
@@ -217,6 +278,7 @@ async def hybrid_search(
         depth = max(limit, RERANK_MAX_CANDIDATES)
     k = int(rrf_k) if rrf_k is not None else settings.hybrid_rrf_k
     filters = dict(folder=folder, tags=tags, frontmatter=frontmatter, user_id=user_id)
+    hiding = hide_private and private_folders.enabled()
 
     # ── 1. The embedding, before any statement (D2, D4) ─────────────────────
     query_embedding = None
@@ -252,7 +314,16 @@ async def hybrid_search(
 
     # ── 4. The keyword arm (the snapshot is taken here) ─────────────────────
     k_arm = await search.keyword_arm_rows(
-        session, query, limit=HYBRID_ARM_DEPTH, with_excerpt_flag=True, **filters
+        session, query, limit=HYBRID_ARM_DEPTH, with_excerpt_flag=True,
+        **filters, **({"private": "exclude"} if hiding else {}),
+    )
+    # The private notes the keyword arm would have held (P98): the same arm
+    # over private notes only, before the semantic arm and its exact plan.
+    k_private = (
+        await search.keyword_arm_rows(
+            session, query, limit=HYBRID_ARM_DEPTH, private="only", **filters
+        )
+        if hiding else None
     )
 
     if _between_arms_hook is not None:
@@ -262,10 +333,12 @@ async def hybrid_search(
     s_rows: list[dict] = []
     s_chunks = 0
     exact_fallback = False
+    s_arm = None
     if unavailable is None:
         s_arm = await embeddings.semantic_arm_rows(
             session, query_embedding, overfetch=HYBRID_ARM_DEPTH,
-            with_rerank_text=rerank_candidates, **filters
+            with_rerank_text=rerank_candidates, **filters,
+            **({"hide_private": True, "count_private": True} if hiding else {}),
         )
         s_rows, s_chunks, exact_fallback = (
             s_arm.rows, s_arm.chunk_rows, s_arm.exact_fallback
@@ -327,6 +400,21 @@ async def hybrid_search(
         await _fill_excerpts(session, page, user_id=user_id)
     timing.add_ms("db_ms", time.monotonic() - db_start)
 
+    private_hidden = None
+    if hiding:
+        # The page as the other searches count it: the first `limit` rows,
+        # before any rerank reorders the candidates (P98).
+        private_keys = s_arm.private_chunk_keys if s_arm is not None else []
+        private_hidden = count_private_hidden(
+            [path for path, *_ in fused[:limit]],
+            _unfiltered_keyword_paths(k_arm.rows, k_private.rows, HYBRID_ARM_DEPTH),
+            _unfiltered_semantic_paths(
+                s_arm.chunk_keys if s_arm is not None else [], private_keys, HYBRID_ARM_DEPTH
+            ),
+            {r["path"] for r in k_private.rows} | {path for _, path, _ in private_keys},
+            k=k, limit=limit,
+        )
+
     overlap = len(k_by_path.keys() & s_by_path.keys())
     keyword_any = sum(1 for r in k_arm.rows if r["match"] == "any")
     result = HybridResult(
@@ -343,6 +431,7 @@ async def hybrid_search(
         snippet_cap=cap,
         rechunk_pending=rechunk_pending,
         top_similarity=max((r["similarity"] for r in s_rows), default=None),
+        private_hidden=private_hidden,
     )
 
     # ── Telemetry (D7); `result_count` / `result_paths` are the tool's ──────

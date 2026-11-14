@@ -1,11 +1,13 @@
-"""Private folders on the three searches, against a real database (fork, P98).
+"""Private folders on the searches, against a real database (fork, P98).
 
 Off by default `include_private` leaves notes under a private folder out
 inside the query, so the limit still fills, and the result ends with how many
 would have been listed ("2 matches in private folders not shown."); with it,
 they come back like any other. Each count is checked against the unfiltered
 run of the same search: the private notes ranked ahead of the last result
-shown, or every one when the results do not fill the limit.
+shown, or every one when the results do not fill the limit. `hybrid_search`
+does the same in both of its arms while it is switched off (the suite runs
+it switched on).
 
 Skipped unless `PGVECTOR_TEST_ADMIN_URL` is set — see `_harness.py`.
 """
@@ -20,9 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 import src.mcp_server.tools as tools
 from src.config import settings
 from src.models.db import NoteEmbedding, NoteMetadata
-from src.services import private_folders
+from src.services import hybrid, private_folders
 from src.services.embeddings import semantic_search
 from src.services.fts import index_tsvector_sql
+from src.services.hybrid import fuse
 from src.services.search import full_text_search
 
 import _harness
@@ -165,6 +168,74 @@ async def test_semantic_count_matches_the_unfiltered_order(wired, limit):
         shown = await semantic_search(session, "q", limit=limit, hide_private=True, counts=counts)
     assert [r["path"] for r in shown] == [p for p in unfiltered if p not in PRIVATE][:limit]
     assert counts["private_hidden"] == _expected_hidden(unfiltered, limit)
+
+
+# ── hybrid_search ────────────────────────────────────────────────────────────
+
+
+async def test_hybrid_search_leaves_private_notes_out_and_counts_them(wired):
+    out = await tools.hybrid_search_impl("apple")
+    assert "Diary" not in out and "People" not in out and "secret" not in out
+    assert '"Notes/a.md"' in out and '"Notes/Plans (private).md"' in out
+    assert out.endswith("\n\n2 matches in private folders not shown.")
+    opened = await tools.hybrid_search_impl("apple", include_private=True)
+    for path in PRIVATE:
+        assert f'"{path}"' in opened
+    assert "not shown" not in opened
+
+
+async def test_hybrid_search_with_only_private_matches(wired):
+    out = await tools.hybrid_search_impl("apple", folder="Diary (private)/")
+    assert out.startswith('No hybrid results for "apple"')
+    assert out.endswith("\n\n1 match in private folders not shown.")
+
+
+async def test_hybrid_search_reranked_ends_with_the_count_too(wired):
+    out = await tools.hybrid_search_impl("apple", rerank=True)
+    assert "reranked: false (not_configured)" in out.splitlines()[0]
+    assert "Diary" not in out and "People" not in out
+    assert out.endswith("\n\n2 matches in private folders not shown.")
+
+
+def _expected_hybrid_hidden(unfiltered: list[str], shown: list[str], limit: int) -> int:
+    """From the unfiltered fused order: private notes ahead of the furthest one shown."""
+    if len(shown) < limit:
+        return min(sum(1 for p in unfiltered if p in PRIVATE), limit)
+    last = max(unfiltered.index(p) for p in shown)
+    return min(sum(1 for p in unfiltered[:last] if p in PRIVATE), limit)
+
+
+@pytest.mark.parametrize("query", ["apple", "banana"])
+@pytest.mark.parametrize("limit", [1, 2, 3, 4])
+async def test_hybrid_count_matches_the_unfiltered_fusion(wired, query, limit):
+    async with wired() as session:
+        unfiltered = [r.path for r in (await hybrid.hybrid_search(session, query, limit=50)).rows]
+    async with wired() as session:
+        result = await hybrid.hybrid_search(session, query, limit=limit, hide_private=True)
+    shown = [r.path for r in result.rows]
+    # Each arm left them out inside its own query: the page is the fusion of
+    # the two filtered rankings, filled to the limit.
+    async with wired() as session:
+        keyword = [r["path"] for r in await full_text_search(session, query, limit=50, hide_private=True)]
+    async with wired() as session:
+        semantic = [r["path"] for r in await semantic_search(session, query, limit=50, hide_private=True)]
+    assert shown == [p for p, *_ in fuse(keyword, semantic, settings.hybrid_rrf_k)][:limit]
+    assert not set(shown) & PRIVATE
+    assert result.private_hidden == _expected_hybrid_hidden(unfiltered, shown, limit)
+
+
+async def test_hybrid_search_without_hiding_is_unchanged(wired):
+    async with wired() as session:
+        result = await hybrid.hybrid_search(session, "apple", limit=50)
+    assert PRIVATE <= {r.path for r in result.rows} and result.private_hidden is None
+
+
+async def test_hybrid_search_without_the_setting_is_unchanged(wired, monkeypatch):
+    monkeypatch.setattr(settings, "private_folder_names", [])
+    out = await tools.hybrid_search_impl("apple")
+    for path in PRIVATE:
+        assert f'"{path}"' in out
+    assert "not shown" not in out
 
 
 # ── find_related ─────────────────────────────────────────────────────────────

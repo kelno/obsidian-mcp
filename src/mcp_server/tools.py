@@ -4044,7 +4044,7 @@ def _render_semantic_rerank_page(
 
 @_tracked(
     "hybrid_search",
-    ["query", "limit", "folder", "tags", "frontmatter", "rerank"],
+    ["query", "limit", "folder", "tags", "frontmatter", "include_private", "rerank"],
     arg_char_caps={"query": MAX_SEARCH_QUERY_CHARS},
 )
 async def hybrid_search_impl(
@@ -4053,6 +4053,7 @@ async def hybrid_search_impl(
     folder: str | None = None,
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
+    include_private: bool = False,
     rerank: bool = False,
 ) -> str:
     """Reciprocal rank fusion of the keyword and semantic arms (#354).
@@ -4061,11 +4062,14 @@ async def hybrid_search_impl(
     arm alone, marked `arms: keyword-only (semantic unavailable: <code>)` on
     every return path and in the usage row, which carries no error marker
     (D4). `result_count` / `result_paths` are the rows actually rendered.
+    Without `include_private`, notes in private folders are left out of both
+    arms and counted on the last line (fork, P98).
     """
     limit = _clamp_limit(limit, hybrid_service.HYBRID_MAX_LIMIT)
     uid = current_user_id.get()
     if rerank:
-        return await _hybrid_search_reranked(query, limit, folder, tags, frontmatter, uid)
+        return await _hybrid_search_reranked(query, limit, folder, tags, frontmatter, uid,
+                                             include_private=include_private)
     async with async_session() as session:
         result = await hybrid_service.hybrid_search(
             session,
@@ -4075,14 +4079,29 @@ async def hybrid_search_impl(
             tags=tags,
             frontmatter=frontmatter,
             user_id=uid,
+            hide_private=not include_private,
         )
     _record_confidence(hybrid_confidence(result), result.top_similarity)
-    rendered, paths = render_hybrid_results(query, result)
+    rendered, paths = _hybrid_response(query, result)
     timing.record_results(paths)
     return rendered
 
 
-async def _hybrid_search_reranked(query, limit, folder, tags, frontmatter, uid) -> str:
+def _hybrid_response(query: str, result, **render_kw) -> tuple[str, list[str]]:
+    """The rendered page and its paths, ending with the private-folder line
+    when the service left private notes out (P98). The line is reserved in
+    the response budget like the page's own footers; only at a cap too small
+    for a worst-case first row can it carry the page past the cap."""
+    suffix = _private_hidden_suffix({"private_hidden": result.private_hidden or 0})
+    if not suffix:
+        return render_hybrid_results(query, result, **render_kw)
+    rendered, paths = render_hybrid_results(
+        query, result, budget=settings.max_read_response_chars - len(suffix), **render_kw)
+    return rendered + suffix, paths
+
+
+async def _hybrid_search_reranked(query, limit, folder, tags, frontmatter, uid, *,
+                                  include_private: bool = False) -> str:
     """`hybrid_search(rerank=true)` (#367, D6, D9): the first 50 fused rows
     and their candidate text in the hybrid snapshot; the session is **closed**
     before the rerank exchange, so no pooled connection is held during it."""
@@ -4096,6 +4115,7 @@ async def _hybrid_search_reranked(query, limit, folder, tags, frontmatter, uid) 
             frontmatter=frontmatter,
             user_id=uid,
             rerank_candidates=True,
+            hide_private=not include_private,
         )
     candidates = result.rows
     _record_confidence(hybrid_confidence(result), result.top_similarity)
@@ -4119,8 +4139,7 @@ async def _hybrid_search_reranked(query, limit, folder, tags, frontmatter, uid) 
         {candidates[i].path: outcome.scores[i] for i in range(len(candidates))}
         if outcome.reranked else None
     )
-    rendered, paths = render_hybrid_results(query, result, rerank=outcome,
-                                            rerank_scores=scores)
+    rendered, paths = _hybrid_response(query, result, rerank=outcome, rerank_scores=scores)
     _record_rerank(outcome)
     timing.record_results(paths)
     return rendered

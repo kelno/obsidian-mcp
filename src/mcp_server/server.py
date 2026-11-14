@@ -220,7 +220,8 @@ SERVER_INSTRUCTIONS = (
 # names its own task tools; switching one of those on (`SWITCHED_OFF`, end of
 # this file) brings its mention back here, in `keyword_search`'s and
 # `semantic_search`'s routing lines, and in `get_recent`'s pointer to
-# `get_changes`.
+# `get_changes`; `hybrid_search` also joins the searches the vault guide's
+# private-folders section names (`tools._private_folders_guide`).
 
 
 class _ScopedFastMCP(FastMCP):
@@ -2553,6 +2554,7 @@ async def hybrid_search(
     folder: str | None = None,
     tags: list[str] | None = None,
     frontmatter: dict | None = None,
+    include_private: Annotated[bool, _D_PRIVATE_SEARCH] = False,
     rerank: bool = False,
 ) -> str:
     """Keyword and semantic search fused into one ranking, for a query that is not clearly an identifier or a paraphrase.
@@ -2620,6 +2622,7 @@ async def hybrid_search(
     """
     return await hybrid_search_impl(
         query, limit=limit, folder=folder, tags=tags, frontmatter=frontmatter,
+        include_private=include_private,
         rerank=rerank,
     )
 

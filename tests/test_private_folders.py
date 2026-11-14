@@ -7,7 +7,9 @@ deployment's default) nothing is private and no tool shows the argument:
 `_drop_include_private` in `src/mcp_server/server.py` removes it, through the
 same SDK internals `_forbid_unknown_arguments` uses, so this module pins them
 too. The searches themselves run against a real database in
-`tests/integration/test_private_folders_pg.py`.
+`tests/integration/test_private_folders_pg.py`. `hybrid_search` filters and
+counts the same way while it is switched off (`server.SWITCHED_OFF`), so it
+is ready when the owner switches it on.
 """
 
 import os
@@ -28,12 +30,15 @@ from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 
 from src.config import Settings, settings  # noqa: E402
 from src.mcp_server import server, tools  # noqa: E402
-from src.services import private_folders  # noqa: E402
+from src.services import hybrid, private_folders  # noqa: E402
+from src.services.hybrid import HybridResult, HybridRow  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: Every tool that takes `include_private` when private folders are configured.
+#: Every served tool that takes `include_private` when private folders are configured.
 PRIVATE_TOOLS = {"keyword_search", "semantic_search", "find_related", "list_tasks", "ledger_get", "ledger_update"}
+#: Switched-off upstream tools that take it too, once switched on.
+SWITCHED_OFF_PRIVATE_TOOLS = {"hybrid_search"}
 
 
 @pytest.fixture
@@ -120,6 +125,65 @@ def test_related_hidden_count_counts_only_what_would_have_been_listed():
     assert tools._related_hidden_count([], {7: 0.1, 8: 0.2}, limit=1) == 1                # at most limit
 
 
+# ── hybrid_search's count: the private notes the unfiltered fusion ranks ahead ─
+
+
+def _kw(path, rank, match="all"):
+    return {"path": path, "rank": rank, "match": match}
+
+
+def test_the_unfiltered_keyword_arm_is_both_blocks_merged_then_cut_to_depth():
+    public = [_kw("p1", 0.5), _kw("p2", 0.1), _kw("p3", 0.9, "any")]
+    private = [_kw("s1", 0.3), _kw("s2", 0.1), _kw("s3", 0.95, "any")]
+    # `all` before `any` whatever the ranks; rank, then path within a block.
+    assert hybrid._unfiltered_keyword_paths(public, private, 50) == ["p1", "s1", "p2", "s2", "s3", "p3"]
+    assert hybrid._unfiltered_keyword_paths(public, private, 3) == ["p1", "s1", "p2"]
+    assert hybrid._unfiltered_keyword_paths(public, [], 50) == ["p1", "p2", "p3"]
+
+
+def test_the_unfiltered_semantic_arm_is_the_chunk_window_deduped_per_note():
+    public = [(0.1, "a", 0), (0.3, "a", 1), (0.4, "b", 0)]
+    private = [(0.2, "s", 0), (0.25, "s", 1), (0.35, "t", 0)]
+    assert hybrid._unfiltered_semantic_paths(public, private, 50) == ["a", "s", "t", "b"]
+    # Four chunks: a, s, s, a. `t` and `b` are past the window.
+    assert hybrid._unfiltered_semantic_paths(public, private, 4) == ["a", "s"]
+
+
+def test_the_hybrid_count_is_the_private_notes_ranked_ahead_of_the_last_shown():
+    # Unfiltered: s1 is in both arms (2/61), p1 and p2 one each (1/62): s1, p1, p2.
+    keyword, semantic, private = ["s1", "p1"], ["s1", "p2"], {"s1"}
+    count = hybrid.count_private_hidden
+    assert count(["p1"], keyword, semantic, private, k=60, limit=1) == 1
+    assert count(["p1", "p2"], keyword, semantic, private, k=60, limit=2) == 1
+    assert count(["p1", "p2"], keyword, semantic, private, k=60, limit=5) == 1     # not full: every one
+    # Nothing private ahead of the last shown.
+    assert count(["p1"], ["p1", "s9"], [], {"s9"}, k=60, limit=1) == 0
+    # The furthest shown row counts, in the unfiltered order, not the page's own.
+    assert count(["p2", "p1"], ["p1", "s1", "p2"], [], {"s1"}, k=60, limit=2) == 1
+    # A shown row past both unfiltered arms: every private note was ahead of it, at most limit.
+    assert count(["x"], ["s1", "s2"], ["s3"], {"s1", "s2", "s3"}, k=60, limit=1) == 1
+    assert count(["x", "y"], ["s1", "s2"], ["s3"], {"s1", "s2", "s3"}, k=60, limit=2) == 2
+    assert count([], [], [], set(), k=60, limit=10) == 0
+
+
+def test_the_hybrid_page_keeps_the_private_line_inside_the_response_cap(monkeypatch):
+    rows = [HybridRow(path=f"{i:02d}-" + "p" * 80 + ".md", title="t" * 80, tags=[], score=1 / 61,
+                      keyword_rank=1, match="all") for i in range(50)]
+
+    def result(hidden):
+        return HybridResult(rows=list(rows), rrf_k=60, keyword_rows=50, keyword_all=50, semantic_rows=0,
+                            semantic_chunks=0, snippet_cap=20, private_hidden=hidden)
+
+    monkeypatch.setattr(settings, "max_read_response_chars", 1500, raising=False)
+    text, paths = tools._hybrid_response("q", result(2))
+    assert len(text) <= 1500
+    assert text.endswith("\n\n2 matches in private folders not shown.")
+    assert paths and paths == [r.path for r in rows[: len(paths)]]
+    # Without hidden notes (none, or no count at all) the page is the renderer's own.
+    for hidden in (0, None):
+        assert tools._hybrid_response("q", result(hidden)) == tools.render_hybrid_results("q", result(hidden))
+
+
 # ── the argument is there only with the setting ──────────────────────────────
 
 
@@ -131,7 +195,7 @@ def test_no_tool_shows_include_private_by_default():
         assert "include_private" not in (tool.description or ""), tool.name
 
 
-@pytest.mark.parametrize("name", sorted(PRIVATE_TOOLS))
+@pytest.mark.parametrize("name", sorted(PRIVATE_TOOLS | SWITCHED_OFF_PRIVATE_TOOLS))
 async def test_passing_it_anyway_is_refused_by_default(name):
     tool = server.mcp._tool_manager.get_tool(name)
     with pytest.raises(ToolError) as exc:
@@ -163,18 +227,28 @@ async def test_dropping_keeps_the_other_arguments_working():
 _ENABLED_SCRIPT = textwrap.dedent(
     """
     import json
-    from src.mcp_server.server import mcp
-    out = {}
-    for tool in mcp._tool_manager.list_tools():
-        prop = tool.parameters.get("properties", {}).get("include_private")
-        if prop is not None:
-            out[tool.name] = {"prop": prop, "field": "include_private" in tool.fn_metadata.arg_model.model_fields}
-    print("SCHEMAS=" + json.dumps(out))
+    from src.mcp_server import server, tools
+
+    def schemas():
+        out = {}
+        for tool in server.mcp._tool_manager.list_tools():
+            prop = tool.parameters.get("properties", {}).get("include_private")
+            if prop is not None:
+                out[tool.name] = {"prop": prop, "field": "include_private" in tool.fn_metadata.arg_model.model_fields}
+        return out
+
+    served = schemas()
+    server.switch_on()
+    print("SCHEMAS=" + json.dumps({"served": served, "switched_on": schemas(),
+                                   "guide": tools._private_folders_guide()}))
     """
 )
 
 
-def test_with_the_setting_the_six_tools_take_it(tmp_path):
+def _enabled_schemas(tmp_path) -> dict:
+    """What a server started with `PRIVATE_FOLDER_NAMES` shows: the served
+    tools' schemas, the same with every switched-off tool back on, and the
+    guide's section."""
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": str(tmp_path),
@@ -189,17 +263,35 @@ def test_with_the_setting_the_six_tools_take_it(tmp_path):
                             capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     import json
-    schemas = json.loads(result.stdout.split("SCHEMAS=", 1)[1])
-    assert set(schemas) == PRIVATE_TOOLS
-    for name, got in schemas.items():
+    return json.loads(result.stdout.split("SCHEMAS=", 1)[1])
+
+
+@pytest.fixture(scope="module")
+def enabled(tmp_path_factory):
+    return _enabled_schemas(tmp_path_factory.mktemp("enabled"))
+
+
+def test_with_the_setting_the_six_served_tools_take_it(enabled):
+    assert set(enabled["served"]) == PRIVATE_TOOLS
+    # Switched on, hybrid_search takes it too: its filter is ready.
+    assert set(enabled["switched_on"]) == PRIVATE_TOOLS | SWITCHED_OFF_PRIVATE_TOOLS
+    for name, got in enabled["switched_on"].items():
         prop = got["prop"]
         assert got["field"] and prop["type"] == "boolean" and prop["default"] is False, name
         description = prop["description"]
         # Says which folders, when to set it, and (searches) the line it replaces.
         assert "`* (private)`" in description, name
         assert "only when the owner asked for something in a private folder" in description, name
-        if name in ("keyword_search", "semantic_search", "find_related"):
+        if name in ("keyword_search", "semantic_search", "hybrid_search", "find_related"):
             assert "2 matches in private folders not shown." in description
+
+
+def test_the_guide_names_exactly_the_served_tools_that_take_it(enabled):
+    # Switching hybrid_search on without naming it in the guide's section
+    # (or naming it while it is off) fails here.
+    import re
+    named = set(re.findall(r"`([a-z_]+)`", enabled["guide"]))
+    assert named & set(enabled["switched_on"]) == set(enabled["served"])
 
 
 # ── the guide ────────────────────────────────────────────────────────────────
