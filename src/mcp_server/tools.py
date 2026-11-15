@@ -10966,20 +10966,27 @@ async def ledger_add_impl(
 _LEDGER_CASE_NUDGE_CHANGES = ("outcome", "status", "rule")
 
 
-async def _ledger_case_notes(uid, entry_id: int, similar: list[dict] | None = None) -> list[str]:
+async def _ledger_case_notes(uid, entry_id: int, similar: list[dict] | None = None, *,
+                             superseded: bool = False) -> list[str]:
     """What a case just written points to (`ledger.case_notes`): a rule that may not be holding, a
-    repeated slip with no rule. The write has happened: a failure here is a note."""
+    repeated slip with no rule; with `superseded`, the current cases a proposal just superseded
+    leaves behind (`ledger.superseded_rule_note`). The write has happened: a failure here is a note."""
     from src.models.db import LedgerEntry
 
     try:
         async with async_session() as session:
             entry = await session.get(LedgerEntry, entry_id)
-            return await _ledger.case_notes(session, uid, entry, similar) if entry is not None else []
+            if entry is None:
+                return []
+            if superseded:
+                note = await _ledger.superseded_rule_note(session, entry)
+                return [note] if note else []
+            return await _ledger.case_notes(session, uid, entry, similar)
     except Exception as exc:  # noqa: BLE001 — the write stands; the note says the check failed
         # debug, not warning: a caller drives this path (the D18 permit rule); the note tells the caller.
         logger.debug("ledger write: the case's rules could not be checked", exc_info=True)
-        return [f"The case was written, but its rules' other cases could not be checked ({type(exc).__name__}): "
-                "ledger_get its rules to see them."]
+        return [f"The change was written, but the rule cases around it could not be checked ({type(exc).__name__}): "
+                "ledger_get the proposals involved to see them."]
 
 
 @_tracked(
@@ -11066,6 +11073,9 @@ async def ledger_update_impl(
         notes.append(f"Does the title still hold? It reads: \"{entry.title}\". If not, change it (title=…).")
     if entry.kind == "case" and any(c.split(" ", 1)[0] in _LEDGER_CASE_NUDGE_CHANGES for c in changed):
         notes.extend(await _ledger_case_notes(uid, entry.id))
+    if entry.kind == "proposal" and entry.status == "superseded" and (
+            "status" in changed or "superseded_by" in changed):
+        notes.extend(await _ledger_case_notes(uid, entry.id, superseded=True))
     return LedgerWriteResult(ref=entry.ref, revision=entry.revision, status=entry.status,
                              changed=changed or None, flagged_lines=_ledger_flagged(updated.flagged),
                              notes=notes or None, cites=cites, cited_by=dependants)
@@ -11118,8 +11128,8 @@ NOTE_REFS_MAX = 30
 
 
 #: After `changed_lines_cite`, when a listed proposal has current cases.
-NOTE_CASES_LINE = ("Read those cases (ledger_get) before rewording or cutting these lines: a change that would turn "
-                   "a case's expected behaviour around goes to the owner.")
+NOTE_CASES_LINE = ("Read those cases now (ledger_get): if your change turns a case's expected behaviour around, "
+                   "put the line back and take the change to the owner.")
 
 
 def _ledger_state_line(state: dict) -> str:
@@ -11137,7 +11147,7 @@ def _ledger_state_line(state: dict) -> str:
     if cases:
         counts = ", ".join(f"{n} {outcome}" for outcome, n in cases["outcomes"].items())
         more = cases["total"] - len(cases["refs"])
-        line += (f" — cases: {cases['total']} ({counts}): {', '.join(cases['refs'])}"
+        line += (f" — current cases: {cases['total']} ({counts}): {', '.join(cases['refs'])}"
                  + (f", +{more}" if more > 0 else ""))
     return line
 

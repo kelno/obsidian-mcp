@@ -1962,10 +1962,12 @@ _LEDGER_FIELD_HELP = {
     "outcome": "slip (the agent broke the rule), good (it did what the rule wants: behaviour to keep) or "
                "overdone (it followed the rule too far: the opposite failure)",
     "expected": "what should have happened",
-    "expected_by": "whose call that is: owner (the owner's own) or agent (an agent's reading of the rule)",
+    "expected_by": "whose call that is: owner when the owner said or confirmed what was expected, agent when "
+                   "it is your own reading of the rule",
     "owner_words": "the owner's words, verbatim, in the language spoken (the request, the reaction, or both); "
-                   "never paraphrased or translated. Leave it out if the owner said nothing, and leave out "
-                   "anything that looks private unless the owner asks for it",
+                   "never paraphrased, translated, trimmed or redacted: verbatim or left out. Leave it out if "
+                   "the owner said nothing. A case that looks private is not logged at all unless the owner asks "
+                   "for it",
     "agent_did": "what the agent did or said; verbatim when the slip is in the wording itself",
 }
 
@@ -2012,9 +2014,9 @@ _D_KIND = Field(description="quirk: how something behaves, observed by you or re
                             "surface, a limit, what works included); feedback: something that got in the way of "
                             "your work, or a wish for a change; proposal: a change to an agent instruction and its "
                             "outcome; case: a real situation where an agent's behaviour was right or wrong against "
-                            "a rule, the test battery for rewording rules (tie it to its rules with rules). The "
-                            "same thing seen again: append to the existing entry (ledger_update) rather than add "
-                            "one.",
+                            "a rule, the test battery for rewording rules (tie it to its rules with rules), logged "
+                            "even though the owner saw it. The same thing seen again: append to the existing entry "
+                            "(ledger_update) rather than add one; except a case: each occurrence is its own case.",
                 json_schema_extra={"enum": list(_ledger_rules.db.LEDGER_KINDS)})
 _D_TITLE = Field(description=f"One line, at most {_ledger_rules.TITLE_MAX} characters; the detail goes in body.",
                  json_schema_extra={"maxLength": _ledger_rules.TITLE_MAX})
@@ -2048,7 +2050,11 @@ _D_CHALLENGES = Field(description="Summary-view line ids (ledger_digest with_ids
                                   "get flagged for review.")
 _D_RULES = Field(description="A case only: the rules it tests, by the proposal ref each rule carries (e.g. "
                              "[\"P41\"]; the rule's line ends with [P41]). Each must be an existing proposal. "
-                             "Leave it out when no rule covers the case yet.",
+                             "When the rule carries no proposal ref yet, first log a proposal for it as it "
+                             "stands (status accepted, proposed_text and final_text its current wording, the body "
+                             "saying it was logged afterwards and its origin is unknown), add that ref at the end "
+                             "of the rule's line, then tie the case to it. Leave rules out only when no rule "
+                             "covers the case yet.",
                  json_schema_extra={"maxItems": _ledger_rules.LIST_ARG_MAX})
 
 
@@ -2078,10 +2084,12 @@ async def ledger_add(
     the entry an area and its topics. A refusal names every problem at once
     (`problems`), with the valid values. The answer gives the new ref and up
     to five similar entries, with their topics: if one holds the same thing,
-    mark the newer one superseded by the older (`ledger_update`). Refs your
-    text cites (`[Q14]`, or a bare Q14) come back as they stand now
-    (`cites`): check your wording matches them. A case's body places a fresh
-    reader back in the situation; the notes say when its rule gathers slips.
+    mark the newer one superseded by the older (`ledger_update`); a case is
+    the exception, each occurrence stays its own case. Refs your text cites
+    (`[Q14]`, or a bare Q14) come back as they stand now (`cites`): check
+    your wording matches them. A case's body places a fresh reader back in
+    the situation. For a case, the notes flag a rule that now has two or
+    more slip cases, and a slip with no rule that repeats an earlier one.
     """
     return await ledger_add_impl(
         kind, title, body=body, area=area, topics=topics, details=details, related=related, origin=origin,
@@ -2100,7 +2108,9 @@ _D_APPEND = Field(description="Add an observation as a paragraph, without rewrit
 _D_STATUS_UPD = Field(description="Close or reopen: handled (feedback dealt with; with handled_account), "
                                   "superseded (with superseded_by), retracted (should never have been logged), stale "
                                   "(a quirk no longer true, e.g. fixed upstream: say since when with append), retired "
-                                  "(a case whose expected behaviour the owner changed; kept), or the kind's open "
+                                  "(a case whose expected behaviour the owner changed, on the owner's word: log the "
+                                  "new expectation as a new case; to fix a case's wording or facts, just update it), "
+                                  "or the kind's open "
                                   "statuses (current, open, to_triage). dismissed is the owner's call only. Combines "
                                   "with append, seen and other changes in one call.")
 _D_AREA_UPD = Field(description="An area name (as in ledger_add), or \"\" to clear it.")

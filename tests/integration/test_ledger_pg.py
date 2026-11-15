@@ -1546,7 +1546,7 @@ async def test_a_note_edit_shows_the_cases_of_the_rules_it_rewords(sessionmaker,
     dry = await tools.edit_note_impl(
         RULES, "- A rule lives in a note. [P54]", find="- A rule kept only in memory gets forgotten. [P54, P80]",
         dry_run=True)
-    assert '"Put agent rules where agents look" — cases: 2 (1 slip, 1 good): C1, C2' in dry
+    assert '"Put agent rules where agents look" — current cases: 2 (1 slip, 1 good): C1, C2' in dry
     assert tools.NOTE_CASES_LINE in dry
     p80_line = next(line for line in dry.splitlines() if line.startswith("- P80 "))
     assert "cases" not in p80_line
@@ -1599,3 +1599,33 @@ async def test_cases_and_their_rules_import_and_export(sessionmaker, ctx, monkey
     with pytest.raises(ledger_import.ImportError_, match="only a case has rules"):
         await ledger_import.run(argparse.Namespace(file=str(path), user=None, single_user=True, dry_run=True,
                                                    skip_area_check=True))
+
+
+async def test_changing_rules_names_every_problem_and_refuses_a_ref_in_both_lists(ctx):
+    await add_proposal("Rule one")
+    await add_proposal("Rule two")
+    c = await add_case("A case", rules=["P1"])
+    bad = await tools.ledger_update_impl(ref=c.ref, expected_revision=1, reason="r",
+                                         rules_add=["P2", "X1"], rules_remove=["Q", "P2", "P9"])
+    assert bad.problems, bad.error
+    messages = " ".join(p["message"] for p in bad.problems)
+    assert "'X1' is not a ledger ref" in messages and "'Q' is not a ledger ref" in messages
+    assert "P2 is named in both rules_add and rules_remove" in messages
+    assert "is not tied to P2, P9" in messages
+    assert (await tools.ledger_get_impl([c.ref])).entries[0].revision == 1
+
+
+async def test_superseding_a_proposal_with_cases_says_where_they_are(ctx):
+    await add_proposal("Old wording of the rule")
+    await add_proposal("New wording of the rule")
+    await add_case("A case", rules=["P1"])
+    await add_case("A good case", rules=["P1"], outcome="good")
+    moved = await tools.ledger_update_impl(ref="P1", expected_revision=1, reason="reworded", status="superseded",
+                                           superseded_by="P2")
+    assert moved.error is None, moved.error
+    assert ("P1 has 2 current cases (C1, C2): tie them to P2 too (ledger_update rules_add on each) if they test "
+            "the same rule.") in moved.notes
+    assert [r["ref"] for r in (await tools.ledger_get_impl(["C1"])).entries[0].rules] == ["P1"]
+    plain = await tools.ledger_update_impl(ref="P2", expected_revision=1, reason="r", status="superseded",
+                                           superseded_by="P1")
+    assert code(plain) == "invalid_argument"  # P1 is closed: a superseded target is refused, as before

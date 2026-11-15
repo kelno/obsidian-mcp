@@ -364,8 +364,14 @@ def test_a_proposals_cases_follow_it_in_a_note_writers_result():
     line = tools._ledger_state_line({
         "ref": "P41", "kind": "proposal", "status": "adjusted", "title": "Answer first", "updated": "2026-11-09",
         "cases": {"total": 12, "outcomes": {"slip": 2, "good": 10}, "refs": [f"C{i}" for i in range(1, 11)]}})
-    assert line == ('- P41 (proposal, adjusted, updated 2026-11-09): "Answer first" — cases: 12 (2 slip, 10 good): '
+    assert line == ('- P41 (proposal, adjusted, updated 2026-11-09): "Answer first" — current cases: 12 (2 slip, 10 good): '
                     "C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, +2")
     assert tools._ledger_state_line({"ref": "C3", "kind": "case", "status": "current", "outcome": "slip",
                                      "title": "t"}) == '- C3 (case, current, slip): "t"'
 
+
+
+def test_case_refs_in_a_note_are_capped():
+    refs = [f"C{i}" for i in range(1, 14)]
+    assert ledger._capped_refs(refs) == ", ".join(f"C{i}" for i in range(1, 11)) + ", +3"
+    assert ledger._capped_refs(["C01", "C2"]) == "C1, C2"

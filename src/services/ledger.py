@@ -47,6 +47,7 @@ from src.models.db import (
     NoteMetadata,
 )
 from src.services.fork_tasks import ops as task_ops, query as task_query
+from src.services.ledger_tasks import CASE_REFS_SHOWN
 
 # ── Limits ───────────────────────────────────────────────────────────────────
 
@@ -1113,7 +1114,7 @@ async def case_notes(session: AsyncSession, uid: int | None, entry: LedgerEntry,
             refs = slips[rule["id"]]
             if len(refs) >= SLIP_CASES_NUDGE:
                 notes.append(
-                    f"{_canonical(rule['ref'])} now has {len(refs)} slip cases ({', '.join(map(_canonical, refs))}): "
+                    f"{_canonical(rule['ref'])} now has {len(refs)} slip cases ({_capped_refs(refs)}): "
                     "the rule may not be holding; look at how it reaches agents (where it lives, a tool at the "
                     "moment of choice, its wording) before rewording it.")
         return notes
@@ -1140,6 +1141,29 @@ async def case_notes(session: AsyncSession, uid: int | None, entry: LedgerEntry,
 def _canonical(ref: str) -> str:
     """`P41` for a stored ref such as `P041` (imported refs keep their zeros)."""
     return f"{ref[0].upper()}{int(ref[1:])}"
+
+
+def _capped_refs(refs: list[str]) -> str:
+    """The first `CASE_REFS_SHOWN` refs, then `+N` for the rest."""
+    shown = ", ".join(map(_canonical, refs[:CASE_REFS_SHOWN]))
+    return shown + (f", +{len(refs) - CASE_REFS_SHOWN}" if len(refs) > CASE_REFS_SHOWN else "")
+
+
+async def superseded_rule_note(session: AsyncSession, entry: LedgerEntry) -> str | None:
+    """For a proposal just superseded: its current cases stay on it, where agents no longer look.
+
+    A note naming them and the proposal that holds the rule now, so the agent
+    can tie the ones that test the same rule to it. Nothing is moved.
+    """
+    if entry.kind != "proposal" or entry.status != "superseded" or entry.superseded_by is None:
+        return None
+    cases = [c["ref"] for c in (await rule_cases(session, [entry.id]))[entry.id] if c["status"] == "current"]
+    if not cases:
+        return None
+    target = (await superseding_refs(session, [entry.superseded_by])).get(entry.superseded_by, "?")
+    return (f"{_canonical(entry.ref)} has {len(cases)} current case{'s' if len(cases) != 1 else ''} "
+            f"({_capped_refs(cases)}): tie them to {_canonical(target)} too (ledger_update rules_add on each) if "
+            "they test the same rule.")
 
 
 # ── Update ───────────────────────────────────────────────────────────────────
@@ -1377,33 +1401,49 @@ async def _update_entry(
 
 async def _change_rules(session, uid, entry: LedgerEntry, before: dict[int, str], add: list[str],
                         remove: list[str], changed: list[str]) -> None:
-    """Tie a case to more rules or fewer; each change goes in `changed` (`rule +P41`, `rule -P41`)."""
+    """Tie a case to more rules or fewer; each change goes in `changed` (`rule +P41`, `rule -P41`).
+
+    Every problem in either list is collected (`Problems`) before anything is
+    written: a malformed ref, a rule the case is not tied to, a ref named in
+    both lists.
+    """
     problems = Problems()
+
+    def parsed(raws: list[str], field_name: str) -> dict[tuple[str, int], str]:
+        out = {}
+        for raw in raws:
+            with problems.check(field_name):
+                out[parse_ref(raw)] = raw.strip()
+        return out
+
+    adding, removing = parsed(add, "rules_add"), parsed(remove, "rules_remove")
+    both = [removing[key] for key in removing if key in adding]
+    if both:
+        problems.add("rules_remove", invalid(
+            f"{', '.join(both)} {'is' if len(both) == 1 else 'are'} named in both rules_add and rules_remove: "
+            "say which you mean."))
+    numbers = {parse_ref(ref)[1] for ref in before.values()}
+    not_on = [raw for (kind, number), raw in removing.items() if kind != "proposal" or number not in numbers]
+    if not_on:
+        problems.add("rules_remove", invalid(
+            f"{entry.ref} is not tied to {', '.join(not_on)} (its rules: "
+            f"{', '.join(sorted(before.values(), key=_ref_sort_key)) or 'none'})."))
+    rules: dict[int, str] = {}
     with problems.check("rules_add"):
-        for rule_id, ref in (await resolve_rules(session, uid, add)).items():
-            if rule_id in before:
-                continue
-            await session.execute(pg_insert(LedgerCaseRule).values(
-                user_id=entry.user_id, case_id=entry.id, rule_id=rule_id).on_conflict_do_nothing())
-            changed.append(f"rule +{ref}")
-    with problems.check("rules_remove"):
-        numbers = {number: ref for ref in before.values() for _kind, number in [parse_ref(ref)]}
-        wanted, not_on = [], []
-        for raw in remove:
-            kind, number = parse_ref(raw)
-            if kind != "proposal" or number not in numbers:
-                not_on.append(raw.strip())
-            else:
-                wanted.append(number)
-        if not_on:
-            raise invalid(f"{entry.ref} is not tied to {', '.join(not_on)} (its rules: "
-                          f"{', '.join(sorted(before.values(), key=_ref_sort_key)) or 'none'}).")
-        ids = [rule_id for rule_id, ref in before.items() if parse_ref(ref)[1] in wanted]
-        if ids:
-            await session.execute(delete(LedgerCaseRule).where(
-                LedgerCaseRule.case_id == entry.id, LedgerCaseRule.rule_id.in_(ids)))
-            changed.extend(f"rule -{before[i]}" for i in sorted(ids, key=lambda i: _ref_sort_key(before[i])))
+        rules = await resolve_rules(session, uid, [raw for raw in adding.values()])
     problems.raise_if_any()
+    for rule_id, ref in rules.items():
+        if rule_id in before:
+            continue
+        await session.execute(pg_insert(LedgerCaseRule).values(
+            user_id=entry.user_id, case_id=entry.id, rule_id=rule_id).on_conflict_do_nothing())
+        changed.append(f"rule +{ref}")
+    wanted = {number for kind, number in removing}
+    ids = [rule_id for rule_id, ref in before.items() if parse_ref(ref)[1] in wanted]
+    if ids:
+        await session.execute(delete(LedgerCaseRule).where(
+            LedgerCaseRule.case_id == entry.id, LedgerCaseRule.rule_id.in_(ids)))
+        changed.extend(f"rule -{before[i]}" for i in sorted(ids, key=lambda i: _ref_sort_key(before[i])))
 
 
 async def _apply_status(session, uid, entry: LedgerEntry, status: str, superseded_by, handled_account,
