@@ -1966,8 +1966,8 @@ _LEDGER_FIELD_HELP = {
                    "it is your own reading of the rule",
     "owner_words": "the owner's words, verbatim, in the language spoken (the request, the reaction, or both); "
                    "never paraphrased, translated, trimmed or redacted: verbatim or left out. Leave it out if "
-                   "the owner said nothing. A case that looks private is not logged at all unless the owner asks "
-                   "for it",
+                   "the owner said nothing. A case that looks private is not logged, and not brought up, unless the "
+                   "owner asks for it",
     "agent_did": "what the agent did or said; verbatim when the slip is in the wording itself",
 }
 
@@ -2038,9 +2038,10 @@ _D_RELATED = Field(description='Refs of related entries ("see also"), e.g. ["Q14
 _D_ORIGIN = Field(description="Who asked for the entry: agent (default: you decided to log it), or owner when the "
                               "owner asked for it to be logged. Any kind.",
                   json_schema_extra={"enum": list(_ledger_rules.db.LEDGER_ORIGINS)})
-_D_STATUS_ADD = Field(description="Leave it out for a quirk or feedback (set for you). A proposal needs its "
-                                  "outcome: accepted (went in as proposed), adjusted (went in reworded or changed: "
-                                  "final_text holds what went in), rejected or withdrawn. A quirk may start stale.")
+_D_STATUS_ADD = Field(description="Leave it out for a quirk, feedback or a case (set for you; a new case starts "
+                                  "current). A proposal needs its outcome: accepted (went in as proposed), adjusted "
+                                  "(went in reworded or changed: final_text holds what went in), rejected or "
+                                  "withdrawn. A quirk may start stale.")
 _D_OBSERVED = Field(description="When it happened, YYYY-MM-DD (default today).")
 _D_SEEN_ADD = Field(description="Feedback only: true if you already talked it through with the owner. Always "
                                 "true with origin owner.")
@@ -2051,7 +2052,8 @@ _D_CHALLENGES = Field(description="Summary-view line ids (ledger_digest with_ids
 _D_RULES = Field(description="A case only: the rules it tests, by the proposal ref each rule carries (e.g. "
                              "[\"P41\"]; the rule's line ends with [P41]). Each must be an existing proposal. "
                              "When the rule carries no proposal ref yet, first log a proposal for it as it "
-                             "stands (status accepted, proposed_text and final_text its current wording, the body "
+                             "stands (status accepted: the rule is in force; proposed_text and final_text its "
+                             "current wording; the body "
                              "saying it was logged afterwards and its origin is unknown), add that ref at the end "
                              "of the rule's line, then tie the case to it. Leave rules out only when no rule "
                              "covers the case yet.",
@@ -2088,8 +2090,9 @@ async def ledger_add(
     the exception, each occurrence stays its own case. Refs your text cites
     (`[Q14]`, or a bare Q14) come back as they stand now (`cites`): check
     your wording matches them. A case's body places a fresh reader back in
-    the situation. For a case, the notes flag a rule that now has two or
-    more slip cases, and a slip with no rule that repeats an earlier one.
+    the situation. For a case, the result's notes flag a rule that now has
+    two or more slip cases, and a slip with no rule that repeats an earlier
+    one.
     """
     return await ledger_add_impl(
         kind, title, body=body, area=area, topics=topics, details=details, related=related, origin=origin,
@@ -2108,7 +2111,7 @@ _D_APPEND = Field(description="Add an observation as a paragraph, without rewrit
 _D_STATUS_UPD = Field(description="Close or reopen: handled (feedback dealt with; with handled_account), "
                                   "superseded (with superseded_by), retracted (should never have been logged), stale "
                                   "(a quirk no longer true, e.g. fixed upstream: say since when with append), retired "
-                                  "(a case whose expected behaviour the owner changed, on the owner's word: log the "
+                                  "(a case whose expected behaviour the owner changed, on the owner's word; log the "
                                   "new expectation as a new case; to fix a case's wording or facts, just update it), "
                                   "or the kind's open "
                                   "statuses (current, open, to_triage). dismissed is the owner's call only. Combines "
