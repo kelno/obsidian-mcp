@@ -1922,8 +1922,11 @@ async def ledger_get(
     for feedback, the work decided; for a quirk or proposal, an open task
     means something is pending on it. A case lists the rules it tests
     (`rules`), a proposal the cases tied to its rule (`cases`): read them
-    before rewording or cutting the rule. `history=true` adds every past
-    version, with who changed it, when and why.
+    before rewording or cutting the rule. Each says `when`: `before` (on or
+    before the proposal's `observed_on`, the day the rule was adopted: an
+    example of why it exists) or `since` (the rule was in force: only these
+    speak to its wording or how it reaches agents). `history=true` adds
+    every past version, with who changed it, when and why.
 
     Args:
         refs: entry refs.
@@ -2089,9 +2092,10 @@ async def ledger_add(
     the exception, each occurrence stays its own case. Refs your text cites
     (`[Q14]`, or a bare Q14) come back as they stand now (`cites`): check
     your wording matches them. A case's body places a fresh reader back in
-    the situation. For a case, the result's notes flag a rule that now has
-    two or more slip cases, and a slip with no rule that repeats an earlier
-    one.
+    the situation. For a case, the result's notes flag a rule with two or
+    more slip cases since it was adopted (dated after its proposal's
+    `observed_on`; earlier ones are examples of why it exists), and a slip
+    with no rule that repeats an earlier one.
     """
     return await ledger_add_impl(
         kind, title, body=body, area=area, topics=topics, details=details, related=related, origin=origin,

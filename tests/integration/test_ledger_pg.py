@@ -1433,17 +1433,23 @@ CASE = {"outcome": "slip", "expected": "Answer the literal question first, then 
         "expected_by": "owner"}
 
 
+#: The day `add_proposal` adopts its rule unless told otherwise: before any case logged today, so the
+#: cases these tests add are "since" the rule (owner's decision, 2026-11-15).
+RULE_DAY = "2026-01-01"
+
+
 async def add_proposal(title, **kw):
     kw.setdefault("status", "adjusted")
+    kw.setdefault("observed_on", RULE_DAY)
     kw.setdefault("details", {"target": "Common-rules", "proposed_text": "x", "final_text": "y"})
     result = await tools.ledger_add_impl("proposal", title, **kw)
     assert result.error is None, result.error
     return result
 
 
-async def add_case(title, rules=None, **details):
+async def add_case(title, rules=None, observed_on=None, **details):
     result = await tools.ledger_add_impl("case", title, details={**CASE, **details}, rules=rules,
-                                         body="The owner asked how the bridge works.")
+                                         body="The owner asked how the bridge works.", observed_on=observed_on)
     assert result.error is None, result.error
     return result
 
@@ -1456,7 +1462,8 @@ async def test_a_case_is_tied_to_its_rules_and_each_side_shows_the_other(ctx):
     good = await add_case("Explained first, then offered the change", rules=["p001"], outcome="good")
     case, proposal = (await tools.ledger_get_impl(["C1", p1.ref])).entries
     assert case.details["owner_words"] == "je demandais juste comment ça marche"
-    assert case.rules == [{"ref": "P1", "title": "Answer the literal question first", "status": "adjusted"}]
+    assert case.rules == [{"ref": "P1", "title": "Answer the literal question first", "status": "adjusted",
+                           "when": "since"}]
     assert [(c["ref"], c["outcome"]) for c in proposal.cases] == [("C1", "slip"), (good.ref, "good")]
     listed = await tools.ledger_search_impl(rule="P1")
     assert [(e.ref, e.outcome) for e in listed.entries] == [("C2", "good"), ("C1", "slip")]
@@ -1527,9 +1534,10 @@ async def test_a_rule_gathering_slips_and_a_repeated_slip_with_no_rule_are_point
     first = await add_case("Answered with a fix", rules=["P1"])
     assert not any("slip cases" in n for n in first.notes or ())
     second = await add_case("Answered with a fix again", rules=["P1"])
-    assert any(n.startswith("P1 now has 2 slip cases (C1, C2): the rule may not be holding") for n in second.notes)
+    assert any(n.startswith("P1 has 2 slip cases since it was adopted (C1, C2): the rule may not be holding")
+               for n in second.notes), second.notes
     good = await add_case("Answered the question first", rules=["P1"], outcome="good")
-    assert any("P1 now has 2 slip cases" in n for n in good.notes)
+    assert any("P1 has 2 slip cases since it was adopted" in n for n in good.notes)
 
     lone = await add_case("Wrote the ledger entry in French")
     assert not any("no rule" in n for n in lone.notes or ())
@@ -1537,7 +1545,7 @@ async def test_a_rule_gathering_slips_and_a_repeated_slip_with_no_rule_are_point
     assert any(n == f"{repeat.ref} looks like another slip with no rule ({lone.ref}): a repeat; worth proposing a "
                "rule to the owner." for n in repeat.notes), repeat.notes
     tied = await tools.ledger_update_impl(ref=lone.ref, expected_revision=1, reason="covered now", rules_add=["P1"])
-    assert any("P1 now has 3 slip cases" in n for n in tied.notes)
+    assert any("P1 has 3 slip cases since it was adopted" in n for n in tied.notes)
 
 
 async def test_a_note_edit_shows_the_cases_of_the_rules_it_rewords(sessionmaker, ctx):
@@ -1547,7 +1555,8 @@ async def test_a_note_edit_shows_the_cases_of_the_rules_it_rewords(sessionmaker,
     dry = await tools.edit_note_impl(
         RULES, "- A rule lives in a note. [P54]", find="- A rule kept only in memory gets forgotten. [P54, P80]",
         dry_run=True)
-    assert '"Put agent rules where agents look" — current cases: 2 (1 slip, 1 good): C1, C2' in dry
+    # P54 and its cases were logged the same day: before the rule (only dates are kept).
+    assert '"Put agent rules where agents look" — current cases: 2; before it: 2 (C1, C2); since: none' in dry
     assert tools.NOTE_CASES_LINE in dry
     p80_line = next(line for line in dry.splitlines() if line.startswith("- P80 "))
     assert "cases" not in p80_line
@@ -1563,9 +1572,61 @@ async def test_a_task_citing_a_proposal_shows_its_cases_and_a_case_can_be_cited(
     created = await tools.create_task_impl("Reword the rule [P1, C1]", path="cases.md")
     assert created.error is None, created.error
     by_ref = {r["ref"]: r for r in created.ledger_refs}
-    assert by_ref["P1"]["cases"] == {"total": 1, "outcomes": {"slip": 1}, "refs": ["C1"]}
+    assert by_ref["P1"]["cases"] == {
+        "total": 1, "outcomes": {"slip": 1}, "refs": ["C1"],
+        "before": {"total": 0, "outcomes": {}, "refs": []},
+        "since": {"total": 1, "outcomes": {"slip": 1}, "refs": ["C1"]}}
     assert by_ref["C1"]["kind"] == "case" and by_ref["C1"]["outcome"] == "slip"
     assert (await tools.ledger_get_impl(["C1"])).entries[0].tasks
+
+
+# ── Before or since the rule (owner's decision, 2026-11-15) ──────────────────
+
+async def test_slips_from_before_the_rule_never_say_it_may_not_be_holding(ctx):
+    await add_proposal("Answer the literal question first", observed_on="2026-06-01")
+    await add_case("Answered with a fix, before the rule", rules=["P1"], observed_on="2026-05-01")
+    same_day = await add_case("Answered with a fix the day it was adopted", rules=["P1"], observed_on="2026-06-01")
+    assert not any("slip cases" in n for n in same_day.notes or ()), same_day.notes
+    first_since = await add_case("Answered with a fix under the rule", rules=["P1"], observed_on="2026-06-02")
+    assert not any("slip cases" in n for n in first_since.notes or ()), first_since.notes
+    second_since = await add_case("Answered with a fix again", rules=["P1"])
+    assert any(n.startswith("P1 has 2 slip cases since it was adopted (C3, C4): the rule may not be holding")
+               for n in second_since.notes), second_since.notes
+    cases = (await tools.ledger_get_impl(["P1"])).entries[0].cases
+    assert [(c["ref"], c["when"]) for c in cases] == [("C1", "before"), ("C2", "before"), ("C3", "since"),
+                                                     ("C4", "since")]
+
+
+async def test_moving_a_case_after_the_rule_by_its_day_brings_the_note(ctx):
+    await add_proposal("Answer the literal question first", observed_on="2026-06-01")
+    await add_case("A slip under the rule", rules=["P1"], observed_on="2026-07-01")
+    early = await add_case("A slip dated before the rule by mistake", rules=["P1"], observed_on="2026-05-01")
+    assert not any("slip cases" in n for n in early.notes or ())
+    fixed = await tools.ledger_update_impl(ref=early.ref, expected_revision=1, reason="the date was wrong",
+                                           observed_on="2026-07-02")
+    assert fixed.error is None, fixed.error
+    assert any("P1 has 2 slip cases since it was adopted (C1, C2)" in n for n in fixed.notes or ()), fixed.notes
+
+
+async def test_a_reworded_rule_reads_a_case_as_since_the_old_proposal_and_before_the_new(ctx):
+    await add_proposal("Old wording of the rule", observed_on="2026-01-01")
+    await add_proposal("New wording of the rule", observed_on="2026-06-01")
+    await add_case("A slip under the old wording", rules=["P1", "P2"], observed_on="2026-03-01")
+    await add_case("A slip under the new wording", rules=["P1", "P2"], observed_on="2026-07-01")
+    await add_case("Kept to the new wording", rules=["P2"], observed_on="2026-07-02", outcome="good")
+    case = (await tools.ledger_get_impl(["C1"])).entries[0]
+    assert [(r["ref"], r["when"]) for r in case.rules] == [("P1", "since"), ("P2", "before")]
+    second = (await tools.ledger_get_impl(["C2"])).entries[0]
+    assert [(r["ref"], r["when"]) for r in second.rules] == [("P1", "since"), ("P2", "since")]
+    _old, new = (await tools.ledger_get_impl(["P1", "P2"])).entries
+    assert [(c["ref"], c["when"]) for c in new.cases] == [("C1", "before"), ("C2", "since"), ("C3", "since")]
+
+    (ctx / "rules.md").write_text("- The rule. [P1, P2]\n", encoding="utf-8")
+    dry = await tools.edit_note_impl("rules.md", "- The rule, reworded. [P2]", find="- The rule. [P1, P2]",
+                                     dry_run=True)
+    lines = {line.split(" ", 2)[1]: line for line in dry.splitlines() if line.startswith("- P")}
+    assert lines["P1"].endswith("— current cases: 2; before it: none; since: 2 slip (C1, C2)"), lines["P1"]
+    assert lines["P2"].endswith("— current cases: 3; before it: 1 (C1); since: 1 slip, 1 good (C2, C3)"), lines["P2"]
 
 
 async def test_cases_and_their_rules_import_and_export(sessionmaker, ctx, monkeypatch, tmp_path):

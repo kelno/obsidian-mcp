@@ -283,6 +283,7 @@ The `ledger_*` tools keep what agents write for each other, in the server's data
   - Quoting: a case is never logged with the owner's words trimmed or redacted: `owner_words` is verbatim or left out.
   - Repeats and retiring: each occurrence is its own case, never an `append` to an earlier one; the repeat is what the counts and the result's notes show. Fix a case's wording or facts with `ledger_update`; when the owner's expectation itself changes, set the old case to `retired` (on the owner's word) and log a new one.
   - When to read them: before rewording, cutting or cold-reading a rule. `ledger_get` on its proposal lists its cases, and the note writers show them beside the proposal refs on the lines you change.
+  - Before or since: a case dated on or before its proposal's `observed_on` (the day the rule was adopted; the same day counts as before) is an example of why the rule exists; one dated after it happened while the rule was in force, and only those speak to the rule's wording or how it reaches agents, so the "may not be holding" warning counts only slips since.
 - Before saying what you can or can't do on a surface, check the summary views: `ledger_digest()` lists them, each with when to read it.
 - Summary views (`ledger_digest`) are short pages to read instead of many entries. When your change flags a line that cites the entry, fix it or confirm it holds right away (`ledger_digest_edit`). When the tools say a view is due, extend or create one and tell the owner.
 

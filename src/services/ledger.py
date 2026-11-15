@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import and_, case, delete, func, insert, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from src.auth.session import current_actor
 from src.config import settings
@@ -47,7 +48,7 @@ from src.models.db import (
     NoteMetadata,
 )
 from src.services.fork_tasks import ops as task_ops, query as task_query
-from src.services.ledger_tasks import CASE_REFS_SHOWN
+from src.services.ledger_tasks import CASE_REFS_SHOWN, case_when
 
 # ── Limits ───────────────────────────────────────────────────────────────────
 
@@ -104,7 +105,7 @@ ADD_STATUSES = {
 }
 #: A proposal's cases `ledger_get` lists; past it, `cases_total` says how many.
 GET_CASES_MAX = 50
-#: Current slip cases on one rule from which a write says the rule may not be holding.
+#: Current slip cases since a rule was adopted from which a write says the rule may not be holding.
 SLIP_CASES_NUDGE = 2
 
 _REF = re.compile(r"\s*([QqFfPpCc])0*([0-9]{1,6})\s*\Z")
@@ -538,35 +539,47 @@ def _ref_sort_key(ref: str):
 
 
 async def case_rules(session: AsyncSession, case_ids: list[int]) -> dict[int, list[dict]]:
-    """The rules (proposals) each case is tied to: `{case id: [{id, ref, title, status}]}`, by number."""
+    """The rules (proposals) each case is tied to: `{case id: [{id, ref, title, status, when}]}`, by number.
+
+    `when` is `before` or `since` the proposal's `observed_on` (`case_when`).
+    """
     out: dict[int, list[dict]] = {i: [] for i in case_ids}
     if not case_ids:
         return out
+    case_ = aliased(LedgerEntry)
     rows = (await session.execute(
-        select(LedgerCaseRule.case_id, LedgerEntry.id, LedgerEntry.ref, LedgerEntry.title, LedgerEntry.status)
+        select(LedgerCaseRule.case_id, LedgerEntry.id, LedgerEntry.ref, LedgerEntry.title, LedgerEntry.status,
+               LedgerEntry.observed_on, case_.observed_on.label("case_day"))
         .join(LedgerEntry, LedgerEntry.id == LedgerCaseRule.rule_id)
+        .join(case_, case_.id == LedgerCaseRule.case_id)
         .where(LedgerCaseRule.case_id.in_(case_ids))
         .order_by(LedgerEntry.number)
     )).all()
     for r in rows:
-        out[r.case_id].append({"id": r.id, "ref": r.ref, "title": r.title, "status": r.status})
+        out[r.case_id].append({"id": r.id, "ref": r.ref, "title": r.title, "status": r.status,
+                               "when": case_when(r.case_day, r.observed_on)})
     return out
 
 
 async def rule_cases(session: AsyncSession, rule_ids: list[int]) -> dict[int, list[dict]]:
-    """The cases tied to each rule (proposal): `{rule id: [{ref, title, outcome, status}]}`,
-    current ones first, then by number."""
+    """The cases tied to each rule (proposal): `{rule id: [{ref, title, outcome, status, when}]}`,
+    current ones first, then by number. `when` is `before` or `since` the proposal's `observed_on`
+    (`case_when`)."""
     out: dict[int, list[dict]] = {i: [] for i in rule_ids}
     if not rule_ids:
         return out
+    rule = aliased(LedgerEntry)
     rows = (await session.execute(
-        select(LedgerCaseRule.rule_id, LedgerEntry.ref, LedgerEntry.title, LedgerEntry.outcome, LedgerEntry.status)
+        select(LedgerCaseRule.rule_id, LedgerEntry.ref, LedgerEntry.title, LedgerEntry.outcome, LedgerEntry.status,
+               LedgerEntry.observed_on, rule.observed_on.label("rule_day"))
         .join(LedgerEntry, LedgerEntry.id == LedgerCaseRule.case_id)
+        .join(rule, rule.id == LedgerCaseRule.rule_id)
         .where(LedgerCaseRule.rule_id.in_(rule_ids))
         .order_by(case((LedgerEntry.status == "current", 0), else_=1), LedgerEntry.number)
     )).all()
     for r in rows:
-        out[r.rule_id].append({"ref": r.ref, "title": r.title, "outcome": r.outcome, "status": r.status})
+        out[r.rule_id].append({"ref": r.ref, "title": r.title, "outcome": r.outcome, "status": r.status,
+                               "when": case_when(r.observed_on, r.rule_day)})
     return out
 
 
@@ -1077,16 +1090,22 @@ async def names(session: AsyncSession, uid: int | None) -> dict[str, str]:
 
 # ── Rule cases: what a case write points out ────────────────────────────────
 
-async def current_slip_cases(session: AsyncSession, rule_ids: list[int]) -> dict[int, list[str]]:
-    """`{rule id: refs of its current slip cases}`, by number."""
+async def slip_cases_since(session: AsyncSession, rule_ids: list[int]) -> dict[int, list[str]]:
+    """`{rule id: refs of its current slip cases since the rule was adopted}`, by number.
+
+    Since: the case's `observed_on` after the proposal's (`case_when`); a slip
+    from before the rule existed says nothing about whether it holds.
+    """
     out: dict[int, list[str]] = {i: [] for i in rule_ids}
     if not rule_ids:
         return out
+    rule = aliased(LedgerEntry)
     rows = (await session.execute(
         select(LedgerCaseRule.rule_id, LedgerEntry.ref)
         .join(LedgerEntry, LedgerEntry.id == LedgerCaseRule.case_id)
+        .join(rule, rule.id == LedgerCaseRule.rule_id)
         .where(LedgerCaseRule.rule_id.in_(rule_ids), LedgerEntry.status == "current",
-               LedgerEntry.outcome == "slip")
+               LedgerEntry.outcome == "slip", LedgerEntry.observed_on > rule.observed_on)
         .order_by(LedgerEntry.number)
     )).all()
     for r in rows:
@@ -1099,8 +1118,9 @@ async def case_notes(session: AsyncSession, uid: int | None, entry: LedgerEntry,
     """What a current case just written points to, for the write's `notes`; never a refusal.
 
     - Each rule it is tied to with `SLIP_CASES_NUDGE` or more current slip
-      cases: the rule may not be holding, and rewording is not the first
-      thing to look at.
+      cases since it was adopted (`slip_cases_since`): the rule may not be
+      holding, and rewording is not the first thing to look at. Slips from
+      before the rule never count.
     - A slip with no rule, when `similar` holds another current slip with no
       rule: a repeat, worth proposing a rule for.
     """
@@ -1109,12 +1129,12 @@ async def case_notes(session: AsyncSession, uid: int | None, entry: LedgerEntry,
     notes: list[str] = []
     rules = (await case_rules(session, [entry.id]))[entry.id]
     if rules:
-        slips = await current_slip_cases(session, [r["id"] for r in rules])
+        slips = await slip_cases_since(session, [r["id"] for r in rules])
         for rule in rules:
             refs = slips[rule["id"]]
             if len(refs) >= SLIP_CASES_NUDGE:
                 notes.append(
-                    f"{_canonical(rule['ref'])} now has {len(refs)} slip cases ({_capped_refs(refs)}): "
+                    f"{_canonical(rule['ref'])} has {len(refs)} slip cases since it was adopted ({_capped_refs(refs)}): "
                     "the rule may not be holding; look at how it reaches agents (where it lives, a tool at the "
                     "moment of choice, its wording) before rewording it.")
         return notes

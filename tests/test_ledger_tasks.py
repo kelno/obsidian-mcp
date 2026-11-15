@@ -230,3 +230,52 @@ def test_a_state_carries_a_proposals_cases_and_a_cases_outcome():
     assert "cases" not in lt.entry_state(proposal, day)
     case = SimpleNamespace(ref="C3", kind="case", title="t", status="current", outcome="slip", updated_at=None)
     assert lt.entry_state(case, day)["outcome"] == "slip"
+
+
+# ── Before or since the rule (owner's decision, 2026-11-15) ──────────────────
+
+def test_a_case_is_since_a_rule_only_after_the_proposals_day():
+    from datetime import date
+    adopted = date(2026, 11, 10)
+    assert lt.case_when(date(2026, 11, 11), adopted) == "since"
+    assert lt.case_when(date(2026, 11, 9), adopted) == "before"
+    # Only dates are kept: the same day counts as before.
+    assert lt.case_when(adopted, adopted) == "before"
+
+
+def test_a_case_between_two_proposals_of_a_reworded_rule_is_since_the_old_and_before_the_new():
+    from datetime import date
+    old, new, case_day = date(2026, 1, 1), date(2026, 6, 1), date(2026, 3, 1)
+    assert lt.case_when(case_day, old) == "since"
+    assert lt.case_when(case_day, new) == "before"
+
+
+def test_current_cases_splits_each_proposals_cases_before_and_since():
+    from datetime import date
+
+    class _Rows:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    old = SimpleNamespace(id=1, kind="proposal", observed_on=date(2026, 1, 1))
+    new = SimpleNamespace(id=2, kind="proposal", observed_on=date(2026, 6, 1))
+    row = lambda rule_id, ref, outcome, day: SimpleNamespace(  # noqa: E731
+        rule_id=rule_id, ref=ref, outcome=outcome, observed_on=day)
+    rows = [row(1, "C1", "good", date(2025, 12, 1)), row(1, "C2", "slip", date(2026, 1, 1)),
+            row(1, "C3", "slip", date(2026, 3, 1)),
+            row(2, "C3", "slip", date(2026, 3, 1)), row(2, "C4", "slip", date(2026, 7, 1))]
+
+    class _Session:
+        async def execute(self, _stmt):
+            return _Rows(rows)
+
+    import asyncio
+    out = asyncio.run(lt.current_cases(_Session(), [old, new]))
+    assert out[1] == {"total": 3, "outcomes": {"good": 1, "slip": 2}, "refs": ["C1", "C2", "C3"],
+                      "before": {"total": 2, "outcomes": {"good": 1, "slip": 1}, "refs": ["C1", "C2"]},
+                      "since": {"total": 1, "outcomes": {"slip": 1}, "refs": ["C3"]}}
+    assert out[2]["before"] == {"total": 1, "outcomes": {"slip": 1}, "refs": ["C3"]}
+    assert out[2]["since"] == {"total": 1, "outcomes": {"slip": 1}, "refs": ["C4"]}

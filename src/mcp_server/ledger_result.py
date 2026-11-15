@@ -105,9 +105,10 @@ class LedgerEntryFull(_OmitNone):
     #: one means something is pending on it.
     tasks: list[dict] | None = None
     tasks_state: str | None = None
-    #: A case: the rules it tests, by their proposals (`{ref, title, status}`).
+    #: A case: the rules it tests, by their proposals (`{ref, title, status, when}`).
+    #: `when`: `before` (on or before the proposal's `observed_on`) or `since`.
     rules: list[dict] | None = None
-    #: A proposal: the cases tied to its rule (`{ref, title, outcome, status}`),
+    #: A proposal: the cases tied to its rule (`{ref, title, outcome, status, when}`),
     #: current ones first, at most 50; `cases_total` when there are more.
     cases: list[dict] | None = None
     cases_total: int | None = None

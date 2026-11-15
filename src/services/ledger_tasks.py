@@ -129,7 +129,7 @@ async def entries_by_ref(session: AsyncSession, uid: int | None, refs: Iterable[
 def entry_state(entry: LedgerEntry, day: Callable[[object], str | None], cases: dict | None = None) -> dict:
     """What a reader needs to check a citation against: ref, kind, title, status,
     a quirk's certainty, a case's outcome, the day it last changed, and a
-    proposal's current cases (`current_cases`) when it has any."""
+    proposal's current cases (`current_cases`, split before and since the rule) when it has any."""
     out = {"ref": canonical(entry.ref), "kind": entry.kind, "title": entry.title, "status": entry.status}
     if entry.kind == "quirk":
         out["certainty"] = entry.certainty
@@ -141,30 +141,54 @@ def entry_state(entry: LedgerEntry, day: Callable[[object], str | None], cases: 
     return out
 
 
+def case_when(case_day, rule_day) -> str:
+    """When a case happened relative to one rule's proposal (owner's decision, 2026-11-15).
+
+    `since`: after the proposal's `observed_on`, the day the rule was adopted;
+    the rule was in force and the behaviour happened anyway, so the case says
+    something about its wording or how it reaches agents. `before`: on or
+    before that day (only dates are kept, so the same day counts as before);
+    an example of why the rule exists. Compared per proposal: a reworded rule
+    has a newer proposal, for which an older "since" case is "before".
+    """
+    return "since" if case_day > rule_day else "before"
+
+
+def _case_counts() -> dict:
+    return {"total": 0, "outcomes": {}, "refs": []}
+
+
+def _count_case(item: dict, ref: str, outcome: str) -> None:
+    item["total"] += 1
+    item["outcomes"][outcome] = item["outcomes"].get(outcome, 0) + 1
+    if len(item["refs"]) < CASE_REFS_SHOWN:
+        item["refs"].append(canonical(ref))
+
+
 async def current_cases(session: AsyncSession, entries: Iterable[LedgerEntry]) -> dict[int, dict]:
-    """`{proposal id: {total, outcomes, refs}}`: each proposal's current cases, in one query.
+    """`{proposal id: {total, outcomes, refs, before, since}}`: each proposal's current cases, in one query.
 
     `outcomes` counts them by outcome (`{"slip": 2, "good": 1}`); `refs` lists
-    the first `CASE_REFS_SHOWN` by number. A proposal with no current case is
-    left out. A rule carries its proposal's ref, so these are the cases to read
-    before rewording or cutting it.
+    the first `CASE_REFS_SHOWN` by number. `before` and `since` split them by
+    `case_when` against the proposal's `observed_on`, each `{total, outcomes,
+    refs}` the same way. A proposal with no current case is left out. A rule
+    carries its proposal's ref, so these are the cases to read before
+    rewording or cutting it.
     """
-    ids = [e.id for e in entries if e.kind == "proposal"]
-    if not ids:
+    days = {e.id: e.observed_on for e in entries if e.kind == "proposal"}
+    if not days:
         return {}
     rows = (await session.execute(
-        select(LedgerCaseRule.rule_id, LedgerEntry.ref, LedgerEntry.outcome)
+        select(LedgerCaseRule.rule_id, LedgerEntry.ref, LedgerEntry.outcome, LedgerEntry.observed_on)
         .join(LedgerEntry, LedgerEntry.id == LedgerCaseRule.case_id)
-        .where(LedgerCaseRule.rule_id.in_(ids), LedgerEntry.status == "current")
+        .where(LedgerCaseRule.rule_id.in_(list(days)), LedgerEntry.status == "current")
         .order_by(LedgerCaseRule.rule_id, LedgerEntry.number)
     )).all()
     out: dict[int, dict] = {}
     for row in rows:
-        item = out.setdefault(row.rule_id, {"total": 0, "outcomes": {}, "refs": []})
-        item["total"] += 1
-        item["outcomes"][row.outcome] = item["outcomes"].get(row.outcome, 0) + 1
-        if len(item["refs"]) < CASE_REFS_SHOWN:
-            item["refs"].append(canonical(row.ref))
+        item = out.setdefault(row.rule_id, {**_case_counts(), "before": _case_counts(), "since": _case_counts()})
+        _count_case(item, row.ref, row.outcome)
+        _count_case(item[case_when(row.observed_on, days[row.rule_id])], row.ref, row.outcome)
     return out
 
 

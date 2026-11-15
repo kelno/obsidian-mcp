@@ -10962,8 +10962,9 @@ async def ledger_add_impl(
     )
 
 
-#: The changes after which a case write says what its rules' cases add up to.
-_LEDGER_CASE_NUDGE_CHANGES = ("outcome", "status", "rule")
+#: The changes after which a case write says what its rules' cases add up to (`observed_on` can move
+#: a case to before or since a rule).
+_LEDGER_CASE_NUDGE_CHANGES = ("outcome", "status", "rule", "observed_on")
 
 
 async def _ledger_case_notes(uid, entry_id: int, similar: list[dict] | None = None, *,
@@ -11132,8 +11133,21 @@ NOTE_CASES_LINE = ("Read those cases now (ledger_get): if your change turns a ca
                    "put the line back and take the change to the owner.")
 
 
+def _ledger_case_part(part: dict, *, by_outcome: bool) -> str:
+    """`3 (C3, C7, C12)`, or by outcome `2 slip, 1 good (C40, C41, C44)`; refs capped with `+N`;
+    `none` when empty."""
+    if not part["total"]:
+        return "none"
+    more = part["total"] - len(part["refs"])
+    refs = ", ".join(part["refs"]) + (f", +{more}" if more > 0 else "")
+    count = (", ".join(f"{n} {outcome}" for outcome, n in part["outcomes"].items()) if by_outcome
+             else str(part["total"]))
+    return f"{count} ({refs})"
+
+
 def _ledger_state_line(state: dict) -> str:
-    """One entry as it stands now, for a note writer's text result; a proposal's current cases after it."""
+    """One entry as it stands now, for a note writer's text result; a proposal's current cases after it,
+    split into those from before the rule was adopted and those since (`ledger_tasks.case_when`)."""
     if state.get("status") == "unknown":
         return f"- {state['ref']}: no such ledger entry."
     facts = [state["kind"], state["status"]]
@@ -11145,12 +11159,9 @@ def _ledger_state_line(state: dict) -> str:
     line = f"- {state['ref']} ({', '.join(facts)}): \"{state['title']}\""
     cases = state.get("cases")
     if cases:
-        counts = ", ".join(f"{n} {outcome}" for outcome, n in cases["outcomes"].items())
-        more = cases["total"] - len(cases["refs"])
-        line += (f" — current cases: {cases['total']} ({counts}): {', '.join(cases['refs'])}"
-                 + (f", +{more}" if more > 0 else ""))
+        line += (f" — current cases: {cases['total']}; before it: {_ledger_case_part(cases['before'], by_outcome=False)}; "
+                 f"since: {_ledger_case_part(cases['since'], by_outcome=True)}")
     return line
-
 
 
 _EOL_RE = re.compile(r"\r\n|\r|\n")

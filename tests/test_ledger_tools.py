@@ -360,15 +360,42 @@ def test_the_case_fields_are_published_with_their_values():
     assert "case" in registered["ledger_add"].parameters["properties"]["kind"]["enum"]
 
 
-def test_a_proposals_cases_follow_it_in_a_note_writers_result():
+def _cases(before: dict, since: dict) -> dict:
+    """A `current_cases` item from the two parts, with the compatibility totals."""
+    outcomes: dict = {}
+    for part in (before, since):
+        for outcome, n in part["outcomes"].items():
+            outcomes[outcome] = outcomes.get(outcome, 0) + n
+    refs = sorted(before["refs"] + since["refs"], key=lambda r: int(r[1:]))[:10]
+    return {"total": before["total"] + since["total"], "outcomes": outcomes, "refs": refs,
+            "before": before, "since": since}
+
+
+_NONE = {"total": 0, "outcomes": {}, "refs": []}
+
+
+def test_a_proposals_cases_follow_it_in_a_note_writers_result_split_before_and_since():
     line = tools._ledger_state_line({
         "ref": "P41", "kind": "proposal", "status": "adjusted", "title": "Answer first", "updated": "2026-11-09",
-        "cases": {"total": 12, "outcomes": {"slip": 2, "good": 10}, "refs": [f"C{i}" for i in range(1, 11)]}})
-    assert line == ('- P41 (proposal, adjusted, updated 2026-11-09): "Answer first" — current cases: 12 (2 slip, 10 good): '
-                    "C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, +2")
+        "cases": _cases({"total": 3, "outcomes": {"good": 2, "slip": 1}, "refs": ["C3", "C7", "C12"]},
+                        {"total": 2, "outcomes": {"slip": 2}, "refs": ["C40", "C41"]})})
+    assert line == ('- P41 (proposal, adjusted, updated 2026-11-09): "Answer first" — current cases: 5; '
+                    "before it: 3 (C3, C7, C12); since: 2 slip (C40, C41)")
     assert tools._ledger_state_line({"ref": "C3", "kind": "case", "status": "current", "outcome": "slip",
                                      "title": "t"}) == '- C3 (case, current, slip): "t"'
 
+
+def test_a_proposals_case_line_says_none_for_an_empty_part_and_caps_each_part():
+    since = {"total": 12, "outcomes": {"slip": 2, "good": 10}, "refs": [f"C{i}" for i in range(1, 11)]}
+    line = tools._ledger_state_line({"ref": "P41", "kind": "proposal", "status": "accepted", "title": "t",
+                                     "cases": _cases(dict(_NONE), since)})
+    assert line.endswith("— current cases: 12; before it: none; since: 2 slip, 10 good "
+                         "(C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, +2)")
+    before = {"total": 11, "outcomes": {"good": 11}, "refs": [f"C{i}" for i in range(1, 11)]}
+    line = tools._ledger_state_line({"ref": "P41", "kind": "proposal", "status": "accepted", "title": "t",
+                                     "cases": _cases(before, dict(_NONE))})
+    assert line.endswith("— current cases: 11; before it: 11 (C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, +1); "
+                         "since: none")
 
 
 def test_case_refs_in_a_note_are_capped():
