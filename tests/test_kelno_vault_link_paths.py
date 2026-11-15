@@ -27,17 +27,32 @@ def run(new, old=None, notes=NOTES):
     ("[[Areas.md]]", "[[Areas/Areas|Areas.md]]"),                             # the name as written
     ("[[Areas#A#B]]", "[[Areas/Areas#A#B|Areas > A > B]]"),
     ("[[v1.2 notes]]", "[[Reference/v1.2 notes|v1.2 notes]]"),                # a dot in a note's name
-    ("| a | [[Areas]] |", "| a | [[Areas/Areas\\|Areas]] |"),                 # table: escaped pipe
-    ("| a | [[Areas\\|A]] |", "| a | [[Areas/Areas\\|A]] |"),
-    ("| [[Areas#H\\|Y]] | b |", "| [[Areas/Areas#H\\|Y]] | b |"),           # escaped pipe after an anchor
-    ("> | [[Areas]] | x |", "> | [[Areas/Areas\\|Areas]] | x |"),             # a table in a callout
-    ("a | [[Areas]]", "a | [[Areas/Areas\\|Areas]]"),                         # a row without a leading pipe
     ("[[a]][[Areas]]", "[[a]][[Areas/Areas|Areas]]"),
 ])
 def test_a_bare_name_naming_one_note_gets_its_full_path(written, expected):
     text, report = run(written)
     assert text == expected
     assert report.rewritten and report.rewritten[0][0] == 1
+
+
+TABLE = "| h | h |\n| --- | :-: |\n"
+
+
+@pytest.mark.parametrize("written,expected", [
+    (TABLE + "| a | [[Areas]] |", TABLE + "| a | [[Areas/Areas\\|Areas]] |"),
+    (TABLE + "| a | [[Areas\\|A]] |", TABLE + "| a | [[Areas/Areas\\|A]] |"),
+    (TABLE + "| [[Areas#H\\|Y]] | b |", TABLE + "| [[Areas/Areas#H\\|Y]] | b |"),   # after an anchor
+    (TABLE + "| [[Areas|A]] | b |", TABLE + "| [[Areas/Areas\\|A]] | b |"),        # a pipe the row needs
+    ("> | h | h |\n> |---|---|\n> | [[Areas]] | x |",
+     "> | h | h |\n> |---|---|\n> | [[Areas/Areas\\|Areas]] | x |"),                # a table in a callout
+    ("h | h\n- | -\na | [[Areas]]", "h | h\n- | -\na | [[Areas/Areas\\|Areas]]"),   # rows without leading pipes
+    (TABLE + "[[Areas\\|f]]", TABLE + "[[Areas/Areas\\|f]]"),                      # a body row with no pipe of its own
+    ("| [[Areas]] | h |\n|---|---|", "| [[Areas/Areas\\|Areas]] | h |\n|---|---|"),  # the header row
+])
+def test_in_a_table_the_pipe_is_escaped(written, expected):
+    text, report = run(written)
+    assert text == expected
+    assert report.rewritten
 
 
 @pytest.mark.parametrize("written", [
@@ -121,9 +136,16 @@ def test_shifted_moves_line_numbers():
     ("`a | b` then [[Areas]]", "`a | b` then [[Areas/Areas|Areas]]"),
     # An escaped pipe outside a table would break the link: it comes back plain.
     ("See [[Areas\\|A]] here", "See [[Areas/Areas|A]] here"),
+    # A pipe in prose, in inline math or in a link's text makes no table without a delimiter row.
+    ("opts: a | b, see [[Areas]]", "opts: a | b, see [[Areas/Areas|Areas]]"),
+    ("norm $|x|$ see [[Areas]]", "norm $|x|$ see [[Areas/Areas|Areas]]"),
+    ("See [[Q/X|F [d]]] and [[Areas]]", "See [[Q/X|F [d]]] and [[Areas/Areas|Areas]]"),
+    ("| a | [[Areas]] |", "| a | [[Areas/Areas|Areas]] |"),
+    # A blank line ends a table.
+    (TABLE + "| a |\n\nSee [[Areas]]", TABLE + "| a |\n\nSee [[Areas/Areas|Areas]]"),
     # In a table, a row's other links leave it a table.
-    ("| [[Areas/Areas\\|Areas]] | [[2026-11-04 Call]] |",
-     "| [[Areas/Areas\\|Areas]] | [[Log/2026-11-04 Call\\|2026-11-04 Call]] |"),
+    (TABLE + "| [[Areas/Areas\\|Areas]] | [[2026-11-04 Call]] |",
+     TABLE + "| [[Areas/Areas\\|Areas]] | [[Log/2026-11-04 Call\\|2026-11-04 Call]] |"),
 ])
 def test_only_a_table_row_escapes_the_pipe(written, expected):
     text, report = run(written)
@@ -134,7 +156,7 @@ def test_only_a_table_row_escapes_the_pipe(written, expected):
 @pytest.mark.parametrize("written", [
     "[[Recent|Recent]]",                                                  # a root-level note's path is its name
     "See [[CLAUDE|the vault's CLAUDE.md]], and [[Areas/Areas|Areas]].",  # beside another display-named link
-    "| [[Recent\\|Recent]] | x |",
+    TABLE + "| [[Recent\\|Recent]] | x |",
 ])
 def test_a_link_already_at_its_full_path_is_neither_changed_nor_reported(written):
     text, report = run(written, notes=NOTES + ["Recent.md", "CLAUDE.md"])

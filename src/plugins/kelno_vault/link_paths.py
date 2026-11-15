@@ -26,9 +26,10 @@ surrounding spaces don't make a line new.
 In a table the pipe before the display text is escaped (`\\|`), and only
 there: elsewhere `\\|` breaks the link in Obsidian, so a rewritten link gets
 the pipe its line calls for, whichever it was written with. A line is a table
-row by its own pipes, never one inside a link or in code: the display pipe of
-another link on an ordinary line once made a rewrite escape this one, and the
-broken link came back on every edit of the line. A link the rewrite would
+row only inside a table block (a header, a delimiter row, the lines up to a
+blank one), never for a stray pipe: the display pipe of another link on an
+ordinary line once made a rewrite escape this one, and the broken link came
+back on every edit of the line. A link the rewrite would
 give back unchanged (a note at the vault root, whose full path is its name)
 is not reported. Lines the write leaves as they were are never touched.
 """
@@ -116,14 +117,42 @@ def _quoted_code_lines(lines: list[str]) -> set[int]:
 _UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
 
 
-def _is_table_row(masked: str) -> bool:
-    """Whether a line is a table row: an unescaped pipe of its own (with or without a leading one).
+#: A table's delimiter row (`| --- | :-: |`, leading and trailing pipes optional); the pipe makes it not a rule.
+_DELIMITER_ROW_RE = re.compile(r"^[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$")
 
-    `masked` is the line with its code blanked. Every link's span is blanked
-    too, so a link's display pipe never counts as the row's.
+
+def _table_rows(masked_lines: list[str]) -> set[int]:
+    """The lines that are rows of a table, header and delimiter included, as Obsidian renders one.
+
+    A table, as in GitHub-flavoured Markdown, is a header line with a pipe of
+    its own, then a delimiter row, then every line up to a blank one or a
+    change of quote depth, pipes or not. A pipe on any other line (prose,
+    inline math, a link's display pipe) makes no table, and only a row gets
+    `\\|`. `masked_lines` have their code blanked; every link's span is
+    blanked too, so a link's display pipe never counts as the row's.
     """
-    own = _WIKILINK_RE.sub(lambda m: " " * len(m.group()), masked)
-    return bool(_UNESCAPED_PIPE_RE.search(own))
+    def split(line: str) -> tuple[int, str, bool]:
+        """Quote depth, the body with links blanked, and whether the body is blank (before the blanking)."""
+        prefix = _QUOTE_PREFIX_RE.match(line)
+        depth = prefix.group().count(">") if prefix else 0
+        body = (line[prefix.end():] if prefix else line).rstrip("\r")
+        return depth, _WIKILINK_RE.sub(lambda m: " " * len(m.group()), body), not body.strip()
+
+    parts = [split(line) for line in masked_lines]
+    rows: set[int] = set()
+    i = 1
+    while i < len(parts):
+        depth, delimiter, _blank = parts[i]
+        head_depth, head, _blank = parts[i - 1]
+        if (i - 1 not in rows and depth == head_depth and "|" in delimiter and _DELIMITER_ROW_RE.match(delimiter)
+                and _UNESCAPED_PIPE_RE.search(head)):
+            rows.update((i - 1, i))
+            i += 1
+            while i < len(parts) and parts[i][0] == depth and not parts[i][2]:
+                rows.add(i)
+                i += 1
+        i += 1
+    return rows
 
 
 def _is_note_target(name: str, index: NoteIndex) -> bool:
@@ -160,11 +189,12 @@ def rewrite(old: str | None, new: str, index: NoteIndex) -> tuple[str, LinkRepor
     # them back so masked lines align with the note's.
     masked = "".join("\n" if c == "\n" else m for c, m in zip(new, masked))
     masked_lines = masked.split("\n")
+    table_rows = _table_rows(masked_lines)
     for i in sorted(changed):
         line, masked = lines[i], masked_lines[i]
         if "[[" not in masked or _CHECKBOX_RE.match(line):
             continue
-        pipe = "\\|" if _is_table_row(masked) else "|"
+        pipe = "\\|" if i in table_rows else "|"
         pieces, last = [], 0
         for m in _WIKILINK_RE.finditer(masked):
             start, end = m.span()
