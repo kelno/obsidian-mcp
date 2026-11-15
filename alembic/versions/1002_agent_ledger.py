@@ -46,7 +46,10 @@ bodies) identical to a scratch build of this migration, made in a
 throwaway schema inside a savepoint and rolled back — which is what a
 stamp-back rerun finds. Anything else (a stray table, a partial set, one
 altered constraint) is refused: rows the server did not write would be
-served as the ledger. `downgrade()` refuses while any entry exists, since the ledger cannot be
+served as the ledger. The one exception is a later revision's own units
+(1004's rule-case columns and constraints), listed by name and exact marker
+in `LATER_COLUMNS` / `LATER_CONSTRAINTS` and left out of both sides: that
+revision verifies them on its own rerun. `downgrade()` refuses while any entry exists, since the ledger cannot be
 rebuilt. `search_path` is pinned; `lock_timeout` / `statement_timeout` are set
 and `RESET`, for 013's to 030's reasons.
 
@@ -504,6 +507,86 @@ def _create(dim: int) -> None:
 SCRATCH = "ledger_032_shape"
 
 
+# Units a later fork revision adds to 1002's tables or replaces there, by
+# table and exact name, each with the exact marker comment that revision
+# writes. The comparison below leaves out exactly these — a unit of one of
+# these names *and* this comment, on both sides, with the index backing a
+# listed unique constraint — because that revision verifies them; otherwise a
+# stamp-back that re-runs 1002 over a head database would refuse them as
+# foreign. Anything else (another name, the right name with another comment
+# or none) is compared and refused as before. On a database without them
+# (every database 1002 itself meets) nothing changes.
+#
+# **A future revision that adds or replaces a unit on these tables must
+# extend these lists on purpose**, with its literal names and markers;
+# nothing is inferred from a comment's shape. Byte identical to 1004's
+# literals.
+_1004_COLUMN = "rule case field (1004_ledger_cases)"
+_1004_CONSTRAINT = "rule case constraint (1004_ledger_cases)"
+LATER_COLUMNS = {
+    "ledger_entries": {
+        "outcome": _1004_COLUMN,
+        "expected": _1004_COLUMN,
+        "expected_by": _1004_COLUMN,
+        "owner_words": _1004_COLUMN,
+        "agent_did": _1004_COLUMN,
+    },
+}
+LATER_CONSTRAINTS = {
+    "ledger_entries": {
+        "ck_ledger_entries_kind": _1004_CONSTRAINT,
+        "ck_ledger_entries_ref": _1004_CONSTRAINT,
+        "ck_ledger_entries_status": _1004_CONSTRAINT,
+        "ck_ledger_entries_quirk_fields": _1004_CONSTRAINT,
+        "ck_ledger_entries_case_fields": _1004_CONSTRAINT,
+        "uq_ledger_entries_id_owner_kind": _1004_CONSTRAINT,
+    },
+    "ledger_ref_counters": {
+        "ck_ledger_ref_counters_kind": _1004_CONSTRAINT,
+    },
+}
+
+
+def _later_units(bind) -> dict[str, dict[str, set[str]]]:
+    """`{table: {"columns", "constraints"}}`: the live units a later revision owns.
+
+    A unit counts only when its name is listed for its table and its comment
+    is exactly the listed marker.
+    """
+    out: dict[str, dict[str, set[str]]] = {}
+    for table in TABLES:
+        rel = f"public.{table}"
+        columns = {
+            name for name, comment in bind.execute(sa.text(
+                "SELECT a.attname, col_description(a.attrelid, a.attnum) FROM pg_attribute a "
+                "WHERE a.attrelid = CAST(:r AS regclass) AND a.attnum > 0 AND NOT a.attisdropped"), {"r": rel}).all()
+            if comment is not None and LATER_COLUMNS.get(table, {}).get(name) == comment
+        }
+        constraints = {
+            name for name, comment in bind.execute(sa.text(
+                "SELECT conname, obj_description(oid, 'pg_constraint') FROM pg_constraint "
+                "WHERE conrelid = CAST(:r AS regclass)"), {"r": rel}).all()
+            if comment is not None and LATER_CONSTRAINTS.get(table, {}).get(name) == comment
+        }
+        out[table] = {"columns": columns, "constraints": constraints}
+    return out
+
+
+def _without_later_units(shape: dict, later: dict) -> dict:
+    """`shape` with the later revision's units taken out, by name (both sides)."""
+    out = dict(shape)
+    for table, units in later.items():
+        if not (units["columns"] or units["constraints"]):
+            continue
+        entry = dict(out[table])
+        entry["columns"] = [c for c in entry["columns"] if c[0] not in units["columns"]]
+        entry["constraints"] = [c for c in entry["constraints"] if c[0] not in units["constraints"]]
+        # A unique constraint's backing index carries the constraint's name.
+        entry["indexes"] = [i for i in entry["indexes"] if i[0] not in units["constraints"]]
+        out[table] = entry
+    return out
+
+
 def _shape(bind, schema: str) -> dict:
     """Everything about the ledger's objects in `schema` that 1002 decides.
 
@@ -554,7 +637,10 @@ def _as_public(value):
 
 
 def _verify_own(bind, dim: int) -> None:
-    """Accept the ledger already in `public` only if it is exactly 1002's."""
+    """Accept the ledger already in `public` only if it is exactly 1002's,
+    apart from the listed units of a later revision (`LATER_COLUMNS`,
+    `LATER_CONSTRAINTS`)."""
+    later = _later_units(bind)
     op.execute(f"SAVEPOINT {SCRATCH}")
     op.execute(f"CREATE SCHEMA {SCRATCH}")
     op.execute(f"SET LOCAL search_path TO {SCRATCH}, public")
@@ -565,7 +651,8 @@ def _verify_own(bind, dim: int) -> None:
     op.execute(f"ROLLBACK TO SAVEPOINT {SCRATCH}")
     op.execute(f"RELEASE SAVEPOINT {SCRATCH}")
     _pin_search_path()
-    expected = _as_public(expected)
+    expected = _without_later_units(_as_public(expected), later)
+    live = _without_later_units(live, later)
     differing = sorted(name for name in expected if expected[name] != live[name])
     if differing:
         raise RuntimeError(

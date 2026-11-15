@@ -70,6 +70,7 @@ DURABLE = {
     "ledger_entry_links",
     "ledger_topics",
     "ledger_entry_topics",
+    "ledger_case_rules",
     # Derived, but kept with its entries: each entry's `embedded_hash` says its
     # vectors are current, so a schema-only dump would leave entries claiming
     # vectors they lack.

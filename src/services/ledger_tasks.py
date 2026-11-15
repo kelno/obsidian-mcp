@@ -32,12 +32,14 @@ from typing import Callable, Iterable
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.db import LedgerEntry, NoteMetadata, ForkNoteTask
+from src.models.db import LEDGER_KIND_LETTERS, LedgerCaseRule, LedgerEntry, NoteMetadata, ForkNoteTask
 from src.services import ledger_citations as citations
 from src.services.ledger_citations import Ref
 
 #: Kind of each ref letter.
-_KIND_OF = {"Q": "quirk", "F": "feedback", "P": "proposal"}
+_KIND_OF = {letter: kind for kind, letter in LEDGER_KIND_LETTERS.items()}
+#: A proposal's current cases a state lists by ref; past it, the count says how many.
+CASE_REFS_SHOWN = 10
 
 #: Status types that close a task. NON_TASK lines are not tasks and are ignored.
 _CLOSED = ("DONE", "CANCELLED")
@@ -124,13 +126,45 @@ async def entries_by_ref(session: AsyncSession, uid: int | None, refs: Iterable[
     return {r: by_key[(_KIND_OF[r.letter], r.number)] for r in refs if (_KIND_OF[r.letter], r.number) in by_key}
 
 
-def entry_state(entry: LedgerEntry, day: Callable[[object], str | None]) -> dict:
+def entry_state(entry: LedgerEntry, day: Callable[[object], str | None], cases: dict | None = None) -> dict:
     """What a reader needs to check a citation against: ref, kind, title, status,
-    a quirk's certainty, and the day it last changed."""
+    a quirk's certainty, a case's outcome, the day it last changed, and a
+    proposal's current cases (`current_cases`) when it has any."""
     out = {"ref": canonical(entry.ref), "kind": entry.kind, "title": entry.title, "status": entry.status}
     if entry.kind == "quirk":
         out["certainty"] = entry.certainty
+    if entry.kind == "case":
+        out["outcome"] = entry.outcome
     out["updated"] = day(entry.updated_at)
+    if cases:
+        out["cases"] = cases
+    return out
+
+
+async def current_cases(session: AsyncSession, entries: Iterable[LedgerEntry]) -> dict[int, dict]:
+    """`{proposal id: {total, outcomes, refs}}`: each proposal's current cases, in one query.
+
+    `outcomes` counts them by outcome (`{"slip": 2, "good": 1}`); `refs` lists
+    the first `CASE_REFS_SHOWN` by number. A proposal with no current case is
+    left out. A rule carries its proposal's ref, so these are the cases to read
+    before rewording or cutting it.
+    """
+    ids = [e.id for e in entries if e.kind == "proposal"]
+    if not ids:
+        return {}
+    rows = (await session.execute(
+        select(LedgerCaseRule.rule_id, LedgerEntry.ref, LedgerEntry.outcome)
+        .join(LedgerEntry, LedgerEntry.id == LedgerCaseRule.case_id)
+        .where(LedgerCaseRule.rule_id.in_(ids), LedgerEntry.status == "current")
+        .order_by(LedgerCaseRule.rule_id, LedgerEntry.number)
+    )).all()
+    out: dict[int, dict] = {}
+    for row in rows:
+        item = out.setdefault(row.rule_id, {"total": 0, "outcomes": {}, "refs": []})
+        item["total"] += 1
+        item["outcomes"][row.outcome] = item["outcomes"].get(row.outcome, 0) + 1
+        if len(item["refs"]) < CASE_REFS_SHOWN:
+            item["refs"].append(canonical(row.ref))
     return out
 
 
@@ -166,6 +200,7 @@ async def refs_on_line(session: AsyncSession, uid: int | None, text: str,
     if not cited and not loose:
         return [], []
     entries = await entries_by_ref(session, uid, cited + loose)
+    cases = await current_cases(session, entries.values())
     task_states = {}
     if cited:
         rows = [r for r in await citing_rows(session, uid) if r.file_path != note_path] + list(note_rows)
@@ -176,7 +211,7 @@ async def refs_on_line(session: AsyncSession, uid: int | None, text: str,
         if entry is None:
             refs.append({"ref": str(ref), "status": "unknown"})
             continue
-        refs.append({**entry_state(entry, day), "tasks": task_states.get(str(ref))})
+        refs.append({**entry_state(entry, day, cases.get(entry.id)), "tasks": task_states.get(str(ref))})
     notes = [
         f"The line mentions {ref} without brackets, so it is not linked to ledger entry {ref} "
         f"(\"{entries[ref].title}\"). To link it, write [{ref}]"
@@ -196,7 +231,9 @@ async def cited_states(session: AsyncSession, uid: int | None, refs: Iterable[Re
     own = canonical(own_ref) if own_ref else None
     refs = [r for r in dict.fromkeys(refs) if str(r) != own]
     entries = await entries_by_ref(session, uid, refs)
-    return [entry_state(entries[r], day) if r in entries else {"ref": str(r), "status": "unknown"} for r in refs]
+    cases = await current_cases(session, entries.values())
+    return [entry_state(entries[r], day, cases.get(entries[r].id)) if r in entries
+            else {"ref": str(r), "status": "unknown"} for r in refs]
 
 
 async def entries_citing(session: AsyncSession, uid: int | None, entry: LedgerEntry, text_columns,

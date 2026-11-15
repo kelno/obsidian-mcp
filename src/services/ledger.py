@@ -34,6 +34,7 @@ from src.auth.session import current_actor
 from src.config import settings
 from src.models import db
 from src.models.db import (
+    LedgerCaseRule,
     LedgerDigest,
     LedgerDigestLine,
     LedgerDigestSource,
@@ -71,25 +72,41 @@ KIND_FIELDS: dict[str, dict[str, int]] = {
     "proposal": {
         "target": 500, "proposed_text": 16000, "final_text": 16000, "changes": 4000, "owner_reason": 4000,
     },
+    "case": {
+        "outcome": 16, "expected": 4000, "expected_by": 8, "owner_words": 4000, "agent_did": 4000,
+        "sources": 4000,
+    },
 }
-REQUIRED_FIELDS = {"quirk": ("certainty",), "feedback": ("subtype",), "proposal": ("target", "proposed_text")}
-ENUM_FIELDS = {"certainty": db.LEDGER_CERTAINTIES, "subtype": db.LEDGER_FEEDBACK_SUBTYPES}
+REQUIRED_FIELDS = {
+    "quirk": ("certainty",), "feedback": ("subtype",), "proposal": ("target", "proposed_text"),
+    "case": ("outcome", "expected", "expected_by"),
+}
+ENUM_FIELDS = {
+    "certainty": db.LEDGER_CERTAINTIES, "subtype": db.LEDGER_FEEDBACK_SUBTYPES,
+    "outcome": db.LEDGER_CASE_OUTCOMES, "expected_by": db.LEDGER_CASE_EXPECTED_BY,
+}
 
 #: Statuses a search with `status="active"` (the default) returns. A proposal's
 #: outcome is its record, so every outcome stays active; what leaves the
 #: default searches is a closed lifecycle: stale, handled, dismissed,
-#: superseded, retracted.
+#: retired (a case whose expected behaviour the owner changed), superseded,
+#: retracted.
 ACTIVE_STATUSES = ("current", "to_triage", "open", "accepted", "adjusted", "rejected", "withdrawn")
-CLOSED_STATUSES = ("stale", "handled", "dismissed", "superseded", "retracted")
+CLOSED_STATUSES = ("stale", "handled", "dismissed", "retired", "superseded", "retracted")
 ALL_STATUSES = ACTIVE_STATUSES + CLOSED_STATUSES
 #: Statuses `ledger_add` may set; the closing ones need an update with a reason.
 ADD_STATUSES = {
     "quirk": ("current", "stale"),
     "feedback": ("open", "to_triage"),
     "proposal": ("accepted", "adjusted", "rejected", "withdrawn"),
+    "case": ("current",),
 }
+#: A proposal's cases `ledger_get` lists; past it, `cases_total` says how many.
+GET_CASES_MAX = 50
+#: Current slip cases on one rule from which a write says the rule may not be holding.
+SLIP_CASES_NUDGE = 2
 
-_REF = re.compile(r"\s*([QqFfPp])0*([0-9]{1,6})\s*\Z")
+_REF = re.compile(r"\s*([QqFfPpCc])0*([0-9]{1,6})\s*\Z")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 _LETTER_KIND = {letter: kind for kind, letter in db.LEDGER_KIND_LETTERS.items()}
 
@@ -184,7 +201,7 @@ def parse_ref(raw: str) -> tuple[str, int]:
     """`(kind, number)` for `Q14`, `q014`, `F3`; `LedgerError` otherwise."""
     match = _REF.match(raw or "") if isinstance(raw, str) else None
     if match is None:
-        raise invalid(f"{raw!r} is not a ledger ref: a letter Q, F or P and a number, such as Q14 or F3.")
+        raise invalid(f"{raw!r} is not a ledger ref: a letter Q, F, P or C and a number, such as Q14 or F3.")
     return _LETTER_KIND[match.group(1).upper()], int(match.group(2))
 
 
@@ -274,7 +291,8 @@ def created_by() -> str:
 def embed_text(entry) -> str:
     """The text an entry is searched and embedded by: its title, body and own fields."""
     parts = [entry.title, entry.body]
-    for name in ("component", "leads", "certainty_note", "target", "proposed_text", "final_text", "changes"):
+    for name in ("component", "leads", "certainty_note", "target", "proposed_text", "final_text", "changes",
+                 "expected", "owner_words", "agent_did"):
         value = getattr(entry, name, None)
         if value:
             parts.append(value)
@@ -356,6 +374,46 @@ async def resolve_topics(session: AsyncSession, uid: int | None, slugs: list[str
             allowed=await topics_allowed(session, uid),
         )
     return {slug: found[slug].id for slug in wanted}
+
+
+_ONLY_CASES_TAKE_RULES = ("only a case takes rules: a case is tied to the rules it tests through their proposal "
+                          "refs ([P41]).")
+
+
+async def resolve_rules(session: AsyncSession, uid: int | None, refs: list[str]) -> dict[int, str]:
+    """`{proposal id: ref}` for the rules a case names: each an existing proposal of the caller's.
+
+    A rule is named by the proposal ref it carries (`P41`). Every ref that is
+    not one is refused together (`Problems`). The rows are key-share-locked,
+    the lock the link's foreign key takes anyway: an update of the proposal
+    (FOR NO KEY UPDATE) never waits on it.
+    """
+    problems = Problems()
+    parsed: list[tuple[str, int]] = []
+    for raw in refs:
+        with problems.check("rules"):
+            kind, number = parse_ref(raw)
+            if kind != "proposal":
+                raise invalid(f"{raw.strip()} is a {kind}, not a proposal: a case is tied to a rule through the "
+                              "proposal ref the rule carries ([P41]).")
+            parsed.append((raw.strip(), number))
+    found: dict[int, str] = {}
+    if parsed:
+        rows = (await session.execute(
+            select(LedgerEntry.id, LedgerEntry.number, LedgerEntry.ref)
+            .where(_owner(LedgerEntry, uid), LedgerEntry.kind == "proposal",
+                   LedgerEntry.number.in_(sorted({n for _r, n in parsed})))
+            .order_by(LedgerEntry.id).with_for_update(read=True, key_share=True)
+        )).all()
+        by_number = {r.number: r for r in rows}
+        missing = [raw for raw, n in parsed if n not in by_number]
+        if missing:
+            problems.add("rules", LedgerError(
+                "not_found", f"proposal{'s' if len(missing) > 1 else ''} {', '.join(missing)} not found: a case's "
+                "rules are existing proposals (ledger_search kinds=[\"proposal\"]). Nothing was written."))
+        found = {by_number[n].id: by_number[n].ref for _r, n in parsed if n in by_number}
+    problems.raise_if_any()
+    return found
 
 
 def validate_details(kind: str, details: dict | None, *, for_add: bool) -> dict:
@@ -478,13 +536,49 @@ def _ref_sort_key(ref: str):
     return (db.LEDGER_KINDS.index(kind), number)
 
 
-def snapshot(entry: LedgerEntry, topics: list[str], related: list[str], superseded_ref: str | None) -> dict:
+async def case_rules(session: AsyncSession, case_ids: list[int]) -> dict[int, list[dict]]:
+    """The rules (proposals) each case is tied to: `{case id: [{id, ref, title, status}]}`, by number."""
+    out: dict[int, list[dict]] = {i: [] for i in case_ids}
+    if not case_ids:
+        return out
+    rows = (await session.execute(
+        select(LedgerCaseRule.case_id, LedgerEntry.id, LedgerEntry.ref, LedgerEntry.title, LedgerEntry.status)
+        .join(LedgerEntry, LedgerEntry.id == LedgerCaseRule.rule_id)
+        .where(LedgerCaseRule.case_id.in_(case_ids))
+        .order_by(LedgerEntry.number)
+    )).all()
+    for r in rows:
+        out[r.case_id].append({"id": r.id, "ref": r.ref, "title": r.title, "status": r.status})
+    return out
+
+
+async def rule_cases(session: AsyncSession, rule_ids: list[int]) -> dict[int, list[dict]]:
+    """The cases tied to each rule (proposal): `{rule id: [{ref, title, outcome, status}]}`,
+    current ones first, then by number."""
+    out: dict[int, list[dict]] = {i: [] for i in rule_ids}
+    if not rule_ids:
+        return out
+    rows = (await session.execute(
+        select(LedgerCaseRule.rule_id, LedgerEntry.ref, LedgerEntry.title, LedgerEntry.outcome, LedgerEntry.status)
+        .join(LedgerEntry, LedgerEntry.id == LedgerCaseRule.case_id)
+        .where(LedgerCaseRule.rule_id.in_(rule_ids))
+        .order_by(case((LedgerEntry.status == "current", 0), else_=1), LedgerEntry.number)
+    )).all()
+    for r in rows:
+        out[r.rule_id].append({"ref": r.ref, "title": r.title, "outcome": r.outcome, "status": r.status})
+    return out
+
+
+def snapshot(entry: LedgerEntry, topics: list[str], related: list[str], superseded_ref: str | None,
+             rules: list[str] | None = None) -> dict:
     """The entry as it is, for the history: every field an update can change."""
     out = {
         "title": entry.title, "body": entry.body, "status": entry.status, "origin": entry.origin,
         "area": entry.area_tag, "observed_on": entry.observed_on.isoformat(), "author": entry.author,
         "topics": topics, "related": related,
     }
+    if entry.kind == "case":
+        out["rules"] = rules or []
     if entry.kind == "feedback":
         out["seen"] = entry.seen
     for name in KIND_FIELDS[entry.kind]:
@@ -627,7 +721,7 @@ def search_document():
 
 #: An entry's text fields: what it says, and so what it can cite.
 TEXT_FIELDS = ("title", "body", "component", "leads", "certainty_note", "sources", "target", "proposed_text",
-               "final_text", "changes", "owner_reason", "handled_account")
+               "final_text", "changes", "owner_reason", "handled_account", "expected", "owner_words", "agent_did")
 
 
 def text_columns():
@@ -673,6 +767,8 @@ class Filters:
     since: date | None = None
     #: The `tasks` filter: only feedback with these numbers (see ledger_tasks).
     feedback_numbers: tuple[int, ...] | None = None
+    #: The `rule` filter: only the cases tied to this proposal (its id).
+    rule_id: int | None = None
 
     def where(self, uid: int | None) -> list:
         clauses = [_owner(LedgerEntry, uid), LedgerEntry.status.in_(self.statuses)]
@@ -697,6 +793,9 @@ class Filters:
             clauses.append(LedgerEntry.updated_at >= day_start_utc(self.since))
         if self.feedback_numbers is not None:
             clauses.append(and_(LedgerEntry.kind == "feedback", LedgerEntry.number.in_(self.feedback_numbers)))
+        if self.rule_id is not None:
+            clauses.append(LedgerEntry.id.in_(
+                select(LedgerCaseRule.case_id).where(LedgerCaseRule.rule_id == self.rule_id)))
         return clauses
 
 
@@ -721,7 +820,7 @@ def parse_statuses(status) -> tuple[str, ...]:
 
 
 async def build_filters(session: AsyncSession, uid: int | None, *, kinds=None, area=None, topics=None,
-                        status=None, origin=None, unseen=False, since=None) -> Filters:
+                        status=None, origin=None, unseen=False, since=None, rule=None) -> Filters:
     f = Filters(statuses=parse_statuses(status), unseen=bool(unseen))
     for kind in bounded_list(kinds, "kinds"):
         if kind not in db.LEDGER_KINDS:
@@ -754,6 +853,14 @@ async def build_filters(session: AsyncSession, uid: int | None, *, kinds=None, a
         f.origin = origin
     if since is not None:
         f.since = parse_day(since, "since")
+    if rule is not None:
+        kind, number = parse_ref(rule)
+        if kind != "proposal":
+            raise invalid(f"rule is a proposal ref such as P41, the ref a rule carries (got {rule!r}).")
+        f.rule_id = (await session.execute(select(LedgerEntry.id).where(
+            _owner(LedgerEntry, uid), LedgerEntry.kind == "proposal", LedgerEntry.number == number))).scalar()
+        if f.rule_id is None:
+            raise LedgerError("not_found", f"proposal {rule.strip()} not found.")
     return f
 
 
@@ -784,6 +891,8 @@ class AddOutcome:
     notes: list[str]
     #: Set when the entry got no area or no topics: `names()`, for the nudge.
     names: dict | None = None
+    #: A case: the refs of the rules (proposals) it was tied to.
+    rules: list[str] = field(default_factory=list)
 
 
 async def _next_number(session: AsyncSession, uid: int | None, kind: str) -> int:
@@ -806,6 +915,7 @@ async def add_entry(
     session: AsyncSession, uid: int | None, *, kind: str, title: str, body: str = "", area: str | None = None,
     topics=None, details=None, related=None, origin: str = "agent", observed_on: str | None = None,
     seen: bool | None = None, status: str | None = None, author: str | None = None, challenges=None,
+    rules=None,
 ) -> AddOutcome:
     # Every independent check runs and one refusal names every problem
     # (`Problems`); a check that depends on a failed one is skipped.
@@ -836,7 +946,8 @@ async def add_entry(
     if kind_ok and not problems.failed("area", "origin"):
         with problems.check("status"):
             if status is None:
-                status = {"quirk": "current", "feedback": "open" if area_tag else "to_triage"}.get(kind)
+                status = {"quirk": "current", "case": "current",
+                          "feedback": "open" if area_tag else "to_triage"}.get(kind)
                 if status is None:
                     raise invalid("a proposal needs status: its outcome, accepted, adjusted, rejected or withdrawn.",
                                   allowed=[{"name": s} for s in ADD_STATUSES["proposal"]])
@@ -871,6 +982,13 @@ async def add_entry(
         if missing:
             raise LedgerError("not_found", f"related entr{'y' if len(missing) == 1 else 'ies'} "
                               f"{', '.join(missing)} not found. Nothing was written.")
+    rule_ids: dict[int, str] = {}
+    with problems.check("rules"):
+        listed = bounded_list(rules, "rules")
+        if listed and kind_ok and kind != "case":
+            raise invalid(_ONLY_CASES_TAKE_RULES)
+        if listed and kind_ok:
+            rule_ids = await resolve_rules(session, uid, listed)
     challenged: list[int] = []
     with problems.check("challenges"):
         challenged = await check_challenges(session, uid, challenges)
@@ -895,6 +1013,8 @@ async def add_entry(
         if other.id != entry.id:
             low, high = sorted((entry.id, other.id))
             session.add(LedgerEntryLink(user_id=uid, entry_id=low, related_id=high))
+    for rule_id in sorted(rule_ids):
+        session.add(LedgerCaseRule(user_id=uid, case_id=entry.id, rule_id=rule_id))
     flagged = await flag_lines(
         session, uid, challenged, f"{entry.ref} says it contradicts this line: {title}", entry.created_by, author)
     await session.flush()
@@ -906,6 +1026,7 @@ async def add_entry(
         entry=entry, topics=sorted(topic_ids), related=sorted({e.ref for e in related_entries.values()},
                                                               key=_ref_sort_key),
         similar=similar, flagged=flagged, hints=hints, notes=notes, names=vocabulary,
+        rules=sorted(rule_ids.values(), key=_ref_sort_key),
     )
 
 
@@ -920,7 +1041,7 @@ async def similar_entries(session: AsyncSession, uid: int | None, entry: LedgerE
     rank = func.ts_rank_cd(doc, query)
     rows = (await session.execute(
         select(LedgerEntry.id, LedgerEntry.ref, LedgerEntry.kind, LedgerEntry.status, LedgerEntry.title,
-               LedgerEntry.area_tag, rank.label("rank"))
+               LedgerEntry.area_tag, LedgerEntry.outcome, rank.label("rank"))
         .where(_owner(LedgerEntry, uid), LedgerEntry.id != entry.id, LedgerEntry.status.in_(ACTIVE_STATUSES),
                doc.op("@@")(query))
         .order_by(rank.desc(), LedgerEntry.id).limit(SIMILAR_MAX)
@@ -929,6 +1050,8 @@ async def similar_entries(session: AsyncSession, uid: int | None, entry: LedgerE
     out = []
     for r in rows:
         item = {"ref": r.ref, "kind": r.kind, "status": r.status, "title": r.title}
+        if r.outcome:
+            item["outcome"] = r.outcome
         if r.area_tag:
             item["area"] = r.area_tag
         if topics.get(r.id):
@@ -949,6 +1072,74 @@ async def names(session: AsyncSession, uid: int | None) -> dict[str, str]:
     areas = [tag.removeprefix(task_query.AREA_PREFIX) for tag, _path, _desc in index.described()]
     topics = [t["name"] for t in await topics_allowed(session, uid)]
     return {"areas": ", ".join(areas) or "none declared", "topics": ", ".join(topics) or "none yet"}
+
+
+# ── Rule cases: what a case write points out ────────────────────────────────
+
+async def current_slip_cases(session: AsyncSession, rule_ids: list[int]) -> dict[int, list[str]]:
+    """`{rule id: refs of its current slip cases}`, by number."""
+    out: dict[int, list[str]] = {i: [] for i in rule_ids}
+    if not rule_ids:
+        return out
+    rows = (await session.execute(
+        select(LedgerCaseRule.rule_id, LedgerEntry.ref)
+        .join(LedgerEntry, LedgerEntry.id == LedgerCaseRule.case_id)
+        .where(LedgerCaseRule.rule_id.in_(rule_ids), LedgerEntry.status == "current",
+               LedgerEntry.outcome == "slip")
+        .order_by(LedgerEntry.number)
+    )).all()
+    for r in rows:
+        out[r.rule_id].append(r.ref)
+    return out
+
+
+async def case_notes(session: AsyncSession, uid: int | None, entry: LedgerEntry,
+                     similar: list[dict] | None = None) -> list[str]:
+    """What a current case just written points to, for the write's `notes`; never a refusal.
+
+    - Each rule it is tied to with `SLIP_CASES_NUDGE` or more current slip
+      cases: the rule may not be holding, and rewording is not the first
+      thing to look at.
+    - A slip with no rule, when `similar` holds another current slip with no
+      rule: a repeat, worth proposing a rule for.
+    """
+    if entry.kind != "case" or entry.status != "current":
+        return []
+    notes: list[str] = []
+    rules = (await case_rules(session, [entry.id]))[entry.id]
+    if rules:
+        slips = await current_slip_cases(session, [r["id"] for r in rules])
+        for rule in rules:
+            refs = slips[rule["id"]]
+            if len(refs) >= SLIP_CASES_NUDGE:
+                notes.append(
+                    f"{_canonical(rule['ref'])} now has {len(refs)} slip cases ({', '.join(map(_canonical, refs))}): "
+                    "the rule may not be holding; look at how it reaches agents (where it lives, a tool at the "
+                    "moment of choice, its wording) before rewording it.")
+        return notes
+    if entry.outcome != "slip":
+        return notes
+    if similar is None:
+        similar = await similar_entries(session, uid, entry)
+    candidates = [s["ref"] for s in similar if s.get("kind") == "case" and s.get("outcome") == "slip"
+                  and s.get("status") == "current"]
+    if candidates:
+        linked = select(LedgerCaseRule.case_id)
+        repeats = (await session.execute(
+            select(LedgerEntry.ref).where(
+                _owner(LedgerEntry, uid), LedgerEntry.ref.in_(candidates), LedgerEntry.kind == "case",
+                LedgerEntry.id.not_in(linked))
+            .order_by(LedgerEntry.number)
+        )).scalars().all()
+        if repeats:
+            notes.append(f"{_canonical(entry.ref)} looks like another slip with no rule "
+                         f"({', '.join(map(_canonical, repeats))}): a repeat; worth proposing a rule to the owner.")
+    return notes
+
+
+def _canonical(ref: str) -> str:
+    """`P41` for a stored ref such as `P041` (imported refs keep their zeros)."""
+    return f"{ref[0].upper()}{int(ref[1:])}"
 
 
 # ── Update ───────────────────────────────────────────────────────────────────
@@ -988,7 +1179,7 @@ async def _update_entry(
     session: AsyncSession, uid: int | None, *, ref: str, expected_revision: int | None, reason: str | None,
     title=None, body=None, append=None, status=None, area=None, topics_add=None, topics_remove=None,
     details=None, superseded_by=None, handled_account=None, related=None, author=None, challenges=None,
-    seen=None, observed_on=None, origin=None,
+    seen=None, observed_on=None, origin=None, rules_add=None, rules_remove=None,
 ) -> UpdateOutcome:
     problems = Problems()
     with problems.check("expected_revision"):
@@ -1022,7 +1213,9 @@ async def _update_entry(
     topics_before = (await entry_topics(session, ids))[entry.id]
     related_before = (await entry_related(session, ids))[entry.id]
     sup = await superseding_refs(session, [entry.superseded_by])
-    before = snapshot(entry, topics_before, related_before, sup.get(entry.superseded_by))
+    rules_before = {r["id"]: r["ref"] for r in (await case_rules(session, ids))[entry.id]}
+    before = snapshot(entry, topics_before, related_before, sup.get(entry.superseded_by),
+                      sorted(rules_before.values(), key=_ref_sort_key))
     changed: list[str] = []
     notes: list[str] = []
 
@@ -1143,6 +1336,12 @@ async def _update_entry(
                 await session.execute(pg_insert(LedgerEntryLink).values(
                     user_id=entry.user_id, entry_id=low, related_id=high).on_conflict_do_nothing())
                 changed.append(f"related +{other.ref}")
+    if rules_add or rules_remove:
+        with problems.check("rules_add" if rules_add else "rules_remove"):
+            if entry.kind != "case":
+                raise invalid(_ONLY_CASES_TAKE_RULES)
+            await _change_rules(session, uid, entry, rules_before, bounded_list(rules_add, "rules_add"),
+                                bounded_list(rules_remove, "rules_remove"), changed)
 
     challenged: list[int] = []
     with problems.check("challenges"):
@@ -1174,6 +1373,37 @@ async def _update_entry(
     await session.commit()
     await session.refresh(entry)
     return UpdateOutcome(entry=entry, changed=changed, flagged=flagged, notes=notes)
+
+
+async def _change_rules(session, uid, entry: LedgerEntry, before: dict[int, str], add: list[str],
+                        remove: list[str], changed: list[str]) -> None:
+    """Tie a case to more rules or fewer; each change goes in `changed` (`rule +P41`, `rule -P41`)."""
+    problems = Problems()
+    with problems.check("rules_add"):
+        for rule_id, ref in (await resolve_rules(session, uid, add)).items():
+            if rule_id in before:
+                continue
+            await session.execute(pg_insert(LedgerCaseRule).values(
+                user_id=entry.user_id, case_id=entry.id, rule_id=rule_id).on_conflict_do_nothing())
+            changed.append(f"rule +{ref}")
+    with problems.check("rules_remove"):
+        numbers = {number: ref for ref in before.values() for _kind, number in [parse_ref(ref)]}
+        wanted, not_on = [], []
+        for raw in remove:
+            kind, number = parse_ref(raw)
+            if kind != "proposal" or number not in numbers:
+                not_on.append(raw.strip())
+            else:
+                wanted.append(number)
+        if not_on:
+            raise invalid(f"{entry.ref} is not tied to {', '.join(not_on)} (its rules: "
+                          f"{', '.join(sorted(before.values(), key=_ref_sort_key)) or 'none'}).")
+        ids = [rule_id for rule_id, ref in before.items() if parse_ref(ref)[1] in wanted]
+        if ids:
+            await session.execute(delete(LedgerCaseRule).where(
+                LedgerCaseRule.case_id == entry.id, LedgerCaseRule.rule_id.in_(ids)))
+            changed.extend(f"rule -{before[i]}" for i in sorted(ids, key=lambda i: _ref_sort_key(before[i])))
+    problems.raise_if_any()
 
 
 async def _apply_status(session, uid, entry: LedgerEntry, status: str, superseded_by, handled_account,

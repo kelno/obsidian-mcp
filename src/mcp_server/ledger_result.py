@@ -43,6 +43,8 @@ class EntrySummary(_OmitNone):
     date: str | None = None
     origin: str | None = None
     seen: bool | None = None
+    #: A case: slip, good or overdone.
+    outcome: str | None = None
     #: In a "by meaning" list: cosine similarity of the best chunk.
     similarity: float | None = None
     #: True when the other list of the same search also holds this entry.
@@ -103,6 +105,12 @@ class LedgerEntryFull(_OmitNone):
     #: one means something is pending on it.
     tasks: list[dict] | None = None
     tasks_state: str | None = None
+    #: A case: the rules it tests, by their proposals (`{ref, title, status}`).
+    rules: list[dict] | None = None
+    #: A proposal: the cases tied to its rule (`{ref, title, outcome, status}`),
+    #: current ones first, at most 50; `cases_total` when there are more.
+    cases: list[dict] | None = None
+    cases_total: int | None = None
     #: Every past version, oldest first, with who, when and why.
     history: list[dict] | None = None
     #: Whether its vector is current (else it is found by words only).
@@ -128,6 +136,8 @@ class LedgerWriteResult(_LedgerResult):
     revision: int | None = None
     status: str | None = None
     changed: list[str] | None = None
+    #: `ledger_add` of a case: the rules (proposal refs) it was tied to.
+    rules: list[str] | None = None
     #: `ledger_add`: active entries sharing words with the new one (fold a duplicate in now).
     similar: list[dict] | None = None
     #: Summary-view lines this change flagged for review: check each one now.

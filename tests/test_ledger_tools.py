@@ -305,3 +305,67 @@ async def test_a_kind_field_beside_details_is_refused_with_where_it_goes(ctx):
         await mcp.call_tool("ledger_update", {"ref": "Q1", "certainty": "tested", "sources": "x"})
     with pytest.raises(ToolError, match="Extra inputs"):
         await mcp.call_tool("ledger_add", {"kind": "quirk", "title": "t", "colour": "red"})
+
+
+# ── Rule cases ───────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("raw, parsed", [("C3", ("case", 3)), ("c003", ("case", 3))])
+def test_case_refs_parse(raw, parsed):
+    assert ledger.parse_ref(raw) == parsed
+    assert ledger.new_ref("case", 3) == "C3"
+
+
+def test_a_cases_details():
+    assert ledger.validate_details("case", {
+        "outcome": "slip", "expected": " Answer the literal question first. ", "expected_by": "owner",
+        "owner_words": "c'est une question, pas une demande", "sources": "Conversation feel examples #4",
+    }, for_add=True) == {
+        "outcome": "slip", "expected": "Answer the literal question first.", "expected_by": "owner",
+        "owner_words": "c'est une question, pas une demande", "sources": "Conversation feel examples #4"}
+    with pytest.raises(ledger.LedgerError) as exc:
+        ledger.validate_details("case", {"outcome": "failed", "certainty": "tested"}, for_add=True)
+    fields = {p["field"] for p in exc.value.problems}
+    assert {"details", "details.outcome", "details.expected", "details.expected_by"} <= fields
+    with pytest.raises(ledger.LedgerError, match="cannot be cleared"):
+        ledger.validate_details("case", {"expected": None}, for_add=False)
+    with pytest.raises(ledger.LedgerError, match="at most 4000"):
+        ledger.validate_details("case", {"agent_did": "x" * 4001}, for_add=False)
+
+
+def test_a_case_is_searched_and_embedded_by_its_own_words():
+    entry = db.LedgerEntry(title="T", body="B", kind="case", outcome="slip", expected="E", expected_by="owner",
+                           owner_words="O", agent_did="A")
+    assert ledger.embed_text(entry) == "T\n\nB\n\nE\n\nO\n\nA"
+    assert {"expected", "owner_words", "agent_did"} <= set(ledger.TEXT_FIELDS)
+
+
+def test_retired_is_closed_and_cases_start_current():
+    assert "retired" in ledger.CLOSED_STATUSES and "retired" in db.LEDGER_KIND_STATUSES["case"]
+    assert ledger.ADD_STATUSES["case"] == ("current",)
+
+
+def test_the_case_fields_are_published_with_their_values():
+    registered = _registered()
+    for name in ("ledger_add", "ledger_update"):
+        props = registered[name].parameters["properties"]
+        details = props["details"]["properties"]
+        assert [v for v in details["outcome"]["enum"] if v] == list(db.LEDGER_CASE_OUTCOMES)
+        assert [v for v in details["expected_by"]["enum"] if v] == list(db.LEDGER_CASE_EXPECTED_BY)
+        assert details["owner_words"]["maxLength"] == 4000
+        assert "verbatim" in details["owner_words"]["description"]
+        assert details["sources"]["description"].startswith("quirk or case only")
+    assert "rules" in registered["ledger_add"].parameters["properties"]
+    assert {"rules_add", "rules_remove"} <= set(registered["ledger_update"].parameters["properties"])
+    assert "rule" in registered["ledger_search"].parameters["properties"]
+    assert "case" in registered["ledger_add"].parameters["properties"]["kind"]["enum"]
+
+
+def test_a_proposals_cases_follow_it_in_a_note_writers_result():
+    line = tools._ledger_state_line({
+        "ref": "P41", "kind": "proposal", "status": "adjusted", "title": "Answer first", "updated": "2026-11-09",
+        "cases": {"total": 12, "outcomes": {"slip": 2, "good": 10}, "refs": [f"C{i}" for i in range(1, 11)]}})
+    assert line == ('- P41 (proposal, adjusted, updated 2026-11-09): "Answer first" — cases: 12 (2 slip, 10 good): '
+                    "C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, +2")
+    assert tools._ledger_state_line({"ref": "C3", "kind": "case", "status": "current", "outcome": "slip",
+                                     "title": "t"}) == '- C3 (case, current, slip): "t"'
+

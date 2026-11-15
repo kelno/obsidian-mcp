@@ -7,7 +7,7 @@ ref such as Q14 counts as well, since nothing else there looks like one.
 
 Matching rules, shared by every tool that reads citations:
 
-- A ref is a capital Q, F or P and a number of 1 to 6 digits, after any
+- A ref is a capital Q, F, P or C and a number of 1 to 6 digits, after any
   leading zeros (`[Q01]` cites Q1). Lower-case letters are not refs.
 - A bracket holds refs only, separated by commas, with optional spaces or
   tabs (ASCII only, so the SQL prefilters below can promise to be a superset).
@@ -28,12 +28,12 @@ import re
 from dataclasses import dataclass
 
 #: One ref inside a bracket or bare: kind letter, then the number without its leading zeros.
-_REF = r"([QFP])0*([0-9]{1,6})(?![0-9A-Za-z_])"
+_REF = r"([QFPC])0*([0-9]{1,6})(?![0-9A-Za-z_])"
 #: A bracket of refs: `[Q14]`, `[P35, P48]`; leading zeros allowed (`[Q0014]`).
 _BRACKET_RE = re.compile(
-    r"\[[ \t]*(?:[QFP]0*[0-9]{1,6}[ \t]*,[ \t]*)*[QFP]0*[0-9]{1,6}[ \t]*\]"
+    r"\[[ \t]*(?:[QFPC]0*[0-9]{1,6}[ \t]*,[ \t]*)*[QFPC]0*[0-9]{1,6}[ \t]*\]"
 )
-_REF_IN_BRACKET_RE = re.compile(r"([QFP])0*([0-9]{1,6})")
+_REF_IN_BRACKET_RE = re.compile(r"([QFPC])0*([0-9]{1,6})")
 #: A bare ref: a whole word, not a tag, a path part, a bracket's content or a footnote.
 _BARE_RE = re.compile(r"(?<![\w#/\[^])" + _REF)
 #: Inline code: a run of backticks, then the shortest text up to the same run.
@@ -50,7 +50,7 @@ _REF_DEFINITION_LEAD_RE = re.compile(r"[ ]{0,3}\Z")
 #: A POSIX regex PostgreSQL can apply to keep only lines that may hold a
 #: bracketed citation: a superset of `_BRACKET_RE`, written without classes
 #: whose meaning depends on the database's locale.
-SQL_BRACKET_PREFILTER = r"\[[ \t]*[QFP][0-9]"
+SQL_BRACKET_PREFILTER = r"\[[ \t]*[QFPC][0-9]"
 
 
 @dataclass(frozen=True)

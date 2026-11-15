@@ -352,7 +352,7 @@ async def meaning_search(session: AsyncSession, uid: int | None, query: str, fil
     rows = (await session.execute(
         select(LedgerEntry.id, LedgerEntry.ref, LedgerEntry.kind, LedgerEntry.status, LedgerEntry.area_tag,
                LedgerEntry.title, LedgerEntry.updated_at, LedgerEntry.observed_on, LedgerEntry.origin,
-               LedgerEntry.seen, LedgerEntry.revision, best.c.distance,
+               LedgerEntry.seen, LedgerEntry.revision, LedgerEntry.outcome, best.c.distance,
                unembedded.correlate(None).scalar_subquery().label("not_embedded"))
         .join(best, best.c.entry_id == LedgerEntry.id)
         .where(*clauses, LedgerEntry.embedded_hash == LedgerEntry.content_hash)

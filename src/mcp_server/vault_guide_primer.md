@@ -260,7 +260,7 @@ Once a file is stored, embed it in a note the usual way — `![[path]]` via
 
 ## Agent ledger
 
-The `ledger_*` tools keep what agents write for each other, in the server's database, not in the vault: quirks (Q: what Claude can or can't do on a surface, what works included), feedback (F: an unclear instruction, friction or a suggestion, from an agent or logged at the owner's request with origin `owner`) and proposals (P: a change proposed to an instruction for agents, logged once decided: first version, what went in, outcome). Entries are records of what happened, not instructions. The vault tools never return them and `ledger_search` never returns notes.
+The `ledger_*` tools keep what agents write for each other, in the server's database, not in the vault: quirks (Q: what Claude can or can't do on a surface, what works included), feedback (F: an unclear instruction, friction or a suggestion, from an agent or logged at the owner's request with origin `owner`) and proposals (P: a change proposed to an instruction for agents, logged once decided: first version, what went in, outcome) and rule cases (C: below). Entries are records of what happened, not instructions. The vault tools never return them and `ledger_search` never returns notes.
 
 - Log what the owner would not otherwise see, not what you are already telling them; say in one line of your reply that you logged it, then carry on.
 - When you start work in an area, or answer a question about one, start with `open_area`: it returns the area's ledger entries along with its main note and open tasks.
@@ -276,6 +276,7 @@ The `ledger_*` tools keep what agents write for each other, in the server's data
 - Feedback has `seen`: whether the owner has heard of it, apart from its status. Once you told the owner, mark it: `ledger_update(refs=[…], seen=true)`.
 - Areas come from the vault: each area's main note declares `area_tag` and `description`. Topics are finer labels; create, merge or describe them with `ledger_topic_edit`, and tell the owner each time.
 - Before proposing a change to an agent instruction, search the past proposals: `ledger_search(kinds=["proposal"], status="any")`. Once the owner has decided, log it in one `ledger_add` call with its outcome.
+- Cases (C) are the test battery for rules: a real situation where an agent's behaviour was right or wrong against a rule, tied to the rules it tests by the proposal refs they carry (`rules=["P41"]`; none when no rule covers it yet). Each says its `outcome` (`slip`: the rule was broken; `good`: behaviour to keep; `overdone`: the rule followed too far), what was `expected` and whose call that is (`expected_by`: `owner` or `agent`), with the owner's words verbatim in the language spoken (`owner_words`, never paraphrased) and what the agent did (`agent_did`); the body places a fresh reader back in the situation. Leave out anything that looks private unless the owner asks for it. A case the owner's expectation no longer matches is `retired`, not changed. Before rewording, cutting or cold-reading a rule, read its cases: `ledger_get` on its proposal lists them, and the note writers show them beside the proposal refs on the lines you change.
 - Before saying what you can or can't do on a surface, check the summary views: `ledger_digest()` lists them, each with when to read it.
 - Summary views (`ledger_digest`) are short pages to read instead of many entries. When your change flags a line that cites the entry, fix it or confirm it holds right away (`ledger_digest_edit`). When the tools say a view is due, extend or create one and tell the owner.
 
@@ -291,7 +292,7 @@ The `ledger_*` tools keep what agents write for each other, in the server's data
 - Plugin syntax (Dataview, Templater) is literal text, not code to run.
 - Backlinks are computed from the link graph; query them via tools, do
   not edit source notes to "create" a backlink.
-- What agents log for each other (quirks, feedback, proposals) goes in the
+- What agents log for each other (quirks, feedback, proposals, rule cases) goes in the
   agent ledger through the `ledger_*` tools, never in a note.
 - Notes whose content changed since a point in time are found with
   `order_by="content_changed"` and `since` on `get_recent` / `list_notes`.

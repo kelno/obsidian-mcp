@@ -3971,6 +3971,8 @@ async def _ledger_guide(uid) -> str:
         return ""
     certainty = ", ".join(_ledger.ENUM_FIELDS["certainty"])
     subtype = ", ".join(_ledger.ENUM_FIELDS["subtype"])
+    outcome = ", ".join(_ledger.ENUM_FIELDS["outcome"])
+    expected_by = ", ".join(_ledger.ENUM_FIELDS["expected_by"])
     topic_lines = "\n".join(
         f"- `{t['name']}`: {t['description']}" if t["description"] else f"- `{t['name']}`" for t in topics
     ) or "- none yet"
@@ -3980,7 +3982,8 @@ async def _ledger_guide(uid) -> str:
         "not a new one. Give every new entry (`ledger_add`) an area and the topics that fit (none when none "
         "does): searches by area or topic miss an entry without them. Each kind has a required field in "
         f"`details`: a quirk `certainty` ({certainty}); feedback `subtype` ({subtype}); a proposal `target` "
-        "and `proposed_text`, plus `status`. Titles are one line of at most "
+        f"and `proposed_text`, plus `status`; a case `outcome` ({outcome}), `expected` and `expected_by` "
+        f"({expected_by}), and its rules as proposal refs in `rules`. Titles are one line of at most "
         f"{_ledger.TITLE_MAX} characters. Areas go with or without the `area/` prefix.\n\n"
         f"Topics:\n{topic_lines}\n\n"
         f"Areas: {vocabulary['areas']}. Their descriptions are in `ledger_topics`."
@@ -10281,7 +10284,7 @@ def _task_closing_notes(refs: list[dict], before: str | None, after: str | None,
                     f"{ref['ref']}'s tasks are now all cancelled: no decision on it stands any more, so it stays "
                     "open, waiting for the owner's call; say so to the owner if they don't know.")
         elif state in ("done", "cancelled") and (
-                kind == "proposal" or (kind == "quirk" and ref.get("status") == "current")):
+                kind == "proposal" or (kind in ("quirk", "case") and ref.get("status") == "current")):
             notes.append(f"{ref['ref']} has no open citing task any more: nothing is pending on it now; the "
                          f"{kind} itself stays as it is.")
     return notes
@@ -10630,7 +10633,7 @@ def _ledger_summary(row, **extra) -> EntrySummary:
     return EntrySummary(
         ref=row.ref, kind=row.kind, status=row.status, title=row.title, revision=row.revision,
         area=row.area_tag, date=_ledger_day(row.updated_at), origin=row.origin if row.origin != "agent" else None,
-        seen=row.seen, **extra,
+        seen=row.seen, outcome=getattr(row, "outcome", None), **extra,
     )
 
 
@@ -10679,12 +10682,12 @@ def _ledger_summary_columns():
 
     return (LedgerEntry.id, LedgerEntry.ref, LedgerEntry.kind, LedgerEntry.status, LedgerEntry.title,
             LedgerEntry.revision, LedgerEntry.area_tag, LedgerEntry.updated_at, LedgerEntry.origin,
-            LedgerEntry.seen)
+            LedgerEntry.seen, LedgerEntry.outcome)
 
 
 @_tracked(
     "ledger_search",
-    ["query", "mode", "kinds", "area", "topics", "status", "origin", "unseen", "since", "tasks", "limit"],
+    ["query", "mode", "kinds", "area", "topics", "status", "origin", "unseen", "since", "tasks", "rule", "limit"],
     refusal_result=_ledger_gate(LedgerSearchResult),
     arg_char_caps={"query": MAX_SEARCH_QUERY_CHARS},
 )
@@ -10700,6 +10703,7 @@ async def ledger_search_impl(
     since: str | None = None,
     tasks: str | None = None,
     limit: int = _ledger.SEARCH_DEFAULT_LIMIT,
+    rule: str | None = None,
 ) -> LedgerSearchResult:
     from sqlalchemy import func, select
 
@@ -10720,7 +10724,7 @@ async def ledger_search_impl(
         try:
             filters = await _ledger.build_filters(
                 session, uid, kinds=kinds, area=area, topics=topics, status=status, origin=origin,
-                unseen=unseen, since=since)
+                unseen=unseen, since=since, rule=rule)
         except _ledger.LedgerError as exc:
             return _ledger_refused(LedgerSearchResult, exc)
         links, links_note = await _ledger_task_links(session, uid)
@@ -10733,7 +10737,8 @@ async def ledger_search_impl(
             filters.feedback_numbers = tuple(sorted(
                 int(ref[1:]) for ref, state in task_states.items() if ref[0] == "F" and state == tasks))
         described = {"status": status, "kinds": kinds, "area": filters.area or ("none" if filters.no_area else None),
-                     "topics": topics, "origin": origin, "unseen": unseen or None, "since": since, "tasks": tasks}
+                     "topics": topics, "origin": origin, "unseen": unseen or None, "since": since, "tasks": tasks,
+                     "rule": rule}
         described = {k: v for k, v in described.items() if v is not None}
         notes = [links_note] if links_note else []
 
@@ -10824,6 +10829,8 @@ async def ledger_get_impl(refs: list[str], history: bool = False, include_privat
             cited = await _ledger.lines_for_entries(session, ids) if ids else {}
             sup = await _ledger.superseding_refs(session, [e.superseded_by for e in entries])
             past = await _ledger.history(session, ids) if (history and ids) else {}
+            rules = await _ledger.case_rules(session, [e.id for e in entries if e.kind == "case"])
+            cases = await _ledger.rule_cases(session, [e.id for e in entries if e.kind == "proposal"])
             links, links_note = ({}, None)
             if entries:
                 links, links_note = await _ledger_task_links(session, uid)
@@ -10851,6 +10858,9 @@ async def ledger_get_impl(refs: list[str], history: bool = False, include_privat
             cited_by=cited.get(entry.id) or None, embedded=entry.embedded_hash == entry.content_hash,
             tasks=[_ledger_task_dict(t, include_private) for t in citing] or None,
             tasks_state=tasks_state,
+            rules=[{k: v for k, v in r.items() if k != "id"} for r in rules.get(entry.id, ())] or None,
+            cases=cases.get(entry.id, [])[:_ledger.GET_CASES_MAX] or None,
+            cases_total=(len(cases[entry.id]) if len(cases.get(entry.id, ())) > _ledger.GET_CASES_MAX else None),
         )
         size = _ledger.json_size(item.model_dump())
         if out and used + size > cap:
@@ -10882,7 +10892,7 @@ def _ledger_write_gate():
 
 @_tracked(
     "ledger_add",
-    ["kind", "area", "topics", "origin", "status", "related", "observed_on", "seen", "challenges"],
+    ["kind", "area", "topics", "origin", "status", "related", "observed_on", "seen", "challenges", "rules"],
     refusal_result=_ledger_gate(LedgerWriteResult),
     write_class=True,
 )
@@ -10900,6 +10910,7 @@ async def ledger_add_impl(
     seen: bool | None = None,
     author: str | None = None,
     challenges: list[int] | None = None,
+    rules: list[str] | None = None,
 ) -> LedgerWriteResult:
     if err := _ledger_write_gate():
         return _ledger_failed(LedgerWriteResult, err)
@@ -10909,7 +10920,7 @@ async def ledger_add_impl(
             added = await _ledger.add_entry(
                 session, uid, kind=kind, title=title, body=body, area=area, topics=topics, details=details,
                 related=related, origin=origin, status=status, observed_on=observed_on, seen=seen, author=author,
-                challenges=challenges)
+                challenges=challenges, rules=rules)
     except _ledger.LedgerError as exc:
         return _ledger_refused(LedgerWriteResult, exc)
     except _LedgerIntegrityError as exc:
@@ -10942,17 +10953,39 @@ async def ledger_add_impl(
     if added.flagged:
         notes.append("Check each flagged summary-view line now: replace it, or resolve it if it still holds "
                      "(ledger_digest_edit).")
+    if entry.kind == "case":
+        notes.extend(await _ledger_case_notes(uid, entry.id, added.similar))
     return LedgerWriteResult(
         ref=entry.ref, revision=entry.revision, status=entry.status, similar=added.similar or None,
         flagged_lines=_ledger_flagged(added.flagged), view_hints=added.hints or None, notes=notes or None,
-        areas_and_topics=added.names, cites=cites,
+        areas_and_topics=added.names, cites=cites, rules=added.rules or None,
     )
+
+
+#: The changes after which a case write says what its rules' cases add up to.
+_LEDGER_CASE_NUDGE_CHANGES = ("outcome", "status", "rule")
+
+
+async def _ledger_case_notes(uid, entry_id: int, similar: list[dict] | None = None) -> list[str]:
+    """What a case just written points to (`ledger.case_notes`): a rule that may not be holding, a
+    repeated slip with no rule. The write has happened: a failure here is a note."""
+    from src.models.db import LedgerEntry
+
+    try:
+        async with async_session() as session:
+            entry = await session.get(LedgerEntry, entry_id)
+            return await _ledger.case_notes(session, uid, entry, similar) if entry is not None else []
+    except Exception as exc:  # noqa: BLE001 — the write stands; the note says the check failed
+        # debug, not warning: a caller drives this path (the D18 permit rule); the note tells the caller.
+        logger.debug("ledger write: the case's rules could not be checked", exc_info=True)
+        return [f"The case was written, but its rules' other cases could not be checked ({type(exc).__name__}): "
+                "ledger_get its rules to see them."]
 
 
 @_tracked(
     "ledger_update",
     ["ref", "refs", "expected_revision", "status", "seen", "area", "topics_add", "topics_remove",
-     "superseded_by", "related", "challenges", "include_private"],
+     "superseded_by", "related", "challenges", "include_private", "rules_add", "rules_remove"],
     refusal_result=_ledger_gate(LedgerWriteResult),
     write_class=True,
 )
@@ -10978,6 +11011,8 @@ async def ledger_update_impl(
     seen: bool | None = None,
     refs: list[str] | None = None,
     include_private: bool = False,
+    rules_add: list[str] | None = None,
+    rules_remove: list[str] | None = None,
 ) -> LedgerWriteResult:
     if err := _ledger_write_gate():
         return _ledger_failed(LedgerWriteResult, err)
@@ -10986,7 +11021,7 @@ async def ledger_update_impl(
         "title": title, "body": body, "append": append, "status": status, "area": area, "topics_add": topics_add,
         "topics_remove": topics_remove, "details": details, "superseded_by": superseded_by,
         "handled_account": handled_account, "related": related, "observed_on": observed_on, "origin": origin,
-        "challenges": challenges,
+        "challenges": challenges, "rules_add": rules_add, "rules_remove": rules_remove,
     }
     only_seen = all(v is None for v in changes.values())
     try:
@@ -11029,6 +11064,8 @@ async def ledger_update_impl(
         dependants = await _ledger_dependants(uid, entry, notes, include_private)
     if any(c.startswith("body") for c in changed) and "title" not in changed:
         notes.append(f"Does the title still hold? It reads: \"{entry.title}\". If not, change it (title=…).")
+    if entry.kind == "case" and any(c.split(" ", 1)[0] in _LEDGER_CASE_NUDGE_CHANGES for c in changed):
+        notes.extend(await _ledger_case_notes(uid, entry.id))
     return LedgerWriteResult(ref=entry.ref, revision=entry.revision, status=entry.status,
                              changed=changed or None, flagged_lines=_ledger_flagged(updated.flagged),
                              notes=notes or None, cites=cites, cited_by=dependants)
@@ -11080,16 +11117,29 @@ NOTE_CITES_LABEL = "cites"
 NOTE_REFS_MAX = 30
 
 
+#: After `changed_lines_cite`, when a listed proposal has current cases.
+NOTE_CASES_LINE = ("Read those cases (ledger_get) before rewording or cutting these lines: a change that would turn "
+                   "a case's expected behaviour around goes to the owner.")
+
+
 def _ledger_state_line(state: dict) -> str:
-    """One entry as it stands now, for a note writer's text result."""
+    """One entry as it stands now, for a note writer's text result; a proposal's current cases after it."""
     if state.get("status") == "unknown":
         return f"- {state['ref']}: no such ledger entry."
     facts = [state["kind"], state["status"]]
-    if state.get("certainty"):
-        facts.append(state["certainty"])
+    for name in ("certainty", "outcome"):
+        if state.get(name):
+            facts.append(state[name])
     if state.get("updated"):
         facts.append(f"updated {state['updated']}")
-    return f"- {state['ref']} ({', '.join(facts)}): \"{state['title']}\""
+    line = f"- {state['ref']} ({', '.join(facts)}): \"{state['title']}\""
+    cases = state.get("cases")
+    if cases:
+        counts = ", ".join(f"{n} {outcome}" for outcome, n in cases["outcomes"].items())
+        more = cases["total"] - len(cases["refs"])
+        line += (f" — cases: {cases['total']} ({counts}): {', '.join(cases['refs'])}"
+                 + (f", +{more}" if more > 0 else ""))
+    return line
 
 
 
@@ -11179,7 +11229,8 @@ async def _note_refs_report(uid, old: str | None, new: str | None, *, old_unread
                      "change doesn't undo what they decided: for an accepted or adjusted proposal, what went in; "
                      "for a rejected or withdrawn one, what was turned down.\n"
                      + "\n".join(map(_ledger_state_line, changed_states))
-                     + (f"\n- and {more['changed']} more" if more["changed"] else ""))
+                     + (f"\n- and {more['changed']} more" if more["changed"] else "")
+                     + (f"\n{NOTE_CASES_LINE}" if any(s.get("cases") for s in changed_states) else ""))
     if added_states:
         parts.append(f"{NOTE_CITES_LABEL}: refs your new text adds, as they stand now; check that what your text "
                      "says matches what they say.\n" + "\n".join(map(_ledger_state_line, added_states))

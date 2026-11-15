@@ -186,3 +186,47 @@ def test_rule_lines_unlogged():
     assert lc.rule_lines_unlogged("a\r\nb\r\n", "a\nb\n") == []
     # Dropping a wrong citation, and nothing else, is no rule change.
     assert lc.rule_lines_unlogged("- Rule one. [P35]\n", "- Rule one.\n") == []
+
+
+# ── Rule cases (C) are cited like every other kind ───────────────────────────
+
+@pytest.mark.parametrize("text,cited", [
+    ("- rule [P41] tested by [C3]", ["P41", "C3"]),
+    ("[C3, P41]", ["C3", "P41"]),
+    ("[C007]", ["C7"]),
+    ("- [C] not a checkbox ref, [c3] not a ref, [C3x] [C] [C1234567]", []),
+    ("[C3](https://x) [C3][r] ![C3] [[C3]] [^C3]", []),
+    ("`[C3]` in code", []),
+    ("- [x][C3] done", ["C3"]),
+])
+def test_cases_are_cited_in_brackets(text, cited):
+    assert refs(lc.bracketed(text)) == cited
+
+
+def test_a_bare_case_ref_counts_in_ledger_text_only_as_a_whole_word():
+    assert refs(lc.bare("see C3 and C04, not #C5, a/C6, C7x, AC8")) == ["C3", "C4"]
+    assert refs(lc.in_ledger_text("C3 repeats [C4]")) == ["C3", "C4"]
+
+
+@pytest.mark.parametrize("text", ["[C3]", "x [ C12, P1] y"])
+def test_the_sql_prefilter_keeps_a_line_citing_a_case(text):
+    assert lc.bracketed(text) and re.search(lc.SQL_BRACKET_PREFILTER, text)
+
+
+def test_a_case_ref_is_a_case():
+    rows = [SimpleNamespace(file_path="a.md", line_number=1, line="- [ ] look at [C2]")]
+    links = lt.link(rows, lambda line, path: SimpleNamespace(status=SimpleNamespace(type="TODO")))
+    assert list(links) == ["C2"]
+    assert lt._KIND_OF["C"] == "case"
+
+
+def test_a_state_carries_a_proposals_cases_and_a_cases_outcome():
+    day = lambda value: "2026-11-15"  # noqa: E731
+    proposal = SimpleNamespace(ref="P041", kind="proposal", title="t", status="adjusted", updated_at=None, id=1)
+    cases = {"total": 3, "outcomes": {"slip": 2, "good": 1}, "refs": ["C3", "C7", "C12"]}
+    assert lt.entry_state(proposal, day, cases) == {
+        "ref": "P41", "kind": "proposal", "title": "t", "status": "adjusted", "updated": "2026-11-15",
+        "cases": cases}
+    assert "cases" not in lt.entry_state(proposal, day)
+    case = SimpleNamespace(ref="C3", kind="case", title="t", status="current", outcome="slip", updated_at=None)
+    assert lt.entry_state(case, day)["outcome"] == "slip"

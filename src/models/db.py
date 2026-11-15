@@ -2256,7 +2256,7 @@ class ConcurrencyRun(Base):
 # migrated one constraint by constraint.
 
 #: Ref letters by kind; a ref is the letter and the kind's own number.
-LEDGER_KIND_LETTERS = {"quirk": "Q", "feedback": "F", "proposal": "P"}
+LEDGER_KIND_LETTERS = {"quirk": "Q", "feedback": "F", "proposal": "P", "case": "C"}
 LEDGER_KINDS = tuple(LEDGER_KIND_LETTERS)
 #: Statuses every kind can take, and each kind's own.
 LEDGER_CLOSING_STATUSES = ("superseded", "retracted")
@@ -2264,10 +2264,16 @@ LEDGER_KIND_STATUSES = {
     "quirk": ("current", "stale"),
     "feedback": ("to_triage", "open", "handled", "dismissed"),
     "proposal": ("accepted", "adjusted", "rejected", "withdrawn"),
+    "case": ("current", "retired"),
 }
 LEDGER_CERTAINTIES = ("tested", "seen_once", "inferred", "docs", "untested")
 LEDGER_FEEDBACK_SUBTYPES = ("unclear_instruction", "friction", "suggestion")
 LEDGER_ORIGINS = ("agent", "owner")
+#: A rule case's outcome: the agent broke the rule (slip), did what it wants
+#: (good), or followed it too far (overdone, the opposite failure).
+LEDGER_CASE_OUTCOMES = ("slip", "good", "overdone")
+#: Whose call a case's expected behaviour is: the owner's own, or an agent's reading of the rule.
+LEDGER_CASE_EXPECTED_BY = ("owner", "agent")
 LEDGER_TOPIC_KINDS = ("system", "surface")
 LEDGER_DIGEST_LAYOUTS = ("list", "matrix")
 
@@ -2283,7 +2289,10 @@ _LEDGER_MARKERS = {
     "ledger_digest_sources": "entries a summary-view line rests on (032_agent_ledger)",
     "ledger_revisions": "append-only history of ledger changes (032_agent_ledger)",
     "ledger_embeddings": "ledger entry vectors, derived (032_agent_ledger)",
+    "ledger_case_rules": "rule case to proposal links (1004_ledger_cases)",
 }
+#: Migration 1004's marker on each rule-case column of `ledger_entries`.
+_LEDGER_CASE_COLUMN_MARKER = "rule case field (1004_ledger_cases)"
 
 _AREA_PREDICATE = "area_tag ~ '^area/[a-z0-9]+(-[a-z0-9]+)*$'"
 _SLUG_PREDICATE = "slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'"
@@ -2328,7 +2337,7 @@ class LedgerRefCounter(Base):
 
     __table_args__ = (
         ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_ref_counters_user"),
-        CheckConstraint("kind IN ('quirk', 'feedback', 'proposal')", name="ck_ledger_ref_counters_kind"),
+        CheckConstraint("kind IN ('quirk', 'feedback', 'proposal', 'case')", name="ck_ledger_ref_counters_kind"),
         CheckConstraint("last_number >= 0", name="ck_ledger_ref_counters_number"),
         {"comment": _LEDGER_MARKERS["ledger_ref_counters"]},
     )
@@ -2380,17 +2389,26 @@ class LedgerEntry(Base):
     #: hash its stored vectors were made from (NULL: none yet).
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     embedded_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # A rule case's own fields (migration 1004); `sources` is shared with quirks.
+    outcome: Mapped[str | None] = mapped_column(String(16), nullable=True, comment=_LEDGER_CASE_COLUMN_MARKER)
+    expected: Mapped[str | None] = mapped_column(Text, nullable=True, comment=_LEDGER_CASE_COLUMN_MARKER)
+    expected_by: Mapped[str | None] = mapped_column(String(8), nullable=True, comment=_LEDGER_CASE_COLUMN_MARKER)
+    owner_words: Mapped[str | None] = mapped_column(Text, nullable=True, comment=_LEDGER_CASE_COLUMN_MARKER)
+    agent_did: Mapped[str | None] = mapped_column(Text, nullable=True, comment=_LEDGER_CASE_COLUMN_MARKER)
 
     __table_args__ = (
         ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_entries_user"),
         UniqueConstraint("id", "owner_key", name="uq_ledger_entries_id_owner"),
         UniqueConstraint("owner_key", "kind", "number", name="uq_ledger_entries_owner_kind_number"),
+        # 1004: lets `ledger_case_rules` check both ends' kinds by foreign key.
+        UniqueConstraint("id", "owner_key", "kind", name="uq_ledger_entries_id_owner_kind"),
         _ledger_fk("superseded_by", "ledger_entries", "fk_ledger_entries_superseded_by"),
-        CheckConstraint("kind IN ('quirk', 'feedback', 'proposal')", name="ck_ledger_entries_kind"),
+        CheckConstraint("kind IN ('quirk', 'feedback', 'proposal', 'case')", name="ck_ledger_entries_kind"),
         CheckConstraint("number >= 1", name="ck_ledger_entries_number"),
         CheckConstraint(
-            "ref ~ '^[QFP][0-9]{1,6}$' "
-            "AND substr(ref, 1, 1) = CASE kind WHEN 'quirk' THEN 'Q' WHEN 'feedback' THEN 'F' ELSE 'P' END "
+            "ref ~ '^[QFPC][0-9]{1,6}$' "
+            "AND substr(ref, 1, 1) = CASE kind WHEN 'quirk' THEN 'Q' WHEN 'feedback' THEN 'F' "
+            "WHEN 'proposal' THEN 'P' ELSE 'C' END "
             "AND CAST(substr(ref, 2) AS integer) = number",
             name="ck_ledger_entries_ref",
         ),
@@ -2398,7 +2416,8 @@ class LedgerEntry(Base):
             "status IN ('superseded', 'retracted') "
             "OR (kind = 'quirk' AND status IN ('current', 'stale')) "
             "OR (kind = 'feedback' AND status IN ('to_triage', 'open', 'handled', 'dismissed')) "
-            "OR (kind = 'proposal' AND status IN ('accepted', 'adjusted', 'rejected', 'withdrawn'))",
+            "OR (kind = 'proposal' AND status IN ('accepted', 'adjusted', 'rejected', 'withdrawn')) "
+            "OR (kind = 'case' AND status IN ('current', 'retired'))",
             name="ck_ledger_entries_status",
         ),
         CheckConstraint("origin IN ('agent', 'owner')", name="ck_ledger_entries_origin"),
@@ -2418,8 +2437,19 @@ class LedgerEntry(Base):
         ),
         CheckConstraint(
             "(kind = 'quirk') = (certainty IS NOT NULL) "
-            "AND (kind = 'quirk' OR (certainty_note IS NULL AND sources IS NULL))",
+            "AND (kind = 'quirk' OR certainty_note IS NULL) "
+            "AND (kind IN ('quirk', 'case') OR sources IS NULL)",
             name="ck_ledger_entries_quirk_fields",
+        ),
+        CheckConstraint(
+            "(kind = 'case') = (outcome IS NOT NULL AND expected IS NOT NULL AND expected_by IS NOT NULL) "
+            "AND (kind = 'case' OR (outcome IS NULL AND expected IS NULL AND expected_by IS NULL "
+            "AND owner_words IS NULL AND agent_did IS NULL)) "
+            "AND outcome IN ('slip', 'good', 'overdone') "
+            "AND expected_by IN ('owner', 'agent') "
+            "AND char_length(btrim(expected)) >= 1 AND char_length(expected) <= 4000 "
+            "AND char_length(owner_words) <= 4000 AND char_length(agent_did) <= 4000",
+            name="ck_ledger_entries_case_fields",
         ),
         CheckConstraint(
             "certainty IN ('tested', 'seen_once', 'inferred', 'docs', 'untested')",
@@ -2483,6 +2513,41 @@ class LedgerEntryLink(Base):
         CheckConstraint("entry_id < related_id", name="ck_ledger_entry_links_order"),
         Index("ix_ledger_entry_links_related", "related_id"),
         {"comment": _LEDGER_MARKERS["ledger_entry_links"]},
+    )
+
+
+class LedgerCaseRule(Base):
+    """A rule case tied to a rule it tests, through the rule's proposal (migration 1004).
+
+    `case_kind` and `rule_kind` are constants stored in the row so the two
+    foreign keys onto `(id, owner_key, kind)` make the database itself refuse
+    linking anything but a case to a proposal of the same owner.
+    """
+
+    __tablename__ = "ledger_case_rules"
+
+    user_id: Mapped[int | None] = _ledger_user_id()
+    owner_key: Mapped[int] = _ledger_owner_key()
+    case_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rule_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_kind: Mapped[str] = mapped_column(String(16), Computed("'case'", persisted=True), nullable=False)
+    rule_kind: Mapped[str] = mapped_column(String(16), Computed("'proposal'", persisted=True), nullable=False)
+    created_at: Mapped[datetime.datetime] = _ledger_now()
+
+    __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_ledger_case_rules_user"),
+        ForeignKeyConstraint(
+            ["case_id", "owner_key", "case_kind"],
+            ["ledger_entries.id", "ledger_entries.owner_key", "ledger_entries.kind"],
+            name="fk_ledger_case_rules_case", ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["rule_id", "owner_key", "rule_kind"],
+            ["ledger_entries.id", "ledger_entries.owner_key", "ledger_entries.kind"],
+            name="fk_ledger_case_rules_rule", ondelete="CASCADE",
+        ),
+        Index("ix_ledger_case_rules_rule", "rule_id"),
+        {"comment": _LEDGER_MARKERS["ledger_case_rules"]},
     )
 
 
