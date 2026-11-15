@@ -2889,7 +2889,7 @@
     "openWorldHint": false,
     "readOnlyHint": false
    },
-   "description": "Add a task, written exactly as the Tasks plugin's \"Create task\" dialog writes it.\n\n    Requires write permission. Counterpart: the Tasks plugin's \"create task\" dialog.\n    Writes one new line `- [ ] description #area/… <fields>` in the plugin's\n    field order, adding the plugin's created date if its settings say so.\n    Changes no other line. The line is read back before writing and the call\n    is refused if the plugin would read it differently.\n\n    Args:\n        description: the task's text, one line. Tags (`#next`) may be part of\n            it. Do not put dates or priority emojis in it: use the arguments.\n            Leave out the global filter (e.g. `#task`): the tool puts it in\n            front, once, and drops any whole-word copy given here, even\n            mid-sentence. To link the task to agent-ledger entries, cite\n            them in the text as `[F12]` (several: `[F12, Q14]`); the result\n            lists the entries linked, as they stand now.\n        path: the note to add it to; default the tasks inbox\n            (`Tasks inbox.md` unless configured). Only the inbox is created\n            when missing.\n        heading: add it under this heading (same selectors as\n            `edit_note(section=…)`: text, `Parent/Child` or `#N`), after the\n            section's last non-blank line. Default: the end of the note.\n        areas: area tags to add (slug, `#area/<slug>` or the area's main\n            note's name). Unknown areas are refused. Omitted: a note inside an\n            area's folder gets that area's tag; elsewhere none. `[]`: none.\n        status: todo (default), done, cancelled or in_progress.\n        priority: highest, high, medium, none, low or lowest.\n        created / start / scheduled / due: `YYYY-MM-DD`, `today`, `tomorrow`\n            or `yesterday` (the owner's local day).\n        on_completion: `keep` or `delete` (🏁: delete removes the line when\n            the task is done).\n        recurrence: a repeat rule (🔁) in the plugin's words: `every day`,\n            `every 3 days`, `every weekday`, `every week`, `every 2 weeks`,\n            `every week on Monday, Thursday`, `every month`, `every month on\n            the 15th`, `every month on the last`, `every year`, `every March\n            on the 1st`; add `when done` to count from completion. Other\n            wordings of these rules are accepted and written in the plugin's\n            own words (`every Monday` is written `every week on Monday`);\n            any other rule (`every weekend`, `every 3 weeks on Friday`) is\n            refused. Needs a due, scheduled or start date, usually the first\n            occurrence (for `every Monday`, the next Monday): refused without.\n        expected_hash: optional; the note's `content_hash`, to refuse if it\n            changed since you read it.\n    ",
+   "description": "Add a task, written exactly as the Tasks plugin's \"Create task\" dialog writes it.\n\n    Requires write permission. Counterpart: the Tasks plugin's \"create task\" dialog.\n    Writes one new line `- [ ] description #area/… <fields>` in the plugin's\n    field order, adding the plugin's created date if its settings say so.\n    Changes no other line. The line is read back before writing and the call\n    is refused if the plugin would read it differently.\n\n    Args:\n        description: the task's text, one line. Tags (`#next`) may be part of\n            it. Do not put dates or priority emojis in it: use the arguments.\n            Leave out the global filter (e.g. `#task`): the tool puts it in\n            front, once, and drops any whole-word copy given here, even\n            mid-sentence. To link the task to agent-ledger entries, cite\n            them in the text as `[F12]` (several: `[F12, Q14]`); the result\n            lists the entries linked, as they stand now.\n        path: the note to add it to; default the tasks inbox\n            (`Tasks inbox.md` unless configured). Only the inbox is created\n            when missing.\n        heading: add it under this heading (same selectors as\n            `edit_note(section=…)`: text, `Parent/Child` or `#N`), after the\n            section's last non-blank line. Default: the end of the note.\n        areas: area tags to add (slug, `#area/<slug>` or the area's main\n            note's name). Unknown areas are refused. Omitted: a note inside an\n            area's folder gets that area's tag; elsewhere none. `[]`: none.\n        status: todo (default), done, cancelled or in_progress.\n        priority: highest, high, medium, none, low or lowest.\n        created / start / scheduled / due: `YYYY-MM-DD`, `today`, `tomorrow`\n            or `yesterday` (the owner's local day).\n        on_completion: `keep` or `delete` (🏁: delete removes the line when\n            the task is done).\n        recurrence: a repeat rule (🔁) in the plugin's words: `every day`,\n            `every 3 days`, `every weekday`, `every week`, `every 2 weeks`,\n            `every week on Monday, Thursday`, `every month`, `every month on\n            the 15th`, `every month on the last`, `every year`, `every March\n            on the 1st`; add `when done` to count from completion. Other\n            wordings of these rules are accepted and written in the plugin's\n            own words (`every Monday` is written `every week on Monday`);\n            any other rule (`every weekend`, `every 3 weeks on Friday`) is\n            refused. Needs a due, scheduled or start date, usually the first\n            occurrence (for `every Monday`, the next Monday): refused without.\n        id: a name for this task (🆔: letters, digits, `-`, `_`), such as\n            `mum-backup`, so other tasks can wait for it. Unique in the vault:\n            an id another task has is refused, naming where.\n        depends_on: a list of ids of tasks this one waits for (⛔); the plugin\n            shows it as blocked until they are done. Each must already be on\n            a task, open or done, in any note: give that task an id first with\n            `edit_task(…, id=…)`. An id no task has is refused.\n        expected_hash: optional; the note's `content_hash`, to refuse if it\n            changed since you read it.\n    ",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {
@@ -2919,6 +2919,21 @@
       ],
       "default": null,
       "title": "Created"
+     },
+     "depends_on": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Depends On"
      },
      "description": {
       "title": "Description",
@@ -2959,6 +2974,18 @@
       ],
       "default": null,
       "title": "Heading"
+     },
+     "id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Id"
      },
      "on_completion": {
       "anyOf": [
@@ -3278,7 +3305,7 @@
     "openWorldHint": false,
     "readOnlyHint": false
    },
-   "description": "Change one task's description or fields, as the Tasks plugin's \"Edit task\" dialog does.\n\n    Requires write permission. Counterpart: the Tasks plugin's \"edit task\" dialog.\n    Postpone a task by setting `scheduled` (⏳). Only that line changes; it\n    is written back in the plugin's field order, as the plugin itself does on\n    any edit, a repeat rule (🔁) in the plugin's own wording. Status changes\n    go through `set_task_status`. If the line cites agent-ledger entries\n    (`[F12]`), the result lists them as they stand now.\n\n    Refused, writing nothing, when the note changed since `expected_hash`\n    (`stale_precondition`), when line `line` is not `expected_line`\n    (`line_mismatch`), when it is not a task (`not_a_task`), or when it\n    repeats by a rule these tools cannot follow (`recurring_task`). Such a\n    task's rule can still be replaced here (`recurrence`) or removed\n    (`clear`), which changes the owner's rule, so ask them first; otherwise\n    edit it in Obsidian.\n\n    Args:\n        path / line / expected_line / expected_hash: the task's `path`,\n            `line`, `text` and `content_hash` from `list_tasks`.\n        description: the new text (tags included). Omit to keep it. The\n            global filter (e.g. `#task`) is put back in front, once; a copy\n            given here as a whole word is dropped, even mid-sentence.\n        priority: highest, high, medium, none, low or lowest.\n        created / start / scheduled / due: `YYYY-MM-DD`, `today`, `tomorrow`\n            or `yesterday`.\n        on_completion: `keep`, `delete` or `none`.\n        recurrence: a repeat rule (🔁), as in `create_task`.\n        clear: fields to remove: any of priority, on_completion, recurrence,\n            created, start, scheduled, due.\n    ",
+   "description": "Change one task's description or fields, as the Tasks plugin's \"Edit task\" dialog does.\n\n    Requires write permission. Counterpart: the Tasks plugin's \"edit task\" dialog.\n    Postpone a task by setting `scheduled` (⏳). Only that line changes; it\n    is written back in the plugin's field order, as the plugin itself does on\n    any edit, a repeat rule (🔁) in the plugin's own wording. Status changes\n    go through `set_task_status`. If the line cites agent-ledger entries\n    (`[F12]`), the result lists them as they stand now.\n\n    Refused, writing nothing, when the note changed since `expected_hash`\n    (`stale_precondition`), when line `line` is not `expected_line`\n    (`line_mismatch`), when it is not a task (`not_a_task`), or when it\n    repeats by a rule these tools cannot follow (`recurring_task`). Such a\n    task's rule can still be replaced here (`recurrence`) or removed\n    (`clear`), which changes the owner's rule, so ask them first; otherwise\n    edit it in Obsidian.\n\n    Args:\n        path / line / expected_line / expected_hash: the task's `path`,\n            `line`, `text` and `content_hash` from `list_tasks`.\n        description: the new text (tags included). Omit to keep it. The\n            global filter (e.g. `#task`) is put back in front, once; a copy\n            given here as a whole word is dropped, even mid-sentence.\n        priority: highest, high, medium, none, low or lowest.\n        created / start / scheduled / due: `YYYY-MM-DD`, `today`, `tomorrow`\n            or `yesterday`.\n        on_completion: `keep`, `delete` or `none`.\n        recurrence: a repeat rule (🔁), as in `create_task`.\n        id: a name for this task (🆔), as in `create_task`. An id other\n            tasks wait for is not changed or cleared until their `depends_on`\n            no longer names it: to rename it, give those tasks their\n            `depends_on` without it (clear only where it is the only one),\n            rename it here, then add the new id to theirs. A done task's id\n            blocks no one, so it can be changed freely.\n        depends_on: the ids it waits for (⛔), replacing the whole list it\n            had (pass the ones to keep too); as in `create_task`. A task that\n            already waits for this one is refused (it would block both).\n        clear: fields to remove: any of priority, on_completion, recurrence,\n            id, depends_on, created, start, scheduled, due.\n    ",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {
@@ -3308,6 +3335,21 @@
       ],
       "default": null,
       "title": "Created"
+     },
+     "depends_on": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Depends On"
      },
      "description": {
       "anyOf": [
@@ -3340,6 +3382,18 @@
      "expected_line": {
       "title": "Expected Line",
       "type": "string"
+     },
+     "id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Id"
      },
      "line": {
       "title": "Line",
