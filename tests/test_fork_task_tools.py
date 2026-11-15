@@ -363,6 +363,22 @@ async def test_unsupported_recurring_rule_is_refused(vault):
     assert read(vault, "n.md") == text
 
 
+async def test_ticking_a_recurring_task_with_id_and_dependency_says_what_the_next_one_lost(vault):
+    line = "- [ ] back up 🆔 bk ⛔ prep 🔁 every week 📅 2026-10-31"
+    text = f"- [ ] prep 🆔 prep\n{line}\n"
+    result = await status(vault, text, 2, line, status="done")
+    assert result.error is None, result.error
+    assert "🆔" not in result.next_occurrence and "⛔" not in result.next_occurrence
+    [lost] = [n for n in result.notes if "does not carry" in n]
+    assert "🆔 bk" in lost and "⛔ prep" in lost and 'clear=["id"]' in lost and 'id="bk"' in lost
+
+
+async def test_ticking_a_recurring_task_without_id_adds_no_chain_note(vault):
+    text = "- [ ] water plants 🔁 every week 📅 2026-10-31\n"
+    result = await status(vault, text, 1, text.rstrip("\n"), status="done")
+    assert result.error is None and not any("does not carry" in n for n in result.notes)
+
+
 async def test_ticking_a_recurring_task_writes_its_next_occurrence_above_it(vault):
     text = "# Chores\n- [ ] water plants 🔁 every week 📅 2026-10-31\n- [ ] other\n"
     result = await status(vault, text, 2, "- [ ] water plants 🔁 every week 📅 2026-10-31", status="done")

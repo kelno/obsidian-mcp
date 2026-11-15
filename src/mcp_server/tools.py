@@ -10640,6 +10640,22 @@ async def set_task_status_impl(
                 f"This task repeats: its next occurrence was written at line {next_line} ({where}), as the "
                 f"Tasks plugin writes it.{tail}"]
             upcoming = result[change.next_index]
+            ticked = located.task
+            if ticked.id or ticked.depends_on:
+                # The plugin drops 🆔 and ⛔ from a next occurrence; a chain
+                # through this series ends here unless the agent moves it.
+                lost = []
+                if ticked.id:
+                    lost.append(f"🆔 {ticked.id} (tasks waiting for it no longer wait for this series)")
+                if ticked.depends_on:
+                    lost.append(f"⛔ {','.join(ticked.depends_on)} (the new occurrence waits for nothing)")
+                how = (f" To keep the chain, first clear the id on the done line (edit_task(…, clear=[\"id\"]): a "
+                       f"done task's id blocks no one), then give it to the new occurrence (edit_task(…, "
+                       f"id=\"{ticked.id}\"))" if ticked.id else " To keep it, give the new occurrence its depends_on "
+                       "again (edit_task(…, depends_on=…))")
+                written.notes = (written.notes or []) + [
+                    f"As the Tasks plugin does, the next occurrence does not carry {' and '.join(lost)}.{how}"
+                    + (", and its depends_on likewise." if ticked.id and ticked.depends_on else ".")]
             first = next((d for d in (upcoming.due, upcoming.scheduled, upcoming.start) if d is not None), None)
             if first is not None and first.value is not None and first.value < today:
                 written.notes.append(
