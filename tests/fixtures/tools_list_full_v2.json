@@ -5241,7 +5241,7 @@
         "type": "string"
        },
        "owner_words": {
-        "description": "case only: the owner's words, verbatim, in the language spoken (the request, the reaction, or both); never paraphrased, translated, trimmed or redacted: verbatim or left out. Leave it out if the owner said nothing. A case that looks private is not logged, and not brought up, unless the owner asks for it.",
+        "description": "case only: the owner's words, verbatim, in the language spoken (the request, the reaction, or both); never paraphrased, translated, trimmed or redacted: verbatim or left out. Leave it out if the owner said nothing.",
         "maxLength": 4000,
         "type": "string"
        },
@@ -5867,7 +5867,7 @@
         ]
        },
        "owner_words": {
-        "description": "case only: the owner's words, verbatim, in the language spoken (the request, the reaction, or both); never paraphrased, translated, trimmed or redacted: verbatim or left out. Leave it out if the owner said nothing. A case that looks private is not logged, and not brought up, unless the owner asks for it.",
+        "description": "case only: the owner's words, verbatim, in the language spoken (the request, the reaction, or both); never paraphrased, translated, trimmed or redacted: verbatim or left out. Leave it out if the owner said nothing.",
         "maxLength": 4000,
         "type": [
          "string",

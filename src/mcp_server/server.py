@@ -1966,8 +1966,7 @@ _LEDGER_FIELD_HELP = {
                    "it is your own reading of the rule",
     "owner_words": "the owner's words, verbatim, in the language spoken (the request, the reaction, or both); "
                    "never paraphrased, translated, trimmed or redacted: verbatim or left out. Leave it out if "
-                   "the owner said nothing. A case that looks private is not logged, and not brought up, unless the "
-                   "owner asks for it",
+                   "the owner said nothing",
     "agent_did": "what the agent did or said; verbatim when the slip is in the wording itself",
 }
 
