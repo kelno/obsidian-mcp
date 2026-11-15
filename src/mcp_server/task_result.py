@@ -103,8 +103,9 @@ class TaskWriteResult(_OmitNone):
     index_note: str | None = None
     today: str | None = None
     #: Agent-ledger entries the line cites (`[F12]`, `[Q14, P3]`), any kind,
-    #: as they stand now: ref, kind, title, status, a quirk's certainty, the
-    #: day it last changed, and `tasks`, the state of every task citing it
+    #: as they stand now: ref, kind, title, status, a quirk's certainty, a
+    #: case's outcome, the day it last changed, a proposal's current rule
+    #: cases (`cases`: total, outcomes, refs), and `tasks`, the state of every task citing it
     #: (open, done or cancelled). `status: unknown` for a ref with no entry.
     ledger_refs: list[dict] | None = None
     #: Plain-language remarks, such as a bare `F12` that links nothing.

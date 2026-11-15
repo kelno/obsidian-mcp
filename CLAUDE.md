@@ -582,7 +582,7 @@ update it in the same change.** What stays here is the short list:
 - Wikilink graph extracted from note bodies into `note_links`; resolved at index time with same-folder-first preference
 - **The agent ledger is primary data: backed up, never rebuilt from the
   vault** (fork, owner's design, migration 1002). The `ledger_*` tables hold
-  what agents write for each other (quirks, feedback, proposals); nothing in
+  what agents write for each other (quirks, feedback, proposals, rule cases); nothing in
   the vault can re-derive them, so a restore of last night's dump loses the
   day's entries — backups protect them. The database itself enforces the
   structure: per-kind columns and CHECKs, composite foreign keys over a
@@ -889,7 +889,7 @@ Recurring tasks are read, never changed. Read
 **Agent ledger** (fork) — `ledger_search`, `ledger_get`, `ledger_add`,
 `ledger_update`, `ledger_digest`, `ledger_digest_edit`, `ledger_topics`,
 `ledger_topic_edit`: what agents log for each other, in the `ledger_*`
-tables (migration 1002), never in the vault. Every change names the revision
+tables (migrations 1002, 1004), never in the vault. Four kinds: quirks (Q), feedback (F), proposals (P) and rule cases (C: a real situation where an agent's behaviour was right or wrong against a rule, tied to the rules it tests by their proposals in `ledger_case_rules`, whose foreign keys check both ends' kinds; the note writers' `changed_lines_cite:` shows a proposal's current cases). 1002's stamp-back rerun leaves 1004's marked units out of its comparison by an explicit allow-list (`LATER_COLUMNS` / `LATER_CONSTRAINTS`), which a later revision touching 1002's tables must extend on purpose. Every change names the revision
 it read and a reason, and keeps the previous version; nothing is deleted.
 What an agent needs is where it already is (fork, owner's decision 2026-11-10, ledger F34): `ledger_add` and `ledger_update` publish each rule and its allowed values in the parameter schema (describing only; the server decides), one refusal lists every problem (`problems`), and `ledger_search` results, a topic-less `ledger_add` and `get_vault_guide` carry the area and topic names.
 Search returns two separate lists, by words and by meaning (an area search also finds entries tied to the area by a topic). A vault task
@@ -924,7 +924,7 @@ summaries.
 | [control-panel.md](docs/architecture/control-panel.md) | panel templates, flash messages, admin guards, the Danger zone |
 | [tasks.md](docs/architecture/tasks.md) | the four task tools, `src/services/fork_tasks/`, `fork_note_tasks` / migration 1001, and any Tasks plugin upgrade |
 | [plugins.md](docs/architecture/plugins.md) | `src/plugins/`, the `PLUGINS` setting, the plugin calls in the note writers, and moving a vault-specific behaviour out of the core |
-| [agent-ledger.md](docs/architecture/agent-ledger.md) | the eight `ledger_*` tools, `src/services/ledger*.py`, the `ledger_*` tables / migration 1002, `scripts/ledger_import.py` / `ledger_export.py`, and the ledger's vectors in the reset and the embed stage |
+| [agent-ledger.md](docs/architecture/agent-ledger.md) | the eight `ledger_*` tools, `src/services/ledger*.py`, the `ledger_*` tables / migrations 1002 and 1004, `scripts/ledger_import.py` / `ledger_export.py`, and the ledger's vectors in the reset and the embed stage |
 | [native-oidc.md](docs/native-oidc.md) | `src/auth/oidc.py`, `src/services/oidc_links.py`, the OIDC callback and the `/admin/users/{id}/oidc/*` routes, `_warn_oidc_lockout`, any `OIDC_*` / `LOCAL_LOGIN_ENABLED` setting, migration 037's link columns (operator guide; the invariants are in control-panel.md) |
 
 Formal requirements live in `openspec/specs/`; the change history and its

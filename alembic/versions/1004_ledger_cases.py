@@ -28,9 +28,10 @@ these names with exactly these markers out of its comparison (its
 
 ## Stamp-back rerun
 
-All units present and marked: verified by rebuilding them in place inside a
-savepoint and comparing the catalog before and after (rolled back), then
-accepted with nothing changed. None present: created. Anything in between,
+All units present and marked: the columns compared with their declared
+shape, the constraints and the table rebuilt in place inside a savepoint
+over the rows present and the catalog compared before and after (rolled
+back), then accepted with nothing changed. None present: created. Anything in between,
 or a unit without its marker, is refused by name with nothing changed.
 
 `downgrade()` refuses while any case entry or case ref counter exists (the
@@ -247,6 +248,10 @@ def _create() -> None:
     for column, type_ in COLUMNS.items():
         op.execute(f"ALTER TABLE ledger_entries ADD COLUMN {column} {type_} NULL")
         op.execute(f"COMMENT ON COLUMN ledger_entries.{column} IS {_quote(COLUMN_MARKER)}")
+    _create_constraints_and_table()
+
+
+def _create_constraints_and_table() -> None:
     for name, (table, predicate, _old) in REPLACED.items():
         op.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}")
         op.execute(f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({predicate})")
@@ -259,13 +264,19 @@ def _create() -> None:
     op.execute(f"COMMENT ON TABLE {TABLE} IS {_quote(TABLE_MARKER)}")
 
 
-def _drop_own() -> None:
-    """Drop every unit of this revision (the replaced CHECKs included, not restored)."""
+#: How the catalog renders each column's type (`format_type`), for the rerun's check.
+COLUMN_TYPES = {"varchar(16)": "character varying(16)", "varchar(8)": "character varying(8)", "text": "text"}
+
+
+def _drop_constraints_and_table() -> None:
+    """Drop this revision's constraints (the replaced CHECKs included, not restored) and its table.
+
+    Not its columns: dropping them would drop the cases' content, and the
+    CHECKs could not be added back over the rows.
+    """
     op.execute(f"DROP TABLE {TABLE}")
     for name, table in CONSTRAINTS.items():
         op.execute(f"ALTER TABLE {table} DROP CONSTRAINT {name}")
-    for column in COLUMNS:
-        op.execute(f"ALTER TABLE ledger_entries DROP COLUMN {column}")
 
 
 #: The savepoint a stamp-back rerun rebuilds this revision's units in, to compare.
@@ -273,12 +284,24 @@ SCRATCH = "ledger_1004_shape"
 
 
 def _verify_own(bind) -> None:
-    """Accept this revision's units only if a rebuild renders them identically."""
+    """Accept this revision's units only if they are exactly what it creates.
+
+    The columns are compared with their declared shape; the constraints and
+    the table are rebuilt in place inside a savepoint over the rows present,
+    and the catalog compared before and after.
+    """
     live = _shape(bind)
+    expected_columns = sorted(
+        (column, COLUMN_TYPES[type_], False, COLUMN_MARKER) for column, type_ in COLUMNS.items())
+    if live["columns"] != expected_columns:
+        raise RuntimeError(
+            "1004 will not adopt rule-case units that differ from what it creates (columns): the ledger is "
+            "primary data. Inspect them, fix or move them aside by hand, then re-run. Nothing has been changed."
+        )
     op.execute(f"SAVEPOINT {SCRATCH}")
     try:
-        _drop_own()
-        _create()
+        _drop_constraints_and_table()
+        _create_constraints_and_table()
         rebuilt = _shape(bind)
     except sa.exc.DBAPIError as exc:
         op.execute(f"ROLLBACK TO SAVEPOINT {SCRATCH}")
@@ -290,7 +313,7 @@ def _verify_own(bind) -> None:
         ) from None
     op.execute(f"ROLLBACK TO SAVEPOINT {SCRATCH}")
     op.execute(f"RELEASE SAVEPOINT {SCRATCH}")
-    differing = [key for key in ("columns", "constraints", "table") if live[key] != rebuilt[key]]
+    differing = [key for key in ("constraints", "table") if live[key] != rebuilt[key]]
     if differing:
         raise RuntimeError(
             f"1004 will not adopt rule-case units that differ from what it creates ({', '.join(differing)}): "

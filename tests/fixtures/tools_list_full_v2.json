@@ -4150,7 +4150,7 @@
     "openWorldHint": false,
     "readOnlyHint": true
    },
-   "description": "Find agent-ledger entries: quirks, feedback and proposals agents log.\n\n    Read-only. The agent ledger holds records agents write for each other,\n    not instructions, and never vault notes. Kinds: Q quirk (what Claude can\n    or can't do on a surface, what works included), F feedback (an unclear\n    instruction, friction or a suggestion, from an agent or logged for the\n    owner), P proposal (a change proposed to an agent instruction, and its\n    outcome).\n\n    With `query`: two separate lists, `by_words` (shared words or the ref:\n    strong sign of a duplicate) and `by_meaning` (similar meaning: weaker),\n    or one of them with `mode`. When the embedding provider is down the\n    meaning list says so and the words list still answers. Without `query`:\n    the filtered list, most recently changed first. One line per entry, no\n    body: read entries with `ledger_get`. A line says whether vault tasks\n    cite the entry, and whether they are all done or cancelled (`tasks`).\n    Every result carries the area and topic names an entry can have\n    (`areas_and_topics`), for the entry you may log next.\n    ",
+   "description": "Find agent-ledger entries: quirks, feedback, proposals and rule cases.\n\n    Read-only. The agent ledger holds records agents write for each other,\n    not instructions, and never vault notes. Kinds: Q quirk (what Claude can\n    or can't do on a surface, what works included), F feedback (an unclear\n    instruction, friction or a suggestion, from an agent or logged for the\n    owner), P proposal (a change proposed to an agent instruction, and its\n    outcome), C case (a real situation where an agent's behaviour was right\n    or wrong against a rule; `rule` lists a rule's cases).\n\n    With `query`: two separate lists, `by_words` (shared words or the ref:\n    strong sign of a duplicate) and `by_meaning` (similar meaning: weaker),\n    or one of them with `mode`. When the embedding provider is down the\n    meaning list says so and the words list still answers. Without `query`:\n    the filtered list, most recently changed first. One line per entry, no\n    body: read entries with `ledger_get`. A line says whether vault tasks\n    cite the entry, and whether they are all done or cancelled (`tasks`).\n    Every result carries the area and topic names an entry can have\n    (`areas_and_topics`), for the entry you may log next.\n    ",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {
@@ -4180,7 +4180,7 @@
        }
       ],
       "default": null,
-      "description": "Any of quirk, feedback, proposal.",
+      "description": "Any of quirk, feedback, proposal, case.",
       "title": "Kinds"
      },
      "limit": {
@@ -4229,6 +4229,19 @@
       "default": null,
       "description": "Words, or a ref such as Q14. by_words lists entries holding every word; when none does, entries sharing any of them, best first (a note says so). by_meaning is separate and weaker.",
       "title": "Query"
+     },
+     "rule": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "A proposal ref such as P41 (the ref a rule carries): only the cases tied to that rule. Combine with status=\"any\" to include retired cases.",
+      "title": "Rule"
      },
      "since": {
       "anyOf": [
@@ -4360,6 +4373,18 @@
         ],
         "default": null,
         "title": "Origin"
+       },
+       "outcome": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Outcome"
        },
        "ref": {
         "title": "Ref",
@@ -4636,7 +4661,7 @@
     "openWorldHint": false,
     "readOnlyHint": true
    },
-   "description": "Read agent-ledger entries in full by ref, optionally with their history.\n\n    Read-only. Up to 20 refs (Q14, F3, P1); leading zeros don't matter (Q1\n    and Q01 are the same entry). Each entry comes with its\n    `revision` (give it to `ledger_update` as `expected_revision`), its own\n    fields, topics, related refs, the summary-view lines that cite it, and\n    the vault tasks citing it (`[F12]` in the task's text) with their status:\n    for feedback, the work decided; for a quirk or proposal, an open task\n    means something is pending on it. `history=true` adds every past\n    version, with who changed it, when and why.\n\n    Args:\n        refs: entry refs.\n        history: include past versions (default false).\n    ",
+   "description": "Read agent-ledger entries in full by ref, optionally with their history.\n\n    Read-only. Up to 20 refs (Q14, F3, P1, C2); leading zeros don't matter\n    (Q1 and Q01 are the same entry). Each entry comes with its\n    `revision` (give it to `ledger_update` as `expected_revision`), its own\n    fields, topics, related refs, the summary-view lines that cite it, and\n    the vault tasks citing it (`[F12]` in the task's text) with their status:\n    for feedback, the work decided; for a quirk or proposal, an open task\n    means something is pending on it. A case lists the rules it tests\n    (`rules`), a proposal the cases tied to its rule (`cases`): read them\n    before rewording or cutting the rule. `history=true` adds every past\n    version, with who changed it, when and why.\n\n    Args:\n        refs: entry refs.\n        history: include past versions (default false).\n    ",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {
@@ -4691,6 +4716,34 @@
        "body": {
         "title": "Body",
         "type": "string"
+       },
+       "cases": {
+        "anyOf": [
+         {
+          "items": {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          "type": "array"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Cases"
+       },
+       "cases_total": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Cases Total"
        },
        "cited_by": {
         "anyOf": [
@@ -4815,6 +4868,22 @@
        "revision": {
         "title": "Revision",
         "type": "integer"
+       },
+       "rules": {
+        "anyOf": [
+         {
+          "items": {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          "type": "array"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Rules"
        },
        "seen": {
         "anyOf": [
@@ -5043,7 +5112,7 @@
     "openWorldHint": false,
     "readOnlyHint": false
    },
-   "description": "Log an agent-ledger entry: a quirk, feedback or a proposal.\n\n    Requires write permission. For what agents write for each other, never\n    the owner's own notes. If no kind fits, log feedback (friction,\n    component \"agent ledger\") saying what you wanted to record and why.\n    Each parameter's description gives its rules and allowed values; give\n    the entry an area and its topics. A refusal names every problem at once\n    (`problems`), with the valid values. The answer gives the new ref and up\n    to five similar entries, with their topics: if one holds the same thing,\n    mark the newer one superseded by the older (`ledger_update`). Refs your\n    text cites (`[Q14]`, or a bare Q14) come back as they stand now\n    (`cites`): check your wording matches them.\n    ",
+   "description": "Log an agent-ledger entry: a quirk, feedback, a proposal or a rule case.\n\n    Requires write permission. For what agents write for each other, never\n    the owner's own notes. If no kind fits, log feedback (friction,\n    component \"agent ledger\") saying what you wanted to record and why.\n    Each parameter's description gives its rules and allowed values; give\n    the entry an area and its topics. A refusal names every problem at once\n    (`problems`), with the valid values. The answer gives the new ref and up\n    to five similar entries, with their topics: if one holds the same thing,\n    mark the newer one superseded by the older (`ledger_update`). Refs your\n    text cites (`[Q14]`, or a bare Q14) come back as they stand now\n    (`cites`): check your wording matches them. A case's body places a fresh\n    reader back in the situation; the notes say when its rule gathers slips.\n    ",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {
@@ -5098,8 +5167,13 @@
      },
      "details": {
       "default": null,
-      "description": "The kind's own fields; a quirk needs certainty; feedback needs subtype; a proposal needs target and proposed_text. Each property says which kind it belongs to; a field of another kind is refused.",
+      "description": "The kind's own fields; a quirk needs certainty; feedback needs subtype; a proposal needs target and proposed_text; a case needs outcome, expected and expected_by. Each property says which kind it belongs to; a field of another kind is refused.",
       "properties": {
+       "agent_did": {
+        "description": "case only: what the agent did or said; verbatim when the slip is in the wording itself.",
+        "maxLength": 4000,
+        "type": "string"
+       },
        "certainty": {
         "description": "quirk only, required: how sure: tested (seen happen more than once, or deliberately), seen_once, inferred (a deduction or a guess), docs (from documentation, not tried) or untested. The owner's own observation counts like yours (tested if they saw it more than once); say who saw it in certainty_note.",
         "enum": [
@@ -5127,6 +5201,20 @@
         "maxLength": 300,
         "type": "string"
        },
+       "expected": {
+        "description": "case only, required: what should have happened.",
+        "maxLength": 4000,
+        "type": "string"
+       },
+       "expected_by": {
+        "description": "case only, required: whose call that is: owner (the owner's own) or agent (an agent's reading of the rule).",
+        "enum": [
+         "owner",
+         "agent"
+        ],
+        "maxLength": 8,
+        "type": "string"
+       },
        "final_text": {
         "description": "proposal only: what went in (required when status is accepted or adjusted).",
         "maxLength": 16000,
@@ -5137,8 +5225,23 @@
         "maxLength": 4000,
         "type": "string"
        },
+       "outcome": {
+        "description": "case only, required: slip (the agent broke the rule), good (it did what the rule wants: behaviour to keep) or overdone (it followed the rule too far: the opposite failure).",
+        "enum": [
+         "slip",
+         "good",
+         "overdone"
+        ],
+        "maxLength": 16,
+        "type": "string"
+       },
        "owner_reason": {
         "description": "proposal only: only if the owner gave one; never press for it.",
+        "maxLength": 4000,
+        "type": "string"
+       },
+       "owner_words": {
+        "description": "case only: the owner's words, verbatim, in the language spoken (the request, the reaction, or both); never paraphrased or translated. Leave it out if the owner said nothing, and leave out anything that looks private unless the owner asks for it.",
         "maxLength": 4000,
         "type": "string"
        },
@@ -5148,7 +5251,7 @@
         "type": "string"
        },
        "sources": {
-        "description": "quirk only: where it comes from (links, refs, files).",
+        "description": "quirk or case only: where it comes from: for a quirk, links, refs, files; for a case, where the case was taken from (a note and its example number, a session, an entry).",
         "maxLength": 4000,
         "type": "string"
        },
@@ -5172,11 +5275,12 @@
       "type": "object"
      },
      "kind": {
-      "description": "quirk: how something behaves, observed by you or reported by the owner (a tool, a surface, a limit, what works included); feedback: something that got in the way of your work, or a wish for a change; proposal: a change to an agent instruction and its outcome. The same thing seen again: append to the existing entry (ledger_update) rather than add one.",
+      "description": "quirk: how something behaves, observed by you or reported by the owner (a tool, a surface, a limit, what works included); feedback: something that got in the way of your work, or a wish for a change; proposal: a change to an agent instruction and its outcome; case: a real situation where an agent's behaviour was right or wrong against a rule, the test battery for rewording rules (tie it to its rules with rules). The same thing seen again: append to the existing entry (ledger_update) rather than add one.",
       "enum": [
        "quirk",
        "feedback",
-       "proposal"
+       "proposal",
+       "case"
       ],
       "title": "Kind",
       "type": "string"
@@ -5219,6 +5323,23 @@
       "default": null,
       "description": "Refs of related entries (\"see also\"), e.g. [\"Q14\", \"F3\"]; the link shows on both entries.",
       "title": "Related"
+     },
+     "rules": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "A case only: the rules it tests, by the proposal ref each rule carries (e.g. [\"P41\"]; the rule's line ends with [P41]). Each must be an existing proposal. Leave it out when no rule covers the case yet.",
+      "maxItems": 20,
+      "title": "Rules"
      },
      "seen": {
       "anyOf": [
@@ -5476,6 +5597,21 @@
       "default": null,
       "title": "Revision"
      },
+     "rules": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Rules"
+     },
      "seen": {
       "anyOf": [
        {
@@ -5546,7 +5682,7 @@
     "openWorldHint": false,
     "readOnlyHint": false
    },
-   "description": "Change an agent-ledger entry (with a reason), or mark feedback as seen.\n\n    Requires write permission. Give `ref`, `expected_revision` and `reason`.\n    Nothing is deleted; close an entry with `status`. A duplicate is\n    superseded by the older entry. `dismissed` is the owner's call only:\n    never set it on your own judgment. Correct your own mistake by updating,\n    with a reason. Summary-view lines citing the entry get flagged: check\n    each one (`ledger_digest_edit`). A refusal names every problem at once\n    (`problems`). The result shows the entries your text cites as they stand\n    now (`cites`) and, after a change to what the entry says, what cites it\n    (`cited_by`: entries, vault tasks, notes): check each.\n\n    Marking feedback seen (the owner has heard of it) needs no reason or\n    revision: `refs` plus `seen=true`, many at once.\n    ",
+   "description": "Change an agent-ledger entry (with a reason), or mark feedback as seen.\n\n    Requires write permission. Give `ref`, `expected_revision` and `reason`.\n    Nothing is deleted; close an entry with `status`. A duplicate is\n    superseded by the older entry. `dismissed` is the owner's call only:\n    never set it on your own judgment. Correct your own mistake by updating,\n    with a reason. Summary-view lines citing the entry get flagged: check\n    each one (`ledger_digest_edit`). A refusal names every problem at once\n    (`problems`). The result shows the entries your text cites as they stand\n    now (`cites`) and, after a change to what the entry says, what cites it\n    (`cited_by`: entries, vault tasks, notes): check each. A case gains or\n    loses rules with `rules_add` / `rules_remove`, kept in its history.\n\n    Marking feedback seen (the owner has heard of it) needs no reason or\n    revision: `refs` plus `seen=true`, many at once.\n    ",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {
@@ -5623,6 +5759,14 @@
       "default": null,
       "description": "The kind's own fields (as in ledger_add): only the fields given change, the others stay; null clears an optional one.",
       "properties": {
+       "agent_did": {
+        "description": "case only: what the agent did or said; verbatim when the slip is in the wording itself.",
+        "maxLength": 4000,
+        "type": [
+         "string",
+         "null"
+        ]
+       },
        "certainty": {
         "description": "quirk only, required: how sure: tested (seen happen more than once, or deliberately), seen_once, inferred (a deduction or a guess), docs (from documentation, not tried) or untested. The owner's own observation counts like yours (tested if they saw it more than once); say who saw it in certainty_note.",
         "enum": [
@@ -5663,6 +5807,27 @@
          "null"
         ]
        },
+       "expected": {
+        "description": "case only, required: what should have happened.",
+        "maxLength": 4000,
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "expected_by": {
+        "description": "case only, required: whose call that is: owner (the owner's own) or agent (an agent's reading of the rule).",
+        "enum": [
+         "owner",
+         "agent",
+         null
+        ],
+        "maxLength": 8,
+        "type": [
+         "string",
+         "null"
+        ]
+       },
        "final_text": {
         "description": "proposal only: what went in (required when status is accepted or adjusted).",
         "maxLength": 16000,
@@ -5679,8 +5844,30 @@
          "null"
         ]
        },
+       "outcome": {
+        "description": "case only, required: slip (the agent broke the rule), good (it did what the rule wants: behaviour to keep) or overdone (it followed the rule too far: the opposite failure).",
+        "enum": [
+         "slip",
+         "good",
+         "overdone",
+         null
+        ],
+        "maxLength": 16,
+        "type": [
+         "string",
+         "null"
+        ]
+       },
        "owner_reason": {
         "description": "proposal only: only if the owner gave one; never press for it.",
+        "maxLength": 4000,
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "owner_words": {
+        "description": "case only: the owner's words, verbatim, in the language spoken (the request, the reaction, or both); never paraphrased or translated. Leave it out if the owner said nothing, and leave out anything that looks private unless the owner asks for it.",
         "maxLength": 4000,
         "type": [
          "string",
@@ -5696,7 +5883,7 @@
         ]
        },
        "sources": {
-        "description": "quirk only: where it comes from (links, refs, files).",
+        "description": "quirk or case only: where it comes from: for a quirk, links, refs, files; for a case, where the case was taken from (a note and its example number, a session, an entry).",
         "maxLength": 4000,
         "type": [
          "string",
@@ -5843,6 +6030,40 @@
       "description": "Refs to add as related; the link shows on both entries.",
       "title": "Related"
      },
+     "rules_add": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "A case only: proposal refs of more rules it tests (as rules in ledger_add).",
+      "maxItems": 20,
+      "title": "Rules Add"
+     },
+     "rules_remove": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "A case only: proposal refs of rules it no longer tests.",
+      "maxItems": 20,
+      "title": "Rules Remove"
+     },
      "seen": {
       "anyOf": [
        {
@@ -5866,7 +6087,7 @@
        }
       ],
       "default": null,
-      "description": "Close or reopen: handled (feedback dealt with; with handled_account), superseded (with superseded_by), retracted (should never have been logged), stale (a quirk no longer true, e.g. fixed upstream: say since when with append), or the kind's open statuses (current, open, to_triage). dismissed is the owner's call only. Combines with append, seen and other changes in one call.",
+      "description": "Close or reopen: handled (feedback dealt with; with handled_account), superseded (with superseded_by), retracted (should never have been logged), stale (a quirk no longer true, e.g. fixed upstream: say since when with append), retired (a case whose expected behaviour the owner changed; kept), or the kind's open statuses (current, open, to_triage). dismissed is the owner's call only. Combines with append, seen and other changes in one call.",
       "title": "Status"
      },
      "superseded_by": {
@@ -6131,6 +6352,21 @@
       ],
       "default": null,
       "title": "Revision"
+     },
+     "rules": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Rules"
      },
      "seen": {
       "anyOf": [
