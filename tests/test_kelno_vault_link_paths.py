@@ -108,3 +108,35 @@ def test_names_match_as_obsidian_lowercases_and_case_twins_are_ambiguous():
 def test_shifted_moves_line_numbers():
     _t, report = run("[[Areas]]")
     assert lp.shifted(report, 3).rewritten[0][0] == 4
+
+
+@pytest.mark.parametrize("written,expected", [
+    # The pipe of another display-named link on the line is not a table's.
+    ("See [[Areas/Areas|Areas]] and [[2026-11-04 Call|the call]].",
+     "See [[Areas/Areas|Areas]] and [[Log/2026-11-04 Call|the call]]."),
+    ("[[2026-11-04 Call|the call]] then [[Areas/Areas|Areas]]",
+     "[[Log/2026-11-04 Call|the call]] then [[Areas/Areas|Areas]]"),
+    ("[[Areas]] and [[Areas]]", "[[Areas/Areas|Areas]] and [[Areas/Areas|Areas]]"),
+    # Nor is a pipe in code formatting.
+    ("`a | b` then [[Areas]]", "`a | b` then [[Areas/Areas|Areas]]"),
+    # An escaped pipe outside a table would break the link: it comes back plain.
+    ("See [[Areas\\|A]] here", "See [[Areas/Areas|A]] here"),
+    # In a table, a row's other links leave it a table.
+    ("| [[Areas/Areas\\|Areas]] | [[2026-11-04 Call]] |",
+     "| [[Areas/Areas\\|Areas]] | [[Log/2026-11-04 Call\\|2026-11-04 Call]] |"),
+])
+def test_only_a_table_row_escapes_the_pipe(written, expected):
+    text, report = run(written)
+    assert text == expected
+    assert report.rewritten
+
+
+@pytest.mark.parametrize("written", [
+    "[[Recent|Recent]]",                                                  # a root-level note's path is its name
+    "See [[CLAUDE|the vault's CLAUDE.md]], and [[Areas/Areas|Areas]].",  # beside another display-named link
+    "| [[Recent\\|Recent]] | x |",
+])
+def test_a_link_already_at_its_full_path_is_neither_changed_nor_reported(written):
+    text, report = run(written, notes=NOTES + ["Recent.md", "CLAUDE.md"])
+    assert text == written
+    assert not report.rewritten

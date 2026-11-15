@@ -23,8 +23,14 @@ Code spans, fenced blocks (inside quotes and callouts too), the frontmatter
 and checkbox lines (a task's line is the task tools' to change) are skipped.
 Lines are compared as the task check compares them: line endings and
 surrounding spaces don't make a line new.
-In a table the pipe before the display text is escaped (`\\|`); a link there
-keeps or gets `\\|`. Lines the write leaves as they were are never touched.
+In a table the pipe before the display text is escaped (`\\|`), and only
+there: elsewhere `\\|` breaks the link in Obsidian, so a rewritten link gets
+the pipe its line calls for, whichever it was written with. A line is a table
+row by its own pipes, never one inside a link or in code: the display pipe of
+another link on an ordinary line once made a rewrite escape this one, and the
+broken link came back on every edit of the line. A link the rewrite would
+give back unchanged (a note at the vault root, whose full path is its name)
+is not reported. Lines the write leaves as they were are never touched.
 """
 
 from __future__ import annotations
@@ -110,16 +116,19 @@ def _quoted_code_lines(lines: list[str]) -> set[int]:
 _UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
 
 
-def _in_table(line: str, start: int, end: int) -> bool:
-    """Whether a link sits in a table row: a pipe outside it, or a row that opens with one (quotes stripped)."""
-    other = line[:start] + line[end:]
-    body = line[_QUOTE_PREFIX_RE.match(line).end():] if _QUOTE_PREFIX_RE.match(line) else line
-    return bool(_UNESCAPED_PIPE_RE.search(other)) or body.lstrip().startswith("|")
+def _is_table_row(masked: str) -> bool:
+    """Whether a line is a table row: an unescaped pipe of its own (with or without a leading one).
+
+    `masked` is the line with its code blanked. Every link's span is blanked
+    too, so a link's display pipe never counts as the row's.
+    """
+    own = _WIKILINK_RE.sub(lambda m: " " * len(m.group()), masked)
+    return bool(_UNESCAPED_PIPE_RE.search(own))
 
 
 def _is_note_target(name: str, index: NoteIndex) -> bool:
     """Whether a bare target means a note: no extension, `.md`, or a note's own name with a dot in it."""
-    base, ext = os.path.splitext(name)
+    _base, ext = os.path.splitext(name)
     return not ext or ext.lower() == ".md" or bool(index.named(name))
 
 
@@ -155,6 +164,7 @@ def rewrite(old: str | None, new: str, index: NoteIndex) -> tuple[str, LinkRepor
         line, masked = lines[i], masked_lines[i]
         if "[[" not in masked or _CHECKBOX_RE.match(line):
             continue
+        pipe = "\\|" if _is_table_row(masked) else "|"
         pieces, last = [], 0
         for m in _WIKILINK_RE.finditer(masked):
             start, end = m.span()
@@ -163,11 +173,11 @@ def rewrite(old: str | None, new: str, index: NoteIndex) -> tuple[str, LinkRepor
                 continue                              # code inside or across the link: not touched
             target = m.group("target")
             anchor, alias = m.group("anchor"), m.group("alias")
-            escaped = False                           # `[[X\|Y]]` in a table: the pipe is escaped
+            # `[[X\|Y]]`: the escaped pipe's backslash is not part of the target.
             if alias is not None and anchor is not None and anchor.endswith("\\"):
-                anchor, escaped = anchor[:-1], True
+                anchor = anchor[:-1]
             elif alias is not None and target.endswith("\\"):
-                target, escaped = target[:-1], True
+                target = target[:-1]
             name = target.strip()
             embed = bool(m.group("embed"))
             after = _PATH_AFTER_RE.match(line, end)
@@ -188,7 +198,6 @@ def rewrite(old: str | None, new: str, index: NoteIndex) -> tuple[str, LinkRepor
                     report.unresolved.append((i + 1, raw))
                 continue
             path = candidates[0][:-3]
-            pipe = "\\|" if escaped or _in_table(line, start, end) else "|"
             link = ("!" if embed else "") + "[[" + path + (f"#{anchor}" if anchor is not None else "")
             if alias is not None:
                 link += pipe + alias
@@ -197,6 +206,8 @@ def rewrite(old: str | None, new: str, index: NoteIndex) -> tuple[str, LinkRepor
                 shown = name + "".join(f" > {part}" for part in (anchor or "").split("#") if part)
                 link += pipe + shown
             link += "]]"
+            if link == raw:
+                continue                              # already right: a root note, its pipe as the row wants
             pieces.append(line[last:start] + link)
             last = end
             report.rewritten.append((i + 1, raw, link))
