@@ -138,6 +138,34 @@ def strip_section(text: str, heading: str) -> tuple[str, bool]:
     return "\n".join(out).rstrip() + ("\n" if text.endswith("\n") else ""), removed
 
 
+def section_body(text: str, heading: str) -> str | None:
+    """The body of the first `## heading` section (up to the next heading of level 1 or 2), or None.
+
+    The heading line itself is left out. Matched as `strip_section` matches:
+    case-insensitively, level 2 only, headings inside fenced code are not headings.
+    """
+    out, inside, found, fence = [], False, False, None
+    target = heading.strip().casefold()
+    for line in text.split("\n"):
+        stripped = line.strip()
+        fence_match = re.match(r"(`{3,}|~{3,})", stripped)
+        if fence is None and fence_match:
+            fence = fence_match.group(1)[0]
+        elif fence is not None and fence_match and fence_match.group(1)[0] == fence:
+            fence = None
+        elif fence is None:
+            match = re.match(r"(#{1,6})\s+(.*?)\s*#*\s*$", line)
+            if match and len(match.group(1)) <= 2:
+                if inside:
+                    break
+                if not found and len(match.group(1)) == 2 and match.group(2).strip().casefold() == target:
+                    inside = found = True
+                    continue
+        if inside:
+            out.append(line)
+    return "\n".join(out) if found else None
+
+
 def strip_frontmatter(text: str) -> str:
     """`text` without a leading YAML frontmatter block."""
     if not text.startswith("---"):

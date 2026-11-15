@@ -63,6 +63,12 @@ OPEN_AREA_ENTRIES_MAX = 40
 OPEN_AREA_TASKS_MAX = 30
 #: The section of the main note left out: the open tasks come from every note instead.
 OPEN_AREA_TASKS_HEADING = "Tasks"
+#: The section of the vault guide note (`VAULT_GUIDE_NOTE`) holding the conventions for working on any
+#: area; read at each call, its text never copied here. The vault's `_/agent/Outside dependencies.md`
+#: records that this plugin depends on the heading's name.
+OPEN_AREA_CONVENTIONS_HEADING = "Working on an area"
+#: The conventions are cut past this many characters.
+OPEN_AREA_CONVENTIONS_MAX_CHARS = 4000
 
 OPEN_AREA_INSTRUCTIONS = (
     "Starting work: check each task and entry against the work you're starting (read an entry with ledger_get "
@@ -128,6 +134,31 @@ async def _open_area_main_note(path: str, uid, notes: list[str]) -> tuple[str | 
     notes.append(f"The main note's text is cut at {OPEN_AREA_NOTE_MAX_CHARS:,} of {len(text_):,} characters: "
                  f"read_note(\"{path}\") has the rest.")
     return text_[:OPEN_AREA_NOTE_MAX_CHARS], len(text_)
+
+
+async def _open_area_conventions(uid, notes: list[str]) -> str | None:
+    """The `## Working on an area` section of the vault guide note, read now; None with a note when it can't be."""
+    path, heading = settings.vault_guide_note, OPEN_AREA_CONVENTIONS_HEADING
+    missing = "so the vault's conventions for working on an area are not included"
+    try:
+        text_ = await asyncio.to_thread(_read_vault_text, path, uid)
+    except FileNotFoundError:
+        notes.append(f"The vault guide note {path} was not found, {missing}.")
+        return None
+    except (ValueError, OSError) as exc:
+        notes.append(f"The vault guide note {path} could not be read ({type(exc).__name__}), {missing}.")
+        return None
+    body = _areas_index.section_body(_areas_index.strip_frontmatter(text_), heading)
+    if body is None or not body.strip():
+        why = "has no" if body is None else "has an empty"
+        notes.append(f"The vault guide note {path} {why} \"## {heading}\" section, {missing}.")
+        return None
+    body = body.strip("\n") + "\n"
+    if len(body) > OPEN_AREA_CONVENTIONS_MAX_CHARS:
+        notes.append(f"The conventions for working on an area are cut at {OPEN_AREA_CONVENTIONS_MAX_CHARS:,} of "
+                     f"{len(body):,} characters: read_note(\"{path}\", section=\"{heading}\") has the rest.")
+        body = body[:OPEN_AREA_CONVENTIONS_MAX_CHARS]
+    return body
 
 
 async def _open_area_entries(tag: str, uid, notes: list[str]) -> tuple[list, bool]:
@@ -282,11 +313,13 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
         if row.main_note is None or row.main_note.casefold() not in declared:
             why = ("it has no main note yet" if row.main_note is None
                    else f"its main note {row.main_note} declares no area_tag")
+            notes = [f"{folder} belongs to the area {row.name!r}, but {why}: the "
+                     f"list of areas says \"{row.vault_cell}\"."]
+            conventions = await _open_area_conventions(uid, notes)
             return OpenAreaResult(
                 found=True, name=row.name, matched_folder=matched_folder, related_folders=row.folders or None,
                 main_note=row.main_note, main_note_open_url=_open_area_note_url(row.main_note),
-                notes=[f"{folder} belongs to the area {row.name!r}, but {why}: the "
-                       f"list of areas says \"{row.vault_cell}\"."])
+                area_conventions=conventions, notes=notes)
         tag, main_note, description = declared[row.main_note.casefold()]
     else:
         try:
@@ -299,6 +332,7 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
 
     if rows is not None and row is None:
         notes.append(f"The area has no row in {AREAS_INDEX_PATH}, so its related folders are unknown.")
+    conventions = await _open_area_conventions(uid, notes)
     text_, full_chars = await _open_area_main_note(main_note, uid, notes)
     entries, entries_truncated = await _open_area_entries(tag, uid, notes)
     tasks, tasks_total = await _open_area_tasks(tag, uid, notes)
@@ -308,7 +342,7 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
     return OpenAreaResult(
         found=True, area=tag, tag="#" + tag, name=row.name if row else None, description=description,
         main_note=main_note, main_note_open_url=_open_area_note_url(main_note), archived=archived,
-        matched_folder=matched_folder, main_note_text=text_,
+        matched_folder=matched_folder, area_conventions=conventions, main_note_text=text_,
         main_note_chars=full_chars, related_folders=(row.folders or None) if row else None,
         entries=entries or None, entries_truncated=entries_truncated or None,
         tasks=tasks or None, tasks_total=tasks_total if tasks_total > len(tasks) else None,
@@ -334,12 +368,15 @@ async def open_area(
     Read-only. Call it first when you start work in an area or answer a
     question about one, and when a session works in a folder outside the
     vault (`folder`), to find its area. One call returns the area's tag and
-    description, its main note's text (the agent rules at its top and
+    description, the vault's conventions for working on any area
+    (`area_conventions`, the "Working on an area" section of the vault's
+    conventions note, read at each call; follow them), its main note's text (the agent rules at its top and
     `## Current position`; without its Tasks section), its related folders
     outside the vault, its active ledger entries (those filed under another
     area but carrying one of its topics are marked `via_topic`), and its open
     tasks from every note carrying its tag, `#next` first, then by urgency.
-    Both lists are capped; `notes` say where the rest is, and name open
+    Both lists are capped; `notes` say where the rest is, say when the
+    conventions could not be read, and name open
     feedback whose citing tasks are all done (ticked in Obsidian, say). `instructions`
     then say what to do with it all. A folder no area lists comes back with
     `found: false`: ask the owner which area it belongs to.

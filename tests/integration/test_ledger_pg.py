@@ -1209,6 +1209,36 @@ async def test_open_area_caps_tasks_and_points_to_list_tasks(sessionmaker, ctx, 
     assert any('list_tasks(area="area/home")' in n for n in result.notes)
 
 
+async def test_open_area_carries_the_vault_guide_notes_area_section(sessionmaker, ctx, monkeypatch):
+    await _open_area_vault(sessionmaker, ctx)
+    missing = await open_area_impl(area="home")
+    assert missing.error is None and missing.area_conventions is None
+    assert any("CLAUDE.md was not found" in n and "conventions for working on an area" in n for n in missing.notes)
+
+    monkeypatch.setattr(settings, "vault_guide_note", "_/agent/Vault conventions.md")
+    guide = ctx / "_" / "agent" / "Vault conventions.md"
+    guide.parent.mkdir(parents=True)
+    guide.write_text("---\ndescription: x\n---\n# Intro\n\n## Changes\n\n- other\n", encoding="utf-8")
+    no_section = await open_area_impl(area="home")
+    assert no_section.error is None and no_section.area_conventions is None
+    assert any('Vault conventions.md has no "## Working on an area" section' in n for n in no_section.notes)
+
+    guide.write_text("---\ndescription: x\n---\nIntro.\n\n## Working on an area\n\n- Start with open_area.\n\n"
+                     "## Changes\n\n- other\n", encoding="utf-8")
+    first = await open_area_impl(area="home")
+    assert first.area_conventions == "- Start with open_area.\n"
+    assert not any("Working on an area" in n or "guide note" in n for n in first.notes or [])
+    guide.write_text("## Working on an area\n\n- Edited.\n", encoding="utf-8")
+    assert (await open_area_impl(area="home")).area_conventions == "- Edited.\n"     # read at each call
+    village = await open_area_impl(folder="D:\\work\\village")
+    assert village.area_conventions == "- Edited.\n" and "no main note yet" in village.notes[0]
+
+    monkeypatch.setattr(kelno_open_area, "OPEN_AREA_CONVENTIONS_MAX_CHARS", 3)
+    cut = await open_area_impl(area="home")
+    assert cut.area_conventions == "- E"
+    assert any("cut at 3 of 10 characters" in n and 'section="Working on an area"' in n for n in cut.notes)
+
+
 
 # ── Note writes show the ledger refs on the lines they change ────────────────
 

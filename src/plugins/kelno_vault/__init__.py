@@ -5,7 +5,8 @@ its own plugin rather than adapting this one. It holds conventions only (folder
 names, naming and linking rules), never the vault's content.
 
 What it does today: it adds the tool `open_area` (`open_area`), opening one
-of the vault's areas. A new note's name, or a move's destination, is checked
+of the vault's areas, with the vault guide note's "Working on an area"
+section. A new note's name, or a move's destination, is checked
 against its folder's `note_names` setting (`note_names`, the name check). On
 the lines a note write adds or changes: a task line written by hand is refused (`task_lines`, the check); a first heading
 repeating the note's name is dropped (`title_heading`), then bare-name
@@ -102,6 +103,15 @@ _TITLE_HEADING_GUIDE = (
 )
 
 
+_OPEN_AREA_GUIDE = (
+    "## Opening an area (this server)\n\n"
+    "Besides the area's main note, ledger entries and open tasks, `open_area` returns `area_conventions`: the "
+    f"\"{open_area.OPEN_AREA_CONVENTIONS_HEADING}\" section of this vault's conventions note (the one below), read "
+    "at each call, so it is current. It holds the rules for working on any area; follow them. When the note or "
+    "the section cannot be read, a line in `notes` says so instead."
+)
+
+
 async def _rewrite(write: plugins.NoteWrite) -> plugins.Rewrite:
     """The title heading, then the links: the heading may drop lines, so the link report is made on the result.
 
@@ -137,5 +147,5 @@ plugin = plugins.Plugin(
                       "(`links_rewritten:`, `links_flagged:`).",
     },
     guide_text="\n\n".join((task_lines.GUIDE, rule_notes.GUIDE, note_names.GUIDE, _LINKS_GUIDE,
-                           _TITLE_HEADING_GUIDE)),
+                           _TITLE_HEADING_GUIDE, _OPEN_AREA_GUIDE)),
 )

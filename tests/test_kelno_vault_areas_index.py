@@ -72,3 +72,14 @@ def test_no_tasks_section_leaves_the_note_whole():
 def test_frontmatter_is_dropped():
     assert ai.strip_frontmatter("---\na: 1\n---\n\nBody\n") == "Body\n"
     assert ai.strip_frontmatter("Body ---\n") == "Body ---\n"
+
+
+def test_a_sections_body_is_read_up_to_the_next_level_one_or_two_heading():
+    note = ("# Conventions\n\nIntro.\n\n## Working on an AREA ##\n\nFor any agent.\n\n- Start here.\n"
+            "### A sub-heading\n\n- kept\n```\n## Not a heading\n```\n\n## Changes\n\n- other\n\n"
+            "## Working on an area\n\n- a second one is ignored\n")
+    body = ai.section_body(note, "Working on an area")
+    assert body == ("\nFor any agent.\n\n- Start here.\n### A sub-heading\n\n- kept\n```\n## Not a heading\n```\n")
+    assert ai.section_body("# Working on an area\n\nlevel one\n", "Working on an area") is None
+    assert ai.section_body("```\n## Working on an area\n```\n", "Working on an area") is None
+    assert ai.section_body("Text\n## Working on an area", "Working on an area") == ""
