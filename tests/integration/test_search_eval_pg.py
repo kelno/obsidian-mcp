@@ -332,7 +332,9 @@ def test_the_snapshot_flags_membership_exactly_as_d6_defines_it(main_db, tmp_pat
     assert all(e["metadata"] for paths in snap.values() for e in paths.values())
     assert meta["sha256"] == _harness_sha(snap_file)
     assert meta["database"] == _dbname(url) and meta["rows"] == 6
-    assert "test" not in json.dumps(meta).replace(_dbname(url), ""), "no password"
+    # The password is "test"; the database and the server's host name may contain it too.
+    shown = {k: v for k, v in meta.items() if k not in ("database", "host")}
+    assert "test" not in json.dumps(shown), "no password"
     assert (snap_file.stat().st_mode & 0o777) == 0o600
     with pytest.raises(Exception, match="--force"):
         arun(write_snapshot(data=tmp_path / "d", database_url=url))
