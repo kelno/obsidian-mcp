@@ -9,8 +9,8 @@ written. Like the import, it reads only the server's own configuration
 (`DATABASE_URL`), so it runs wherever that is set.
 
 `--format json` writes the shape `scripts/ledger_import.py` reads, so an
-export imports back with its refs, dates, statuses, topics, links, views and
-review flags. Not part of that shape: the history, removed view lines and
+export imports back with its refs, dates, statuses, topics, links, a case's
+rules, views and review flags. Not part of that shape: the history, removed view lines and
 merged topics (their entries carry the target topic). One read-only,
 repeatable-read transaction, so the export is one consistent snapshot. `--history` adds every past version
 to the Markdown.
@@ -65,6 +65,8 @@ async def collect(args) -> dict:
         refs = {e.id: e.ref for e in entries}
         entry_topics = await ledger.entry_topics(session, ids) if ids else {}
         related = await ledger.entry_related(session, ids) if ids else {}
+        rules = {case_id: [r["ref"] for r in listed] for case_id, listed in (await ledger.case_rules(
+            session, [e.id for e in entries if e.kind == "case"])).items()}
         history = await ledger.history(session, ids) if (ids and args.history) else {}
         digests = (await session.execute(select(LedgerDigest).where(LedgerDigest.owner_key == okey)
                                          .order_by(LedgerDigest.slug))).scalars().all()
@@ -88,7 +90,7 @@ async def collect(args) -> dict:
         # ends the read transaction and keeps them readable.
     await engine.dispose()
     return {"topics": topics, "topic_slugs": topic_slugs, "entries": entries, "refs": refs,
-            "entry_topics": entry_topics, "related": related, "history": history, "views": views}
+            "entry_topics": entry_topics, "related": related, "rules": rules, "history": history, "views": views}
 
 
 def as_json(data: dict) -> str:
@@ -106,6 +108,7 @@ def as_json(data: dict) -> str:
             "related": data["related"].get(e.id, []),
             "superseded_by": data["refs"].get(e.superseded_by), "handled_account": e.handled_account,
             "handled_at": e.handled_at.isoformat() if e.handled_at else None,
+            "rules": data["rules"].get(e.id, []),
         }
         out["entries"].append({k: v for k, v in item.items() if v not in (None, [], {})})
     for v in data["views"]:
@@ -128,7 +131,7 @@ def as_markdown(data: dict) -> str:
         merged = f", merged into {data['topic_slugs'].get(t.merged_into)}" if t.merged_into else ""
         area = f", {t.area_tag}" if t.area_tag else ""
         md.append(f"- **{t.slug}** ({t.kind}{area}{merged}): {t.description}")
-    titles = {"quirk": "Quirks", "feedback": "Feedback", "proposal": "Proposals"}
+    titles = {"quirk": "Quirks", "feedback": "Feedback", "proposal": "Proposals", "case": "Rule cases"}
     for kind in db.LEDGER_KINDS:
         md += ["", f"## {titles[kind]}"]
         for e in (e for e in data["entries"] if e.kind == kind):
@@ -144,6 +147,8 @@ def as_markdown(data: dict) -> str:
                 md.append("- topics: " + ", ".join(data["entry_topics"][e.id]))
             if data["related"].get(e.id):
                 md.append("- related: " + ", ".join(data["related"][e.id]))
+            if data["rules"].get(e.id):
+                md.append("- rules: " + ", ".join(data["rules"][e.id]))
             for name, value in ledger.entry_fields(e).items():
                 md.append(f"- {name}: {value}")
             if e.superseded_by:

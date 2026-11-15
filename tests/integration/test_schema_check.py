@@ -61,7 +61,7 @@ DIM = 64  # irrelevant here; keeps the migration cheap.
 # The current head. Every case that migrates forward asserts it, so adding a
 # revision without teaching this module about it fails loudly rather than
 # leaving the new migration unexercised.
-HEAD_REVISION = "1003"
+HEAD_REVISION = "1004"
 
 # Every test builds and drops its own database, nothing is module-scoped:
 # pytest-xdist may share the tests out one by one (see tests/conftest.py).
@@ -9438,7 +9438,7 @@ def test_040_chains_from_039_and_is_head():
     config.set_main_option("script_location", str(_harness.ROOT / "alembic"))
     script = ScriptDirectory.from_config(config)
     # The fork joins upstream's head with its own branch (1003, "Fork migrations").
-    assert "040" in script.get_revision(HEAD_REVISION).down_revision
+    assert "040" in script.get_revision("1003").down_revision
     assert script.get_revision("040").down_revision == "039"
 
 
@@ -9746,7 +9746,8 @@ def test_1001_chains_from_030():
     assert script.get_revision("1001").down_revision == "030"
     assert script.get_revision("1002").down_revision == "1001"
     assert script.get_revision("1003").down_revision == ("040", "1002")
-    assert script.get_current_head() == HEAD_REVISION == "1003"
+    assert script.get_revision("1004").down_revision == "1003"
+    assert script.get_current_head() == HEAD_REVISION == "1004"
 
 
 def test_1001_rows_cascade_with_their_note_and_the_checks_hold():
@@ -9844,7 +9845,7 @@ LEDGER_ENTRY_1002 = (
 
 def test_1002_fresh_head_is_clean_and_marked():
     with throwaway_db("schema_1002_fresh") as url:
-        assert alembic_version(url) == HEAD_REVISION == "1003"
+        assert alembic_version(url) == HEAD_REVISION == "1004"
         assert fetchval(
             url, "SELECT obj_description('public.ledger_entries'::regclass, 'pg_class')"
         ) == "agent ledger entries, primary data (032_agent_ledger)"
@@ -9923,4 +9924,152 @@ def test_downgrade_1002_refuses_while_an_entry_exists_and_drops_an_empty_ledger(
         assert fetchval(url, "SELECT to_regclass('public.ledger_entries')") is None
         assert fetchval(url, "SELECT to_regprocedure('public.ledger_refuse_change()')") is None
         _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
+        assert_alembic_check_clean(url, DIM)
+
+
+# ── 1004: rule cases ─────────────────────────────────────────────────────────
+#
+# A fresh head is clean and the link table checks kinds; 1002's stamp-back
+# rerun still adopts the ledger with 1004 applied (its allow-list), but not a
+# 1004-named unit without 1004's marker; 1004's own rerun changes nothing and
+# refuses a partial set; its downgrade refuses while a case exists, and up
+# again is clean.
+
+CASE_1004 = (
+    "INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
+    "outcome, expected, expected_by) VALUES ('case', 1, 'C1', 'current', 'c', '2026-11-15', 'gate', 'h', "
+    "'slip', 'e', 'owner')"
+)
+PROPOSAL_1004 = (
+    "INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
+    "target, proposed_text) VALUES ('proposal', 1, 'P1', 'rejected', 'p', '2026-11-15', 'gate', 'h', 't', 'x')"
+)
+LINK_1004 = (
+    "INSERT INTO ledger_case_rules (case_id, rule_id) SELECT c.id, p.id FROM ledger_entries c, ledger_entries p "
+    "WHERE c.ref = 'C1' AND p.ref = 'P1'"
+)
+
+
+def _case_snapshot(url):
+    return (
+        [tuple(r) for r in fetch(
+            url, "SELECT conname, pg_get_constraintdef(oid) AS def, obj_description(oid, 'pg_constraint') AS c "
+                 "FROM pg_constraint WHERE conrelid = 'ledger_entries'::regclass ORDER BY conname")],
+        [tuple(r) for r in fetch(url, "SELECT * FROM ledger_case_rules ORDER BY case_id")],
+        [tuple(r) for r in fetch(url, "SELECT id, kind, outcome, revision FROM ledger_entries ORDER BY id")],
+    )
+
+
+def test_1004_fresh_head_is_clean_marked_and_checks_kinds():
+    with throwaway_db("schema_1004_fresh") as url:
+        assert fetchval(url, "SELECT obj_description('public.ledger_case_rules'::regclass, 'pg_class')") == (
+            "rule case to proposal links (1004_ledger_cases)")
+        assert fetchval(url, "SELECT col_description('public.ledger_entries'::regclass, attnum) FROM pg_attribute "
+                             "WHERE attrelid = 'public.ledger_entries'::regclass AND attname = 'owner_words'") == (
+            "rule case field (1004_ledger_cases)")
+        assert fetchval(url, "SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint "
+                             "WHERE conname = 'ck_ledger_entries_kind'") == "rule case constraint (1004_ledger_cases)"
+        sql(url, CASE_1004)
+        sql(url, PROPOSAL_1004)
+        sql(url, LEDGER_ENTRY_1002)
+        sql(url, LINK_1004)
+        with pytest.raises(asyncpg.PostgresError, match="fk_ledger_case_rules"):
+            sql(url, "INSERT INTO ledger_case_rules (case_id, rule_id) SELECT c.id, q.id FROM ledger_entries c, "
+                     "ledger_entries q WHERE c.ref = 'C1' AND q.ref = 'Q1'")
+        assert_alembic_check_clean(url, DIM)
+
+
+def test_1002_stamp_back_rerun_adopts_the_ledger_with_1004_applied():
+    with throwaway_db("schema_1004_rerun_1002") as url:
+        sql(url, CASE_1004)
+        sql(url, PROPOSAL_1004)
+        sql(url, LINK_1004)
+        before = _case_snapshot(url)
+        _harness.run_alembic(url, "stamp", "1001", dimensions=DIM)
+        _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
+        assert alembic_version(url) == HEAD_REVISION
+        assert _case_snapshot(url) == before
+        assert fetchval(url, "SELECT to_regnamespace('ledger_032_shape')") is None
+        assert_alembic_check_clean(url, DIM)
+
+
+@pytest.mark.parametrize("label,ddl,fragment", [
+    (
+        "unmarked_replaced_check",
+        ["COMMENT ON CONSTRAINT ck_ledger_entries_status ON ledger_entries IS NULL"],
+        "will not adopt pre-existing ledger objects that differ",
+    ),
+    (
+        "unmarked_column",
+        ["COMMENT ON COLUMN ledger_entries.agent_did IS 'somebody else'"],
+        "will not adopt pre-existing ledger objects that differ",
+    ),
+    (
+        "marked_but_weakened",
+        ["ALTER TABLE ledger_entries DROP CONSTRAINT ck_ledger_entries_case_fields",
+         "ALTER TABLE ledger_entries ADD CONSTRAINT ck_ledger_entries_case_fields CHECK (true)",
+         "COMMENT ON CONSTRAINT ck_ledger_entries_case_fields ON ledger_entries IS "
+         "'rule case constraint (1004_ledger_cases)'"],
+        "1004 will not adopt rule-case units that differ",
+    ),
+])
+def test_a_stamp_back_rerun_refuses_an_altered_1004_unit(label, ddl, fragment):
+    with throwaway_db(f"schema_1004_altered_{label}") as url:
+        for statement in ddl:
+            sql(url, statement)
+        _harness.run_alembic(url, "stamp", "1001", dimensions=DIM)
+        result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
+        assert result.returncode != 0
+        assert fragment in (result.stdout + result.stderr)
+        assert alembic_version(url, fork=True) == "1001"
+
+
+def test_1004_stamp_back_rerun_changes_nothing_and_refuses_a_partial_set():
+    with throwaway_db("schema_1004_rerun") as url:
+        sql(url, CASE_1004)
+        sql(url, PROPOSAL_1004)
+        sql(url, LINK_1004)
+        before = _case_snapshot(url)
+        _harness.run_alembic(url, "stamp", "1003", dimensions=DIM)
+        _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
+        assert alembic_version(url) == HEAD_REVISION
+        assert _case_snapshot(url) == before
+        assert_alembic_check_clean(url, DIM)
+    with throwaway_db("schema_1004_partial") as url:
+        _harness.run_alembic(url, "downgrade", "1003", dimensions=DIM)
+        sql(url, "ALTER TABLE ledger_entries ADD COLUMN outcome varchar(16)")
+        sql(url, "COMMENT ON COLUMN ledger_entries.outcome IS 'rule case field (1004_ledger_cases)'")
+        result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
+        assert result.returncode != 0
+        assert "1004 found only part of its units (outcome)" in (result.stdout + result.stderr)
+        assert alembic_version(url) == "1003"
+
+
+def test_downgrade_1004_refuses_while_a_case_exists_and_up_again_is_clean():
+    with throwaway_db("schema_1004_downgrade") as url:
+        sql(url, CASE_1004)
+        sql(url, LEDGER_ENTRY_1002)
+        result = _harness.run_alembic(url, "downgrade", "1003", dimensions=DIM, check=False)
+        assert result.returncode != 0
+        assert "holds 1 case entries" in (result.stdout + result.stderr)
+        assert alembic_version(url) == HEAD_REVISION
+
+        async def remove_the_case(conn):
+            async with conn.transaction():
+                await conn.execute("SET LOCAL ledger.allow_delete = 'on'")
+                await conn.execute("DELETE FROM ledger_entries WHERE kind = 'case'")
+                await conn.execute("DELETE FROM ledger_ref_counters WHERE kind = 'case'")
+        asyncio.run(_run(url, remove_the_case))
+        _harness.run_alembic(url, "downgrade", "1003", dimensions=DIM)
+        assert alembic_version(url) == "1003"
+        assert fetchval(url, "SELECT to_regclass('public.ledger_case_rules')") is None
+        assert fetchval(url, "SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint "
+                             "WHERE conname = 'ck_ledger_entries_kind'") is None
+        assert "'case'" not in fetchval(url, "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                                             "WHERE conname = 'ck_ledger_entries_status'")
+        # At 1003 the ledger is exactly 1002's again: its own stamp-back rerun adopts it.
+        _harness.run_alembic(url, "stamp", "1001", dimensions=DIM)
+        _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
+        assert alembic_version(url) == HEAD_REVISION
+        assert fetchval(url, "SELECT count(*) FROM ledger_entries") == 1
         assert_alembic_check_clean(url, DIM)

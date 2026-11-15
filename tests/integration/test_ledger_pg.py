@@ -52,7 +52,7 @@ pytestmark = [
 DIM = int(settings.embedding_dimensions)
 TODAY = date(2026, 11, 5)
 LEDGER_TABLES = (
-    "ledger_revisions", "ledger_digest_sources", "ledger_digest_lines", "ledger_digest_columns",
+    "ledger_case_rules", "ledger_revisions", "ledger_digest_sources", "ledger_digest_lines", "ledger_digest_columns",
     "ledger_digests", "ledger_entry_topics", "ledger_entry_links", "ledger_embeddings", "ledger_entries",
     "ledger_topics", "ledger_ref_counters",
 )
@@ -188,7 +188,7 @@ async def test_the_triggers_exist(migrated_url):
     assert "trg_ledger_revisions_no_update" in names
     for table in ("ledger_entries", "ledger_topics", "ledger_digest_lines"):
         assert f"trg_{table}_keeps_history" in names
-    for table in ("ledger_entry_links", "ledger_entry_topics", "ledger_digest_sources"):
+    for table in ("ledger_entry_links", "ledger_entry_topics", "ledger_digest_sources", "ledger_case_rules"):
         assert f"trg_{table}_no_truncate" in names
 
 
@@ -263,6 +263,24 @@ async def test_links_between_two_owners_are_refused_also_in_single_user_mode(ses
     ("INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
      "target, proposed_text) VALUES ('proposal', 7, 'P7', 'accepted', 't', now(), 's', 'h', 'x', 'y')",
      "ck_ledger_entries_proposal_fields"),
+    ("INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
+     "outcome, expected_by) VALUES ('case', 7, 'C7', 'current', 't', now(), 's', 'h', 'slip', 'owner')",
+     "ck_ledger_entries_case_fields"),
+    ("INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
+     "certainty, outcome) VALUES ('quirk', 7, 'Q7', 'current', 't', now(), 's', 'h', 'tested', 'slip')",
+     "ck_ledger_entries_case_fields"),
+    ("INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
+     "outcome, expected, expected_by) VALUES ('case', 7, 'C7', 'current', 't', now(), 's', 'h', 'missed', 'e', "
+     "'owner')", "ck_ledger_entries_case_fields"),
+    ("INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
+     "outcome, expected, expected_by, certainty_note) VALUES ('case', 7, 'C7', 'current', 't', now(), 's', 'h', "
+     "'slip', 'e', 'owner', 'n')", "ck_ledger_entries_quirk_fields"),
+    ("INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
+     "outcome, expected, expected_by) VALUES ('case', 7, 'C7', 'stale', 't', now(), 's', 'h', 'slip', 'e', "
+     "'owner')", "ck_ledger_entries_status"),
+    ("INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
+     "outcome, expected, expected_by) VALUES ('case', 7, 'P7', 'current', 't', now(), 's', 'h', 'slip', 'e', "
+     "'owner')", "ck_ledger_entries_ref"),
     ("INSERT INTO ledger_revisions (entry_id, topic_id, action, reason, before, created_by) VALUES (NULL, NULL, "
      "'update', 'r', '{}', 's')", "ck_ledger_revisions_one_subject"),
 ])
@@ -1406,3 +1424,178 @@ class _Text:
 
     def __init__(self, text):
         self.error = text
+
+
+# ── Rule cases (C): the test battery of rules, tied to them by their proposals ─
+
+CASE = {"outcome": "slip", "expected": "Answer the literal question first, then offer the task.",
+        "expected_by": "owner"}
+
+
+async def add_proposal(title, **kw):
+    kw.setdefault("status", "adjusted")
+    kw.setdefault("details", {"target": "Common-rules", "proposed_text": "x", "final_text": "y"})
+    result = await tools.ledger_add_impl("proposal", title, **kw)
+    assert result.error is None, result.error
+    return result
+
+
+async def add_case(title, rules=None, **details):
+    result = await tools.ledger_add_impl("case", title, details={**CASE, **details}, rules=rules,
+                                         body="The owner asked how the bridge works.")
+    assert result.error is None, result.error
+    return result
+
+
+async def test_a_case_is_tied_to_its_rules_and_each_side_shows_the_other(ctx):
+    p1 = await add_proposal("Answer the literal question first")
+    c1 = await add_case("Answered a how-question with a fix", rules=["P1"],
+                        owner_words="je demandais juste comment ça marche", agent_did="Started editing the file.")
+    assert (c1.ref, c1.status, c1.rules) == ("C1", "current", ["P1"])
+    good = await add_case("Explained first, then offered the change", rules=["p001"], outcome="good")
+    case, proposal = (await tools.ledger_get_impl(["C1", p1.ref])).entries
+    assert case.details["owner_words"] == "je demandais juste comment ça marche"
+    assert case.rules == [{"ref": "P1", "title": "Answer the literal question first", "status": "adjusted"}]
+    assert [(c["ref"], c["outcome"]) for c in proposal.cases] == [("C1", "slip"), (good.ref, "good")]
+    listed = await tools.ledger_search_impl(rule="P1")
+    assert [(e.ref, e.outcome) for e in listed.entries] == [("C2", "good"), ("C1", "slip")]
+    assert (await tools.ledger_search_impl(kinds=["case"], query="literal question")).by_words
+    assert code(await tools.ledger_search_impl(rule="Q1")) == "invalid_argument"
+    assert code(await tools.ledger_search_impl(rule="P9")) == "not_found"
+
+
+async def test_rules_must_be_proposals_and_only_cases_take_them(ctx):
+    q = await add_quirk("Voice drops long calls")
+    await add_proposal("Keep replies short")
+    both = await tools.ledger_add_impl("case", "x", details=CASE, rules=[q.ref, "P7"])
+    assert both.problems and {p["field"] for p in both.problems} == {"rules"}
+    assert "is a quirk, not a proposal" in both.error and "P7 not found" in both.error
+    on_quirk = await tools.ledger_add_impl("quirk", "y", details={"certainty": "tested"}, rules=["P1"])
+    assert code(on_quirk) == "invalid_argument" and "only a case takes rules" in on_quirk.error
+    no_expected = await tools.ledger_add_impl("case", "z", details={"outcome": "slip", "expected_by": "agent"})
+    assert code(no_expected) == "invalid_argument" and "details.expected" in no_expected.error
+    assert (await tools.ledger_search_impl(kinds=["case"], status="any")).entries == []
+
+
+async def test_the_database_refuses_a_link_to_anything_but_a_proposal(sessionmaker, ctx):
+    q = await add_quirk("A quirk")
+    p = await add_proposal("A rule")
+    c = await add_case("A case")
+    ids = {}
+    async with sessionmaker() as session:
+        for ref in (q.ref, p.ref, c.ref):
+            ids[ref] = (await session.execute(text("SELECT id FROM ledger_entries WHERE ref = :r"), {"r": ref})).scalar()
+    for case_id, rule_id in ((ids[c.ref], ids[q.ref]), (ids[p.ref], ids[p.ref]), (ids[q.ref], ids[p.ref])):
+        async with sessionmaker() as session:
+            with pytest.raises(IntegrityError, match="fk_ledger_case_rules"):
+                await session.execute(text(
+                    f"INSERT INTO ledger_case_rules (user_id, case_id, rule_id) VALUES (NULL, {case_id}, {rule_id})"))
+    async with sessionmaker() as session:
+        await session.execute(text(
+            f"INSERT INTO ledger_case_rules (user_id, case_id, rule_id) VALUES (NULL, {ids[c.ref]}, {ids[p.ref]})"))
+        await session.commit()
+        with pytest.raises(DBAPIError, match="agent ledger"):
+            await session.execute(text("TRUNCATE ledger_case_rules"))
+
+
+async def test_changing_a_cases_rules_keeps_the_history_and_retired_leaves_the_default_search(ctx):
+    await add_proposal("Rule one")
+    await add_proposal("Rule two")
+    c = await add_case("A case", rules=["P1"])
+    moved = await tools.ledger_update_impl(ref=c.ref, expected_revision=1, reason="it tests rule two",
+                                           rules_add=["P2"], rules_remove=["P1"])
+    assert moved.error is None, moved.error
+    assert moved.changed == ["rule +P2", "rule -P1"] and moved.revision == 2
+    got = (await tools.ledger_get_impl([c.ref], history=True)).entries[0]
+    assert [r["ref"] for r in got.rules] == ["P2"]
+    assert got.history[-1]["before"]["rules"] == ["P1"]
+    not_on = await tools.ledger_update_impl(ref=c.ref, expected_revision=2, reason="r", rules_remove=["P1"])
+    assert code(not_on) == "invalid_argument" and "is not tied to P1" in not_on.error
+    on_proposal = await tools.ledger_update_impl(ref="P1", expected_revision=1, reason="r", rules_add=["P2"])
+    assert "only a case takes rules" in on_proposal.error
+    retired = await tools.ledger_update_impl(ref=c.ref, expected_revision=2, reason="the owner changed their mind",
+                                             status="retired")
+    assert retired.status == "retired"
+    assert (await tools.ledger_search_impl(kinds=["case"])).entries == []
+    assert [e.ref for e in (await tools.ledger_search_impl(rule="P2", status="any")).entries] == [c.ref]
+    assert (await tools.ledger_get_impl(["P2"])).entries[0].cases[0]["status"] == "retired"
+
+
+async def test_a_rule_gathering_slips_and_a_repeated_slip_with_no_rule_are_pointed_out(ctx):
+    await add_proposal("Answer the literal question first")
+    first = await add_case("Answered with a fix", rules=["P1"])
+    assert not any("slip cases" in n for n in first.notes or ())
+    second = await add_case("Answered with a fix again", rules=["P1"])
+    assert any(n.startswith("P1 now has 2 slip cases (C1, C2): the rule may not be holding") for n in second.notes)
+    good = await add_case("Answered the question first", rules=["P1"], outcome="good")
+    assert any("P1 now has 2 slip cases" in n for n in good.notes)
+
+    lone = await add_case("Wrote the ledger entry in French")
+    assert not any("no rule" in n for n in lone.notes or ())
+    repeat = await add_case("Wrote another ledger entry in French")
+    assert any(n == f"{repeat.ref} looks like another slip with no rule ({lone.ref}): a repeat; worth proposing a "
+               "rule to the owner." for n in repeat.notes), repeat.notes
+    tied = await tools.ledger_update_impl(ref=lone.ref, expected_revision=1, reason="covered now", rules_add=["P1"])
+    assert any("P1 now has 3 slip cases" in n for n in tied.notes)
+
+
+async def test_a_note_edit_shows_the_cases_of_the_rules_it_rewords(sessionmaker, ctx):
+    await _rule_note(sessionmaker, ctx)
+    await add_case("Kept a rule only in memory", rules=["P54"])
+    await add_case("Wrote the rule into the note", rules=["P54"], outcome="good")
+    dry = await tools.edit_note_impl(
+        RULES, "- A rule lives in a note. [P54]", find="- A rule kept only in memory gets forgotten. [P54, P80]",
+        dry_run=True)
+    assert '"Put agent rules where agents look" — cases: 2 (1 slip, 1 good): C1, C2' in dry
+    assert tools.NOTE_CASES_LINE in dry
+    p80_line = next(line for line in dry.splitlines() if line.startswith("- P80 "))
+    assert "cases" not in p80_line
+    other = await tools.edit_note_impl(RULES, "- Another rule, reworded. [P80]", find="- Another rule. [P3]",
+                                       dry_run=True)
+    assert tools.NOTE_CASES_LINE not in other
+
+
+async def test_a_task_citing_a_proposal_shows_its_cases_and_a_case_can_be_cited(sessionmaker, ctx):
+    await _task_note(sessionmaker, ctx, "cases.md")
+    await add_proposal("A rule")
+    await add_case("A case", rules=["P1"])
+    created = await tools.create_task_impl("Reword the rule [P1, C1]", path="cases.md")
+    assert created.error is None, created.error
+    by_ref = {r["ref"]: r for r in created.ledger_refs}
+    assert by_ref["P1"]["cases"] == {"total": 1, "outcomes": {"slip": 1}, "refs": ["C1"]}
+    assert by_ref["C1"]["kind"] == "case" and by_ref["C1"]["outcome"] == "slip"
+    assert (await tools.ledger_get_impl(["C1"])).entries[0].tasks
+
+
+async def test_cases_and_their_rules_import_and_export(sessionmaker, ctx, monkeypatch, tmp_path):
+    import argparse
+
+    from scripts import ledger_export, ledger_import
+
+    for module in (ledger_import, ledger_export):
+        monkeypatch.setattr(module, "async_session", sessionmaker)
+        monkeypatch.setattr(module, "engine", _NoEngine())
+    data = {"entries": [
+        {"ref": "P41", "status": "adjusted", "title": "Answer first",
+         "details": {"target": "t", "proposed_text": "x", "final_text": "y"}},
+        {"ref": "C3", "status": "current", "title": "Answered with a fix", "rules": ["P41"],
+         "details": {**CASE, "owner_words": "pas une demande", "sources": "examples #4"}},
+    ]}
+    path = tmp_path / "cases.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    await ledger_import.run(argparse.Namespace(file=str(path), user=None, single_user=True, dry_run=False,
+                                               skip_area_check=True))
+    exported = json.loads(ledger_export.as_json(await ledger_export.collect(
+        argparse.Namespace(user=None, single_user=True, history=False))))
+    case = next(e for e in exported["entries"] if e["ref"] == "C3")
+    assert case["rules"] == ["P41"] and case["details"]["owner_words"] == "pas une demande"
+    assert (await add_case("After the import")).ref == "C4"
+    markdown = ledger_export.as_markdown(await ledger_export.collect(
+        argparse.Namespace(user=None, single_user=True, history=False)))
+    assert "## Rule cases" in markdown and "- rules: P41" in markdown
+    bad = {"entries": [{"ref": "Q1", "status": "current", "title": "q", "details": {"certainty": "tested"},
+                        "rules": ["Q1"]}]}
+    path.write_text(json.dumps(bad), encoding="utf-8")
+    with pytest.raises(ledger_import.ImportError_, match="only a case has rules"):
+        await ledger_import.run(argparse.Namespace(file=str(path), user=None, single_user=True, dry_run=True,
+                                                   skip_area_check=True))

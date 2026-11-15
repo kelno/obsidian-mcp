@@ -39,7 +39,8 @@ also finds that entry as `Q1`.
         "origin": "agent", "seen": true, "observed_on": "2026-10-02",
         "created_at": "2026-10-02T10:00:00+00:00", "updated_at": "…",
         "author": "…", "related": ["Q02"], "superseded_by": "Q03",
-        "handled_account": "…", "handled_at": "…"
+        "handled_account": "…", "handled_at": "…",
+        "rules": ["P41"]
       }],
       "digests": [{
         "slug": "claude-surfaces", "title": "…", "description": "…", "layout": "matrix",
@@ -51,7 +52,8 @@ also finds that entry as `Q1`.
 
 `kind` is taken from the ref's letter. `details` holds the kind's own fields
 (see `ledger_add`); feedback's `fix`, the name `leads` had before, is read
-as `leads`. `seen` is for feedback only (default: true for origin
+as `leads`. `rules` is for cases only: the proposals (in the file) whose
+rules the case tests. `seen` is for feedback only (default: true for origin
 owner, false otherwise). Dates are ISO; `created_at`/`updated_at` default to
 now, `observed_on` to `created_at`'s day. `scripts/ledger_export.py --format
 json` writes this same shape.
@@ -72,6 +74,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from src.database import async_session, engine
 from src.models import db
 from src.models.db import (
+    LedgerCaseRule,
     LedgerDigest,
     LedgerDigestColumn,
     LedgerDigestLine,
@@ -223,6 +226,15 @@ async def run(args) -> dict:
                     low, high = sorted((entry.id, other.id))
                     await session.execute(pg_insert(LedgerEntryLink).values(
                         user_id=uid, entry_id=low, related_id=high).on_conflict_do_nothing())
+            rules = e.get("rules") or []
+            if rules and entry.kind != "case":
+                raise ImportError_(f"{name}: only a case has rules")
+            for ref in rules:
+                rule = resolve(ref, name)
+                if rule.kind != "proposal":
+                    raise ImportError_(f"{name}: rule {ref} is a {rule.kind}, not a proposal")
+                await session.execute(pg_insert(LedgerCaseRule).values(
+                    user_id=uid, case_id=entry.id, rule_id=rule.id).on_conflict_do_nothing())
         for kind in db.LEDGER_KINDS:
             highest = max((n for (k, n) in entries if k == kind), default=0)
             if highest:
