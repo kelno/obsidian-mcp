@@ -1149,8 +1149,9 @@ async def test_open_area_gathers_the_note_folders_entries_and_tasks(sessionmaker
     assert set(refs) == {f"plans.md:{first.line}", f"plans.md:{later.line}", f"Secret (private)/s.md:{secret.line}"}
     hidden = next(t for t in result.tasks if t.ref.startswith("Secret"))
     assert hidden.text is None and hidden.status == "TODO"
-    assert len(result.instructions) == 2 and "#when" in result.instructions[0]
+    assert len(result.instructions) == 3 and "#when" in result.instructions[0]
     assert "Current position" in result.instructions[1]
+    assert "_/agent/templates/Work note.md" in result.instructions[2]
     assert result.archived is None and result.tasks_total is None
     assert not any("carries #next" in n for n in result.notes or [])
 

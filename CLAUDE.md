@@ -884,7 +884,7 @@ returned line on disk; the writers change one line through the same ladder as
 Recurring tasks are read, never changed. Read
 [task tools](docs/architecture/tasks.md) first.
 
-**`open_area`** (fork; a tool of the `kelno_vault` plugin, served only with it loaded): the one call an agent makes when it opens an area (by name or by a folder outside the vault, through the list of areas `Areas/Areas.md`): the main note without its Tasks section, related folders, active ledger entries and open tasks, then two instruction lines. Class `scan`. Read [open_area](docs/architecture/open-area.md) first.
+**`open_area`** (fork; a tool of the `kelno_vault` plugin, served only with it loaded): the one call an agent makes when it opens an area (by name or by a folder outside the vault, through the list of areas `Areas/Areas.md`): the main note without its Tasks section, related folders, active ledger entries and open tasks, then three instruction lines. Class `scan`. Read [open_area](docs/architecture/open-area.md) first.
 
 **Agent ledger** (fork) — `ledger_search`, `ledger_get`, `ledger_add`,
 `ledger_update`, `ledger_digest`, `ledger_digest_edit`, `ledger_topics`,

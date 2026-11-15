@@ -71,6 +71,8 @@ OPEN_AREA_INSTRUCTIONS = (
     "event a \"When …\" task (#when) waits for? If so, say so to the owner in your reply before you tick or change that task.",
     "Answering a status question (\"where am I on X?\"): report the Current position (with its date) and the "
     "#next tasks, or say none is marked #next; the rest is for agents about to act.",
+    "Starting a piece of work here likely to span several conversations (a design, a decision, a plan or a "
+    "proposal): copy the work note template, _/agent/templates/Work note.md; its comments say how.",
 )
 
 
