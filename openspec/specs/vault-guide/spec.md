@@ -41,6 +41,8 @@ The primer content SHALL be loaded from a source that ships with the server (a M
 
 ### Requirement: Response includes vault-specific guide from `CLAUDE.md`
 
+(Fork: the note read is the one `VAULT_GUIDE_NOTE` names, `CLAUDE.md` at the vault root by default; see `docs/architecture/vault-tools.md`, "The guide note".)
+
 When `CLAUDE.md` exists at the vault root, the tool SHALL include the file's contents as a vault-specific section, concatenated after the primer with a clear section header separating the two.
 
 When `CLAUDE.md` does not exist at the vault root, the tool SHALL include a short onboarding message in place of the vault-specific section that explains how to create a `CLAUDE.md` file and what to put in it (folder structure, naming conventions, tag taxonomy). The response SHALL NOT raise an error in this case.

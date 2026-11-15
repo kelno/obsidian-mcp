@@ -177,15 +177,36 @@ _VAULT_GUIDE_PRIMER = (Path(__file__).parent / "vault_guide_primer.md").read_tex
     encoding="utf-8"
 )
 
-_NO_CLAUDE_MD_MESSAGE = (
-    "# Vault-Specific Conventions\n"
-    "\n"
-    "No `CLAUDE.md` found at the vault root. To teach the agent about your\n"
-    "folder structure, file-naming conventions, tag taxonomy, required\n"
-    "frontmatter fields, or task-management syntax, create a `CLAUDE.md`\n"
-    "file at the root of your vault. The agent will pick it up automatically\n"
-    "on the next call.\n"
-    "\n"
+# The primer's one line naming where the vault's conventions come from.
+_PRIMER_SOURCE = "`CLAUDE.md` at the vault root"
+
+
+def _primer_for(note: str) -> str:
+    """The primer, its source line naming the note the guide actually serves."""
+    if note == "CLAUDE.md":
+        return _VAULT_GUIDE_PRIMER
+    return _VAULT_GUIDE_PRIMER.replace(_PRIMER_SOURCE, f"`{note}` in the vault", 1)
+
+
+def _no_guide_note_message(note: str) -> str:
+    """What the guide says in place of the vault's conventions when the note
+    `VAULT_GUIDE_NOTE` names is missing: how to start one. For the default,
+    a root `CLAUDE.md`, the text is upstream's, word for word."""
+    at_root = "/" not in note
+    return (
+        "# Vault-Specific Conventions\n"
+        "\n"
+        f"No `{note}` found {'at the vault root' if at_root else 'in the vault'}. To teach the agent about your\n"
+        "folder structure, file-naming conventions, tag taxonomy, required\n"
+        f"frontmatter fields, or task-management syntax, create a `{note}`\n"
+        f"file {'at the root of your vault' if at_root else 'in your vault'}. The agent will pick it up automatically\n"
+        "on the next call.\n"
+        "\n"
+        + _GUIDE_NOTE_SUGGESTED_SECTIONS
+    )
+
+
+_GUIDE_NOTE_SUGGESTED_SECTIONS = (
     "Suggested sections:\n"
     "\n"
     "- **Folder structure** — what lives where, and where new notes belong.\n"
@@ -3934,21 +3955,23 @@ async def _hybrid_search_reranked(query, limit, folder, tags, frontmatter, uid) 
 
 @_tracked("get_vault_guide", [])
 async def get_vault_guide_impl() -> str:
-    """Return the Obsidian primer plus any vault-specific conventions from CLAUDE.md."""
+    """Return the Obsidian primer plus the vault's own conventions, read from
+    the note `VAULT_GUIDE_NOTE` names (`CLAUDE.md` by default)."""
     uid = current_user_id.get()
+    guide_note = settings.vault_guide_note
     try:
-        note = read_file("CLAUDE.md", user_id=uid)
+        note = read_file(guide_note, user_id=uid)
         vault_section = (
             "# Vault-Specific Conventions\n"
             "\n"
             f"{note['content']}"
         )
     except FileNotFoundError:
-        vault_section = _NO_CLAUDE_MD_MESSAGE
+        vault_section = _no_guide_note_message(guide_note)
     except ValueError as e:
         vault_section = f"# Vault-Specific Conventions\n\n{e}"
     ledger_section = await _ledger_guide(uid)
-    return (f"{_VAULT_GUIDE_PRIMER}{_plugins.guide_text()}{_agent_edit_stamp_guide()}{_private_folders_guide()}{ledger_section}"
+    return (f"{_primer_for(guide_note)}{_plugins.guide_text()}{_agent_edit_stamp_guide()}{_private_folders_guide()}{ledger_section}"
             f"\n\n---\n\n{vault_section}")
 
 

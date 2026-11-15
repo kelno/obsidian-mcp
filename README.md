@@ -378,7 +378,7 @@ the wire, so none is cut off by a client's description limit.
 - `list_tasks` and `task_agenda` list checkbox tasks across the vault
   from the index; see [Tasks (optional)](#tasks-optional)
 - `get_vault_guide()`, the Obsidian primer plus this vault's
-  `CLAUDE.md`, served live
+  `CLAUDE.md` (or the note `VAULT_GUIDE_NOTE` names), served live
 - `index_status(folder?)`, how far indexing and embedding have got for
   the caller's vault: notes embedded, pending (never embedded or changed
   since), excluded or empty; the same for a folder and for private
@@ -1937,7 +1937,8 @@ break Dataview queries. The data layer works fine; the context layer
 is where the failures show up.
 
 The fix is small. Keep a machine-readable instruction file
-(`CLAUDE.md` at the vault root) that describes the system's own rules.
+(`CLAUDE.md` at the vault root, or another note named by
+`VAULT_GUIDE_NOTE`) that describes the system's own rules.
 Expose it as a dedicated tool. Every connecting agent calls it once at
 the start of a session and immediately knows how the vault works.
 Update the file, every agent sees the change on the next call. No
@@ -2193,6 +2194,7 @@ reason.
 | `LAST_AI_EDIT_EXCLUDE` | empty | Comma-separated globs of vault paths never stamped (e.g. `_/*,CLAUDE.md`) |
 | `PRIVATE_FOLDER_NAMES` | empty | Folder-name globs (`*`, `?`; any case, any depth) marking private folders, e.g. `["* (private)"]`. `keyword_search`, `semantic_search` and `find_related` leave notes under them out and end with how many ("2 matches in private folders not shown."); `list_tasks`, `ledger_get`, `ledger_update` and `open_area` list their tasks and lines without text. The first six take `include_private` to show them. Private notes must be embedded (not in `EMBEDDING_EXCLUDE_PATTERNS`) for semantic search to reach them. Empty: nothing is private and no tool shows the argument |
 | `OPEN_NOTE_URL` | unset | An http(s) link template with `{path}` exactly once (e.g. `https://notes.example.org/open?file={path}`): `read_note`, `open_area`, `create_note` and the search and listing tools then carry `open_url`, a link opening the note in Obsidian, with `{path}` the note's vault path without `.md`, percent-encoded (`/` kept). You serve the page behind it (e.g. a redirect to `obsidian://open`). Checked at startup. Unset: no links |
+| `VAULT_GUIDE_NOTE` | `CLAUDE.md` | The vault note `get_vault_guide` serves as the vault's own conventions, a vault-relative `.md` path such as `_/agent/Vault conventions.md`, for a vault whose root `CLAUDE.md` holds only Claude Code imports. A path that is absolute, holds `..`, `.` or a hidden folder, or is not `.md` stops the server at startup. A missing note gets the guide's "create one" message naming it, never the root `CLAUDE.md` in its place |
 | `ARCHIVE_FOLDER` | unset | A folder mirroring the tree (e.g. `Archive`); `move_note` says when the folder a note left has a counterpart there |
 | `TASKS_PLUGIN_SETTINGS_PATH` | `.obsidian/plugins/obsidian-tasks-plugin/data.json` | The Tasks plugin's settings file in the vault, read on every task call |
 | `VAULT_ALLOW_NAMED_STAGING_FALLBACK` | `false` | Accept named staging on filesystems without `O_TMPFILE`. One flag, both write paths. See [System requirements](#system-requirements). |

@@ -20,7 +20,7 @@ titles, tags, frontmatter and chunk excerpts indefinitely, while the panel had
 told the operator "vault tools error".
 
 - **Nothing is exempt.** Every `_tracked` tool reads or writes vault content or
-  vault metadata — `get_vault_guide` returns the vault's own `CLAUDE.md`,
+  vault metadata — `get_vault_guide` returns the vault's own guide note (`CLAUDE.md`),
   `check_upload` reports a published vault path and digest. Keep the exemption
   list at zero; a new tool inherits the gate by being registered.
 - **The index rows are preserved.** Deleting `notes_metadata` on the NULL

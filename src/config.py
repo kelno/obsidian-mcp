@@ -923,8 +923,13 @@ class Settings(BaseSettings):
     # `move_note` says so when the folder a note leaves has a counterpart under
     # it; it never moves archive content. Unset: no hint.
     archive_folder: str | None = None
+    # The vault note `get_vault_guide` serves as the vault's own conventions,
+    # a vault-relative `.md` path. `CLAUDE.md` at the root is where most
+    # vaults keep them; a vault whose root `CLAUDE.md` holds only Claude Code
+    # imports names the note that has the text. Blank means the default.
+    vault_guide_note: str = "CLAUDE.md"
 
-    # ── Open-note links (fork) ───────────────────────────────────────────────
+    # ── Open-note links (fork)───────────────────────────────────────────────
     # A URL template with `{path}` exactly once, http(s) only, e.g.
     # `https://notes.example.org/open?file={path}`. When set, results that
     # name a note for the agent to show the user (read_note, open_area,
@@ -1795,6 +1800,32 @@ class Settings(BaseSettings):
         or folder named ''."""
         if isinstance(v, str):
             v = v.strip().strip("/") if v.strip() else None
+        return v
+
+    @field_validator("vault_guide_note", mode="before")
+    @classmethod
+    def _vault_guide_note_is_a_vault_note(cls, v):
+        """Checked at startup, so a typo stops the server rather than leaving
+        every agent with the "no guide found" message: a vault-relative `.md`
+        path with no `..`, `.` or hidden component, written with `/`."""
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return "CLAUDE.md"
+        if not isinstance(v, str):
+            raise ValueError("VAULT_GUIDE_NOTE must be a vault-relative path")
+        v = v.strip()
+        parts = v.split("/")
+        if (
+            "\\" in v
+            or v.startswith("/")
+            or re.match(r"^[A-Za-z]:", v)
+            or any(p in ("", ".", "..") or p.startswith(".") for p in parts)
+            or not v.lower().endswith(".md")
+        ):
+            raise ValueError(
+                f"VAULT_GUIDE_NOTE={v!r} must be a vault-relative path to a .md note, "
+                "with '/' between folders and no '.', '..' or hidden folder, e.g. "
+                "'CLAUDE.md' or '_/agent/Vault conventions.md'"
+            )
         return v
 
     @field_validator("last_ai_edit_field")

@@ -767,9 +767,10 @@ async def get_vault_guide() -> str:
        heading refs, tags, frontmatter, callouts, comments, highlights,
        math, mermaid, footnotes, tasks, plugin literals).
     2. **Vault-specific conventions** — folder structure, naming rules,
-       frontmatter requirements, and tag taxonomy as configured by the
-       vault owner in `CLAUDE.md`. If `CLAUDE.md` is absent, the response
-       includes instructions for creating one.
+       frontmatter requirements, and tag taxonomy, from the note the vault
+       owner keeps them in (`CLAUDE.md` at the vault root unless the server
+       is set to another). If that note is absent, the response includes
+       instructions for creating one.
     """
     return await get_vault_guide_impl()
 
