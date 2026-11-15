@@ -53,7 +53,7 @@ DAMAGING_WARNINGS = {
 
 STATUS_NAMES = {"todo": "TODO", "done": "DONE", "cancelled": "CANCELLED", "in_progress": "IN_PROGRESS"}
 EDIT_DATE_FIELDS = ("created", "start", "scheduled", "due")
-CLEARABLE = ("priority", "on_completion", "recurrence", *EDIT_DATE_FIELDS)
+CLEARABLE = ("priority", "on_completion", "recurrence", "id", "depends_on", *EDIT_DATE_FIELDS)
 
 
 def owner_today(timezone_name: str, now: datetime | None = None) -> date:
@@ -252,9 +252,29 @@ def recurring_dates_unsupported(rule: str, reason: str) -> TaskOpError:
     )
 
 
+def _id_arg(value: str) -> str:
+    if not tf.TASK_ID_RE.match(value) or not value:
+        raise TaskOpError(
+            "invalid_argument",
+            f"a task id is one or more letters, digits, '-' or '_', as the Tasks plugin reads 🆔 (got {value!r})",
+        )
+    return value
+
+
+def _depends_on_arg(values: list[str]) -> tuple[str, ...]:
+    if not values:
+        raise TaskOpError("invalid_argument", "depends_on needs at least one task id; to remove them, use clear")
+    out: list[str] = []
+    for value in values:
+        if _id_arg(value) not in out:
+            out.append(value)
+    return tuple(out)
+
+
 def apply_fields(task: tf.Task, *, today: date, description: str | None = None, priority: str | None = None,
                  on_completion: str | None = None, dates: dict[str, str | None] | None = None,
                  clear: list[str] | None = None, recurrence: str | None = None,
+                 id: str | None = None, depends_on: list[str] | None = None,
                  settings: TasksSettings | None = None) -> tf.Task:
     """The dialog's `applyEdits` for the fields the tools expose.
 
@@ -264,6 +284,10 @@ def apply_fields(task: tf.Task, *, today: date, description: str | None = None, 
     a write that sets the rule or a date also refuses dates the rule cannot
     be followed from (yearly from February 29), so the problem shows when
     the task is written rather than when it is ticked.
+
+    `id` (🆔) and `depends_on` (⛔) are checked for their characters and
+    against each other here; whether other tasks in the vault carry them is
+    `check_task_ids`' question, which needs the index.
     """
     changes: dict = {}
     if description is not None:
@@ -274,6 +298,10 @@ def apply_fields(task: tf.Task, *, today: date, description: str | None = None, 
         changes["on_completion"] = _on_completion_arg(on_completion)
     if recurrence is not None:
         changes["recurrence"] = _recurrence_arg(recurrence)
+    if id is not None:
+        changes["id"] = _id_arg(id)
+    if depends_on is not None:
+        changes["depends_on"] = _depends_on_arg(depends_on)
     for name, value in (dates or {}).items():
         if value is not None:
             changes[name] = _date_arg(name, value, today)
@@ -284,7 +312,7 @@ def apply_fields(task: tf.Task, *, today: date, description: str | None = None, 
             raise TaskOpError("invalid_argument", f"clear accepts {', '.join(CLEARABLE)} (got {name!r})")
         if name in changes:
             raise TaskOpError("invalid_argument", f"{name} is both set and cleared")
-        changes[name] = tf.Priority.NONE if name == "priority" else "" if name == "on_completion" else None
+        changes[name] = {"priority": tf.Priority.NONE, "on_completion": "", "id": "", "depends_on": ()}.get(name)
         if name == "scheduled":
             changes["scheduled_inferred"] = False
     if "recurrence" not in changes and task.recurrence is not None:
@@ -295,6 +323,8 @@ def apply_fields(task: tf.Task, *, today: date, description: str | None = None, 
     updated = replace(task, **changes)
     if "description" in changes:
         updated = replace(updated, tags=tf.extract_hashtags(updated.description))
+    if updated.id and updated.id in updated.depends_on:
+        raise TaskOpError("invalid_argument", f"a task cannot depend on itself (🆔 {updated.id} is in its depends_on)")
     if updated.recurrence is not None and all(
         d is None for d in (updated.start, None if updated.scheduled_inferred else updated.scheduled, updated.due)
     ):
@@ -319,6 +349,141 @@ def apply_fields(task: tf.Task, *, today: date, description: str | None = None, 
                 "ticking it would be refused; change the date or the rule. Nothing was written.",
             ) from None
     return updated
+
+
+#: A task with an id or dependencies, somewhere in the vault:
+#: `("path:line", id or "", depends_on, done)`, `done` being the plugin's
+#: `isDone` (DONE, CANCELLED or NON_TASK), which never waits for anything.
+TaskLink = tuple[str, str, tuple[str, ...], bool]
+
+
+def task_links_in_note(text: str, path: str, settings: TasksSettings, registry: tf.StatusRegistry,
+                       *, except_line: int | None = None) -> list[TaskLink]:
+    """The tasks of one note that carry 🆔 or ⛔, as its text reads now."""
+    out: list[TaskLink] = []
+    for scanned in scan_note(text).lines:
+        if scanned.kind != "task" or scanned.line_number == except_line:
+            continue
+        if "🆔" not in scanned.text and "⛔" not in scanned.text:
+            continue
+        task = parse_line(scanned.text, path, settings, registry)
+        if task is not None and (task.id or task.depends_on):
+            out.append((f"{path}:{scanned.line_number}", task.id, task.depends_on, task.is_done))
+    return out
+
+
+def _refs(refs: list[str]) -> str:
+    return ", ".join(refs[:5]) + (f" and {len(refs) - 5} more" if len(refs) > 5 else "")
+
+
+def check_task_ids(before: tf.Task | None, after: tf.Task, links: list[TaskLink]) -> list[str]:
+    """Refuse a write that would leave tasks wrongly chained; the notes to give otherwise.
+
+    `links` are the vault's other tasks with an id or dependencies (the task
+    being written left out). The plugin checks none of these: ids are
+    "intended to be unique across the whole vault", a dependency on an id no
+    task has blocks nothing, and two tasks waiting for each other are blocked
+    for ever. Each is almost always a mistake that would silently unchain or
+    lock the tasks, so the tools refuse rather than write it:
+
+    - a new id another task already has (any task, done or not: the plugin
+      blocks on any open task with the id, so a reused one could re-block);
+    - a changed or removed id that open tasks wait for (they would be
+      unblocked without anyone asking);
+    - a new dependency on an id no task has;
+    - a dependency that leads, through open tasks waiting for one another,
+      back to this one (a cycle, however long), checked for every dependency
+      when the task takes a new id, since open tasks may already name it.
+
+    A finished task waits for nothing and blocks nobody (`Task.isBlocked`
+    looks only for open carriers, `isBlocking` is false when done): a done
+    waiter neither stops a rename nor closes a cycle, and a done task being
+    written is free to change its id, can't close a cycle and blocks no one.
+    A dependency the task already had is otherwise kept unchecked. The one
+    note: open tasks that already named the new id, now blocked by this task.
+    """
+    carriers: dict[str, list[str]] = {}
+    for ref, task_id, _deps, _done in links:
+        if task_id:
+            carriers.setdefault(task_id, []).append(ref)
+    open_links = [(ref, task_id, deps) for ref, task_id, deps, done in links if not done]
+    new_id = bool(after.id) and (before is None or after.id != before.id)
+    if new_id and after.id in carriers:
+        raise TaskOpError(
+            "invalid_argument",
+            f"another task already has 🆔 {after.id} ({_refs(carriers[after.id])}); task ids are unique across "
+            "the vault, so the tasks that depend on it would be ambiguous. Choose another id. Nothing was written.",
+        )
+    if before is not None and before.id and after.id != before.id and not before.is_done:
+        waiting = [ref for ref, _id, deps in open_links if before.id in deps]
+        if waiting:
+            raise TaskOpError(
+                "invalid_argument",
+                f"other tasks wait for this one's 🆔 {before.id} ({_refs(waiting)}); changing or removing it would "
+                "unblock them without anyone asking. To rename it: give those tasks their depends_on without it "
+                "(clear=[\"depends_on\"] only where it is the only one), rename it here, then add the new id to "
+                "their depends_on; otherwise keep the id. Nothing was written.",
+            )
+    had = set(before.depends_on) if before is not None else set()
+    new = [i for i in after.depends_on if i not in had]
+    missing = [i for i in new if i not in carriers]
+    if missing:
+        raise TaskOpError(
+            "invalid_argument",
+            f"no task in the vault has 🆔 {', '.join(missing)}, so depending on it would block nothing. Give "
+            "the task this one waits for an id first (edit_task(…, id=…)), then name it here. A task written to "
+            "a new note in the last minutes may not count yet. Nothing was written.",
+        )
+    notes: list[str] = []
+    if after.id and not after.is_done:
+        cycle = _cycle_path(after.id, set(after.depends_on) if new_id else set(new), open_links)
+        if cycle:
+            raise TaskOpError(
+                "invalid_argument",
+                f"the tasks this one would wait for already wait for it, through {_refs(cycle)} (🆔 {after.id}); "
+                "they would all stay blocked for ever. Nothing was written.",
+            )
+        if new_id:
+            named = [ref for ref, _id, deps in open_links if after.id in deps]
+            if named:
+                notes.append(f"Open tasks already waited for 🆔 {after.id} ({_refs(named)}): they are blocked by "
+                             "this task now, until it is done.")
+    return notes
+
+
+def _cycle_path(target: str, start: set[str], open_links: list[tuple[str, str, tuple[str, ...]]]) -> list[str]:
+    """The refs of open tasks leading from the ids in `start` back to `target`, or [].
+
+    A walk over the open tasks carrying each id, following their dependencies;
+    the first chain that names `target` is the cycle a write would close.
+    """
+    by_id: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
+    for ref, task_id, deps in open_links:
+        if task_id:
+            by_id.setdefault(task_id, []).append((ref, deps))
+    queue = [(task_id, []) for task_id in sorted(start)]
+    seen: set[str] = set()
+    while queue:
+        task_id, path = queue.pop(0)
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+        for ref, deps in by_id.get(task_id, ()):
+            if target in deps:
+                return path + [ref]
+            queue.extend((dep, path + [ref]) for dep in deps if dep not in seen)
+    return []
+
+
+def dropped_dependency_notes(before: tf.Task | None, after: tf.Task) -> list[str]:
+    """`depends_on` replaces the whole list: say which ids a replacement left out."""
+    if before is None or not after.depends_on:
+        return []
+    dropped = [i for i in before.depends_on if i not in after.depends_on]
+    if not dropped:
+        return []
+    return [f"depends_on was replaced: this task no longer waits for 🆔 {', '.join(dropped)}. To add a dependency, "
+            "pass every id it should keep waiting for too."]
 
 
 def edited_description(task: tf.Task, description: str | None, settings: TasksSettings) -> str | None:
@@ -368,7 +533,8 @@ def _without_global_filter(description: str, gf: str) -> str:
 
 def new_task(*, description: str, settings: TasksSettings, registry: tf.StatusRegistry, today: date,
              area_tags: list[str], status: tf.Status | None, priority: str | None, on_completion: str | None,
-             dates: dict[str, str | None], recurrence: str | None = None) -> tf.Task:
+             dates: dict[str, str | None], recurrence: str | None = None,
+             id: str | None = None, depends_on: list[str] | None = None) -> tf.Task:
     """`createTaskLineModal`: the dialog's new task, as it would be saved."""
     text = _description_arg(description)
     if settings.global_filter:
@@ -383,7 +549,7 @@ def new_task(*, description: str, settings: TasksSettings, registry: tf.StatusRe
     base = tf.Task(indentation="", list_marker="-", status=todo, description=text, created=created,
                    tags=tf.extract_hashtags(text))
     task = apply_fields(base, today=today, priority=priority, on_completion=on_completion, dates=dates,
-                        recurrence=recurrence, settings=settings)
+                        recurrence=recurrence, id=id, depends_on=depends_on, settings=settings)
     if status is not None:
         if task.recurrence is not None and status.type == "DONE":
             raise TaskOpError(

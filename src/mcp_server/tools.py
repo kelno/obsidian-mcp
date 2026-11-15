@@ -9620,6 +9620,47 @@ async def _area_index(uid: int | None) -> _tq.AreaIndex:
     return _tq.AreaIndex.from_rows([(r.file_path, r.frontmatter) for r in rows])
 
 
+async def _task_ids_in_index(uid: int | None, exclude_path: str) -> list:
+    """`[("path:line", id, depends_on), …]`: every indexed task of the
+    caller's notes but `exclude_path` (whose current text the caller reads
+    itself) that carries 🆔 or ⛔."""
+    from sqlalchemy import or_, select
+
+    from src.models.db import ForkNoteTask, NoteMetadata
+
+    task_settings, registry, _today = await _task_context(uid)
+    async with async_session() as session:
+        rows = (await session.execute(
+            select(NoteMetadata.file_path, ForkNoteTask.line_number, ForkNoteTask.line)
+            .join(NoteMetadata, NoteMetadata.id == ForkNoteTask.note_id)
+            .where(_note_owner_predicate(uid), ForkNoteTask.kind == "task",
+                   or_(ForkNoteTask.line.contains("🆔"), ForkNoteTask.line.contains("⛔")),
+                   NoteMetadata.file_path != exclude_path)
+        )).all()
+    out = []
+    for row in rows:
+        task = _task_ops.parse_line(row.line, row.file_path, task_settings, registry)
+        if task is not None and (task.id or task.depends_on):
+            out.append((f"{row.file_path}:{row.line_number}", task.id, task.depends_on, task.is_done))
+    return out
+
+
+async def _check_task_ids(uid, before, after, path: str, note_text: str, task_settings, registry,
+                          except_line: int | None) -> list[str]:
+    """`check_task_ids` against the vault: other notes from the index, this
+    note from the text just read; its notes for the result. Only when the
+    write sets, changes or removes an id or adds a dependency, so other
+    writes never touch the index."""
+    notes = _task_ops.dropped_dependency_notes(before, after)
+    id_changed = after.id != (before.id if before is not None else "")
+    new_deps = set(after.depends_on) - set(before.depends_on if before is not None else ())
+    if not (id_changed or new_deps):
+        return notes
+    links = await _task_ids_in_index(uid, path)
+    links += _task_ops.task_links_in_note(note_text, path, task_settings, registry, except_line=except_line)
+    return _task_ops.check_task_ids(before, after, links) + notes
+
+
 def _task_item(entry: _tq.Entry, content_hash: str, today) -> TaskItem:
     task = entry.task
 
@@ -10320,7 +10361,7 @@ def _task_refused(exc: "_task_ops.TaskOpError") -> TaskWriteResult:
 @_tracked(
     "create_task",
     ["path", "heading", "areas", "status", "priority", "created", "start", "scheduled", "due",
-     "on_completion", "recurrence", "expected_hash"],
+     "on_completion", "recurrence", "id", "depends_on", "expected_hash"],
     refusal_result=_task_write_refusal,
     write_class=True,
 )
@@ -10337,6 +10378,8 @@ async def create_task_impl(
     due: str | None = None,
     on_completion: str | None = None,
     recurrence: str | None = None,
+    id: str | None = None,
+    depends_on: list[str] | None = None,
     expected_hash: str | None = None,
 ) -> TaskWriteResult:
     """Add one task line, as the plugin's `createTaskLineModal()` dialog writes it.
@@ -10366,7 +10409,7 @@ async def create_task_impl(
             description=description, settings=task_settings, registry=registry, today=today,
             area_tags=area_tags, status=new_status, priority=priority, on_completion=on_completion,
             dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
-            recurrence=recurrence,
+            recurrence=recurrence, id=id, depends_on=depends_on,
         )
     except _task_ops.TaskOpError as exc:
         return _task_refused(exc)
@@ -10390,7 +10433,7 @@ async def create_task_impl(
             if err := _precondition_error("create_task", path, None, expected_hash,
                                           no_incumbent=True, enforceable=False):
                 return _task_failed(TaskWriteResult, err)
-            existing, new_text, number = None, new_line + "\n", 1
+            existing, new_text, number, old_text = None, new_line + "\n", 1, ""
         else:
             err, existing, old_text = await _read_task_note("create_task", target, path, expected_hash)
             if err:
@@ -10401,6 +10444,11 @@ async def create_task_impl(
             except _task_ops.TaskOpError as exc:
                 return _task_refused(exc)
         try:
+            link_notes = await _check_task_ids(uid, None, task, target.rel, old_text, task_settings, registry,
+                                               except_line=None)
+        except _task_ops.TaskOpError as exc:
+            return _task_refused(exc)
+        try:
             _task_ops.verify_written(new_text, number, task, path, task_settings, registry, allow_field_text=False)
             if existing is not None:
                 _task_ops.verify_other_lines(old_text, new_text, number, 1, path)
@@ -10409,9 +10457,9 @@ async def create_task_impl(
         err, new_text, shift = await _publish_task_text(uid, target, path, new_text, existing)
         if err:
             return _task_failed(TaskWriteResult, err)
-        return await _task_written(uid, target, number + shift, None, new_line, new_text, today,
-                                   task_settings=task_settings, registry=registry,
-                                   changed=True, created_note=True if existing is None else None)
+        return _with_notes(await _task_written(uid, target, number + shift, None, new_line, new_text, today,
+                                               task_settings=task_settings, registry=registry, changed=True,
+                                               created_note=True if existing is None else None), link_notes)
 
 
 async def _existing_task(tool, uid, target, path, line, expected_line, expected_hash):
@@ -10432,7 +10480,7 @@ async def _existing_task(tool, uid, target, path, line, expected_line, expected_
 @_tracked(
     "edit_task",
     ["path", "line", "description", "priority", "created", "start", "scheduled", "due",
-     "on_completion", "recurrence", "clear", "expected_hash"],
+     "on_completion", "recurrence", "id", "depends_on", "clear", "expected_hash"],
     refusal_result=_task_write_refusal,
     write_class=True,
 )
@@ -10449,13 +10497,15 @@ async def edit_task_impl(
     due: str | None = None,
     on_completion: str | None = None,
     recurrence: str | None = None,
+    id: str | None = None,
+    depends_on: list[str] | None = None,
     clear: list[str] | None = None,
 ) -> TaskWriteResult:
     """Change one task's description or fields, as `editTaskLineModal(line)` returns it."""
     if err := _task_write_parameters("edit_task", expected_hash, path):
         return _task_failed(TaskWriteResult, err)
     if all(v is None for v in (description, priority, created, start, scheduled, due, on_completion,
-                               recurrence)) and not clear:
+                               recurrence, id, depends_on)) and not clear:
         return _task_failed(TaskWriteResult, _body_refusal(
             "edit_task was given nothing to change. Nothing was written.", "invalid_argument"))
     uid = current_user_id.get()
@@ -10475,8 +10525,10 @@ async def edit_task_impl(
                 description=_task_ops.edited_description(old, description, task_settings),
                 priority=priority, on_completion=on_completion,
                 dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
-                clear=clear, recurrence=recurrence, settings=task_settings,
+                clear=clear, recurrence=recurrence, id=id, depends_on=depends_on, settings=task_settings,
             )
+            link_notes = await _check_task_ids(uid, old, updated, target.rel, located.text, task_settings, registry,
+                                               except_line=line)
             new_line = _tf.to_file_line(updated)
             if new_line == expected_line:
                 return TaskWriteResult(
@@ -10499,7 +10551,14 @@ async def edit_task_impl(
             result.notes = (result.notes or []) + [
                 f"The 🔁 rule was rewritten in the Tasks plugin's own wording ({old.recurrence!r} → "
                 f"{updated.recurrence!r}), as the plugin does whenever it saves the line; it means the same."]
-        return result
+        return _with_notes(result, link_notes)
+
+
+def _with_notes(result: TaskWriteResult, notes: list[str]) -> TaskWriteResult:
+    """`result` with `notes` added after its own."""
+    if notes:
+        result.notes = (result.notes or []) + notes
+    return result
 
 
 @_tracked(

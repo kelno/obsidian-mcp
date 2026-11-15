@@ -194,6 +194,25 @@ async def test_ticking_a_recurring_task_lists_its_next_occurrence_at_once(sessio
     ]
 
 
+async def test_ids_and_dependencies_are_checked_against_the_whole_vault(sessionmaker, vault):
+    write(vault, "mum.md", "# Mum\n- [ ] back up the mailbox 📅 2026-11-05\n")
+    write(vault, "other.md", "- [x] old 🆔 taken ✅ 2026-10-01\n")
+    await indexer.index_vault(user_id=None)
+    [backup] = (await tools.fork_list_tasks_impl(text="back up")).tasks
+    named = await tools.edit_task_impl(backup.path, backup.line, backup.text, backup.content_hash, id="mum-backup")
+    assert named.error is None and named.indexed is True, named
+
+    # Another note's task names it at once, through the index the write refreshed.
+    retry = await tools.create_task_impl("retry the cleanup", path="other.md", depends_on=["mum-backup"])
+    assert retry.error is None, retry.error
+    assert retry.text == "- [ ] retry the cleanup ⛔ mum-backup"
+
+    # An id another note's task carries is refused, naming where it is.
+    taken = await tools.create_task_impl("x", path="mum.md", id="taken")
+    assert json.loads(taken.error.rsplit("\n", 1)[-1].removeprefix("MCP-REFUSAL "))["code"] == "invalid_argument"
+    assert "other.md:1" in taken.error
+
+
 async def test_task_writes_record_attributed_feed_events_and_refresh_upstreams_rows(sessionmaker, vault):
     """Like every other note writer (#351, #432): an event attributed to the
     tool, so the next pass records nothing of its own, and upstream's

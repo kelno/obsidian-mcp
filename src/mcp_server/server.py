@@ -1666,6 +1666,8 @@ async def create_task(
     due: str | None = None,
     on_completion: str | None = None,
     recurrence: str | None = None,
+    id: str | None = None,
+    depends_on: list[str] | None = None,
     expected_hash: str | None = None,
 ) -> TaskWriteResult:
     """Add a task, written exactly as the Tasks plugin's "Create task" dialog writes it.
@@ -1709,13 +1711,20 @@ async def create_task(
             any other rule (`every weekend`, `every 3 weeks on Friday`) is
             refused. Needs a due, scheduled or start date, usually the first
             occurrence (for `every Monday`, the next Monday): refused without.
+        id: a name for this task (🆔: letters, digits, `-`, `_`), such as
+            `mum-backup`, so other tasks can wait for it. Unique in the vault:
+            an id another task has is refused, naming where.
+        depends_on: a list of ids of tasks this one waits for (⛔); the plugin
+            shows it as blocked until they are done. Each must already be on
+            a task, open or done, in any note: give that task an id first with
+            `edit_task(…, id=…)`. An id no task has is refused.
         expected_hash: optional; the note's `content_hash`, to refuse if it
             changed since you read it.
     """
     return await create_task_impl(
         description, path=path, heading=heading, areas=areas, status=status, priority=priority,
         created=created, start=start, scheduled=scheduled, due=due, on_completion=on_completion,
-        recurrence=recurrence, expected_hash=expected_hash,
+        recurrence=recurrence, id=id, depends_on=depends_on, expected_hash=expected_hash,
     )
 
 
@@ -1733,6 +1742,8 @@ async def edit_task(
     due: str | None = None,
     on_completion: str | None = None,
     recurrence: str | None = None,
+    id: str | None = None,
+    depends_on: list[str] | None = None,
     clear: list[str] | None = None,
 ) -> TaskWriteResult:
     """Change one task's description or fields, as the Tasks plugin's "Edit task" dialog does.
@@ -1763,13 +1774,22 @@ async def edit_task(
             or `yesterday`.
         on_completion: `keep`, `delete` or `none`.
         recurrence: a repeat rule (🔁), as in `create_task`.
+        id: a name for this task (🆔), as in `create_task`. An id other
+            tasks wait for is not changed or cleared until their `depends_on`
+            no longer names it: to rename it, give those tasks their
+            `depends_on` without it (clear only where it is the only one),
+            rename it here, then add the new id to theirs. A done task's id
+            blocks no one, so it can be changed freely.
+        depends_on: the ids it waits for (⛔), replacing the whole list it
+            had (pass the ones to keep too); as in `create_task`. A task that
+            already waits for this one is refused (it would block both).
         clear: fields to remove: any of priority, on_completion, recurrence,
-            created, start, scheduled, due.
+            id, depends_on, created, start, scheduled, due.
     """
     return await edit_task_impl(
         path, line, expected_line, expected_hash, description=description, priority=priority,
         created=created, start=start, scheduled=scheduled, due=due, on_completion=on_completion,
-        recurrence=recurrence, clear=clear,
+        recurrence=recurrence, id=id, depends_on=depends_on, clear=clear,
     )
 
 
@@ -2965,8 +2985,9 @@ if settings.mcp_reject_unknown_arguments:
 
 # ── Upstream tools switched off (fork) ──────────────────────────────────────
 #
-# Upstream tools the owner has not decided on yet (CLAUDE.md, "Following
-# upstream"): their code is kept as upstream wrote it and registered like any
+# Upstream tools switched off (CLAUDE.md, "Following upstream"): the five
+# task tools for good (owner's decision 2026-11-15, FORK.md), `get_changes`
+# and `hybrid_search` until the owner decides on them. Their code is kept as upstream wrote it and registered like any
 # other tool above, then taken off the list here, so no client is offered them.
 # Removing a name switches that tool on. `switch_on` puts them back for
 # upstream's tests of them. `upstream_list_tasks` is upstream's `list_tasks`,

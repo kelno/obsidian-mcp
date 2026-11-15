@@ -46,6 +46,11 @@ OWNER_SETTINGS = {
 #: The fake immediate re-index's record of calls: `(rel_path, text)`.
 REINDEXED: list = []
 
+#: Task ids the fake index knows in other notes: `{id: ["path:line", …]}`.
+INDEXED_IDS: dict = {}
+#: Other indexed tasks with dependencies: `("path:line", id or "", (depends_on, …)[, done])`.
+INDEXED_DEPS: list = []
+
 AREAS = [
     ("projects/Area X/Area X.md", {"area_tag": "area/area-x"}),
     ("projects/Other/Other.md", {"area_tag": "area/other"}),
@@ -79,6 +84,17 @@ def vault(tmp_path, monkeypatch):
         return task_query.AreaIndex.from_rows(AREAS)
 
     monkeypatch.setattr(tools, "_area_index", areas)
+
+    async def indexed_tasks(uid, exclude_path):
+        # The fake index: other notes' tasks with an id or dependencies, `(ref, id, depends_on)`.
+        rows = [(ref, i, (), False) for i, refs in INDEXED_IDS.items() for ref in refs]
+        rows += [r if len(r) == 4 else (*r, False) for r in INDEXED_DEPS]
+        return [r for r in rows if not r[0].startswith(exclude_path + ":")]
+
+    monkeypatch.setattr(tools, "_task_ids_in_index", indexed_tasks, raising=False)
+    INDEXED_IDS.clear()
+    INDEXED_DEPS.clear()
+
     async def reindex(uid, rel, text):
         REINDEXED.append((rel, text))
         return True, "task index updated"
@@ -1072,3 +1088,196 @@ def test_the_rule_nudge_numbers_lines_as_written_when_the_stamp_adds_a_block(vau
 def test_without_the_vault_plugin_no_rule_nudge(vault):
     created = asyncio.run(tools.create_note_impl("_/agent/Unset.md", "- A new rule.\n"))
     assert "rule_change_unlogged" not in created
+
+
+# --- dependencies: 🆔 and ⛔ (ledger F9) ------------------------------------------
+
+async def test_create_with_an_id_and_dependencies_writes_them_in_the_plugins_order(vault):
+    INDEXED_IDS["backup"] = ["mum.md:3"]
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("retry the cleanup", path="n.md", id="retry", depends_on=["backup"],
+                                          due="2026-11-05", priority="high")
+    assert result.error is None, result.error
+    assert read(vault, "n.md") == "# T\n- [ ] retry the cleanup 🆔 retry ⛔ backup ⏫ 📅 2026-11-05\n"
+
+
+async def test_create_depending_on_a_task_in_the_same_note(vault):
+    note(vault, "n.md", "- [ ] first 🆔 first\n")
+    await tools.create_task_impl("second", path="n.md", depends_on=["first", "first"])
+    assert read(vault, "n.md") == "- [ ] first 🆔 first\n- [ ] second ⛔ first\n"
+
+
+async def test_create_refuses_an_id_another_task_already_has(vault):
+    INDEXED_IDS["backup"] = ["mum.md:3"]
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("x", path="n.md", id="backup")
+    assert code(result) == "invalid_argument"
+    assert "mum.md:3" in result.error
+    assert read(vault, "n.md") == "# T\n"
+
+
+async def test_create_refuses_an_id_already_in_the_same_note(vault):
+    note(vault, "n.md", "- [x] old 🆔 a ✅ 2026-10-01\n")
+    result = await tools.create_task_impl("x", path="n.md", id="a")
+    assert code(result) == "invalid_argument"
+    assert "n.md:1" in result.error
+
+
+async def test_create_refuses_a_dependency_no_task_carries(vault):
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("x", path="n.md", depends_on=["nobody"])
+    assert code(result) == "invalid_argument"
+    assert "nobody" in result.error and "edit_task" in result.error
+    assert read(vault, "n.md") == "# T\n"
+
+
+@pytest.mark.parametrize("bad", ["a b", "é", "a,b", "", "🆔"])
+async def test_create_refuses_an_id_outside_the_plugins_characters(vault, bad):
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("x", path="n.md", id=bad)
+    assert code(result) == "invalid_argument"
+
+
+async def test_create_refuses_a_task_depending_on_itself(vault):
+    note(vault, "n.md", "# T\n")
+    result = await tools.create_task_impl("x", path="n.md", id="x", depends_on=["x"])
+    assert code(result) == "invalid_argument"
+
+
+async def test_edit_sets_an_id(vault):
+    text = "- [ ] back up the mailbox 📅 2026-11-05"
+    result = await edit(vault, text + "\n", 1, text, id="mum-backup")
+    assert result.error is None, result.error
+    assert read(vault, "n.md") == "- [ ] back up the mailbox 🆔 mum-backup 📅 2026-11-05\n"
+
+
+async def test_edit_replaces_dependencies_checking_only_the_new_ones(vault):
+    INDEXED_IDS["a"] = ["o.md:1"]
+    text = "- [ ] b ⛔ gone"
+    await edit(vault, text + "\n", 1, text, depends_on=["gone", "a"])
+    assert read(vault, "n.md") == "- [ ] b ⛔ gone,a\n"
+
+
+async def test_edit_keeping_its_own_id_is_not_a_duplicate(vault):
+    text = "- [ ] a 🆔 a"
+    result = await edit(vault, text + "\n", 1, text, id="a", description="renamed")
+    assert result.error is None, result.error
+    assert read(vault, "n.md") == "- [ ] renamed 🆔 a\n"
+
+
+async def test_edit_clears_id_and_dependencies(vault):
+    text = "- [ ] a 🆔 a ⛔ b 🔼"
+    await edit(vault, text + "\n", 1, text, clear=["id", "depends_on"])
+    assert read(vault, "n.md") == "- [ ] a 🔼\n"
+
+
+async def test_edit_refuses_an_unknown_dependency(vault):
+    text = "- [ ] a"
+    result = await edit(vault, text + "\n", 1, text, depends_on=["missing"])
+    assert code(result) == "invalid_argument"
+    assert read(vault, "n.md") == text + "\n"
+
+
+async def test_edit_refuses_changing_an_id_other_tasks_wait_for(vault):
+    INDEXED_DEPS.append(("o.md:2", "", ("mum-backup",)))
+    text = "- [ ] back up 🆔 mum-backup"
+    for change in ({"id": "backup-1"}, {"clear": ["id"]}):
+        result = await edit(vault, text + "\n", 1, text, **change)
+        assert code(result) == "invalid_argument"
+        assert "o.md:2" in result.error
+        assert read(vault, "n.md") == text + "\n"
+
+
+async def test_edit_refuses_changing_an_id_a_task_in_the_same_note_waits_for(vault):
+    text = "- [ ] back up 🆔 mum-backup"
+    result = await edit(vault, text + "\n- [ ] wipe ⛔ mum-backup\n", 1, text, clear=["id"])
+    assert code(result) == "invalid_argument"
+    assert "n.md:2" in result.error
+
+
+async def test_a_done_task_waiting_for_an_id_does_not_stop_its_rename(vault):
+    # The plugin never blocks a finished task (`Task.isBlocked` is false when done).
+    INDEXED_DEPS.append(("o.md:3", "", ("report",), True))
+    text = "- [ ] report 🆔 report"
+    result = await edit(vault, text + "\n", 1, text, id="report-2026")
+    assert result.error is None, result.error
+    assert read(vault, "n.md") == "- [ ] report 🆔 report-2026\n"
+
+
+async def test_a_done_task_cannot_close_a_cycle(vault):
+    INDEXED_DEPS.append(("o.md:1", "b", ("a",), True))
+    text = "- [ ] a 🆔 a"
+    result = await edit(vault, text + "\n", 1, text, depends_on=["b"])
+    assert result.error is None, result.error
+
+
+async def test_taking_an_id_that_closes_a_cycle_through_a_dangling_dependency_is_refused(vault):
+    # B waits for an id no task had (its task was removed by 🏁 delete); A
+    # already waits for B. Giving A that id would lock both.
+    INDEXED_DEPS.append(("o.md:1", "b", ("a",)))
+    text = "- [ ] x ⛔ b"
+    result = await edit(vault, text + "\n", 1, text, id="a")
+    assert code(result) == "invalid_argument"
+    assert "o.md:1" in result.error
+
+
+async def test_taking_an_id_open_tasks_already_wait_for_says_so(vault):
+    INDEXED_DEPS.append(("o.md:2", "", ("a",)))
+    text = "- [ ] x"
+    result = await edit(vault, text + "\n", 1, text, id="a")
+    assert result.error is None, result.error
+    assert any("o.md:2" in n and "blocked" in n for n in result.notes)
+
+
+async def test_a_done_task_can_change_its_id_though_open_tasks_name_it(vault):
+    # A finished task blocks nobody (`isBlocked` looks only for open carriers):
+    # the open task is already unblocked (review 2, point 1).
+    INDEXED_DEPS.append(("o.md:2", "", ("bins",)))
+    text = "- [x] bins 🆔 bins ✅ 2026-10-01"
+    for change, line in (({"clear": ["id"]}, "- [x] bins ✅ 2026-10-01"),
+                         ({"id": "bins-old"}, "- [x] bins 🆔 bins-old ✅ 2026-10-01")):
+        result = await edit(vault, text + "\n", 1, text, **change)
+        assert result.error is None, result.error
+        assert read(vault, "n.md") == line + "\n"
+
+
+async def test_a_done_task_cannot_close_a_cycle_or_block_anyone(vault):
+    INDEXED_DEPS.append(("o.md:1", "b", ("a",)))
+    text = "- [x] a 🆔 a ✅ 2026-10-01"
+    result = await edit(vault, text + "\n", 1, text, depends_on=["b"])
+    assert result.error is None, result.error
+    INDEXED_DEPS[:] = [("o.md:2", "", ("x",))]
+    text = "- [x] y ✅ 2026-10-01"
+    result = await edit(vault, text + "\n", 1, text, id="x")
+    assert result.error is None, result.error
+    assert not any("blocked" in n for n in result.notes or [])
+
+
+async def test_a_longer_cycle_is_refused(vault):
+    # b waits for c, c waits for a: a waiting for b would lock all three (point 6).
+    INDEXED_DEPS.extend([("o.md:1", "b", ("c",)), ("o.md:2", "c", ("a",))])
+    text = "- [ ] a 🆔 a"
+    result = await edit(vault, text + "\n", 1, text, depends_on=["b"])
+    assert code(result) == "invalid_argument"
+    assert "o.md:1" in result.error and "o.md:2" in result.error
+    assert read(vault, "n.md") == text + "\n"
+
+
+async def test_replacing_depends_on_names_the_ids_it_drops(vault):
+    # depends_on replaces the list: the result says what is no longer waited for (point 5).
+    INDEXED_IDS["c"] = ["o.md:5"]
+    text = "- [ ] x ⛔ a,b"
+    result = await edit(vault, text + "\n", 1, text, depends_on=["c"])
+    assert read(vault, "n.md") == "- [ ] x ⛔ c\n"
+    assert any("a, b" in n and "no longer" in n for n in result.notes)
+    result = await edit(vault, text + "\n", 1, text, depends_on=["a"])
+    assert any("🆔 b" in n and "no longer" in n for n in result.notes)
+
+
+async def test_edit_refuses_a_dependency_cycle(vault):
+    # B already waits for A; making A wait for B would block both for ever.
+    INDEXED_DEPS.append(("o.md:1", "b", ("a",)))
+    text = "- [ ] a 🆔 a"
+    result = await edit(vault, text + "\n", 1, text, depends_on=["b"])
+    assert code(result) == "invalid_argument"
+    assert "o.md:1" in result.error
