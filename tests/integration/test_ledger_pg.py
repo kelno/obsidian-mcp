@@ -1165,6 +1165,7 @@ async def test_open_area_gathers_the_note_folders_entries_and_tasks(sessionmaker
     assert len(result.instructions) == 3 and "#when" in result.instructions[0]
     assert "Current position" in result.instructions[1]
     assert "_/agent/templates/Work note.md" in result.instructions[2]
+    assert '"Work notes" in area_conventions' in result.instructions[2]
     assert result.archived is None and result.tasks_total is None
     assert not any("carries #next" in n for n in result.notes or [])
 

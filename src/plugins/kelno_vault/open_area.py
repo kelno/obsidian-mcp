@@ -69,7 +69,7 @@ OPEN_AREA_TASKS_HEADING = "Tasks"
 #: records that this plugin depends on the heading's name.
 OPEN_AREA_CONVENTIONS_HEADING = "Working on an area"
 #: The conventions are cut past this many characters.
-OPEN_AREA_CONVENTIONS_MAX_CHARS = 4000
+OPEN_AREA_CONVENTIONS_MAX_CHARS = 8000
 
 OPEN_AREA_INSTRUCTIONS = (
     "Starting work: check each task and entry against the work you're starting (read an entry with ledger_get "
@@ -79,7 +79,8 @@ OPEN_AREA_INSTRUCTIONS = (
     "Answering a status question (\"where am I on X?\"): report the Current position (with its date) and the "
     "#next tasks, or say none is marked #next; the rest is for agents about to act.",
     "Starting a piece of work here likely to span several conversations (a design, a decision, a plan or a "
-    "proposal): copy the work note template, _/agent/templates/Work note.md; its comments say how.",
+    "proposal): give it a work note. The rules are under \"Work notes\" in area_conventions; the template "
+    "_/agent/templates/Work note.md is a starting point to copy and adapt.",
 )
 
 
