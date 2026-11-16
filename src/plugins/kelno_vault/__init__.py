@@ -108,7 +108,9 @@ _OPEN_AREA_GUIDE = (
     "Besides the area's main note, ledger entries and open tasks, `open_area` returns `area_conventions`: the "
     f"\"{open_area.OPEN_AREA_CONVENTIONS_HEADING}\" section of this vault's conventions note (the one below), read "
     "at each call, so it is current. It holds the rules for working on any area; follow them. When the note or "
-    "the section cannot be read, a line in `notes` says so instead."
+    "the section cannot be read, a line in `notes` says so instead. Its `map` lists the notes in the area's folder "
+    "with their `description` frontmatter and each subfolder with its folder note's: open the note you need from "
+    "it, and give a note you work on a one-line `description` when it has none."
 )
 
 

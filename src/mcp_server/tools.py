@@ -90,6 +90,7 @@ from src import plugins as _plugins
 from src.services import ai_edit_stamp, page_text, private_folders, transfer, vault_fs
 from src.services import index_status as _index_status
 from src.services import open_note_url as _open_note_url
+from src.services import note_description
 from src.services import change_feed, transfer, vault_fs
 from src.services import (
     task_dates,
@@ -2842,6 +2843,26 @@ async def _note_window(tool, columns, *, folder, tags, frontmatter, since, until
                            label=_NOTE_ORDERS[order])
 
 
+def _list_notes_description_column() -> tuple:
+    """The column `list_notes` adds for `LIST_NOTES_DESCRIPTION_FIELD`: the
+    field's JSONB value from the indexed frontmatter, or nothing when unset."""
+    field = settings.list_notes_description_field
+    if not field:
+        return ()
+    from src.models.db import NoteMetadata
+
+    return (NoteMetadata.frontmatter[field].label("description"),)
+
+
+def _list_notes_description_suffix(row, described: tuple) -> str:
+    """` — description: "…"` for a note whose field holds a string; nothing
+    otherwise, and nothing for a note in a private folder."""
+    if not described or private_folders.is_private(row.file_path):
+        return ""
+    text_ = note_description.one_line(row.description)
+    return f" — description: {note_description.render(text_)}" if text_ else ""
+
+
 @_tracked(
     "list_notes",
     ["folder", "limit", "tags", "frontmatter", "since", "until", "order_by", "cursor"],
@@ -2863,13 +2884,16 @@ async def list_notes_impl(
 
     limit = _clamp_limit(limit)
     uid = current_user_id.get()
+    # Fork: with `LIST_NOTES_DESCRIPTION_FIELD` set, each line carries that
+    # frontmatter field; unset, the statements and bytes are as before.
+    described = _list_notes_description_column()
     if _note_window_requested(since, until, order_by, cursor):
         # #351, D8: any new parameter switches to the bounded, keyset-paged
         # path. A call with none of them keeps today's statement and bytes.
         try:
             window = await _note_window(
                 "list_notes",
-                (NoteMetadata.file_path, NoteMetadata.file_size),
+                (NoteMetadata.file_path, NoteMetadata.file_size, *described),
                 folder=folder or None, tags=tags, frontmatter=frontmatter,
                 since=since, until=until, order_by=order_by, cursor=cursor,
                 limit=limit, uid=uid,
@@ -2882,7 +2906,8 @@ async def list_notes_impl(
                  f"(by {window.label} time):\n"]
         for n in window.rows:
             mod = n.window_time.astimezone(timezone.utc).strftime("%Y-%m-%d")
-            lines.append(f"- `{n.file_path}` ({n.file_size or 0:,}B, {window.label} {mod})")
+            lines.append(f"- `{n.file_path}` ({n.file_size or 0:,}B, {window.label} {mod})"
+                         f"{_list_notes_description_suffix(n, described)}")
         if window.next_cursor:
             lines.append(f"\nmore: cursor={window.next_cursor}")
         return "\n".join(lines)
@@ -2891,7 +2916,7 @@ async def list_notes_impl(
         # exact `modified_at` ties so membership and order at the LIMIT no
         # longer depend on the plan.
         stmt = select(
-            NoteMetadata.file_path, NoteMetadata.file_size, NoteMetadata.modified_at
+            NoteMetadata.file_path, NoteMetadata.file_size, NoteMetadata.modified_at, *described
         ).order_by(NoteMetadata.modified_at.desc(), NoteMetadata.file_path.asc())
         stmt = apply_note_filters(
             stmt, folder=folder or None, tags=tags, frontmatter=frontmatter, user_id=uid
@@ -2910,7 +2935,8 @@ async def list_notes_impl(
         else:
             mod = "unknown"
         size = n.file_size or 0
-        lines.append(f"- `{n.file_path}` ({size:,}B, modified {mod}){_open_note_url.text_suffix(n.file_path)}")
+        lines.append(f"- `{n.file_path}` ({size:,}B, modified {mod})"
+                     f"{_list_notes_description_suffix(n, described)}{_open_note_url.text_suffix(n.file_path)}")
     return "\n".join(lines)
 
 

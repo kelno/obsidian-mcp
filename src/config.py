@@ -923,6 +923,12 @@ class Settings(BaseSettings):
     # `move_note` says so when the folder a note leaves has a counterpart under
     # it; it never moves archive content. Unset: no hint.
     archive_folder: str | None = None
+    # The frontmatter field `list_notes` shows after each note, as one quoted
+    # line (a string value only, cut at 300 characters; withheld for a note in
+    # a private folder), e.g. `description`. Unset (the default): no field
+    # read and every listing as before. See "Note descriptions" in
+    # docs/architecture/vault-tools.md.
+    list_notes_description_field: str | None = None
     # The vault note `get_vault_guide` serves as the vault's own conventions,
     # a vault-relative `.md` path. `CLAUDE.md` at the root is where most
     # vaults keep them; a vault whose root `CLAUDE.md` holds only Claude Code
@@ -1793,7 +1799,7 @@ class Settings(BaseSettings):
                 f"PRIVATE_FOLDER_NAMES holds folder names, not paths: {', '.join(bad)} contains '/'")
         return [n for n in out if n]
 
-    @field_validator("last_ai_edit_field", "archive_folder", mode="before")
+    @field_validator("last_ai_edit_field", "archive_folder", "list_notes_description_field", mode="before")
     @classmethod
     def _blank_is_unset(cls, v):
         """An empty value (`LAST_AI_EDIT_FIELD=`) means unset, not a property

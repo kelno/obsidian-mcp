@@ -32,6 +32,7 @@ from src.mcp_server.tools import (
     _tf,
     _tq,
 )
+from src.plugins.kelno_vault import area_map as _area_map
 from src.plugins.kelno_vault import areas_index as _areas_index
 from src.plugins.kelno_vault.area_result import AreaTask, OpenAreaResult
 from src.services import private_folders
@@ -46,8 +47,8 @@ AREAS_INDEX_PATH = "Areas/Areas.md"
 # The one call an agent makes when it opens an area: to start work there, or
 # to answer a question about it. It gathers what the agent would otherwise
 # collect in several calls and may skip: the main note (agent rules at the
-# top, `## Current position`), the area's folders outside the vault, its
-# ledger entries and its open tasks. See docs/architecture/open-area.md.
+# top, `## Current position`), the area's folders outside the vault, the map
+# of its notes, its ledger entries and its open tasks. See docs/architecture/open-area.md.
 #
 # Kept as one function per part so later parts slot in beside them: notes
 # changed since an agent last looked, stale-task hints, matching a "When …"
@@ -279,6 +280,27 @@ async def _open_area_tasks(tag: str, uid, notes: list[str]) -> tuple[list[AreaTa
     return out, total
 
 
+async def _open_area_map(main_note: str, uid, notes: list[str]) -> list[str] | None:
+    """The map of the area's folder (`area_map.build`), from the index."""
+    from sqlalchemy import select
+
+    from src.models.db import NoteMetadata
+    from src.services.filters import folder_prefix_clause
+
+    folder = _area_map.area_folder(main_note)
+    if folder is None:
+        notes.append(f"The main note {main_note} is not its folder's folder note (<Folder>/<Folder>.md), so the "
+                     "area has no folder of its own to map.")
+        return None
+    async with database.async_session() as session:
+        rows = (await session.execute(
+            select(NoteMetadata.file_path, NoteMetadata.frontmatter[_area_map.DESCRIPTION_FIELD])
+            .where(_note_owner_predicate(uid), folder_prefix_clause(folder))
+        )).all()
+    return _area_map.build(folder, main_note, [tuple(r) for r in rows],
+                           list_notes_describes=bool(settings.list_notes_description_field))
+
+
 def _open_area_note_url(main_note: str | None) -> str | None:
     return _open_note_url.open_note_url(main_note) if main_note else None
 
@@ -334,6 +356,7 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
         notes.append(f"The area has no row in {AREAS_INDEX_PATH}, so its related folders are unknown.")
     conventions = await _open_area_conventions(uid, notes)
     text_, full_chars = await _open_area_main_note(main_note, uid, notes)
+    area_map = await _open_area_map(main_note, uid, notes)
     entries, entries_truncated = await _open_area_entries(tag, uid, notes)
     tasks, tasks_total = await _open_area_tasks(tag, uid, notes)
     archived = _archived(main_note)
@@ -343,7 +366,7 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
         found=True, area=tag, tag="#" + tag, name=row.name if row else None, description=description,
         main_note=main_note, main_note_open_url=_open_area_note_url(main_note), archived=archived,
         matched_folder=matched_folder, area_conventions=conventions, main_note_text=text_,
-        main_note_chars=full_chars, related_folders=(row.folders or None) if row else None,
+        main_note_chars=full_chars, related_folders=(row.folders or None) if row else None, map=area_map,
         entries=entries or None, entries_truncated=entries_truncated or None,
         tasks=tasks or None, tasks_total=tasks_total if tasks_total > len(tasks) else None,
         instructions=list(OPEN_AREA_INSTRUCTIONS), notes=notes or None,
@@ -363,7 +386,7 @@ async def open_area(
     area: Annotated[str | None, _A_AREA] = None,
     folder: Annotated[str | None, _A_FOLDER] = None,
 ) -> OpenAreaResult:
-    """Open an area: its rules, current position, ledger entries and open tasks.
+    """Open an area: rules, current position, notes map, ledger entries, open tasks.
 
     Read-only. Call it first when you start work in an area or answer a
     question about one, and when a session works in a folder outside the
@@ -372,7 +395,10 @@ async def open_area(
     (`area_conventions`, the "Working on an area" section of the vault's
     conventions note, read at each call; follow them), its main note's text (the agent rules at its top and
     `## Current position`; without its Tasks section), its related folders
-    outside the vault, its active ledger entries (those filed under another
+    outside the vault, a `map` of its folder (each note's one-line
+    `description`, each subfolder's note count and folder-note description,
+    capped; a note without a description is marked, add one when you work on
+    it), its active ledger entries (those filed under another
     area but carrying one of its topics are marked `via_topic`), and its open
     tasks from every note carrying its tag, `#next` first, then by urgency.
     Both lists are capped; `notes` say where the rest is, say when the

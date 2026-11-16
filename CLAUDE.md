@@ -828,6 +828,10 @@ paraphrase; it and `semantic_search` take the optional `rerank` argument,
 #367), `read_note`, `list_notes`, `get_tags`, `get_recent`, `get_vault_guide`, `get_changes`
 (the change feed, after an `ev:<seq>` cursor or a UTC date; `by` =
 `any | me | agents | human`), and `list_tasks` / `task_agenda` (see **Tasks** below).
+With `LIST_NOTES_DESCRIPTION_FIELD` set (fork, off by default), `list_notes`
+ends each note's line with that frontmatter field from the index, one
+JSON-quoted line, withheld in private folders; unset, byte-identical (see
+"Note descriptions" in [vault tools](docs/architecture/vault-tools.md)).
 
 **`index_status`** — how far indexing and embedding have got for the caller's vault (embedded, pending, excluded, no text; a folder, private folders, the ledger; the last hour's rate and time left; the indexer's health), counted by `src/services/index_status.py`, which also holds the one definition of "pending" the panel uses. Class `scan`. See [indexing and embeddings](docs/architecture/indexing-and-embeddings.md), "Reporting progress to agents".
 
@@ -890,7 +894,7 @@ other tasks (unique ids, no dependency on a missing id, no cycle, no silent
 unblock of open tasks). Read
 [task tools](docs/architecture/tasks.md) first.
 
-**`open_area`** (fork; a tool of the `kelno_vault` plugin, served only with it loaded): the one call an agent makes when it opens an area (by name or by a folder outside the vault, through the list of areas `Areas/Areas.md`): the main note without its Tasks section, related folders, active ledger entries and open tasks, then three instruction lines. Class `scan`. Read [open_area](docs/architecture/open-area.md) first.
+**`open_area`** (fork; a tool of the `kelno_vault` plugin, served only with it loaded): the one call an agent makes when it opens an area (by name or by a folder outside the vault, through the list of areas `Areas/Areas.md`): the main note without its Tasks section, related folders, a map of the area's folder from the index (each note's `description`, each subfolder's note count and folder-note description, capped at 30 lines), active ledger entries and open tasks, then three instruction lines. Class `scan`. Read [open_area](docs/architecture/open-area.md) first.
 
 **Agent ledger** (fork) — `ledger_search`, `ledger_get`, `ledger_add`,
 `ledger_update`, `ledger_digest`, `ledger_digest_edit`, `ledger_topics`,

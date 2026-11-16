@@ -2,7 +2,7 @@
 
 Fields come in the order an agent needs them: which area, what it is for,
 the vault's conventions for working on any area, its main note (the agent rules at its top and its `## Current position`),
-where else it lives, then its ledger entries and its open tasks, and last
+where else it lives, the map of its folder, then its ledger entries and its open tasks, and last
 the two lines saying what to do with all of it.
 """
 
@@ -60,6 +60,11 @@ class OpenAreaResult(_OmitNone):
     main_note_chars: int | None = None
     #: Folders outside the vault that belong to the area (repos, working directories).
     related_folders: list[str] | None = None
+    #: The map of the area's folder, from the index: one line per note in it
+    #: (not the main note) with its `description`, then one per subfolder with
+    #: its note count and its folder note's description; capped, then lines
+    #: for the rest, the notes without a description, and how to list a subfolder.
+    map: list[str] | None = None
     #: Active ledger entries, as `ledger_search(area=…)` lists them, newest change first.
     entries: list[EntrySummary] | None = None
     #: More active entries exist than are listed.

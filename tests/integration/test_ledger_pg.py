@@ -1252,6 +1252,56 @@ async def test_open_area_carries_the_vault_guide_notes_area_section(sessionmaker
     assert any("cut at 3 of 10 characters" in n and 'section="Working on an area"' in n for n in cut.notes)
 
 
+async def _indexed(sessionmaker, path, frontmatter):
+    async with sessionmaker() as session:
+        await session.execute(text(
+            "INSERT INTO notes_metadata (user_id, file_path, title, tags, frontmatter, content_hash, file_size, "
+            "modified_at) VALUES (NULL, :p, 't', '{}', CAST(:f AS jsonb), 'h', 10, now())"),
+            {"p": path, "f": json.dumps(frontmatter)})
+        await session.commit()
+
+
+async def test_open_area_maps_the_areas_folder_from_the_index(sessionmaker, ctx, monkeypatch):
+    monkeypatch.setattr(settings, "private_folder_names", ["* (private)"])
+    await _open_area_vault(sessionmaker, ctx)
+    home = "projects/Home/"
+    await _indexed(sessionmaker, home + "Paint.md", {"description": "Which paint, where."})
+    await _indexed(sessionmaker, home + "Bare.md", {})
+    await _indexed(sessionmaker, home + "Log/Log.md", {"description": "One note per day."})
+    await _indexed(sessionmaker, home + "Log/2026-11-01.md", {"description": "x"})
+    await _indexed(sessionmaker, home + "Old/a.md", {"description": 7})
+    await _indexed(sessionmaker, home + "Diary (private)/Diary (private).md", {"description": "secret"})
+    await _indexed(sessionmaker, "projects/Homeless/Other.md", {"description": "not this area"})
+
+    result = await open_area_impl(area="home")
+    assert result.error is None, result.error
+    assert result.map == [
+        "Bare.md — no description",
+        'Paint.md — "Which paint, where."',
+        "Diary (private)/ — 1 note, a private folder: description not shown",
+        'Log/ — 2 notes — "One note per day."',
+        "Old/ — 1 note, no folder note (Old/Old.md)",
+        "1 note without a description: add one when you work on it.",
+        "To list a subfolder's notes: list_notes(folder=\"projects/Home/Log/\"), for example.",
+    ]
+
+    monkeypatch.setattr(tools.settings, "list_notes_description_field", "description")
+    described = await open_area_impl(area="home")
+    assert described.map[-1].startswith("To list a subfolder's notes with their descriptions:")
+    listed = await tools.list_notes_impl("projects/Home/Log/")
+    assert 'description: "One note per day."' in listed and 'description: "x"' in listed
+    hidden = await tools.list_notes_impl(home + "Diary (private)/")
+    assert "Diary (private).md" in hidden and "secret" not in hidden
+
+
+async def test_open_area_has_no_map_without_a_folder_of_its_own(sessionmaker, ctx):
+    await _indexed(sessionmaker, "projects/Shed.md", {"area_tag": "area/shed"})
+    await _indexed(sessionmaker, "projects/Tools.md", {"description": "Not the shed's."})
+    result = await open_area_impl(area="shed")
+    assert result.error is None and result.map is None
+    assert any("is not its folder's folder note" in n for n in result.notes)
+
+
 
 # ── Note writes show the ledger refs on the lines they change ────────────────
 
