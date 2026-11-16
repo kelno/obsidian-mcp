@@ -11119,8 +11119,6 @@ async def ledger_add_impl(
     if added.flagged:
         notes.append("Check each flagged summary-view line now: replace it, or resolve it if it still holds "
                      "(ledger_digest_edit).")
-    if entry.kind == "case":
-        notes.extend(await _ledger_case_notes(uid, entry.id, added.similar))
     return LedgerWriteResult(
         ref=entry.ref, revision=entry.revision, status=entry.status, similar=added.similar or None,
         flagged_lines=_ledger_flagged(added.flagged), view_hints=added.hints or None, notes=notes or None,
@@ -11128,16 +11126,9 @@ async def ledger_add_impl(
     )
 
 
-#: The changes after which a case write says what its rules' cases add up to (`observed_on` can move
-#: a case to before or since a rule).
-_LEDGER_CASE_NUDGE_CHANGES = ("outcome", "status", "rule", "observed_on")
-
-
-async def _ledger_case_notes(uid, entry_id: int, similar: list[dict] | None = None, *,
-                             superseded: bool = False) -> list[str]:
-    """What a case just written points to (`ledger.case_notes`): a rule that may not be holding, a
-    repeated slip with no rule; with `superseded`, the current cases a proposal just superseded
-    leaves behind (`ledger.superseded_rule_note`). The write has happened: a failure here is a note."""
+async def _ledger_superseded_note(uid, entry_id: int) -> list[str]:
+    """The current cases a proposal just superseded leaves behind (`ledger.superseded_rule_note`).
+    The write has happened: a failure here is a note."""
     from src.models.db import LedgerEntry
 
     try:
@@ -11145,13 +11136,11 @@ async def _ledger_case_notes(uid, entry_id: int, similar: list[dict] | None = No
             entry = await session.get(LedgerEntry, entry_id)
             if entry is None:
                 return []
-            if superseded:
-                note = await _ledger.superseded_rule_note(session, entry)
-                return [note] if note else []
-            return await _ledger.case_notes(session, uid, entry, similar)
+            note = await _ledger.superseded_rule_note(session, entry)
+            return [note] if note else []
     except Exception as exc:  # noqa: BLE001 — the write stands; the note says the check failed
         # debug, not warning: a caller drives this path (the D18 permit rule); the note tells the caller.
-        logger.debug("ledger write: the case's rules could not be checked", exc_info=True)
+        logger.debug("ledger write: the superseded proposal's cases could not be checked", exc_info=True)
         return [f"The change was written, but the rule cases around it could not be checked ({type(exc).__name__}): "
                 "ledger_get the proposals involved to see them."]
 
@@ -11238,11 +11227,9 @@ async def ledger_update_impl(
         dependants = await _ledger_dependants(uid, entry, notes, include_private)
     if any(c.startswith("body") for c in changed) and "title" not in changed:
         notes.append(f"Does the title still hold? It reads: \"{entry.title}\". If not, change it (title=…).")
-    if entry.kind == "case" and any(c.split(" ", 1)[0] in _LEDGER_CASE_NUDGE_CHANGES for c in changed):
-        notes.extend(await _ledger_case_notes(uid, entry.id))
     if entry.kind == "proposal" and entry.status == "superseded" and (
             "status" in changed or "superseded_by" in changed):
-        notes.extend(await _ledger_case_notes(uid, entry.id, superseded=True))
+        notes.extend(await _ledger_superseded_note(uid, entry.id))
     return LedgerWriteResult(ref=entry.ref, revision=entry.revision, status=entry.status,
                              changed=changed or None, flagged_lines=_ledger_flagged(updated.flagged),
                              notes=notes or None, cites=cites, cited_by=dependants)

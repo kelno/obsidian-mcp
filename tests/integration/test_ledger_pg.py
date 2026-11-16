@@ -1622,23 +1622,20 @@ async def test_changing_a_cases_rules_keeps_the_history_and_retired_leaves_the_d
     assert (await tools.ledger_get_impl(["P2"])).entries[0].cases[0]["status"] == "retired"
 
 
-async def test_a_rule_gathering_slips_and_a_repeated_slip_with_no_rule_are_pointed_out(ctx):
+async def test_a_case_write_no_longer_warns_about_repeated_slips(ctx):
+    # Owner's decision, 2026-11-16: which rules keep slipping is looked at in
+    # the monthly review, not told to whoever logs a case.
     await add_proposal("Answer the literal question first")
-    first = await add_case("Answered with a fix", rules=["P1"])
-    assert not any("slip cases" in n for n in first.notes or ())
+    await add_case("Answered with a fix", rules=["P1"])
     second = await add_case("Answered with a fix again", rules=["P1"])
-    assert any(n.startswith("P1 has 2 slip cases since it was adopted (C1, C2): the rule may not be holding")
-               for n in second.notes), second.notes
-    good = await add_case("Answered the question first", rules=["P1"], outcome="good")
-    assert any("P1 has 2 slip cases since it was adopted" in n for n in good.notes)
-
+    assert not any("slip" in n for n in second.notes or ()), second.notes
     lone = await add_case("Wrote the ledger entry in French")
-    assert not any("no rule" in n for n in lone.notes or ())
     repeat = await add_case("Wrote another ledger entry in French")
-    assert any(n == f"{repeat.ref} looks like another slip with no rule ({lone.ref}): a repeat; worth proposing a "
-               "rule to the owner." for n in repeat.notes), repeat.notes
+    assert not any("no rule" in n for n in repeat.notes or ()), repeat.notes
     tied = await tools.ledger_update_impl(ref=lone.ref, expected_revision=1, reason="covered now", rules_add=["P1"])
-    assert any("P1 has 3 slip cases since it was adopted" in n for n in tied.notes)
+    assert tied.error is None, tied.error
+    assert not any("slip" in n for n in tied.notes or ()), tied.notes
+    assert {e.ref for e in (await tools.ledger_search_impl(rule="P1")).entries} == {"C1", "C2", lone.ref}
 
 
 async def test_a_note_edit_shows_the_cases_of_the_rules_it_rewords(sessionmaker, ctx):
@@ -1675,30 +1672,25 @@ async def test_a_task_citing_a_proposal_shows_its_cases_and_a_case_can_be_cited(
 
 # ── Before or since the rule (owner's decision, 2026-11-15) ──────────────────
 
-async def test_slips_from_before_the_rule_never_say_it_may_not_be_holding(ctx):
+async def test_a_case_on_or_before_its_rules_day_is_before_and_after_it_since(ctx):
     await add_proposal("Answer the literal question first", observed_on="2026-06-01")
     await add_case("Answered with a fix, before the rule", rules=["P1"], observed_on="2026-05-01")
-    same_day = await add_case("Answered with a fix the day it was adopted", rules=["P1"], observed_on="2026-06-01")
-    assert not any("slip cases" in n for n in same_day.notes or ()), same_day.notes
-    first_since = await add_case("Answered with a fix under the rule", rules=["P1"], observed_on="2026-06-02")
-    assert not any("slip cases" in n for n in first_since.notes or ()), first_since.notes
-    second_since = await add_case("Answered with a fix again", rules=["P1"])
-    assert any(n.startswith("P1 has 2 slip cases since it was adopted (C3, C4): the rule may not be holding")
-               for n in second_since.notes), second_since.notes
+    await add_case("Answered with a fix the day it was adopted", rules=["P1"], observed_on="2026-06-01")
+    await add_case("Answered with a fix under the rule", rules=["P1"], observed_on="2026-06-02")
+    await add_case("Answered with a fix again", rules=["P1"])
     cases = (await tools.ledger_get_impl(["P1"])).entries[0].cases
     assert [(c["ref"], c["when"]) for c in cases] == [("C1", "before"), ("C2", "before"), ("C3", "since"),
                                                      ("C4", "since")]
 
 
-async def test_moving_a_case_after_the_rule_by_its_day_brings_the_note(ctx):
+async def test_moving_a_case_after_the_rule_by_its_day_makes_it_since(ctx):
     await add_proposal("Answer the literal question first", observed_on="2026-06-01")
-    await add_case("A slip under the rule", rules=["P1"], observed_on="2026-07-01")
     early = await add_case("A slip dated before the rule by mistake", rules=["P1"], observed_on="2026-05-01")
-    assert not any("slip cases" in n for n in early.notes or ())
+    assert (await tools.ledger_get_impl(["P1"])).entries[0].cases[0]["when"] == "before"
     fixed = await tools.ledger_update_impl(ref=early.ref, expected_revision=1, reason="the date was wrong",
                                            observed_on="2026-07-02")
     assert fixed.error is None, fixed.error
-    assert any("P1 has 2 slip cases since it was adopted (C1, C2)" in n for n in fixed.notes or ()), fixed.notes
+    assert (await tools.ledger_get_impl(["P1"])).entries[0].cases[0]["when"] == "since"
 
 
 async def test_a_reworded_rule_reads_a_case_as_since_the_old_proposal_and_before_the_new(ctx):

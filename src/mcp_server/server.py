@@ -2137,10 +2137,7 @@ async def ledger_add(
     the exception, each occurrence stays its own case. Refs your text cites
     (`[Q14]`, or a bare Q14) come back as they stand now (`cites`): check
     your wording matches them. A case's body places a fresh reader back in
-    the situation. For a case, the result's notes flag a rule with two or
-    more slip cases since it was adopted (dated after its proposal's
-    `observed_on`; earlier ones are examples of why it exists), and a slip
-    with no rule that repeats an earlier one.
+    the situation.
     """
     return await ledger_add_impl(
         kind, title, body=body, area=area, topics=topics, details=details, related=related, origin=origin,

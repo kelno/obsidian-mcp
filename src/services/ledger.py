@@ -105,8 +105,6 @@ ADD_STATUSES = {
 }
 #: A proposal's cases `ledger_get` lists; past it, `cases_total` says how many.
 GET_CASES_MAX = 50
-#: Current slip cases since a rule was adopted from which a write says the rule may not be holding.
-SLIP_CASES_NUDGE = 2
 
 _REF = re.compile(r"\s*([QqFfPpCc])0*([0-9]{1,6})\s*\Z")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
@@ -1088,75 +1086,14 @@ async def names(session: AsyncSession, uid: int | None) -> dict[str, str]:
     return {"areas": ", ".join(areas) or "none declared", "topics": ", ".join(topics) or "none yet"}
 
 
-# ── Rule cases: what a case write points out ────────────────────────────────
-
-async def slip_cases_since(session: AsyncSession, rule_ids: list[int]) -> dict[int, list[str]]:
-    """`{rule id: refs of its current slip cases since the rule was adopted}`, by number.
-
-    Since: the case's `observed_on` after the proposal's (`case_when`); a slip
-    from before the rule existed says nothing about whether it holds.
-    """
-    out: dict[int, list[str]] = {i: [] for i in rule_ids}
-    if not rule_ids:
-        return out
-    rule = aliased(LedgerEntry)
-    rows = (await session.execute(
-        select(LedgerCaseRule.rule_id, LedgerEntry.ref)
-        .join(LedgerEntry, LedgerEntry.id == LedgerCaseRule.case_id)
-        .join(rule, rule.id == LedgerCaseRule.rule_id)
-        .where(LedgerCaseRule.rule_id.in_(rule_ids), LedgerEntry.status == "current",
-               LedgerEntry.outcome == "slip", LedgerEntry.observed_on > rule.observed_on)
-        .order_by(LedgerEntry.number)
-    )).all()
-    for r in rows:
-        out[r.rule_id].append(r.ref)
-    return out
-
-
-async def case_notes(session: AsyncSession, uid: int | None, entry: LedgerEntry,
-                     similar: list[dict] | None = None) -> list[str]:
-    """What a current case just written points to, for the write's `notes`; never a refusal.
-
-    - Each rule it is tied to with `SLIP_CASES_NUDGE` or more current slip
-      cases since it was adopted (`slip_cases_since`): the rule may not be
-      holding, and rewording is not the first thing to look at. Slips from
-      before the rule never count.
-    - A slip with no rule, when `similar` holds another current slip with no
-      rule: a repeat, worth proposing a rule for.
-    """
-    if entry.kind != "case" or entry.status != "current":
-        return []
-    notes: list[str] = []
-    rules = (await case_rules(session, [entry.id]))[entry.id]
-    if rules:
-        slips = await slip_cases_since(session, [r["id"] for r in rules])
-        for rule in rules:
-            refs = slips[rule["id"]]
-            if len(refs) >= SLIP_CASES_NUDGE:
-                notes.append(
-                    f"{_canonical(rule['ref'])} has {len(refs)} slip cases since it was adopted ({_capped_refs(refs)}): "
-                    "the rule may not be holding; look at how it reaches agents (where it lives, a tool at the "
-                    "moment of choice, its wording) before rewording it.")
-        return notes
-    if entry.outcome != "slip":
-        return notes
-    if similar is None:
-        similar = await similar_entries(session, uid, entry)
-    candidates = [s["ref"] for s in similar if s.get("kind") == "case" and s.get("outcome") == "slip"
-                  and s.get("status") == "current"]
-    if candidates:
-        linked = select(LedgerCaseRule.case_id)
-        repeats = (await session.execute(
-            select(LedgerEntry.ref).where(
-                _owner(LedgerEntry, uid), LedgerEntry.ref.in_(candidates), LedgerEntry.kind == "case",
-                LedgerEntry.id.not_in(linked))
-            .order_by(LedgerEntry.number)
-        )).scalars().all()
-        if repeats:
-            notes.append(f"{_canonical(entry.ref)} looks like another slip with no rule "
-                         f"({', '.join(map(_canonical, repeats))}): a repeat; worth proposing a rule to the owner.")
-    return notes
-
+# ── Rule cases: what a superseded rule leaves behind ────────────────────────
+#
+# A case write no longer says a rule "may not be holding" or that a slip with
+# no rule repeats another (owner's decision, 2026-11-16): logging time was the
+# wrong place, and two slips can come from one conversation. Which rules keep
+# slipping is looked at in the monthly review, from `ledger_search` and
+# `ledger_get`, and a rule's cases since it was adopted show where it is
+# reworded (the note writers' proposal lines).
 
 def _canonical(ref: str) -> str:
     """`P41` for a stored ref such as `P041` (imported refs keep their zeros)."""
