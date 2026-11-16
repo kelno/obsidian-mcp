@@ -51,9 +51,11 @@ class CitingTask:
     ref: str          # "path:line", 1-based
     status_type: str  # TODO, IN_PROGRESS, ON_HOLD, DONE, CANCELLED
     text: str         # the line as indexed
+    id: str = ""      # its 🆔, "" when it has none
 
     def as_dict(self) -> dict:
-        return {"ref": self.ref, "status": self.status_type, "text": self.text}
+        out = {"ref": self.ref, "status": self.status_type, "text": self.text}
+        return {"id": self.id, **out} if self.id else out
 
 
 def task_state(status_types: Iterable[str]) -> str | None:
@@ -91,7 +93,8 @@ def link(rows, parse: Callable[[str, str], object]) -> dict[str, list[CitingTask
         task = parse(row.line, row.file_path)
         if task is None:
             continue
-        item = CitingTask(f"{row.file_path}:{row.line_number}", task.status.type, row.line)
+        item = CitingTask(f"{row.file_path}:{row.line_number}", task.status.type, row.line,
+                          getattr(task, "id", "") or "")
         for ref in refs:
             out.setdefault(str(ref), []).append(item)
     return out

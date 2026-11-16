@@ -885,7 +885,10 @@ plugin's settings file in the vault. `list_tasks` answers from `fork_note_tasks`
 (migration 1001, filled by the index pass next to the links) and checks each
 returned line on disk; the writers change one line (two when a recurring task
 is ticked) through the same ladder as `edit_note`, read it back first, and
-re-index that note's task rows at once. A recurring task (`🔁`) is ticked with
+re-index that note's task rows at once. `edit_task` and `set_task_status`
+name a task by its `id` (🆔), found wherever it now is; `path` + `line` only
+for a task with none, and with `TASKS_ALWAYS_ID` every task gets one (fork,
+owner's decision 2026-11-16). A recurring task (`🔁`) is ticked with
 its next occurrence and its rule written as the plugin writes them, the dates
 from upstream's `src/services/task_recurrence.py`, used unchanged; a rule
 outside that engine's list is refused (`recurring_task`). Dependencies (`🆔` / `⛔`)

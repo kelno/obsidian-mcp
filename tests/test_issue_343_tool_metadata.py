@@ -367,7 +367,7 @@ def test_the_instructions_name_the_task_tools_in_one_sentence_outside_the_lead()
         assert name not in text[:INSTRUCTIONS_LEAD], name
     for name in UPSTREAM_TASK_TOOLS:
         assert name not in text, name
-    assert "`path`" in sentence and "line number" in sentence
+    assert "`id`" in sentence and "line" not in sentence
     assert "query blocks in notes are text" in sentence
     assert len(text) <= INSTRUCTIONS_CAP
 

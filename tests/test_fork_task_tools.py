@@ -517,9 +517,10 @@ async def test_invalid_date_line_is_refused(vault):
     assert code(result) == "not_a_task"
 
 
-async def test_missing_hash_is_a_protocol_argument_error():
-    with pytest.raises(TypeError):
-        await tools.set_task_status_impl("n.md", 1, "- [ ] a", status="done")
+async def test_missing_hash_by_line_is_refused(vault):
+    note(vault, "n.md", "- [ ] a\n")
+    result = await tools.set_task_status_impl("n.md", 1, "- [ ] a", status="done")
+    assert code(result) == "invalid_argument" and "expected_hash" in result.error
 
 
 async def test_read_only_key_is_refused(vault):
@@ -1162,7 +1163,7 @@ async def test_create_refuses_a_task_depending_on_itself(vault):
 
 async def test_edit_sets_an_id(vault):
     text = "- [ ] back up the mailbox 📅 2026-11-05"
-    result = await edit(vault, text + "\n", 1, text, id="mum-backup")
+    result = await edit(vault, text + "\n", 1, text, new_id="mum-backup")
     assert result.error is None, result.error
     assert read(vault, "n.md") == "- [ ] back up the mailbox 🆔 mum-backup 📅 2026-11-05\n"
 
@@ -1176,7 +1177,7 @@ async def test_edit_replaces_dependencies_checking_only_the_new_ones(vault):
 
 async def test_edit_keeping_its_own_id_is_not_a_duplicate(vault):
     text = "- [ ] a 🆔 a"
-    result = await edit(vault, text + "\n", 1, text, id="a", description="renamed")
+    result = await edit(vault, text + "\n", 1, text, new_id="a", description="renamed")
     assert result.error is None, result.error
     assert read(vault, "n.md") == "- [ ] renamed 🆔 a\n"
 
@@ -1197,7 +1198,7 @@ async def test_edit_refuses_an_unknown_dependency(vault):
 async def test_edit_refuses_changing_an_id_other_tasks_wait_for(vault):
     INDEXED_DEPS.append(("o.md:2", "", ("mum-backup",)))
     text = "- [ ] back up 🆔 mum-backup"
-    for change in ({"id": "backup-1"}, {"clear": ["id"]}):
+    for change in ({"new_id": "backup-1"}, {"clear": ["id"]}):
         result = await edit(vault, text + "\n", 1, text, **change)
         assert code(result) == "invalid_argument"
         assert "o.md:2" in result.error
@@ -1215,7 +1216,7 @@ async def test_a_done_task_waiting_for_an_id_does_not_stop_its_rename(vault):
     # The plugin never blocks a finished task (`Task.isBlocked` is false when done).
     INDEXED_DEPS.append(("o.md:3", "", ("report",), True))
     text = "- [ ] report 🆔 report"
-    result = await edit(vault, text + "\n", 1, text, id="report-2026")
+    result = await edit(vault, text + "\n", 1, text, new_id="report-2026")
     assert result.error is None, result.error
     assert read(vault, "n.md") == "- [ ] report 🆔 report-2026\n"
 
@@ -1232,7 +1233,7 @@ async def test_taking_an_id_that_closes_a_cycle_through_a_dangling_dependency_is
     # already waits for B. Giving A that id would lock both.
     INDEXED_DEPS.append(("o.md:1", "b", ("a",)))
     text = "- [ ] x ⛔ b"
-    result = await edit(vault, text + "\n", 1, text, id="a")
+    result = await edit(vault, text + "\n", 1, text, new_id="a")
     assert code(result) == "invalid_argument"
     assert "o.md:1" in result.error
 
@@ -1240,7 +1241,7 @@ async def test_taking_an_id_that_closes_a_cycle_through_a_dangling_dependency_is
 async def test_taking_an_id_open_tasks_already_wait_for_says_so(vault):
     INDEXED_DEPS.append(("o.md:2", "", ("a",)))
     text = "- [ ] x"
-    result = await edit(vault, text + "\n", 1, text, id="a")
+    result = await edit(vault, text + "\n", 1, text, new_id="a")
     assert result.error is None, result.error
     assert any("o.md:2" in n and "blocked" in n for n in result.notes)
 
@@ -1251,7 +1252,7 @@ async def test_a_done_task_can_change_its_id_though_open_tasks_name_it(vault):
     INDEXED_DEPS.append(("o.md:2", "", ("bins",)))
     text = "- [x] bins 🆔 bins ✅ 2026-10-01"
     for change, line in (({"clear": ["id"]}, "- [x] bins ✅ 2026-10-01"),
-                         ({"id": "bins-old"}, "- [x] bins 🆔 bins-old ✅ 2026-10-01")):
+                         ({"new_id": "bins-old"}, "- [x] bins 🆔 bins-old ✅ 2026-10-01")):
         result = await edit(vault, text + "\n", 1, text, **change)
         assert result.error is None, result.error
         assert read(vault, "n.md") == line + "\n"
@@ -1264,7 +1265,7 @@ async def test_a_done_task_cannot_close_a_cycle_or_block_anyone(vault):
     assert result.error is None, result.error
     INDEXED_DEPS[:] = [("o.md:2", "", ("x",))]
     text = "- [x] y ✅ 2026-10-01"
-    result = await edit(vault, text + "\n", 1, text, id="x")
+    result = await edit(vault, text + "\n", 1, text, new_id="x")
     assert result.error is None, result.error
     assert not any("blocked" in n for n in result.notes or [])
 

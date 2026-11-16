@@ -199,7 +199,7 @@ async def test_ids_and_dependencies_are_checked_against_the_whole_vault(sessionm
     write(vault, "other.md", "- [x] old 🆔 taken ✅ 2026-10-01\n")
     await indexer.index_vault(user_id=None)
     [backup] = (await tools.fork_list_tasks_impl(text="back up")).tasks
-    named = await tools.edit_task_impl(backup.path, backup.line, backup.text, backup.content_hash, id="mum-backup")
+    named = await tools.edit_task_impl(backup.path, backup.line, backup.text, backup.content_hash, new_id="mum-backup")
     assert named.error is None and named.indexed is True, named
 
     # Another note's task names it at once, through the index the write refreshed.
@@ -211,6 +211,23 @@ async def test_ids_and_dependencies_are_checked_against_the_whole_vault(sessionm
     taken = await tools.create_task_impl("x", path="mum.md", id="taken")
     assert json.loads(taken.error.rsplit("\n", 1)[-1].removeprefix("MCP-REFUSAL "))["code"] == "invalid_argument"
     assert "other.md:1" in taken.error
+
+
+async def test_a_task_is_found_by_its_id_wherever_it_moved(sessionmaker, vault, monkeypatch):
+    """Task ids: the index says which note holds the id, the note on disk says
+    which line; `TASKS_ALWAYS_ID` makes one up on create."""
+    monkeypatch.setattr(tools.settings, "tasks_always_id", True)
+    write(vault, "bank.md", "# Bank\n")
+    await indexer.index_vault(user_id=None)
+    created = await tools.create_task_impl("call the bank", path="bank.md")
+    assert created.error is None and created.id and created.indexed is True, created
+    # A line added above by hand, not indexed yet: the id still finds the task.
+    (vault / "bank.md").write_text("# Bank\n- [ ] added by hand\n" + created.text + "\n", encoding="utf-8")
+    done = await tools.set_task_status_impl(id=created.id, status="done")
+    assert done.error is None, done.error
+    assert done.line == 3 and done.id == created.id
+    assert json.loads((await tools.set_task_status_impl(id="zzzzzz", status="done")).error
+                      .rsplit("\n", 1)[-1].removeprefix("MCP-REFUSAL "))["code"] == "task_id_not_found"
 
 
 async def test_task_writes_record_attributed_feed_events_and_refresh_upstreams_rows(sessionmaker, vault):

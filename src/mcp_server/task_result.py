@@ -16,11 +16,13 @@ from src.services.tool_outcomes import BodyOutcome
 
 
 class TaskItem(_OmitNone):
-    ref: str                       # "path:line", 1-based
+    #: The task's 🆔: the name to change it by (`edit_task(id=…)`) or cite it elsewhere.
+    id: str | None = None
+    ref: str                       # "path:line", 1-based: where it is now
     path: str
     line: int
     #: True for a task in a private folder listed by a query not scoped to
-    #: that folder: only `ref`, `path`, `line` and `status_type` are given.
+    #: that folder: only `id`, `ref`, `path`, `line` and `status_type` are given.
     private: bool | None = None
     text: str | None = None        # the exact line, as on disk
     status_symbol: str | None = None
@@ -39,7 +41,6 @@ class TaskItem(_OmitNone):
     cancelled: str | None = None
     recurrence: str | None = None
     on_completion: str | None = None
-    id: str | None = None
     depends_on: list[str] | None = None
     urgency: float | None = None
     #: invalid_date, unknown_on_completion, field_in_description.
@@ -89,6 +90,10 @@ class TaskListResult(_OmitNone):
 class TaskWriteResult(_OmitNone):
     _body_outcome: BodyOutcome | None = PrivateAttr(default=None)
 
+    #: The task's 🆔, the way to name it in the next call (`id=`); for a
+    #: recurring task ticked done, the done line's (the new occurrence's is
+    #: `next_occurrence_id`; with `TASKS_ALWAYS_ID`, the id the call named).
+    id: str | None = None
     path: str | None = None
     ref: str | None = None
     line: int | None = None
@@ -104,6 +109,7 @@ class TaskWriteResult(_OmitNone):
     #: and its 1-based line number, placed as the Tasks plugin's settings say.
     next_occurrence: str | None = None
     next_occurrence_line: int | None = None
+    next_occurrence_id: str | None = None
     changed: bool | None = None
     created_note: bool | None = None
     content_hash: str | None = None

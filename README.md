@@ -788,15 +788,21 @@ and needing no running Obsidian:
 - `list_tasks(path=None, status="not_done", tags=None, area=None, due=None, …,
   sort="default", limit=50)`, lists tasks; each argument is one Tasks query
   line, with the plugin's meaning, and the result carries the query block it
-  equals. Each task comes with its `path:line`, its exact text and its note's
-  `content_hash`.
+  equals. Each task comes with its id (`🆔`), its `path:line`, its exact text
+  and its note's `content_hash`.
 - `create_task(description, path=None, heading=None, areas=None, …)`, adds a
   task line as the plugin's dialog writes it (default note: the inbox).
-- `edit_task(path, line, expected_line, expected_hash, …)`, changes a task's
-  description or fields (postpone with `scheduled`).
-- `set_task_status(path, line, expected_line, expected_hash, status=None,
-  symbol=None)`, marks a task done, to-do, cancelled or any configured status,
-  with the done/cancelled dates the settings ask for; refuses recurring tasks.
+- `edit_task(id, …)`, changes a task's description or fields (postpone with
+  `scheduled`; `new_id` renames it).
+- `set_task_status(id, status=None, symbol=None)`, marks a task done, to-do,
+  cancelled or any configured status, with the done/cancelled dates the
+  settings ask for, and a recurring task's next occurrence.
+
+  Both name the task by its id, found wherever it now is; a task with no id
+  is named by `path`, `line`, `expected_line` and `expected_hash` instead.
+  With `TASKS_ALWAYS_ID`, every task gets an id: `create_task` makes one up,
+  and a write by line gives one. `scripts/fork_tasks_assign_ids.py` gives
+  every task of an existing vault one, once.
 
 Every task write is refused when the line or the note changed since it was
 read, and changes only that one line. See
@@ -2190,6 +2196,7 @@ reason.
 | `FETCH_PAGE_MAX_BYTES` | `4194304` | Largest page `fetch_page` downloads before converting it |
 | `TASKS_INBOX_PATH` | `Tasks inbox.md` | Note `create_task` writes to when none is named; the only note it creates when missing |
 | `TASKS_TIMEZONE` | `Europe/Brussels` | The owner's time zone: every "today" the task tools use. An unknown zone stops the server at startup. |
+| `TASKS_ALWAYS_ID` | `false` | Every task carries an id (`🆔`): `create_task` makes one up when none is given, a recurring task's next occurrence gets a new one, a task written by line gets one, a task that has one is refused by line (`task_has_id`), and ids cannot be cleared |
 | `LAST_AI_EDIT_FIELD` | unset | A frontmatter property every note write sets to the write's date, time and offset (e.g. `last_ai_edit`); unset stamps nothing |
 | `LAST_AI_EDIT_EXCLUDE` | empty | Comma-separated globs of vault paths never stamped (e.g. `_/*,CLAUDE.md`) |
 | `PRIVATE_FOLDER_NAMES` | empty | Folder-name globs (`*`, `?`; any case, any depth) marking private folders, e.g. `["* (private)"]`. `keyword_search`, `semantic_search` and `find_related` leave notes under them out and end with how many ("2 matches in private folders not shown."); `list_tasks`, `ledger_get`, `ledger_update` and `open_area` list their tasks and lines without text. The first six take `include_private` to show them. Private notes must be embedded (not in `EMBEDDING_EXCLUDE_PATTERNS`) for semantic search to reach them. Empty: nothing is private and no tool shows the argument |

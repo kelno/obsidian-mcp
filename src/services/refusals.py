@@ -137,6 +137,9 @@ BODY_CODES = frozenset({
     # line is not a task the plugin reads; a status change on a `🔁` task; the
     # vault's Tasks plugin settings cannot be applied.
     "line_mismatch", "not_a_task", "recurring_task", "task_settings_invalid",
+    # Task tools (fork), addressing by id: no task carries the id; several do;
+    # a task reached by line carries an id to use instead (`TASKS_ALWAYS_ID`).
+    "task_id_not_found", "task_id_ambiguous", "task_has_id",
     # A general note writer asked to add or change a task line by hand: tasks
     # go through the task tools (the `kelno_vault` plugin's check).
     "task_line_by_hand",

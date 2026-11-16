@@ -9585,7 +9585,8 @@ from src.mcp_server.task_result import (  # noqa: E402
 )
 from src.services.fork_tasks import format as _tf, index as _task_index, ops as _task_ops  # noqa: E402
 from src.services import ledger_citations as _ledger_citations, ledger_tasks as _ledger_tasks  # noqa: E402
-from src.services.fork_tasks import query as _tq  # noqa: E402
+from src.services.fork_tasks import ids as _task_ids, query as _tq  # noqa: E402
+from dataclasses import replace as _dc_replace  # noqa: E402
 from src.services.fork_tasks.scan import split_lines as _task_split_lines  # noqa: E402
 from src.services.fork_tasks.settings import TasksSettingsError, read_settings as _read_task_settings  # noqa: E402
 
@@ -9685,6 +9686,144 @@ async def _check_task_ids(uid, before, after, path: str, note_text: str, task_se
     links = await _task_ids_in_index(uid, path)
     links += _task_ops.task_links_in_note(note_text, path, task_settings, registry, except_line=except_line)
     return _task_ops.check_task_ids(before, after, links) + notes
+
+
+async def _taken_task_ids(uid, path: str, note_text: str, task_settings, registry) -> set[str]:
+    """Every id the caller's vault already uses: other notes from the index,
+    this note from the text just read. A new id must not be among them."""
+    links = await _task_ids_in_index(uid, path)
+    links += _task_ops.task_links_in_note(note_text, path, task_settings, registry)
+    return {link[1] for link in links if link[1]}
+
+
+async def _task_paths_with_id(uid, task_id: str, task_settings, registry) -> list[str]:
+    """The caller's indexed notes holding a task whose 🆔 is `task_id`."""
+    from sqlalchemy import select
+
+    from src.models.db import ForkNoteTask, NoteMetadata
+
+    async with async_session() as session:
+        rows = (await session.execute(
+            select(NoteMetadata.file_path, ForkNoteTask.line)
+            .join(NoteMetadata, NoteMetadata.id == ForkNoteTask.note_id)
+            .where(_note_owner_predicate(uid), ForkNoteTask.kind == "task",
+                   ForkNoteTask.line.contains("🆔"), ForkNoteTask.line.contains(task_id))
+        )).all()
+    paths: list[str] = []
+    for row in rows:
+        task = _task_ops.parse_line(row.line, row.file_path, task_settings, registry)
+        if task is not None and task.id == task_id and row.file_path not in paths:
+            paths.append(row.file_path)
+    return sorted(paths)
+
+
+#: Notes read from disk at most when resolving one id (each holding it, per the index).
+_TASK_ID_NOTES_READ_MAX = 20
+
+
+async def _resolve_task_id(uid, task_id: str, path: str | None):
+    """`(err, path, line, line_text)` of the one task whose 🆔 is `task_id`.
+
+    The index says which notes hold it; each is then read from disk, where the
+    task's line is found as the note reads now, so a line moved since the
+    last pass is still found. `path` narrows the search to one note, and is
+    read even when the index does not list it (a note new since the last pass).
+    """
+    try:
+        task_id = _task_ops._id_arg(task_id)
+        task_settings, registry, _today = await _task_context(uid)
+    except _task_ops.TaskOpError as exc:
+        return _body_refusal(str(exc), exc.code), None, None, None
+    paths = await _task_paths_with_id(uid, task_id, task_settings, registry)
+    if path is not None:
+        if not path.endswith(".md"):
+            path += ".md"
+        paths = [path]
+    found: list[tuple[str, int, str]] = []
+    unread = paths[_TASK_ID_NOTES_READ_MAX:]
+    for note_path in paths[:_TASK_ID_NOTES_READ_MAX]:
+        try:
+            data = await asyncio.to_thread(read_bytes, note_path, uid, MAX_NOTE_BYTES)
+            text_ = data.decode("utf-8")
+        except FileNotFoundError:
+            continue  # gone since the index saw it
+        except (ValueError, OSError, UnicodeDecodeError):
+            unread.append(note_path)  # it may hold the id: not counted as absent
+            continue
+        found += [(note_path, n, t) for n, t in _task_ids.lines_with_id(text_, note_path, task_id,
+                                                                         task_settings, registry)]
+    if unread and found:
+        return _body_refusal(
+            f"🆔 {task_id} is in {', '.join(f'{p}:{n}' for p, n, _ in found[:5])}, but the index also lists it in "
+            f"{len(unread)} note(s) that could not be read ({', '.join(unread[:5])}), so whether it is unique "
+            "cannot be told. Nothing was written. Give `path` to name the note.", "task_id_ambiguous"), \
+            None, None, None
+    if not found:
+        where = f" in {path}" if path is not None else ""
+        return _body_refusal(
+            f"No task carries 🆔 {task_id}{where}. Nothing was written. Check the id with list_tasks; a task "
+            "added by hand in the last minutes, or in a note new since the last index pass, is found only "
+            "once indexed, or by giving its path.", "task_id_not_found"), None, None, None
+    if len(found) > 1:
+        refs = ", ".join(f"{p}:{n}" for p, n, _ in found[:10])
+        return _body_refusal(
+            f"{len(found)} tasks carry 🆔 {task_id} ({refs}); ids are meant to be unique, so none was chosen. "
+            "Nothing was written. Give `path` to choose between notes; to make them unique, give one of them "
+            "a new id: edit_task(path=…, line=…, expected_line=…, expected_hash=…, new_id=…), with the line, "
+            "text and content_hash list_tasks returns for it.", "task_id_ambiguous"), None, None, None
+    return None, *found[0]
+
+
+async def _task_address(tool: str, uid, id: str | None, path: str | None, line: int | None,
+                        expected_line: str | None, expected_hash: str | None):
+    """`(err, path, line, expected_line)`: the task a write names, by id or by line.
+
+    By id, the line and its text are what the note holds now; `expected_hash`
+    stays optional. By line, all of `path`, `line`, `expected_line` and
+    `expected_hash` are needed, as before ids.
+    """
+    if id is not None:
+        if line is not None or expected_line is not None:
+            return _body_refusal(
+                f"{tool} names a task by `id`, or by `path` + `line` + `expected_line`, not both (`path` may "
+                "come with `id`, to choose a note). Nothing was written.", "invalid_argument"), None, None, None
+        return await _resolve_task_id(uid, id, path)
+    missing = [name for name, value in (("path", path), ("line", line), ("expected_line", expected_line),
+                                        ("expected_hash", expected_hash)) if value is None]
+    if missing:
+        return _body_refusal(
+            f"{tool} needs the task's `id` (from list_tasks), or else all of path, line, expected_line and "
+            f"expected_hash; missing: {', '.join(missing)}. Nothing was written.", "invalid_argument"), \
+            None, None, None
+    return None, path, line, expected_line
+
+
+def _private_by_id(result: TaskWriteResult, by_line: bool, named_path: str | None) -> TaskWriteResult:
+    """A task found by id alone in a private folder: its result without the
+    line's text (P98). An agent that named the note (`path`) or its line
+    chose it, as with every other write tool, and keeps the text."""
+    if by_line or named_path is not None or result.path is None or not private_folders.is_private(result.path):
+        return result
+    result.text = result.previous_text = result.next_occurrence = None
+    result.notes = (result.notes or []) + [
+        "The task is in a private folder, so its text is left out; give `path` too to see it."]
+    return result
+
+
+async def _refuse_line_address(uid, located, path: str, task_settings, registry):
+    """With `TASKS_ALWAYS_ID`, a task reached by line that has an id of its
+    own is to be named by it: the refusal, or None. A shared id is let
+    through, since only a line can pick one of its holders."""
+    task_id = located.task.id
+    if not settings.tasks_always_id or not task_id:
+        return None
+    in_note = _task_ids.lines_with_id(located.text, path, task_id, task_settings, registry)
+    elsewhere = [p for p in await _task_paths_with_id(uid, task_id, task_settings, registry) if p != path]
+    if len(in_note) > 1 or elsewhere:
+        return None
+    return _body_refusal(
+        f"This task has 🆔 {task_id}: name it by id (id=\"{task_id}\"), not by line. Nothing was written.",
+        "task_has_id")
 
 
 def _task_item(entry: _tq.Entry, content_hash: str, today) -> TaskItem:
@@ -10137,7 +10276,8 @@ async def fork_list_tasks_impl(
             continue
         if hidden:
             tasks.append(TaskItem(ref=f"{entry.path}:{entry.line_number}", path=entry.path,
-                                  line=entry.line_number, private=True, status_type=entry.task.status.type))
+                                  line=entry.line_number, private=True, status_type=entry.task.status.type,
+                                  id=entry.task.id or None))
             continue
         tasks.append(_task_item(entry, content_hash, today))
 
@@ -10312,6 +10452,10 @@ async def _task_written(uid, target, line_number, previous, written, new_text, t
     if refs or notes:
         extra = {**extra, "ledger_refs": [{k: v for k, v in r.items() if v is not None} for r in refs] or None,
                  "notes": notes or None}
+    if task_settings is not None and registry is not None and "id" not in extra:
+        shown = (written or previous or "").split("\n", 1)[0]
+        task = _task_ops.parse_line(shown, target.rel, task_settings, registry) if shown else None
+        extra = {**extra, "id": (task.id or None) if task is not None else None}
     return TaskWriteResult(
         path=target.rel,
         ref=f"{target.rel}:{line_number}",
@@ -10459,11 +10603,21 @@ async def create_task_impl(
             if err := _precondition_error("create_task", path, None, expected_hash,
                                           no_incumbent=True, enforceable=False):
                 return _task_failed(TaskWriteResult, err)
-            existing, new_text, number, old_text = None, new_line + "\n", 1, ""
+            existing, old_text = None, ""
         else:
             err, existing, old_text = await _read_task_note("create_task", target, path, expected_hash)
             if err:
                 return _task_failed(TaskWriteResult, err)
+        if settings.tasks_always_id and not task.id:
+            try:
+                task = _dc_replace(task, id=_task_ids.new_id(
+                    await _taken_task_ids(uid, target.rel, old_text, task_settings, registry)))
+            except _task_ops.TaskOpError as exc:
+                return _task_refused(exc)
+            new_line = _tf.to_file_line(task)
+        if existing is None:
+            new_text, number = new_line + "\n", 1
+        else:
             try:
                 _task_ops.refuse_unsafe_note(old_text, path)
                 new_text, number = _task_ops.insert_line(old_text, new_line, heading, path)
@@ -10488,8 +10642,13 @@ async def create_task_impl(
                                                created_note=True if existing is None else None), link_notes)
 
 
-async def _existing_task(tool, uid, target, path, line, expected_line, expected_hash):
-    """`(err, existing_bytes, located, settings, registry, today)` for a task write."""
+async def _existing_task(tool, uid, target, path, line, expected_line, expected_hash, task_id=None):
+    """`(err, existing_bytes, located, settings, registry, today)` for a task write.
+
+    With `task_id`, the task is found by its id in the bytes read here, the
+    ones the publish compares against (`line` and `expected_line` only said
+    which note); the line found is `located.index + 1`.
+    """
     if err := _leaf_state_error(target, path, missing=f"Note not found: {path}"):
         return err, None, None, None, None, None
     err, existing, text_ = await _read_task_note(tool, target, path, expected_hash)
@@ -10497,6 +10656,14 @@ async def _existing_task(tool, uid, target, path, line, expected_line, expected_
         return err, None, None, None, None, None
     try:
         task_settings, registry, today = await _task_context(uid)
+        if task_id is not None:
+            matches = _task_ids.lines_with_id(text_, path, task_id, task_settings, registry)
+            if len(matches) != 1:
+                code = "task_id_not_found" if not matches else "task_id_ambiguous"
+                return _body_refusal(
+                    f"{path} changed while this call ran: it now holds {len(matches)} task(s) with 🆔 {task_id}. "
+                    "Nothing was written; call again.", code), None, None, None, None, None
+            line, expected_line = matches[0]
         located = _task_ops.locate(text_, path, line, expected_line, task_settings, registry)
     except _task_ops.TaskOpError as exc:
         return _body_refusal(str(exc), exc.code), None, None, None, None, None
@@ -10505,16 +10672,16 @@ async def _existing_task(tool, uid, target, path, line, expected_line, expected_
 
 @_tracked(
     "edit_task",
-    ["path", "line", "description", "priority", "created", "start", "scheduled", "due",
-     "on_completion", "recurrence", "id", "depends_on", "clear", "expected_hash"],
+    ["id", "path", "line", "description", "priority", "created", "start", "scheduled", "due",
+     "on_completion", "recurrence", "new_id", "depends_on", "clear", "expected_hash"],
     refusal_result=_task_write_refusal,
     write_class=True,
 )
 async def edit_task_impl(
-    path: str,
-    line: int,
-    expected_line: str,
-    expected_hash: str,
+    path: str | None = None,
+    line: int | None = None,
+    expected_line: str | None = None,
+    expected_hash: str | None = None,
     description: str | None = None,
     priority: str | None = None,
     created: str | None = None,
@@ -10523,45 +10690,69 @@ async def edit_task_impl(
     due: str | None = None,
     on_completion: str | None = None,
     recurrence: str | None = None,
-    id: str | None = None,
+    new_id: str | None = None,
     depends_on: list[str] | None = None,
     clear: list[str] | None = None,
+    id: str | None = None,
 ) -> TaskWriteResult:
-    """Change one task's description or fields, as `editTaskLineModal(line)` returns it."""
-    if err := _task_write_parameters("edit_task", expected_hash, path):
+    """Change one task's description or fields, as `editTaskLineModal(line)` returns it.
+
+    The task is named by `id`, or by `path` + `line` + `expected_line` +
+    `expected_hash` (`_task_address`); `new_id` sets or changes its 🆔.
+    """
+    if err := _require_write():
         return _task_failed(TaskWriteResult, err)
     if all(v is None for v in (description, priority, created, start, scheduled, due, on_completion,
-                               recurrence, id, depends_on)) and not clear:
+                               recurrence, new_id, depends_on)) and not clear:
         return _task_failed(TaskWriteResult, _body_refusal(
             "edit_task was given nothing to change. Nothing was written.", "invalid_argument"))
+    if settings.tasks_always_id and clear and "id" in clear:
+        return _task_failed(TaskWriteResult, _body_refusal(
+            "every task in this vault carries an id, so it cannot be cleared; give new_id to change it. "
+            "Nothing was written.", "invalid_argument"))
     uid = current_user_id.get()
+    by_line = id is None
+    named_path = path
+    err, path, line, expected_line = await _task_address("edit_task", uid, id, path, line, expected_line,
+                                                         expected_hash)
+    if err:
+        return _task_failed(TaskWriteResult, err)
+    if err := _task_write_parameters("edit_task", expected_hash, path):
+        return _task_failed(TaskWriteResult, err)
     try:
         target = open_mutable(path, user_id=uid)
     except ValueError as e:
         return _task_failed(TaskWriteResult, _body_refusal(str(e), "validation_failed"))
     with target:
         err, existing, located, task_settings, registry, today = await _existing_task(
-            "edit_task", uid, target, path, line, expected_line, expected_hash)
+            "edit_task", uid, target, path, line, expected_line, expected_hash, task_id=id)
         if err:
             return _task_failed(TaskWriteResult, err)
+        line, expected_line = located.index + 1, located.lines[located.index][0]
         old = located.task
+        if by_line and (err := await _refuse_line_address(uid, located, target.rel, task_settings, registry)):
+            return _task_failed(TaskWriteResult, err)
         try:
+            if settings.tasks_always_id and not old.id and new_id is None:
+                new_id = _task_ids.new_id(await _taken_task_ids(uid, target.rel, located.text, task_settings,
+                                                                registry))
             updated = _task_ops.apply_fields(
                 old, today=today,
                 description=_task_ops.edited_description(old, description, task_settings),
                 priority=priority, on_completion=on_completion,
                 dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
-                clear=clear, recurrence=recurrence, id=id, depends_on=depends_on, settings=task_settings,
+                clear=clear, recurrence=recurrence, id=new_id, depends_on=depends_on, settings=task_settings,
             )
             link_notes = await _check_task_ids(uid, old, updated, target.rel, located.text, task_settings, registry,
                                                except_line=line)
             new_line = _tf.to_file_line(updated)
             if new_line == expected_line:
-                return TaskWriteResult(
+                return _private_by_id(TaskWriteResult(
+                    id=updated.id or None,
                     path=target.rel, ref=f"{target.rel}:{line}", line=line, previous_text=expected_line,
                     text=new_line, changed=False, content_hash=content_hash_for_bytes(existing),
                     today=today.isoformat(),
-                )
+                ), by_line, named_path)
             new_text = _task_ops.splice(located.lines, located.index, [new_line])
             _task_ops.verify_written(new_text, line, updated, path, task_settings, registry,
                                      allow_field_text="field_in_description" in old.warnings)
@@ -10577,7 +10768,7 @@ async def edit_task_impl(
             result.notes = (result.notes or []) + [
                 f"The 🔁 rule was rewritten in the Tasks plugin's own wording ({old.recurrence!r} → "
                 f"{updated.recurrence!r}), as the plugin does whenever it saves the line; it means the same."]
-        return _with_notes(result, link_notes)
+        return _private_by_id(_with_notes(result, link_notes), by_line, named_path)
 
 
 def _with_notes(result: TaskWriteResult, notes: list[str]) -> TaskWriteResult:
@@ -10589,41 +10780,83 @@ def _with_notes(result: TaskWriteResult, notes: list[str]) -> TaskWriteResult:
 
 @_tracked(
     "set_task_status",
-    ["path", "line", "status", "symbol", "expected_hash"],
+    ["id", "path", "line", "status", "symbol", "expected_hash"],
     refusal_result=_task_write_refusal,
     write_class=True,
 )
 async def set_task_status_impl(
-    path: str,
-    line: int,
-    expected_line: str,
-    expected_hash: str,
+    path: str | None = None,
+    line: int | None = None,
+    expected_line: str | None = None,
+    expected_hash: str | None = None,
     status: str | None = None,
     symbol: str | None = None,
+    id: str | None = None,
 ) -> TaskWriteResult:
-    """Set one task's status, as the plugin's status change (`handleNewStatus`) does."""
-    if err := _task_write_parameters("set_task_status", expected_hash, path):
+    """Set one task's status, as the plugin's status change (`handleNewStatus`) does.
+
+    The task is named by `id`, or by `path` + `line` + `expected_line` +
+    `expected_hash` (`_task_address`).
+    """
+    if err := _require_write():
         return _task_failed(TaskWriteResult, err)
     uid = current_user_id.get()
+    by_line = id is None
+    named_path = path
+    err, path, line, expected_line = await _task_address("set_task_status", uid, id, path, line, expected_line,
+                                                         expected_hash)
+    if err:
+        return _task_failed(TaskWriteResult, err)
+    if err := _task_write_parameters("set_task_status", expected_hash, path):
+        return _task_failed(TaskWriteResult, err)
     try:
         target = open_mutable(path, user_id=uid)
     except ValueError as e:
         return _task_failed(TaskWriteResult, _body_refusal(str(e), "validation_failed"))
     with target:
         err, existing, located, task_settings, registry, today = await _existing_task(
-            "set_task_status", uid, target, path, line, expected_line, expected_hash)
+            "set_task_status", uid, target, path, line, expected_line, expected_hash, task_id=id)
         if err:
+            return _task_failed(TaskWriteResult, err)
+        line, expected_line = located.index + 1, located.lines[located.index][0]
+        if by_line and (err := await _refuse_line_address(uid, located, target.rel, task_settings, registry)):
             return _task_failed(TaskWriteResult, err)
         try:
             new_status = _task_ops.resolve_status(registry, status, symbol)
             change = _task_ops.new_status_tasks(located.task, new_status, today, task_settings, registry)
             if change is None:
-                return TaskWriteResult(
+                unchanged = TaskWriteResult(
+                    id=located.task.id or None,
                     path=target.rel, ref=f"{target.rel}:{line}", line=line, previous_text=expected_line,
                     text=expected_line, changed=False, content_hash=content_hash_for_bytes(existing),
                     today=today.isoformat(),
                 )
-            result = change.tasks
+                if located.task.recurrence is not None and located.task.status.type == "DONE":
+                    unchanged.notes = [
+                        "This is a recurring task's occurrence that is already done, so nothing changed. When it "
+                        "was ticked, its next occurrence was written as a separate task with its own id: "
+                        "list_tasks finds it (by its text), and that is the one to tick now."]
+                return _private_by_id(unchanged, by_line, named_path)
+            result = list(change.tasks)
+            if settings.tasks_always_id and result:
+                # Every task carries an id. A recurring task ticked done hands
+                # its id to its next occurrence, so the id keeps naming the
+                # task still to do, and the done line gets a new one (owner,
+                # 2026-11-16; the plugin writes the next occurrence with none).
+                # Otherwise the task keeps its own, or gets one if it has none.
+                taken = await _taken_task_ids(uid, target.rel, located.text, task_settings, registry)
+                own = located.task.id or None
+                if change.next_index is not None:
+                    own = own or _task_ids.new_id(taken)
+                    taken.add(own)
+                for i, t in enumerate(result):
+                    if change.next_index is not None:
+                        t = _dc_replace(t, id=own if i == change.next_index else _task_ids.new_id(taken))
+                    elif not t.id:
+                        own = own or _task_ids.new_id(taken)
+                        t = _dc_replace(t, id=own)
+                    taken.add(t.id)
+                    result[i] = t
             new_lines = [_tf.to_file_line(t) for t in result]
             new_text = _task_ops.splice(located.lines, located.index, new_lines)
             for offset, written_task in enumerate(result):
@@ -10642,7 +10875,8 @@ async def set_task_status_impl(
         reported_line, reported_text = line + shift, "\n".join(new_lines)
         if change.next_index is not None:
             next_line = line + shift + change.next_index
-            extra = {"next_occurrence": new_lines[change.next_index], "next_occurrence_line": next_line}
+            extra = {"next_occurrence": new_lines[change.next_index], "next_occurrence_line": next_line,
+                     "next_occurrence_id": result[change.next_index].id or None}
             # `line`, `ref` and `text` stay the ticked task's: where it is now,
             # or nothing when `🏁 delete` left only its next occurrence.
             if len(result) == 2:
@@ -10667,7 +10901,16 @@ async def set_task_status_impl(
                 f"Tasks plugin writes it.{tail}"]
             upcoming = result[change.next_index]
             ticked = located.task
-            if ticked.id or ticked.depends_on:
+            if settings.tasks_always_id:
+                done_id = next((t.id for i, t in enumerate(result) if i != change.next_index), None)
+                moved = (f"The id {upcoming.id} moved to the next occurrence, so it still names the task to do"
+                         + (f"; the done line now has 🆔 {done_id}." if done_id else "."))
+                if ticked.depends_on:
+                    moved += (f" As the Tasks plugin does, the next occurrence does not carry ⛔ "
+                              f"{','.join(ticked.depends_on)} (it waits for nothing); to keep it, give it its "
+                              f"depends_on again (edit_task(id=\"{upcoming.id}\", depends_on=…)).")
+                written.notes = (written.notes or []) + [moved]
+            elif ticked.id or ticked.depends_on:
                 # The plugin drops 🆔 and ⛔ from a next occurrence; a chain
                 # through this series ends here unless the agent moves it.
                 lost = []
@@ -10675,10 +10918,16 @@ async def set_task_status_impl(
                     lost.append(f"🆔 {ticked.id} (tasks waiting for it no longer wait for this series)")
                 if ticked.depends_on:
                     lost.append(f"⛔ {','.join(ticked.depends_on)} (the new occurrence waits for nothing)")
-                how = (f" To keep the chain, first clear the id on the done line (edit_task(…, clear=[\"id\"]): a "
-                       f"done task's id blocks no one), then give it to the new occurrence (edit_task(…, "
-                       f"id=\"{ticked.id}\"))" if ticked.id else " To keep it, give the new occurrence its depends_on "
-                       "again (edit_task(…, depends_on=…))")
+                if ticked.id and settings.tasks_always_id:
+                    how = (f" To keep the chain, first give the done line another id (edit_task(id=\"{ticked.id}\", "
+                           f"new_id=…): a done task's id blocks no one), then give {ticked.id} to the new occurrence "
+                           f"(edit_task(id=\"{upcoming.id}\", new_id=\"{ticked.id}\"))")
+                elif ticked.id:
+                    how = (" To keep the chain, first clear the id on the done line (edit_task(…, clear=[\"id\"]): a "
+                           "done task's id blocks no one), then give it to the new occurrence (edit_task(…, "
+                           f"new_id=\"{ticked.id}\"))")
+                else:
+                    how = " To keep it, give the new occurrence its depends_on again (edit_task(…, depends_on=…))"
                 written.notes = (written.notes or []) + [
                     f"As the Tasks plugin does, the next occurrence does not carry {' and '.join(lost)}.{how}"
                     + (", and its depends_on likewise." if ticked.id and ticked.depends_on else ".")]
@@ -10692,7 +10941,7 @@ async def set_task_status_impl(
             written.notes = (written.notes or []) + [
                 "This task repeats: if its next occurrence was written when it was ticked done, that line is still "
                 "in the note. If the tick was a mistake, it may need removing: ask the owner."]
-        return written
+        return _private_by_id(written, by_line, named_path)
 
 
 # ── Agent ledger (fork) ─────────────────────────────────────────────────────

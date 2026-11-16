@@ -431,7 +431,7 @@ def check_task_ids(before: tf.Task | None, after: tf.Task, links: list[TaskLink]
         raise TaskOpError(
             "invalid_argument",
             f"no task in the vault has 🆔 {', '.join(missing)}, so depending on it would block nothing. Give "
-            "the task this one waits for an id first (edit_task(…, id=…)), then name it here. A task written to "
+            "the task this one waits for an id first (edit_task(…, new_id=…)), then name it here. A task written to "
             "a new note in the last minutes may not count yet. Nothing was written.",
         )
     notes: list[str] = []

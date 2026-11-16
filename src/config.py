@@ -889,6 +889,14 @@ class Settings(BaseSettings):
     # The Tasks plugin's settings file inside the vault, read (never written)
     # on every task tool call.
     tasks_plugin_settings_path: str = ".obsidian/plugins/obsidian-tasks-plugin/data.json"
+    # Every task carries an id (🆔), and the tools name tasks by it. On:
+    # `create_task` writes one when none is given, a recurring task's next
+    # occurrence gets a new one, a task reached by `path` + `line` gets one
+    # with that write (and one that already has an id is refused by line,
+    # with the id to use), and `clear=["id"]` is refused. Off (default):
+    # ids are written only when given, as before; `id` addressing works
+    # either way for a task that has one.
+    tasks_always_id: bool = False
 
     # ── Plugins (fork) ───────────────────────────────────────────────────────
     # The plugins this deployment loads, by module name under `src/plugins/`,

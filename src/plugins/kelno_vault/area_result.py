@@ -16,7 +16,9 @@ from src.services.tool_outcomes import BodyOutcome
 
 
 class AreaTask(_OmitNone):
-    #: `path:line`, 1-based.
+    #: The task's 🆔: the name to change it by (`edit_task(id=…)`) or cite it elsewhere.
+    id: str | None = None
+    #: `path:line`, 1-based: where it is now, which moves when lines above it do.
     ref: str
     #: The task line as written; left out for a note in a private folder.
     text: str | None = None

@@ -259,6 +259,7 @@ async def _open_area_tasks(tag: str, uid, notes: list[str]) -> tuple[list[AreaTa
             stale += 1
             continue
         out.append(AreaTask(
+            id=task.id or None,
             ref=f"{row.file_path}:{row.line_number}",
             text=None if private_folders.is_private(row.file_path) else row.line,
             status=task.status.type, next=True if is_next else None,

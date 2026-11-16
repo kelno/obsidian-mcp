@@ -209,7 +209,7 @@ SERVER_INSTRUCTIONS = (
     "says when to retry and spends no daily quota. `list_tasks` answers a "
     "Tasks-plugin query from the index (query blocks in notes are text it "
     "does not run); `create_task` adds a task, and `edit_task` and "
-    "`set_task_status` change one, named by its note `path` and line number."
+    "`set_task_status` change one, named by its `id` (🆔), as `list_tasks` gives it."
 )
 # Fork: the text above names only tools this fork serves. Upstream's lead
 # also routes "unsure" searches to `hybrid_search`, and its task sentence
@@ -1607,11 +1607,16 @@ async def list_tasks(
     (escaped) is not a task. Lines that look like tasks but may not be read
     as one by the plugin are listed under `problems`, never dropped.
 
-    Each task gives `ref` (`path:line`, 1-based), the exact line (`text`),
-    parsed fields, and the note's `content_hash`. To change a task, pass
+    Each task gives its `id` (🆔; no `id` field: the task has none), `ref`
+    (`path:line`, 1-based: where it is now, which moves when lines above it
+    do, so never write a `ref` down to find the task later), the exact line
+    (`text`), parsed fields, and the note's `content_hash`. To change a task,
+    or to point at it from anywhere else (a note, a message, a tracker), use
+    its `id`: `edit_task(id=…)`,
+    `set_task_status(id=…)`. Only a task with no id is named by line: pass
     `path`, `line`, `text` (as `expected_line`) and `content_hash` (as
-    `expected_hash`) to `edit_task` or `set_task_status`. Tasks whose line
-    changed since the index read it are listed under `stale`, not returned.
+    `expected_hash`). Tasks whose line changed since the index read it are
+    listed under `stale`, not returned.
 
     Args:
         path: `path includes …` — a case-insensitive substring of the note's
@@ -1712,12 +1717,14 @@ async def create_task(
             refused. Needs a due, scheduled or start date, usually the first
             occurrence (for `every Monday`, the next Monday): refused without.
         id: a name for this task (🆔: letters, digits, `-`, `_`), such as
-            `mum-backup`, so other tasks can wait for it. Unique in the vault:
-            an id another task has is refused, naming where.
+            `mum-backup`; the name to change it or point at it by later. Unique
+            in the vault: an id another task has is refused, naming where.
+            Omitted: none, unless the server gives every task one (then a made-
+            up one, such as `k3x9pq`); the result's `id` says which.
         depends_on: a list of ids of tasks this one waits for (⛔); the plugin
             shows it as blocked until they are done. Each must already be on
             a task, open or done, in any note: give that task an id first with
-            `edit_task(…, id=…)`. An id no task has is refused.
+            `edit_task(…, new_id=…)`. An id no task has is refused.
         expected_hash: optional; the note's `content_hash`, to refuse if it
             changed since you read it.
     """
@@ -1730,10 +1737,11 @@ async def create_task(
 
 @mcp.tool(title="Edit task", annotations=_DESTRUCTIVE)
 async def edit_task(
-    path: str,
-    line: int,
-    expected_line: str,
-    expected_hash: str,
+    id: str | None = None,
+    path: str | None = None,
+    line: int | None = None,
+    expected_line: str | None = None,
+    expected_hash: str | None = None,
     description: str | None = None,
     priority: str | None = None,
     created: str | None = None,
@@ -1742,7 +1750,7 @@ async def edit_task(
     due: str | None = None,
     on_completion: str | None = None,
     recurrence: str | None = None,
-    id: str | None = None,
+    new_id: str | None = None,
     depends_on: list[str] | None = None,
     clear: list[str] | None = None,
 ) -> TaskWriteResult:
@@ -1755,17 +1763,32 @@ async def edit_task(
     go through `set_task_status`. If the line cites agent-ledger entries
     (`[F12]`), the result lists them as they stand now.
 
-    Refused, writing nothing, when the note changed since `expected_hash`
-    (`stale_precondition`), when line `line` is not `expected_line`
-    (`line_mismatch`), when it is not a task (`not_a_task`), or when it
-    repeats by a rule these tools cannot follow (`recurring_task`). Such a
-    task's rule can still be replaced here (`recurrence`) or removed
-    (`clear`), which changes the owner's rule, so ask them first; otherwise
-    edit it in Obsidian.
+    Name the task by `id`. Refused, writing nothing, when no task or several
+    carry it (`task_id_not_found`, `task_id_ambiguous`), when a task named
+    by line has an id to use instead (`task_has_id`), when the note
+    changed since `expected_hash` (`stale_precondition`), when line `line`
+    is not `expected_line` (`line_mismatch`), when it is not a task
+    (`not_a_task`), or when it repeats by a rule these tools cannot follow
+    (`recurring_task`). Such a task's rule can still be replaced here
+    (`recurrence`) or removed (`clear`), which changes the owner's rule, so
+    ask them first; otherwise edit it in Obsidian.
 
     Args:
-        path / line / expected_line / expected_hash: the task's `path`,
-            `line`, `text` and `content_hash` from `list_tasks`.
+        id: the task's 🆔, from `list_tasks` or an earlier result; the task
+            is found wherever it now is. `path` may come with it, to search
+            only that note (to choose between tasks sharing an id), and
+            `expected_hash` too: the note's `content_hash`, to refuse if the
+            note changed since you read it; without it, the task is changed
+            as it is now (unless the server requires a hash on every
+            write: `precondition_required`).
+        path / line / expected_line / expected_hash: only for a task with no
+            id, all four: its `path`, `line`, `text` and `content_hash` from
+            `list_tasks`. The server may give every task an id: then this
+            write gives the task one (the result's `id`), and a task that
+            already has one is refused by line (`task_has_id`, naming the
+            id to use). One exception: several tasks in one note share an
+            id (`task_id_ambiguous` even with `path`); name one by line to
+            give it a `new_id`.
         description: the new text (tags included). Omit to keep it. The
             global filter (e.g. `#task`) is put back in front, once; a copy
             given here as a whole word is dropped, even mid-sentence.
@@ -1774,7 +1797,7 @@ async def edit_task(
             or `yesterday`.
         on_completion: `keep`, `delete` or `none`.
         recurrence: a repeat rule (🔁), as in `create_task`.
-        id: a name for this task (🆔), as in `create_task`. An id other
+        new_id: a new 🆔 for this task, as `id` in `create_task`. An id other
             tasks wait for is not changed or cleared until their `depends_on`
             no longer names it: to rename it, give those tasks their
             `depends_on` without it (clear only where it is the only one),
@@ -1784,21 +1807,24 @@ async def edit_task(
             had (pass the ones to keep too); as in `create_task`. A task that
             already waits for this one is refused (it would block both).
         clear: fields to remove: any of priority, on_completion, recurrence,
-            id, depends_on, created, start, scheduled, due.
+            id, depends_on, created, start, scheduled, due. The id cannot be
+            removed where the server gives every task one.
     """
     return await edit_task_impl(
-        path, line, expected_line, expected_hash, description=description, priority=priority,
+        id=id, path=path, line=line, expected_line=expected_line, expected_hash=expected_hash,
+        description=description, priority=priority,
         created=created, start=start, scheduled=scheduled, due=due, on_completion=on_completion,
-        recurrence=recurrence, id=id, depends_on=depends_on, clear=clear,
+        recurrence=recurrence, new_id=new_id, depends_on=depends_on, clear=clear,
     )
 
 
 @mcp.tool(title="Set task status", annotations=_DESTRUCTIVE)
 async def set_task_status(
-    path: str,
-    line: int,
-    expected_line: str,
-    expected_hash: str,
+    id: str | None = None,
+    path: str | None = None,
+    line: int | None = None,
+    expected_line: str | None = None,
+    expected_hash: str | None = None,
     status: str | None = None,
     symbol: str | None = None,
 ) -> TaskWriteResult:
@@ -1817,27 +1843,37 @@ async def set_task_status(
     **A recurring task (🔁) ticked done also gets its next occurrence**, a new
     line above it (below, if the plugin is set so), with its dates moved on as
     the plugin moves them. The result's `line` and `text` are then the ticked
-    task's, where it is now; `next_occurrence` and `next_occurrence_line` the
-    new one's; lines below move down by one. The plugin counts the next date
+    task's, where it is now; `next_occurrence`, `next_occurrence_line` and
+    `next_occurrence_id` the new one's; lines below move down by one. Where
+    the server gives every task an id, the ticked task's id moves to its
+    next occurrence (so it still names the task to do) and the done line
+    gets a new one (`id`). The plugin counts the next date
     from the old one, so a late tick can give a date already past: the
     result says so. The rules followed are those
     `create_task`'s `recurrence` lists; any other is refused
     (`recurring_task`): tick that one in Obsidian, or ask the owner whether
     to replace its rule with `edit_task(…, recurrence=…)` first.
 
-    Refused, writing nothing, when the note changed since `expected_hash`
-    (`stale_precondition`), when line `line` is not `expected_line`
-    (`line_mismatch`), or when it is not a task (`not_a_task`).
+    Name the task by `id`. Refused, writing nothing, when no task or several
+    carry it (`task_id_not_found`, `task_id_ambiguous`), when a task named
+    by line has an id to use instead (`task_has_id`), when the note
+    changed since `expected_hash` (`stale_precondition`), when line `line`
+    is not `expected_line` (`line_mismatch`), or when it is not a task
+    (`not_a_task`).
 
     Args:
-        path / line / expected_line / expected_hash: the task's `path`,
-            `line`, `text` and `content_hash` from `list_tasks`.
+        id: the task's 🆔, from `list_tasks` or an earlier result; the task
+            is found wherever it now is. `path` and `expected_hash` may come
+            with it, as in `edit_task`.
+        path / line / expected_line / expected_hash: only for a task with no
+            id (or one whose id several tasks share), as in `edit_task`.
         status: todo, done, cancelled or in_progress.
         symbol: instead of `status`, the checkbox character of any status set
             up in the Tasks plugin (e.g. `/`). Exactly one of the two.
     """
     return await set_task_status_impl(
-        path, line, expected_line, expected_hash, status=status, symbol=symbol
+        id=id, path=path, line=line, expected_line=expected_line, expected_hash=expected_hash,
+        status=status, symbol=symbol,
     )
 
 
