@@ -915,6 +915,9 @@ async def move_note(
     """Move or rename a note inside the vault. Requires write permission — a `readwrite` API key, or an OAuth token
     carrying the `readwrite` scope.
 
+    With `OPEN_NOTE_URL` set, the first line ends with `— open_url: <link>`:
+    give that link when pointing the owner to the note.
+
     {plugin_text}
 
     Arguments: `from_path`, `to_path` (must not exist; parent directories are created), `rewrite_links`
@@ -952,9 +955,8 @@ async def move_note(
     result reads `partial success: …`, naming the sources still linking to the old path. The move is **not**
     rolled back; fix the named sources with `edit_note`.
 
-    Success reports the `content_hash` of the bytes actually published at `to_path` — the moved bytes for a
-    plain move, the post-rewrite bytes when the moved note's own body was rewritten — and that value binds a
-    following `edit_note(to_path, …, expected_hash=…)`. A failed rewrite stays a partial success and never
+    Success reports the `content_hash` of the bytes published at `to_path` (after the moved note's own
+    rewrite, if any), which binds a following `edit_note(to_path, …, expected_hash=…)`. A failed rewrite stays a partial success and never
     claims nothing was written; if another writer changed `to_path` in between, **no hash is reported** and the
     result says to re-read `to_path` first.
 

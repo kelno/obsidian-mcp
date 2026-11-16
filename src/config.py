@@ -947,7 +947,7 @@ class Settings(BaseSettings):
     # A URL template with `{path}` exactly once, http(s) only, e.g.
     # `https://notes.example.org/open?file={path}`. When set, results that
     # name a note for the agent to show the user (read_note, open_area,
-    # create_note, the search and listing tools) carry `open_url`: the
+    # create_note, move_note, the search and listing tools) carry `open_url`: the
     # template with `{path}` replaced by the note's vault-relative path without
     # `.md`, percent-encoded with `/` kept. The page behind it (typically a
     # redirect to `obsidian://open?…`) is the deployment's, not this app's.

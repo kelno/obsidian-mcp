@@ -1164,3 +1164,23 @@ async def test_every_slice_b_tool_logs_the_argument(vault, usage_rows, tool, par
     assert usage_rows[-1]["tool"] == tool
     for key in params:
         assert key in usage_rows[-1]["params"], usage_rows[-1]
+
+
+async def test_a_move_ends_its_first_line_with_the_new_link(vault, monkeypatch):
+    # OPEN_NOTE_URL (fork): after a move, the link to give the owner is the
+    # note's new one, as create_note gives it; unset, the result is unchanged.
+    from src.services import open_note_url
+
+    seed(vault, "Old.md", b"moved\n")
+    seed(vault, "Other.md", b"moved\n")
+    monkeypatch.setattr(tools, "async_session", _fake_session())
+    off = await tools.move_note_impl("Other.md", "Other two.md")
+    assert "open_url" not in off
+
+    monkeypatch.setattr(
+        open_note_url.settings, "open_note_url", "https://notes.example.org/open?file={path}"
+    )
+    out = await tools.move_note_impl("Old.md", "Sub/New one.md")
+    first = out.splitlines()[0]
+    assert first.startswith("Moved Old.md → Sub/New one.md — content_hash: ")
+    assert first.endswith(" — open_url: https://notes.example.org/open?file=Sub/New%20one")

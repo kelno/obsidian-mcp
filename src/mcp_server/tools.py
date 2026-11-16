@@ -7607,7 +7607,8 @@ async def _move_note_locked(
                 f"what is on disk. Re-read {to_rel} before writing to it.)"
             )
             conflict = _concurrent_write_refusal(
-                " — ".join(parts), to_rel, nothing_written=None
+                " — ".join(parts) + _open_note_url.text_suffix(to_rel),
+                to_rel, nothing_written=None,
             )
             # A later publication refusal historically wins usage attribution;
             # the caller still needs the moved note's concurrent-write code.
@@ -7625,7 +7626,13 @@ async def _move_note_locked(
             parts.append(_hash_unavailable_clause(to_rel))
         if hint := _archive_counterpart_hint(uid, from_rel, to_rel):
             parts.append(hint)
-        message = (" — ".join(parts) if len(parts) > 1 else parts[0]) + name_flag
+        # The note is at `to_rel` now, whatever else the result reports, so
+        # the link to give the owner is the new one (as in create_note).
+        message = (
+            (" — ".join(parts) if len(parts) > 1 else parts[0])
+            + _open_note_url.text_suffix(to_rel)
+            + name_flag
+        )
         if db_failed or failed_rewrite_sources or stopped:
             return _body_refusal(
                 message, partial_marker or "partial_completion", disposition="partial"
