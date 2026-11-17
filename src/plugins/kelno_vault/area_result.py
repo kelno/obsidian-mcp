@@ -49,7 +49,8 @@ class OpenAreaResult(_OmitNone):
     description: str | None = None
     #: True when the main note's frontmatter sets `code_project: true`; absent otherwise.
     code_project: bool | None = Field(
-        default=None, description="true: this area is worked as a code project (coding-practices)")
+        default=None,
+        description="true: this area is worked as a code project (`_/agent/guides/coding-practices.md`)")
     main_note: str | None = None
     #: The http(s) link that opens the main note in the Obsidian app, when the
     #: server sets `OPEN_NOTE_URL`: give it to the owner when pointing them to the note.

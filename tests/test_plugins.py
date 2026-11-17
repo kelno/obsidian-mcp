@@ -390,7 +390,8 @@ def test_this_vaults_plugin_points_to_the_conventions_it_enforces_instead_of_res
         text = loaded.tool_text[name]
         for section in (conventions.LINKS, conventions.TITLES, conventions.TASKS):
             assert f'"{section}" in {note}' in text, (name, section)
-        assert f'"{conventions.RULE_REFS}" in `{conventions.RULES_NOTE}`' in text, name
+        assert (f'the bullet "{conventions.RULE_REFS}" under "{conventions.RULE_REFS_UNDER}" in '
+                f'`{conventions.RULES_NOTE}`') in text, name
     assert f'"{conventions.DATES}" in {note}' in loaded.tool_text["create_note"]
     for section in (conventions.LINKS, conventions.TITLES, conventions.TASKS, conventions.DATES):
         assert f'The convention is "{section}" in the vault\'s conventions note' in loaded.guide_text, section
@@ -404,6 +405,7 @@ def test_open_area_reads_the_code_project_flag_strictly():
     from src.plugins.kelno_vault import open_area as kelno_open_area
 
     assert kelno_open_area._code_project("---\narea_tag: area/x\ncode_project: true\n---\nText\n") is True
+    assert kelno_open_area._code_project("---\r\ncode_project: True\r\n---\r\nText\r\n") is True
     for text in ("---\ncode_project: false\n---\n", "---\ncode_project: \"true\"\n---\n", "---\nx: 1\n---\n",
                  "No frontmatter.\n", "---\ncode_project: [true\n---\n", "Text\n---\ncode_project: true\n---\n"):
         assert kelno_open_area._code_project(text) is None, text
@@ -523,5 +525,5 @@ def test_open_area_registered_as_the_server_does_keeps_its_schema():
     assert tool.outputSchema is not None and tool.annotations.readOnlyHint is True
     assert tool.description.startswith("Open an area") and "code_project: true" in tool.description
     assert (tool.outputSchema["properties"]["code_project"]["description"]
-            == "true: this area is worked as a code project (coding-practices)")
+            == "true: this area is worked as a code project (`_/agent/guides/coding-practices.md`)")
 

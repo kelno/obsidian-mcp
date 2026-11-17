@@ -279,10 +279,10 @@ async def check_name(note: plugins.NoteName) -> plugins.NameCheck | None:
 
 TOOL_TEXT = (
     f"**Dated note names** {conventions.see(conventions.DATES)}. Where a folder note (`<folder>/<folder>.md`) sets "
-    "`note_names: dated` (for that folder and the folders below it, and for a folder under an area or the archive "
-    "named like a top-level one, unless a nearer folder note says otherwise), a new note's name that doesn't start "
-    "with its date as the convention writes it is refused with `note_name_date`, writing nothing, naming the folder "
-    "note and, when it can, the corrected name. Where it sets `note_names: undated`, a name starting with a date is "
+    "`note_names: dated` (for that folder and the folders below it, and for a folder anywhere under an area or "
+    "`Archive/` named like a top-level one, unless a nearer folder note says otherwise), a new note's name that "
+    "doesn't start with the date it is about, written as the convention says, is refused with `note_name_date`, "
+    "writing nothing, naming the folder note and, when it can, the corrected name. Where it sets `note_names: undated`, a name starting with a date is "
     "written and flagged (`note_name:`). No setting above: no check."
 )
 
@@ -301,7 +301,8 @@ GUIDE = (
     "under `Archive/` (`Archive/Areas/<area>/Log` too) whose name is a top-level folder's follows that top-level "
     "folder's setting, with no copy of its folder note needed, unless a nearer folder note sets its own. Where no "
     "folder note above sets anything, names are not checked. In a dated folder, `create_note`, `move_note` and "
-    "`write_file` (a new `.md`) refuse a name that doesn't start with its date as the convention writes it, with "
+    "`write_file` (a new `.md`) refuse a name that doesn't start with the date it is about, written as the "
+    "convention says, with "
     "`note_name_date`, naming the folder note and the corrected name when it can be derived; nothing is written, so "
     "call again with the right name. In an undated folder, a name starting with a date is written and flagged "
     "(`note_name:`), not refused. A move into `Archive/` that keeps the note's name is not checked."

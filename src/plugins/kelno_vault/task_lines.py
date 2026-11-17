@@ -94,7 +94,7 @@ async def check(write: plugins.NoteWrite) -> plugins.Refusal | None:
 TOOL_TEXT = (
     f"**Task lines go through the task tools** {conventions.see(conventions.TASKS)}. A write that adds or changes a "
     "task line (a checkbox line the Tasks plugin reads as a task, with the vault's global filter such as `#task`) "
-    "is refused with `task_line_by_hand`, naming the lines and the task tool to use, and writes nothing. Deleting a "
+    "is refused with `task_line_by_hand`, naming the lines and the task tools, and writes nothing. Deleting a "
     "task line, keeping one unchanged (the same text, wherever it now sits in the note, so reordering is fine), and "
     "showing one in a code span or fenced code block are allowed."
 )
@@ -104,7 +104,7 @@ WRITE_FILE_TEXT = "A write that adds or changes a task line is refused like `edi
 GUIDE = (
     "## Task lines (this server)\n\n"
     f"{conventions.see_below(conventions.TASKS)} The note tools (`edit_note`, `create_note`, `write_file`) refuse a "
-    "write that adds or changes a task line (`task_line_by_hand`), naming the lines and the task tool to use, and "
+    "write that adds or changes a task line (`task_line_by_hand`), naming the lines and the task tools, and "
     "write nothing. Deleting a task line with them, keeping one unchanged (the same text, wherever it sits in the "
     "note), or showing one in a code span or fenced code block is allowed."
 )

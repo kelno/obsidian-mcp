@@ -440,8 +440,9 @@ async def open_area(
     question about one, and when a session works in a folder outside the
     vault (`folder`), to find its area. One call returns the area's tag and
     description, `code_project: true` when the area is worked as a code
-    project (its main note's frontmatter flag; what that means is "Where
-    code work starts" in `_/agent/guides/coding-practices.md`), its rules
+    project (its main note's frontmatter flag; what that means is the
+    paragraph "Where code work starts" at the top of
+    `_/agent/guides/coding-practices.md`), its rules
     for agents (`for_agents`, its main note's
     `## For agents` section: the rules for working in this area; follow
     them; absent when the area has none), the vault's conventions for

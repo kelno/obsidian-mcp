@@ -85,11 +85,11 @@ async def _full_path_links(write: plugins.NoteWrite, new: str) -> tuple[str, lin
 
 _TITLE_HEADING_TOOL_TEXT = (
     f"**No title heading** {conventions.see(conventions.TITLES)}. When the body's first non-blank line is a heading "
-    "(`#` to `######`) whose text is exactly the note's name (its whole file name without `.md`, a date included; "
-    "case and surrounding spaces ignored, formatting such as `**` not stripped) and this write adds or changes that "
-    "line, it is removed with the blank lines after it, and the result says so under `title_heading_removed:`; the "
-    "reported `content_hash` is of what was written. Only exact repeats are caught. The write is never refused for "
-    "it."
+    "(`#` to `######`) whose text is exactly the note's whole file name without `.md`, its date too (case and "
+    "surrounding spaces ignored, formatting such as `**` not stripped) and this write adds or changes that line, it "
+    "is removed with the blank lines after it, and the result says so under `title_heading_removed:`; the reported "
+    "`content_hash` is of what was written. Only exact repeats are caught (`# Vet call` in `2026-11-12 Vet call` "
+    "stays). The write is never refused for it."
 )
 
 _TITLE_HEADING_GUIDE = (
@@ -107,9 +107,9 @@ _OPEN_AREA_GUIDE = (
     "## Opening an area (this server)\n\n"
     "`open_area` opens one of the vault's areas in one call; when to call it is in the "
     f"\"{open_area.OPEN_AREA_CONVENTIONS_HEADING}\" section of the vault's conventions note, below. Its result "
-    "carries the area's own rules for agents (`for_agents`, its main note's `## For agents` section) and that "
-    "section itself (`area_conventions`, read at each call, so it is current): follow both while you work in the "
-    "area. Its description says what else it returns."
+    "carries the area's own rules for agents (`for_agents`, its main note's `## For agents` section) and the "
+    f"\"{open_area.OPEN_AREA_CONVENTIONS_HEADING}\" section (`area_conventions`, read at each call, so it is "
+    "current): follow both while you work in the area. Its description says what else it returns."
 )
 
 

@@ -101,7 +101,7 @@ def render(lines: list[tuple[int, str]], shift: int) -> str:
               "change of meaning the owner hasn't decided waits for their decision: ask first.")
 
 
-_SEE = conventions.see(conventions.RULE_REFS, conventions.RULES_NOTE)
+_SEE = conventions.see(conventions.RULE_REFS, conventions.RULES_NOTE, under=conventions.RULE_REFS_UNDER)
 
 TOOL_TEXT = (
     f"**Rule edits carry their proposal** {_SEE}. In this vault's rules for agents (the rule files "
@@ -118,7 +118,8 @@ GUIDE = (
     f"This vault's rules for agents are the rule files `{rule_files.RULE_FILES_PATH}` lists: whole notes, such as "
     "the notes under `_/agent/` and the vault's root `CLAUDE.md`, and a `## For agents` section in any note (an "
     "area's, a folder's, a machine's or a person's), whose lines alone are rules. How their lines cite the "
-    f"proposals that shaped them is \"{conventions.RULE_REFS}\" in `{conventions.RULES_NOTE}`. A write that adds "
+    f"proposals that shaped them is the bullet \"{conventions.RULE_REFS}\" under "
+    f"\"{conventions.RULE_REFS_UNDER}\" in `{conventions.RULES_NOTE}`. A write that adds "
     "or changes rule lines with none of them carrying a new proposal ref gets `rule_change_unlogged:` in its "
     "result, with those lines and what to do."
 )
