@@ -201,7 +201,7 @@ Vaults that use the Tasks plugin keep tasks as checkbox lines in its emoji forma
 
 ## Links to notes for the owner (this server)
 
-Tools that name a note carry a ready-made http(s) link that opens it in the Obsidian app (`open_url`; `main_note_open_url` in `open_area`), when the server sets `OPEN_NOTE_URL`. When you point the owner to a note in a reply, give that link as is: it's clickable where `obsidian://` isn't.
+Tools that name a note carry a ready-made http(s) link that opens it in the Obsidian app (`open_url`; `main_note_open_url` in `open_area`), when the server sets `OPEN_NOTE_URL`. Tools that name a task carry one too (`open_url` on each task, `next_occurrence_open_url` for a recurring task's next one): it opens the task's own line when the line ends with a block id (`^…`), otherwise its note; give it when pointing the owner to a task, rather than a bare 🆔. When you point the owner to a note in a reply, give that link as is: it's clickable where `obsidian://` isn't.
 
 ## Index and embedding state (this server)
 

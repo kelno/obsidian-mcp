@@ -9843,6 +9843,7 @@ def _task_item(entry: _tq.Entry, content_hash: str, today) -> TaskItem:
         ref=f"{entry.path}:{entry.line_number}",
         path=entry.path,
         line=entry.line_number,
+        open_url=_open_note_url.open_line_url(entry.path, entry.text),
         text=entry.text,
         status_symbol=task.status.symbol,
         status_name=task.status.name,
@@ -10284,7 +10285,8 @@ async def fork_list_tasks_impl(
         if hidden:
             tasks.append(TaskItem(ref=f"{entry.path}:{entry.line_number}", path=entry.path,
                                   line=entry.line_number, private=True, status_type=entry.task.status.type,
-                                  id=entry.task.id or None))
+                                  id=entry.task.id or None,
+                                  open_url=_open_note_url.open_line_url(entry.path, entry.text)))
             continue
         tasks.append(_task_item(entry, content_hash, today))
 
@@ -10463,10 +10465,15 @@ async def _task_written(uid, target, line_number, previous, written, new_text, t
         shown = (written or previous or "").split("\n", 1)[0]
         task = _task_ops.parse_line(shown, target.rel, task_settings, registry) if shown else None
         extra = {**extra, "id": (task.id or None) if task is not None else None}
+    if extra.get("next_occurrence"):
+        extra = {**extra, "next_occurrence_open_url": _open_note_url.open_line_url(target.rel,
+                                                                                    extra["next_occurrence"])}
     return TaskWriteResult(
         path=target.rel,
         ref=f"{target.rel}:{line_number}",
         line=line_number,
+        open_url=_open_note_url.open_line_url(target.rel, written) if written else _open_note_url.open_note_url(
+            target.rel),
         previous_text=previous,
         text=written,
         content_hash=content_hash_for_bytes(new_text.encode("utf-8")),
@@ -10622,6 +10629,9 @@ async def create_task_impl(
             except _task_ops.TaskOpError as exc:
                 return _task_refused(exc)
             new_line = _tf.to_file_line(task)
+        if settings.tasks_block_id:
+            task = _task_ops.with_block_id(task)
+            new_line = _tf.to_file_line(task)
         if existing is None:
             new_text, number = new_line + "\n", 1
         else:
@@ -10757,6 +10767,8 @@ async def edit_task_impl(
                 dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
                 clear=clear, recurrence=recurrence, id=new_id, depends_on=depends_on, settings=task_settings,
             )
+            if settings.tasks_block_id:
+                updated = _task_ops.with_block_id(updated, old.id)
             link_notes = await _check_task_ids(uid, old, updated, target.rel, located.text, task_settings, registry,
                                                except_line=line)
             if description is not None:
@@ -10765,7 +10777,8 @@ async def edit_task_impl(
             if new_line == expected_line:
                 return _private_by_id(TaskWriteResult(
                     id=updated.id or None,
-                    path=target.rel, ref=f"{target.rel}:{line}", line=line, previous_text=expected_line,
+                    path=target.rel, ref=f"{target.rel}:{line}", line=line,
+                    open_url=_open_note_url.open_line_url(target.rel, expected_line), previous_text=expected_line,
                     text=new_line, changed=False, content_hash=content_hash_for_bytes(existing),
                     today=today.isoformat(),
                 ), by_line, named_path)
@@ -10845,7 +10858,8 @@ async def set_task_status_impl(
             if change is None:
                 unchanged = TaskWriteResult(
                     id=located.task.id or None,
-                    path=target.rel, ref=f"{target.rel}:{line}", line=line, previous_text=expected_line,
+                    path=target.rel, ref=f"{target.rel}:{line}", line=line,
+                    open_url=_open_note_url.open_line_url(target.rel, expected_line), previous_text=expected_line,
                     text=expected_line, changed=False, content_hash=content_hash_for_bytes(existing),
                     today=today.isoformat(),
                 )
@@ -10875,6 +10889,8 @@ async def set_task_status_impl(
                         t = _dc_replace(t, id=own)
                     taken.add(t.id)
                     result[i] = t
+            if settings.tasks_block_id:
+                result = [_task_ops.with_block_id(t, located.task.id) for t in result]
             new_lines = [_tf.to_file_line(t) for t in result]
             new_text = _task_ops.splice(located.lines, located.index, new_lines)
             for offset, written_task in enumerate(result):
@@ -11682,6 +11698,8 @@ async def _note_refs_report(uid, old: str | None, new: str | None, *, old_unread
 def _ledger_task_dict(task, include_private: bool = False) -> dict:
     """A citing task for a result: its text left out when it sits in a private folder (P98)."""
     item = task.as_dict()
+    if url := _open_note_url.open_line_url(task.ref.rsplit(":", 1)[0], task.text):
+        item["open_url"] = url
     if not include_private and private_folders.is_private(task.ref.rsplit(":", 1)[0]):
         del item["text"]
     return item

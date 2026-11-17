@@ -21,6 +21,9 @@ class TaskItem(_OmitNone):
     ref: str                       # "path:line", 1-based: where it is now
     path: str
     line: int
+    #: With `OPEN_NOTE_URL` set: the link that opens the task in Obsidian, on
+    #: its own line when the line ends with a block id (`^…`), else the note.
+    open_url: str | None = None
     #: True for a task in a private folder listed by a query not scoped to
     #: that folder: only `id`, `ref`, `path`, `line` and `status_type` are given.
     private: bool | None = None
@@ -97,6 +100,9 @@ class TaskWriteResult(_OmitNone):
     path: str | None = None
     ref: str | None = None
     line: int | None = None
+    #: With `OPEN_NOTE_URL` set: the link that opens the task in Obsidian, on
+    #: its own line when the line ends with a block id (`^…`), else the note.
+    open_url: str | None = None
     previous_text: str | None = None
     #: The line(s) now at `line`; empty when `🏁 delete` removed the task.
     #: For a recurring task ticked done, `line`, `ref` and `text` are the
@@ -110,6 +116,7 @@ class TaskWriteResult(_OmitNone):
     next_occurrence: str | None = None
     next_occurrence_line: int | None = None
     next_occurrence_id: str | None = None
+    next_occurrence_open_url: str | None = None
     changed: bool | None = None
     created_note: bool | None = None
     content_hash: str | None = None

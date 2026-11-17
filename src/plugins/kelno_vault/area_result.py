@@ -20,6 +20,9 @@ class AreaTask(_OmitNone):
     id: str | None = None
     #: `path:line`, 1-based: where it is now, which moves when lines above it do.
     ref: str
+    #: With `OPEN_NOTE_URL` set: the link that opens the task in Obsidian, on
+    #: its own line when the line ends with a block id (`^…`), else the note.
+    open_url: str | None = None
     #: The task line as written; left out for a note in a private folder.
     text: str | None = None
     #: The Tasks plugin's status type: TODO, IN_PROGRESS, ON_HOLD, …

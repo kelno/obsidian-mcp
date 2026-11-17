@@ -2,6 +2,12 @@
 
     python -m scripts.fork_tasks_assign_ids /path/to/vault            # dry run: lists every change
     python -m scripts.fork_tasks_assign_ids /path/to/vault --apply    # writes them
+    python -m scripts.fork_tasks_assign_ids /path/to/vault --block-ids [--apply]
+
+`--block-ids` instead gives every task that has an id and no block link its
+id as its block id (` ^<id>` at the very end of the line, before trailing
+spaces), as the task tools write it with `TASKS_BLOCK_ID`, so a link can
+open the task on its own line. Same checks, same listing, same reruns.
 
 Runs on a vault folder directly, with no database and no server, through the
 task tools' own code: the owner's Tasks settings from the vault, the same
@@ -41,6 +47,7 @@ from src.services.fork_tasks.ids import new_id
 from src.services.fork_tasks.ops import DAMAGING_WARNINGS, TaskOpError, _comparable, parse_line
 from src.services.fork_tasks.scan import scan_note, split_lines
 from src.services.fork_tasks.settings import read_settings
+from src.services.open_note_url import BLOCK_ID_RE
 
 DEFAULT_SETTINGS_PATH = ".obsidian/plugins/obsidian-tasks-plugin/data.json"
 
@@ -66,6 +73,12 @@ def with_id(line: str, task_id: str) -> str:
     return line[:end] + f" 🆔 {task_id}" + line[end:]
 
 
+def with_block_id(line: str, task_id: str) -> str:
+    """`line` with ` ^<task_id>` at its end, before trailing whitespace; every other byte kept."""
+    end = len(line.rstrip())
+    return line[:end] + f" ^{task_id}" + line[end:]
+
+
 def _notes(root: Path):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
@@ -80,7 +93,8 @@ def _rows(text: str) -> list[tuple[int, str, str | None, str]]:
     return [(s.line_number, s.kind, s.reason, s.text) for s in scan.lines]
 
 
-def plan_note(rel: str, data: bytes, settings, registry, taken: set[str]) -> NotePlan | str | None:
+def plan_note(rel: str, data: bytes, settings, registry, taken: set[str], *,
+              block_ids: bool = False) -> NotePlan | str | None:
     """The changes for one note, a reason it is skipped, or None when it has nothing to change."""
     try:
         text = data.decode("utf-8")
@@ -96,19 +110,30 @@ def plan_note(rel: str, data: bytes, settings, registry, taken: set[str]) -> Not
         if scanned.kind != "task":
             continue
         task = parse_line(scanned.text, rel, settings, registry)
-        if task is None or task.id:
+        if task is None:
+            continue
+        if block_ids:
+            if not task.id or task.block_link or not BLOCK_ID_RE.fullmatch(task.id):
+                continue
+        elif task.id:
             continue
         damaging = [w for w in task.warnings if w in DAMAGING_WARNINGS]
         if damaging:
             plan.left.append((scanned.line_number, scanned.text, DAMAGING_WARNINGS[damaging[0]]))
             continue
-        task_id = new_id(taken)
-        new_line = with_id(scanned.text, task_id)
+        if block_ids:
+            task_id = task.id
+            new_line = with_block_id(scanned.text, task_id)
+            intended = replace(task, block_link=f" ^{task_id}")
+        else:
+            task_id = new_id(taken)
+            new_line = with_id(scanned.text, task_id)
+            intended = replace(task, id=task_id)
         back = parse_line(new_line, rel, settings, registry)
-        intended = replace(task, id=task_id)
         if back is None or _comparable(back) != _comparable(intended) or back.warnings != task.warnings:
             plan.left.append((scanned.line_number, scanned.text,
-                              "with an id added at its end, the Tasks plugin would read it differently"))
+                              f"with {'a block id' if block_ids else 'an id'} added at its end, the Tasks plugin "
+                              "would read it differently"))
             continue
         taken.add(task_id)
         index = scanned.line_number - 1
@@ -157,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("vault", type=Path)
     parser.add_argument("--apply", action="store_true", help="write the changes (default: dry run)")
+    parser.add_argument("--block-ids", action="store_true",
+                        help="give tasks that have an id that id as their block id, instead of giving ids")
     parser.add_argument("--settings-path", default=DEFAULT_SETTINGS_PATH)
     args = parser.parse_args(argv)
     root = args.vault.resolve()
@@ -189,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     plans: list[tuple[Path, NotePlan]] = []
     for full, rel, data in notes:
         try:
-            result = plan_note(rel, data, settings, registry, taken)
+            result = plan_note(rel, data, settings, registry, taken, block_ids=args.block_ids)
         except TaskOpError as exc:
             skipped.append((rel, str(exc)))
             continue
@@ -206,7 +233,8 @@ def main(argv: list[str] | None = None) -> int:
         for number, old, new in plan.changes:
             out.write(f"{number}:\n  - {old}\n  + {new}\n")
     if left:
-        out.write("\n## Tasks left without an id (fix the line, then run again)\n")
+        out.write(f"\n## Tasks left without {'a block id' if args.block_ids else 'an id'} (fix the line, then run "
+                  "again)\n")
         for rel, number, line, why in left:
             out.write(f"{rel}:{number}: {why}\n  {line}\n")
     if skipped:
@@ -215,7 +243,8 @@ def main(argv: list[str] | None = None) -> int:
             out.write(f"{rel}: {why}\n")
 
     if not args.apply:
-        out.write(f"\nDry run: {total} task(s) in {sum(1 for _, p in plans if p.changes)} note(s) would get an id; "
+        what = "a block id" if args.block_ids else "an id"
+        out.write(f"\nDry run: {total} task(s) in {sum(1 for _, p in plans if p.changes)} note(s) would get {what}; "
                   f"{len(left)} task(s) left without one; {len(skipped)} note(s) skipped. Run again with --apply "
                   "to write.\n")
         return 0

@@ -897,6 +897,12 @@ class Settings(BaseSettings):
     # ids are written only when given, as before; `id` addressing works
     # either way for a task that has one.
     tasks_always_id: bool = False
+    # Every task with an id also carries it as its block id (` ^<id>` at the
+    # end of its line), written by the task tools, so the `open_url` of a
+    # task opens the note on the task's own line (Obsidian's links reach a
+    # line only through a block id). Off (default): no block ids written;
+    # a task's link opens its line only if it already ends with one.
+    tasks_block_id: bool = False
 
     # ── Plugins (fork) ───────────────────────────────────────────────────────
     # The plugins this deployment loads, by module name under `src/plugins/`,

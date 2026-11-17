@@ -1620,6 +1620,10 @@ async def list_tasks(
     `expected_hash`). Tasks whose line changed since the index read it are
     listed under `stale`, not returned.
 
+    With `OPEN_NOTE_URL` set, each task carries `open_url`: give that link
+    when pointing the user to a task; it opens the note on the task's
+    own line when the line ends with a block id (`^…`).
+
     Args:
         path: `path includes …` — a case-insensitive substring of the note's
             vault path, `.md` included, anywhere in it (not only a prefix).
@@ -1684,6 +1688,9 @@ async def create_task(
     field order, adding the plugin's created date if its settings say so.
     Changes no other line. The line is read back before writing and the call
     is refused if the plugin would read it differently.
+    With `OPEN_NOTE_URL` set, the result carries `open_url`: give that link
+    when pointing the user to the task; it opens the note on the task's
+    own line when the line ends with a block id (`^…`).
 
     Args:
         description: the task's text, one line. Tags (`#next`) may be part of
@@ -1765,6 +1772,9 @@ async def edit_task(
     any edit, a repeat rule (🔁) in the plugin's own wording. Status changes
     go through `set_task_status`. If the line cites agent-ledger entries
     (`[F12]`), the result lists them as they stand now.
+    With `OPEN_NOTE_URL` set, the result carries `open_url`: give that link
+    when pointing the user to the task; it opens the note on the task's
+    own line when the line ends with a block id (`^…`).
 
     Name the task by `id`. Refused, writing nothing, when no task or several
     carry it (`task_id_not_found`, `task_id_ambiguous`), when a task named
@@ -1848,6 +1858,9 @@ async def set_task_status(
     cites agent-ledger entries (`[F12]`), the result lists them as they stand
     now, and when this closes the last open task citing feedback, its `notes`
     say whether to close that entry as handled.
+    With `OPEN_NOTE_URL` set, the result (and `next_occurrence_open_url`) carries `open_url`: give that link
+    when pointing the user to the task; it opens the note on the task's
+    own line when the line ends with a block id (`^…`).
 
     **A recurring task (🔁) ticked done also gets its next occurrence**, a new
     line above it (below, if the plugin is set so), with its dates moved on as

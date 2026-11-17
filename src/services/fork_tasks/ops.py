@@ -575,6 +575,23 @@ def dropped_tag_notes(before: tf.Task, after: tf.Task, settings: TasksSettings) 
             "edit it again with them in the description."]
 
 
+def with_block_id(task: tf.Task, previous_id: str = "") -> tf.Task:
+    """`task` with its 🆔 as its block id (` ^<id>`), so a link can open its line (`TASKS_BLOCK_ID`).
+
+    Obsidian's links reach a line only through a block id, so the task's own
+    id serves as one. A block link the task already has is kept, unless it
+    is the id the task had before this write (`previous_id`): that one
+    follows the id, so a recurring task's done line, whose id moved to its
+    next occurrence, never keeps a block id the next occurrence now carries.
+    An id with characters a block id cannot hold (`_`) gets none.
+    """
+    if task.block_link and task.block_link != f" ^{previous_id}":
+        return task
+    if not task.id or not re.fullmatch(r"[A-Za-z0-9-]+", task.id):
+        return task
+    return replace(task, block_link=f" ^{task.id}")
+
+
 def _remove_as_word(description: str, gf: str) -> str:
     # `GlobalFilter.removeAsWordFrom`.
     pattern = re.compile("(^|" + tf._WS + ")" + re.escape(gf) + "($|" + tf._WS + ")")

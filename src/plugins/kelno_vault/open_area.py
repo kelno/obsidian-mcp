@@ -35,7 +35,7 @@ from src.mcp_server.tools import (
 from src.plugins.kelno_vault import area_map as _area_map
 from src.plugins.kelno_vault import areas_index as _areas_index
 from src.plugins.kelno_vault.area_result import AreaTask, OpenAreaResult
-from src.services import private_folders
+from src.services import open_note_url as _open_note_url, private_folders
 from src.services.tool_outcomes import body_refusal as _body_refusal
 from src.services.vault import read_bytes
 
@@ -261,6 +261,7 @@ async def _open_area_tasks(tag: str, uid, notes: list[str]) -> tuple[list[AreaTa
         out.append(AreaTask(
             id=task.id or None,
             ref=f"{row.file_path}:{row.line_number}",
+            open_url=_open_note_url.open_line_url(row.file_path, row.line),
             text=None if private_folders.is_private(row.file_path) else row.line,
             status=task.status.type, next=True if is_next else None,
             due=task.due.text if task.due is not None else None,
@@ -408,6 +409,8 @@ async def open_area(
     feedback whose citing tasks are all done (ticked in Obsidian, say). `instructions`
     then say what to do with it all. A folder no area lists comes back with
     `found: false`: ask the owner which area it belongs to.
+    With `OPEN_NOTE_URL` set, each task carries `open_url` too, opening
+    its own line when it ends with a block id (`^…`).
     With `OPEN_NOTE_URL` set, `main_note_open_url`: give that link when
     pointing the owner to the main note.
     """

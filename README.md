@@ -802,7 +802,9 @@ and needing no running Obsidian:
   is named by `path`, `line`, `expected_line` and `expected_hash` instead.
   With `TASKS_ALWAYS_ID`, every task gets an id: `create_task` makes one up,
   and a write by line gives one. `scripts/fork_tasks_assign_ids.py` gives
-  every task of an existing vault one, once.
+  every task of an existing vault one, once. With `TASKS_BLOCK_ID`, each id
+  is also the line's block id (`^<id>`), so a task's `open_url` opens its
+  own line; the same script's `--block-ids` adds them to an existing vault.
 
 Every task write is refused when the line or the note changed since it was
 read, and changes only that one line. See
@@ -2196,11 +2198,12 @@ reason.
 | `FETCH_PAGE_MAX_BYTES` | `4194304` | Largest page `fetch_page` downloads before converting it |
 | `TASKS_INBOX_PATH` | `Tasks inbox.md` | Note `create_task` writes to when none is named; the only note it creates when missing |
 | `TASKS_TIMEZONE` | `Europe/Brussels` | The owner's time zone: every "today" the task tools use. An unknown zone stops the server at startup. |
+| `TASKS_BLOCK_ID` | `false` | Every task with an id also carries it as its block id (` ^<id>` at the end of its line), written by `create_task`, `edit_task` and `set_task_status`, so a task's `open_url` opens the note on the task's own line (Obsidian's links reach a line only through a block id). A block link the line already has is kept, unless it was the task's previous id, which it follows. `scripts/fork_tasks_assign_ids.py --block-ids` gives an existing vault's tasks theirs, once |
 | `TASKS_ALWAYS_ID` | `false` | Every task carries an id (`🆔`): `create_task` makes one up when none is given, a recurring task's next occurrence gets a new one, a task written by line gets one, a task that has one is refused by line (`task_has_id`), and ids cannot be cleared |
 | `LAST_AI_EDIT_FIELD` | unset | A frontmatter property every note write sets to the write's date, time and offset (e.g. `last_ai_edit`); unset stamps nothing |
 | `LAST_AI_EDIT_EXCLUDE` | empty | Comma-separated globs of vault paths never stamped (e.g. `_/*,CLAUDE.md`) |
 | `PRIVATE_FOLDER_NAMES` | empty | Folder-name globs (`*`, `?`; any case, any depth) marking private folders, e.g. `["* (private)"]`. `keyword_search`, `semantic_search` and `find_related` leave notes under them out and end with how many ("2 matches in private folders not shown."); `list_tasks`, `ledger_get`, `ledger_update` and `open_area` list their tasks and lines without text. The first six take `include_private` to show them. Private notes must be embedded (not in `EMBEDDING_EXCLUDE_PATTERNS`) for semantic search to reach them. Empty: nothing is private and no tool shows the argument |
-| `OPEN_NOTE_URL` | unset | An http(s) link template with `{path}` exactly once (e.g. `https://notes.example.org/open?file={path}`): `read_note`, `open_area`, `create_note`, `move_note` and the search and listing tools then carry `open_url`, a link opening the note in Obsidian, with `{path}` the note's vault path without `.md`, percent-encoded (`/` kept). You serve the page behind it (e.g. a redirect to `obsidian://open`). Checked at startup. Unset: no links |
+| `OPEN_NOTE_URL` | unset | An http(s) link template with `{path}` exactly once (e.g. `https://notes.example.org/open?file={path}`): `read_note`, `open_area`, `create_note`, `move_note`, the search and listing tools and the task tools (each task named, on its own line when it ends with a block id `^…`) then carry `open_url`, a link opening the note in Obsidian, with `{path}` the note's vault path without `.md`, percent-encoded (`/` kept). You serve the page behind it (e.g. a redirect to `obsidian://open`). Checked at startup. Unset: no links |
 | `VAULT_GUIDE_NOTE` | `CLAUDE.md` | The vault note `get_vault_guide` serves as the vault's own conventions, a vault-relative `.md` path such as `_/agent/Vault conventions.md`, for a vault whose root `CLAUDE.md` holds only Claude Code imports. A path that is absolute, holds `..`, `.` or a hidden folder, or is not `.md` stops the server at startup. A missing note gets the guide's "create one" message naming it, never the root `CLAUDE.md` in its place. With the `kelno_vault` plugin, `open_area` also returns this note's `## Working on an area` section |
 | `LIST_NOTES_DESCRIPTION_FIELD` | unset | A frontmatter field (e.g. `description`) that `list_notes` shows at the end of each note's line, before `open_url`, as ` — description: "…"`: one JSON-quoted line, a string value only, cut at 300 characters, read from the index. Not shown for a note in a private folder. Unset: listings as before |
 | `ARCHIVE_FOLDER` | unset | A folder mirroring the tree (e.g. `Archive`); `move_note` says when the folder a note left has a counterpart there |
