@@ -33,15 +33,14 @@ logger = logging.getLogger(__name__)
 
 #: The tool descriptions name each check and its result in a line; the guide sections hold the detail.
 #: Every served description stays within the cap `tests/test_issue_343_tool_metadata.py` sets, this
-#: text included: `edit_note`'s own text leaves no room, so it gets none (its "See `get_vault_guide`"
-#: line points to the sections), and `move_note` gets one line.
+#: text included: `edit_note` and `move_note` sit close to theirs, so each gets one line.
 _WRITER_TEXT = (
     "**This vault's checks**, on the lines a write adds or changes (conventions: "
     f"`{conventions.CONVENTIONS_NOTE}`; details: the \"(this server)\" sections of `get_vault_guide`). A task line "
     "is refused (`task_line_by_hand`): use the task tools. A first heading repeating the note's name is dropped "
-    "(`title_heading_removed:`). A bare-name wikilink one note has gets its full path (`links_rewritten:`; others "
-    "`links_flagged:`), so `content_hash` is of what was written. A rule line without a new proposal ref is "
-    "flagged (`rule_change_unlogged:`)."
+    "(`title_heading_removed:`). A bare-name wikilink one note has gets its full path (`links_rewritten:`; an "
+    "ambiguous or unknown one `links_flagged:`), so `content_hash` is of what was written. A rule-note change none "
+    "of whose lines gains a new proposal ref is flagged (`rule_change_unlogged:`)."
 )
 
 _CREATE_NOTE_NAME_TEXT = (
@@ -51,11 +50,14 @@ _CREATE_NOTE_NAME_TEXT = (
 )
 
 _WRITE_FILE_TEXT = (
-    "On a `.md`, this vault's checks run as in `create_note` (`task_line_by_hand`, `note_name_date` for a new note, "
-    "`title_heading_removed:`, `links_rewritten:`, `rule_change_unlogged:`)."
+    "On a `.md`, this vault's checks run as in `create_note` (`task_line_by_hand`, `note_name_date` and "
+    "`note_name:` for a new note, `title_heading_removed:`, `links_rewritten:`, `links_flagged:`, "
+    "`rule_change_unlogged:`)."
 )
 
 _MOVE_NOTE_TEXT = "The name is checked as in `create_note`."
+
+_EDIT_NOTE_TEXT = "Vault checks as in `create_note`: a task line written by hand is refused."
 
 _LINKS_GUIDE = (
     "## Links (this server)\n\n"
@@ -149,6 +151,7 @@ plugin = plugins.Plugin(
     tools=(open_area.TOOL,),
     tool_text={
         "create_note": f"{_WRITER_TEXT} {_CREATE_NOTE_NAME_TEXT}",
+        "edit_note": _EDIT_NOTE_TEXT,
         "move_note": _MOVE_NOTE_TEXT,
         "write_file": _WRITE_FILE_TEXT,
     },

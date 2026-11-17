@@ -406,8 +406,18 @@ def test_no_description_exceeds_the_cap_with_the_fork_owners_plugin():
     script = ("import asyncio, json, sys; sys.path.insert(0, sys.argv[1]); "
               "from src.mcp_server.server import mcp; "
               "print(json.dumps({t.name: t.description or '' for t in asyncio.run(mcp.list_tools())}))")
-    env = dict(os.environ, PLUGINS='["kelno_vault"]')
-    env.setdefault("OLLAMA_URL", "http://127.0.0.1:11434")
+    # A closed environment: the developer's own settings must not reach the import.
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": tempfile.gettempdir(),
+        "SECRET_KEY": "test",
+        "DATABASE_URL": "postgresql+asyncpg://test:test@localhost/test",
+        "VAULT_PATH": "/tmp/test-vault",
+        "OLLAMA_URL": "http://127.0.0.1:11434",
+        "PLUGINS": '["kelno_vault"]',
+    }
+    if "SYSTEMROOT" in os.environ:
+        env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
     repo = str(Path(__file__).resolve().parents[1])
     run = subprocess.run([sys.executable, "-c", script, repo], env=env, capture_output=True, text=True,
                          timeout=300, cwd=tempfile.gettempdir())
@@ -416,7 +426,8 @@ def test_no_description_exceeds_the_cap_with_the_fork_owners_plugin():
     assert "task_line_by_hand" in served["create_note"], "the plugin's text did not reach the descriptions"
     over = {name: len(text) for name, text in served.items()
             if len(text) > FORK_DESCRIPTION_CAPS.get(name, DESCRIPTION_CAP)}
-    assert not over, f"characters on the wire with kelno_vault loaded: {over}"
+    assert not over, (f"characters on the wire with kelno_vault loaded: {over}; trim the plugin's tool_text "
+                      "(src/plugins/kelno_vault/__init__.py) or the tool's own docstring")
 
 
 @pytest.mark.parametrize("name", RESTRUCTURED_WRITE_TOOLS + TASK_WRITE_TOOLS)

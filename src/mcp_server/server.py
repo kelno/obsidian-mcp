@@ -697,9 +697,8 @@ async def edit_note(
 
     {plugin_text}
 
-    **Agent-ledger refs** (`[P54, P80]`) on the lines this write removes or rewrites come back under
-    `changed_lines_cite:`, those your text adds under `cites:`, as they stand now: check your
-    change doesn't undo what they decided (`ledger_get`). `dry_run=true` shows both lists first.
+    **Ledger refs** (`[P54]`) on the lines this write changes come back under `changed_lines_cite:`, those
+    it adds under `cites:`: check you don't undo what they decided (`ledger_get`; `dry_run` shows both).
 
     Modes (mutually exclusive):
     1. **Full replace** (default): `content` becomes the note's **body**; an existing valid line-1 YAML
