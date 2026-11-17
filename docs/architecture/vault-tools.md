@@ -111,8 +111,8 @@ sit close to their caps, so that plugin adds one line to each; see
 until 2026-11-18, when the owner removed it: four sentences of upstream's text
 went (the precondition codes, which each refusal names; the LF byte-identity
 note, which `read_note` states; the `#N` agreement, which the parity sentence
-carries; the symlink refusal, which explains itself). `Tool.from_function` publishes
-`description or fn.__doc__ or ""` — no `inspect.cleandoc` — so indentation
+carries; the symlink refusal, which explains itself).
+`Tool.from_function` publishes `description or fn.__doc__ or ""` — no `inspect.cleandoc` — so indentation
 counts, and every length in the test is measured on `tool.description` from
 the registry. Claude Code cuts an upfront description at 4,096; before #343
 `edit_note` was 10,458 raw and its `expected_hash` / `MCP-REFUSAL` contract was
