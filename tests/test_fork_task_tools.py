@@ -616,6 +616,30 @@ async def test_edit_areas_replaces_or_removes_the_area_tags(vault):
     assert read(vault, "n.md") == "- [ ] b #next\n"
 
 
+async def test_edit_area_tags_followed_by_punctuation(vault):
+    # Found by the adversarial review: the plugin reads `#area/x,` as the tag `#area/x`.
+    text = "- [ ] a #area/area-x"
+    await edit(vault, text + "\n", 1, text, description="fix #area/area-x.")
+    assert read(vault, "n.md") == "- [ ] fix #area/area-x.\n"
+    text = "- [ ] ask #area/area-x, then y"
+    await edit(vault, text + "\n", 1, text, areas=["other"])
+    assert read(vault, "n.md") == "- [ ] ask, then y #area/other\n"
+
+
+async def test_edit_area_tags_keeps_only_well_formed_ones(vault):
+    text = "- [ ] fix `x #area/y` #area/area-x/sub"
+    await edit(vault, text + "\n", 1, text, description="b")
+    assert read(vault, "n.md") == "- [ ] b #area/area-x/sub\n"
+
+
+async def test_edit_areas_cannot_leave_only_the_global_filter(vault):
+    write_settings(vault, {**OWNER_SETTINGS, "globalFilter": "#task"})
+    text = "- [ ] #task #area/area-x"
+    result = await edit(vault, text + "\n", 1, text, areas=[])
+    assert code(result) == "invalid_argument"
+    assert read(vault, "n.md") == text + "\n"
+
+
 async def test_edit_areas_unknown_is_refused(vault):
     text = "- [ ] a #area/area-x"
     result = await edit(vault, text + "\n", 1, text, areas=["nope"])

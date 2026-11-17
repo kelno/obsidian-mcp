@@ -10751,7 +10751,8 @@ async def edit_task_impl(
             updated = _task_ops.apply_fields(
                 old, today=today,
                 description=_task_ops.with_area_tags(
-                    old, _task_ops.edited_description(old, description, task_settings), area_tags),
+                    old, _task_ops.edited_description(old, description, task_settings), area_tags,
+                    task_settings),
                 priority=priority, on_completion=on_completion,
                 dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
                 clear=clear, recurrence=recurrence, id=new_id, depends_on=depends_on, settings=task_settings,

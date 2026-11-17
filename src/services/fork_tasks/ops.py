@@ -512,16 +512,22 @@ def _has_word(description: str, word: str) -> bool:
     return re.search("(^|" + tf._WS + ")" + re.escape(word) + "($|" + tf._WS + ")", description) is not None
 
 
+#: An area tag as the tools write it, a nested one included. A hashtag
+#: carrying anything else (a backtick, a quote) is left alone, never copied.
+_AREA_TAG_RE = re.compile(re.escape(AREA_TAG_PREFIX) + r"[a-z0-9-]+(?:/[a-z0-9-]+)*")
+
+
 def area_tags_of(description: str) -> list[str]:
     """The area tags (`#area/…`) in `description`, in order, each once."""
     out: list[str] = []
     for tag in tf.extract_hashtags(description):
-        if tag.startswith(AREA_TAG_PREFIX) and tag not in out:
+        if _AREA_TAG_RE.fullmatch(tag) and tag not in out:
             out.append(tag)
     return out
 
 
-def with_area_tags(task: tf.Task, description: str | None, area_tags: list[str] | None) -> str | None:
+def with_area_tags(task: tf.Task, description: str | None, area_tags: list[str] | None,
+                   settings: TasksSettings | None = None) -> str | None:
     """The edited description with the task's area tags kept or set; None if unchanged.
 
     An area tag says which area the task belongs to, not what it says, so a
@@ -537,15 +543,24 @@ def with_area_tags(task: tf.Task, description: str | None, area_tags: list[str] 
         wanted = area_tags_of(task.description)
     else:
         wanted = ["#" + t for t in area_tags]
-        for tag in area_tags_of(text):
-            if tag not in wanted:
-                pattern = re.compile("(?:^|" + tf._WS + ")" + re.escape(tag) + "(?=$|" + tf._WS + ")")
-                text = tf.js_trim(pattern.sub("", text))
+        # Each unwanted tag goes with the whitespace before it, by the span the
+        # plugin reads it at, so `#area/x,` is removed and its comma kept.
+        text = tf.js_trim(tf.HASHTAG_RE.sub(
+            lambda m: "" if _AREA_TAG_RE.fullmatch(tf.js_trim(m.group(0))) and tf.js_trim(m.group(0)) not in wanted
+            else m.group(0), text))
+    present = set(tf.extract_hashtags(text))
     for tag in wanted:
-        if not _has_word(text, tag):
+        if tag not in present:
             text = f"{text} {tag}"
-    if not tf.js_trim(text):
-        raise TaskOpError("invalid_argument", "a task needs a description besides its area tags")
+            present.add(tag)
+    rest = text
+    if gf := (settings.global_filter if settings else ""):
+        rest = _remove_as_word(rest, gf)
+    for tag in area_tags_of(text):
+        rest = tf.HASHTAG_RE.sub(lambda m: "" if tf.js_trim(m.group(0)) == tag else m.group(0), rest)
+    if not tf.js_trim(rest):
+        raise TaskOpError("invalid_argument", "a task needs a description besides its area tags and the global "
+                          "filter. Nothing was written.")
     return text
 
 
