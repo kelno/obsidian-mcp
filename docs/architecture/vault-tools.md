@@ -107,10 +107,11 @@ Claude Code's cut). `test_no_description_exceeds_the_cap_with_the_fork_owners_pl
 imports the server in a fresh interpreter with `PLUGINS=["kelno_vault"]`, since
 the docstrings take the plugins' text at import. `edit_note` and `move_note`
 sit close to their caps, so that plugin adds one line to each; see
-[plugins.md](plugins.md). `edit_note`'s fork exception (4,400) stays above
-Claude Code's cut: its last few hundred characters (the indented-fence and
-symlink refusals, which explain themselves) can be cut there, accepted; the
-plugin's line sits near the top. `Tool.from_function` publishes
+[plugins.md](plugins.md). `edit_note` had a fork exception of 4,400 characters
+until 2026-11-18, when the owner removed it: four sentences of upstream's text
+went (the precondition codes, which each refusal names; the LF byte-identity
+note, which `read_note` states; the `#N` agreement, which the parity sentence
+carries; the symlink refusal, which explains itself). `Tool.from_function` publishes
 `description or fn.__doc__ or ""` — no `inspect.cleandoc` — so indentation
 counts, and every length in the test is measured on `tool.description` from
 the registry. Claude Code cuts an upfront description at 4,096; before #343

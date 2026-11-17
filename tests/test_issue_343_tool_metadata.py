@@ -88,11 +88,8 @@ ADDITIONS = Path(__file__).resolve().parent / "fixtures" / "tools_list_schema_ad
 AMENDMENTS = Path(__file__).resolve().parent / "fixtures" / "tools_list_schema_amendments.json"
 NOTE_WINDOW_PROPERTIES = {"since", "until", "order_by", "cursor"}
 
+#: Every tool, `edit_note` included, as served with the deployment's plugins (owner, 2026-11-18).
 DESCRIPTION_CAP = 4_000
-#: Fork: `edit_note` carries the fork's ledger-refs and line-endings paragraphs
-#: on top of upstream's text (and a deployment's plugins add their own), so
-#: its core description gets this much instead.
-FORK_DESCRIPTION_CAPS = {"edit_note": 4_400}
 LEAD_CHARS = 1_500
 INSTRUCTIONS_CAP = 2_000
 INSTRUCTIONS_LEAD = 512
@@ -390,7 +387,7 @@ def test_the_instructions_name_only_registered_tools():
 
 @pytest.mark.parametrize("tool", listed(), ids=lambda t: t.name)
 def test_no_description_exceeds_the_cap(tool):
-    assert len(tool.description or "") <= FORK_DESCRIPTION_CAPS.get(tool.name, DESCRIPTION_CAP), (
+    assert len(tool.description or "") <= DESCRIPTION_CAP, (
         f"{tool.name}: {len(tool.description or '')} characters on the wire"
     )
 
@@ -425,7 +422,7 @@ def test_no_description_exceeds_the_cap_with_the_fork_owners_plugin():
     served = json.loads(run.stdout.strip().splitlines()[-1])
     assert "task_line_by_hand" in served["create_note"], "the plugin's text did not reach the descriptions"
     over = {name: len(text) for name, text in served.items()
-            if len(text) > FORK_DESCRIPTION_CAPS.get(name, DESCRIPTION_CAP)}
+            if len(text) > DESCRIPTION_CAP}
     assert not over, (f"characters on the wire with kelno_vault loaded: {over}; trim the plugin's tool_text "
                       "(src/plugins/kelno_vault/__init__.py) or the tool's own docstring")
 

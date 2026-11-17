@@ -625,7 +625,7 @@ update it in the same change.** What stays here is the short list:
   `FastMCP(instructions=SERVER_INSTRUCTIONS)` is ≤ 2,000 characters with a
   ≤ 512-character lead that states the round trip *with its conditions* and
   `expected_hash` as optional. No description exceeds 4,000 characters on the
-  wire (the raw docstring is what ships; `edit_note` 4,400), the deployment's
+  wire (the raw docstring is what ships), `edit_note` included, the deployment's
   plugin text included (owner, F110: with `kelno_vault` loaded, a test renders
   them in a fresh interpreter); the four long ones lead with their
   contract and the reasoning moved to the vault-tools note. See

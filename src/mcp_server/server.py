@@ -713,34 +713,30 @@ async def edit_note(
        `replace_all=True`.
     4. **Section**: `section=<heading>` replaces the **whole body** under the named ATX heading. `Parent/Child`
        disambiguates repeated headings; a `#N` ordinal ("#7", 1-based document order) is the only form that
-       addresses duplicate siblings. A selector resolves to the same section here as in `read_note` on any
-       write this tool admits — parity is about resolution, not admission.
+       addresses duplicate siblings. A selector resolves to the same section as in `read_note` on any write
+       this tool admits.
 
     `dry_run=True` returns a unified diff and writes nothing.
 
     **`expected_hash`**: pass the `content_hash` a read returned, verbatim, and the call is refused with
     nothing written if the file changed since — in every mode, `dry_run` included. It is the **whole file's**
     hash, never a hash of the text you received. Optional by default — omitted, a stale edit overwrites —
-    unless the deployment requires it, when an omitted hash is refused `precondition_required`. Codes:
-    `stale_precondition`, `concurrent_write`, `no_incumbent`, `malformed_precondition`,
-    `precondition_unavailable`, `precondition_required`. Success reports the `content_hash` of the bytes
-    **this call wrote**, not what is on disk when you read it; `dry_run` reports none.
+    unless the deployment requires it, when an omitted hash is refused `precondition_required`. Success
+    reports the `content_hash` of the bytes **this call wrote**, not what is on disk when you read it;
+    `dry_run` reports none.
 
     **Section mode.** `content` is the section's **body**: the text beginning on the line immediately after the
     matched heading line; the heading line is never rewritten. The body is replaced **whole** — anything
     `content` does not resend, a fenced code block under the heading included, is deleted — so a blank
     line you want after the heading belongs in `content`. `read_note(path, section=...)` is the matching read:
     its `heading` field carries the heading line and its `content` field the body, and this tool takes exactly
-    that `content`. Byte-identity holds for notes whose body newlines are LF: non-LF terminators inside the
-    selected body come back as LF. `#N` ordinals agree with `read_note`; a heading inside a fenced code block is
-    not a heading.
+    that `content`. A heading inside a fenced code block is not a heading.
     A write keeps the note's line endings (a CRLF note stays CRLF); `replace_frontmatter=True` writes bytes as sent.
 
     **Two shapes refuse a section write outright, naming the problem and writing nothing:** a malformed
     frontmatter block, whose refusal names the `replace_frontmatter=True` repair; and a fence opener indented by
     one to three spaces that nothing below it closes — close the fence or unindent it to column zero, then
-    reissue. Both are asymmetric with reads: `read_note` keeps working on such notes. A symlinked
-    final component is refused.
+    reissue. `read_note` still reads such notes.
     """
     return await edit_note_impl(
         path,
