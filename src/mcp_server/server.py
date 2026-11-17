@@ -1755,6 +1755,7 @@ async def edit_task(
     new_id: str | None = None,
     depends_on: list[str] | None = None,
     clear: list[str] | None = None,
+    areas: list[str] | None = None,
 ) -> TaskWriteResult:
     """Change one task's description or fields, as the Tasks plugin's "Edit task" dialog does.
 
@@ -1793,7 +1794,10 @@ async def edit_task(
             give it a `new_id`.
         description: the new text (tags included). Omit to keep it. The
             global filter (e.g. `#task`) is put back in front, once; a copy
-            given here as a whole word is dropped, even mid-sentence.
+            given here as a whole word is dropped, even mid-sentence. The
+            task's area tags (`#area/…`) stay even when left out here (change
+            them with `areas`); the result notes any other tag it no longer
+            has.
         priority: highest, high, medium, none, low or lowest.
         created / start / scheduled / due: `YYYY-MM-DD`, `today`, `tomorrow`
             or `yesterday`.
@@ -1811,12 +1815,15 @@ async def edit_task(
         clear: fields to remove: any of priority, on_completion, recurrence,
             id, depends_on, created, start, scheduled, due. The id cannot be
             removed where the server gives every task one.
+        areas: the task's area tags, replacing the ones it has (slug,
+            `#area/<slug>` or the area's main note's name); `[]` removes
+            them all. Omitted: they are kept. Unknown areas are refused.
     """
     return await edit_task_impl(
         id=id, path=path, line=line, expected_line=expected_line, expected_hash=expected_hash,
         description=description, priority=priority,
         created=created, start=start, scheduled=scheduled, due=due, on_completion=on_completion,
-        recurrence=recurrence, new_id=new_id, depends_on=depends_on, clear=clear,
+        recurrence=recurrence, new_id=new_id, depends_on=depends_on, clear=clear, areas=areas,
     )
 
 

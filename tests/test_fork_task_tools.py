@@ -595,6 +595,34 @@ async def test_edit_round_trips_the_listed_description_without_doubling_the_filt
     assert read(vault, "n.md") == "- [ ] #task b #area/x\n"
 
 
+async def test_edit_keeps_the_area_tags_a_new_description_leaves_out(vault):
+    # F108: a reworded task stayed in its area only if the agent repeated the tag.
+    write_settings(vault, {**OWNER_SETTINGS, "globalFilter": "#task"})
+    text = "- [ ] #task a #area/area-x #next #area/other 📅 2026-11-05"
+    result = await edit(vault, text + "\n", 1, text, description="b #area/other")
+    assert result.error is None
+    assert read(vault, "n.md") == "- [ ] #task b #area/other #area/area-x 📅 2026-11-05\n"
+    # Other tags follow the description, but the result says which went.
+    assert any("#next" in n and "#area" not in n for n in result.notes or [])
+
+
+async def test_edit_areas_replaces_or_removes_the_area_tags(vault):
+    text = "- [ ] a #area/area-x #next"
+    await edit(vault, text + "\n", 1, text, areas=["Other"])
+    assert read(vault, "n.md") == "- [ ] a #next #area/other\n"
+    text = "- [ ] a #next #area/other"
+    result = await edit(vault, text + "\n", 1, text, description="b #next #area/other", areas=[])
+    assert result.error is None and not result.notes
+    assert read(vault, "n.md") == "- [ ] b #next\n"
+
+
+async def test_edit_areas_unknown_is_refused(vault):
+    text = "- [ ] a #area/area-x"
+    result = await edit(vault, text + "\n", 1, text, areas=["nope"])
+    assert code(result) == "invalid_argument"
+    assert read(vault, "n.md") == text + "\n"
+
+
 async def test_edit_with_only_the_global_filter_is_refused(vault):
     write_settings(vault, {**OWNER_SETTINGS, "globalFilter": "#task"})
     text = "- [ ] #task a"

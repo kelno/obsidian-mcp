@@ -504,6 +504,62 @@ def edited_description(task: tf.Task, description: str | None, settings: TasksSe
     return new
 
 
+#: The prefix of an area tag, as `create_task`'s `areas` writes it (`#area/<slug>`).
+AREA_TAG_PREFIX = "#area/"
+
+
+def _has_word(description: str, word: str) -> bool:
+    return re.search("(^|" + tf._WS + ")" + re.escape(word) + "($|" + tf._WS + ")", description) is not None
+
+
+def area_tags_of(description: str) -> list[str]:
+    """The area tags (`#area/…`) in `description`, in order, each once."""
+    out: list[str] = []
+    for tag in tf.extract_hashtags(description):
+        if tag.startswith(AREA_TAG_PREFIX) and tag not in out:
+            out.append(tag)
+    return out
+
+
+def with_area_tags(task: tf.Task, description: str | None, area_tags: list[str] | None) -> str | None:
+    """The edited description with the task's area tags kept or set; None if unchanged.
+
+    An area tag says which area the task belongs to, not what it says, so a
+    new description that leaves one out keeps it (added at the end, as
+    `create_task` adds them): an agent rewording a task should not move it
+    out of its area by accident (F108). `area_tags` (`area/<slug>`, already
+    resolved) replaces them all instead, `[]` removing every one.
+    """
+    if description is None and area_tags is None:
+        return None
+    text = task.description if description is None else description
+    if area_tags is None:
+        wanted = area_tags_of(task.description)
+    else:
+        wanted = ["#" + t for t in area_tags]
+        for tag in area_tags_of(text):
+            if tag not in wanted:
+                pattern = re.compile("(?:^|" + tf._WS + ")" + re.escape(tag) + "(?=$|" + tf._WS + ")")
+                text = tf.js_trim(pattern.sub("", text))
+    for tag in wanted:
+        if not _has_word(text, tag):
+            text = f"{text} {tag}"
+    if not tf.js_trim(text):
+        raise TaskOpError("invalid_argument", "a task needs a description besides its area tags")
+    return text
+
+
+def dropped_tag_notes(before: tf.Task, after: tf.Task, settings: TasksSettings) -> list[str]:
+    """Say which tags (other than area tags and the global filter) an edit removed."""
+    kept = set(after.tags)
+    dropped = [t for t in dict.fromkeys(before.tags)
+               if t not in kept and not t.startswith(AREA_TAG_PREFIX) and t != settings.global_filter]
+    if not dropped:
+        return []
+    return [f"The new description drops the tag(s) {' '.join(dropped)} the task had. If that wasn't meant, "
+            "edit it again with them in the description."]
+
+
 def _remove_as_word(description: str, gf: str) -> str:
     # `GlobalFilter.removeAsWordFrom`.
     pattern = re.compile("(^|" + tf._WS + ")" + re.escape(gf) + "($|" + tf._WS + ")")
@@ -540,7 +596,7 @@ def new_task(*, description: str, settings: TasksSettings, registry: tf.StatusRe
     if settings.global_filter:
         text = _without_global_filter(text, settings.global_filter)
     for tag in area_tags:
-        if not re.search("(^|" + tf._WS + ")" + re.escape("#" + tag) + "($|" + tf._WS + ")", text):
+        if not _has_word(text, "#" + tag):
             text = f"{text} #{tag}"
     if settings.global_filter:
         text = f"{settings.global_filter} {text}"

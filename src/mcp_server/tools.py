@@ -10680,7 +10680,7 @@ async def _existing_task(tool, uid, target, path, line, expected_line, expected_
 @_tracked(
     "edit_task",
     ["id", "path", "line", "description", "priority", "created", "start", "scheduled", "due",
-     "on_completion", "recurrence", "new_id", "depends_on", "clear", "expected_hash"],
+     "on_completion", "recurrence", "new_id", "depends_on", "clear", "areas", "expected_hash"],
     refusal_result=_task_write_refusal,
     write_class=True,
 )
@@ -10701,6 +10701,7 @@ async def edit_task_impl(
     depends_on: list[str] | None = None,
     clear: list[str] | None = None,
     id: str | None = None,
+    areas: list[str] | None = None,
 ) -> TaskWriteResult:
     """Change one task's description or fields, as `editTaskLineModal(line)` returns it.
 
@@ -10710,7 +10711,7 @@ async def edit_task_impl(
     if err := _require_write():
         return _task_failed(TaskWriteResult, err)
     if all(v is None for v in (description, priority, created, start, scheduled, due, on_completion,
-                               recurrence, new_id, depends_on)) and not clear:
+                               recurrence, new_id, depends_on, areas)) and not clear:
         return _task_failed(TaskWriteResult, _body_refusal(
             "edit_task was given nothing to change. Nothing was written.", "invalid_argument"))
     if settings.tasks_always_id and clear and "id" in clear:
@@ -10743,15 +10744,22 @@ async def edit_task_impl(
             if settings.tasks_always_id and not old.id and new_id is None:
                 new_id = _task_ids.new_id(await _taken_task_ids(uid, target.rel, located.text, task_settings,
                                                                 registry))
+            area_tags = None
+            if areas is not None:
+                areas_index = await _area_index(uid)
+                area_tags = [areas_index.lookup(a) for a in areas]
             updated = _task_ops.apply_fields(
                 old, today=today,
-                description=_task_ops.edited_description(old, description, task_settings),
+                description=_task_ops.with_area_tags(
+                    old, _task_ops.edited_description(old, description, task_settings), area_tags),
                 priority=priority, on_completion=on_completion,
                 dates={"created": created, "start": start, "scheduled": scheduled, "due": due},
                 clear=clear, recurrence=recurrence, id=new_id, depends_on=depends_on, settings=task_settings,
             )
             link_notes = await _check_task_ids(uid, old, updated, target.rel, located.text, task_settings, registry,
                                                except_line=line)
+            if description is not None:
+                link_notes = _task_ops.dropped_tag_notes(old, updated, task_settings) + link_notes
             new_line = _tf.to_file_line(updated)
             if new_line == expected_line:
                 return _private_by_id(TaskWriteResult(
@@ -10766,6 +10774,8 @@ async def edit_task_impl(
             _task_ops.verify_other_lines(located.text, new_text, line, 0, path)
         except _task_ops.TaskOpError as exc:
             return _task_refused(exc)
+        except _tq.QueryError as exc:
+            return _task_failed(TaskWriteResult, _body_refusal(f"{exc}. Nothing was written.", "invalid_argument"))
         err, new_text, shift = await _publish_task_text(uid, target, path, new_text, existing)
         if err:
             return _task_failed(TaskWriteResult, err)
