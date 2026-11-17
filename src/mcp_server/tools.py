@@ -9811,6 +9811,11 @@ def _private_by_id(result: TaskWriteResult, by_line: bool, named_path: str | Non
     chose it, as with every other write tool, and keeps the text."""
     if by_line or named_path is not None or result.path is None or not private_folders.is_private(result.path):
         return result
+    if result.open_url is not None:
+        result.open_url = _open_note_url.open_task_url(result.path, result.text, result.id, private=True)
+    if result.next_occurrence_open_url is not None:
+        result.next_occurrence_open_url = _open_note_url.open_task_url(
+            result.path, result.next_occurrence, result.next_occurrence_id, private=True)
     result.text = result.previous_text = result.next_occurrence = None
     result.notes = (result.notes or []) + [
         "The task is in a private folder, so its text is left out; give `path` too to see it."]
@@ -10286,7 +10291,8 @@ async def fork_list_tasks_impl(
             tasks.append(TaskItem(ref=f"{entry.path}:{entry.line_number}", path=entry.path,
                                   line=entry.line_number, private=True, status_type=entry.task.status.type,
                                   id=entry.task.id or None,
-                                  open_url=_open_note_url.open_line_url(entry.path, entry.text)))
+                                  open_url=_open_note_url.open_task_url(entry.path, entry.text, entry.task.id,
+                                                                         private=True)))
             continue
         tasks.append(_task_item(entry, content_hash, today))
 
@@ -10630,7 +10636,7 @@ async def create_task_impl(
                 return _task_refused(exc)
             new_line = _tf.to_file_line(task)
         if settings.tasks_block_id:
-            task = _task_ops.with_block_id(task)
+            task = _task_ops.with_block_id(task, others=_task_ops.note_block_ids(old_text))
             new_line = _tf.to_file_line(task)
         if existing is None:
             new_text, number = new_line + "\n", 1
@@ -10768,7 +10774,7 @@ async def edit_task_impl(
                 clear=clear, recurrence=recurrence, id=new_id, depends_on=depends_on, settings=task_settings,
             )
             if settings.tasks_block_id:
-                updated = _task_ops.with_block_id(updated, old.id)
+                updated = _task_ops.with_block_id(updated, old.id, _task_ops.note_block_ids(located.text, (line,)))
             link_notes = await _check_task_ids(uid, old, updated, target.rel, located.text, task_settings, registry,
                                                except_line=line)
             if description is not None:
@@ -10890,7 +10896,10 @@ async def set_task_status_impl(
                     taken.add(t.id)
                     result[i] = t
             if settings.tasks_block_id:
-                result = [_task_ops.with_block_id(t, located.task.id) for t in result]
+                others = _task_ops.note_block_ids(located.text, (line,))
+                result = [_task_ops.with_block_id(t, located.task.id, others) for t in result]
+                if len(result) == 2 and result[0].block_link and result[0].block_link == result[1].block_link:
+                    raise _task_ops.TaskOpError("content_unsafe", "both lines would carry one block id")
             new_lines = [_tf.to_file_line(t) for t in result]
             new_text = _task_ops.splice(located.lines, located.index, new_lines)
             for offset, written_task in enumerate(result):
@@ -11698,9 +11707,11 @@ async def _note_refs_report(uid, old: str | None, new: str | None, *, old_unread
 def _ledger_task_dict(task, include_private: bool = False) -> dict:
     """A citing task for a result: its text left out when it sits in a private folder (P98)."""
     item = task.as_dict()
-    if url := _open_note_url.open_line_url(task.ref.rsplit(":", 1)[0], task.text):
+    path = task.ref.rsplit(":", 1)[0]
+    hidden = not include_private and private_folders.is_private(path)
+    if url := _open_note_url.open_task_url(path, task.text, task.id, private=hidden):
         item["open_url"] = url
-    if not include_private and private_folders.is_private(task.ref.rsplit(":", 1)[0]):
+    if hidden:
         del item["text"]
     return item
 

@@ -261,7 +261,8 @@ async def _open_area_tasks(tag: str, uid, notes: list[str]) -> tuple[list[AreaTa
         out.append(AreaTask(
             id=task.id or None,
             ref=f"{row.file_path}:{row.line_number}",
-            open_url=_open_note_url.open_line_url(row.file_path, row.line),
+            open_url=_open_note_url.open_task_url(row.file_path, row.line, task.id,
+                                                   private=private_folders.is_private(row.file_path)),
             text=None if private_folders.is_private(row.file_path) else row.line,
             status=task.status.type, next=True if is_next else None,
             due=task.due.text if task.due is not None else None,

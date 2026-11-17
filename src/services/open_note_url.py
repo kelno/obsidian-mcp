@@ -83,6 +83,17 @@ def open_line_url(path: str, line: str | None) -> str | None:
     return open_note_url(path, line_block_id(line))
 
 
+def open_task_url(path: str, line: str | None, task_id: str | None, *, private: bool = False) -> str | None:
+    """`open_line_url` for a task line. For a task shown without its text
+    (a private folder), the line's block id is used only when it is the
+    task's own id, which the result gives anyway: a block id written by
+    hand is part of the text."""
+    block = line_block_id(line)
+    if private and block != (task_id or None):
+        block = None
+    return open_note_url(path, block)
+
+
 def text_suffix(path: str) -> str:
     """` — open_url: <url>` to append to a text result's line for `path`, or ""."""
     url = open_note_url(path)

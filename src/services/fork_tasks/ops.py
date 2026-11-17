@@ -575,7 +575,7 @@ def dropped_tag_notes(before: tf.Task, after: tf.Task, settings: TasksSettings) 
             "edit it again with them in the description."]
 
 
-def with_block_id(task: tf.Task, previous_id: str = "") -> tf.Task:
+def with_block_id(task: tf.Task, previous_id: str = "", others: frozenset[str] | set[str] = frozenset()) -> tf.Task:
     """`task` with its 🆔 as its block id (` ^<id>`), so a link can open its line (`TASKS_BLOCK_ID`).
 
     Obsidian's links reach a line only through a block id, so the task's own
@@ -583,13 +583,33 @@ def with_block_id(task: tf.Task, previous_id: str = "") -> tf.Task:
     is the id the task had before this write (`previous_id`): that one
     follows the id, so a recurring task's done line, whose id moved to its
     next occurrence, never keeps a block id the next occurrence now carries.
-    An id with characters a block id cannot hold (`_`) gets none.
+    A task gets none when its id has characters a block id cannot hold (`_`),
+    or when another line of the note already ends with that block id
+    (`others`, from `note_block_ids`): a note never gets two.
     """
-    if task.block_link and task.block_link != f" ^{previous_id}":
+    own = f" ^{previous_id}" if previous_id else None
+    if task.block_link and task.block_link != own:
         return task
-    if not task.id or not re.fullmatch(r"[A-Za-z0-9-]+", task.id):
-        return task
+    if not task.id or not re.fullmatch(r"[A-Za-z0-9-]+", task.id) or task.id in others:
+        # The previous id's block named an id this task no longer has.
+        return replace(task, block_link="") if task.block_link and task.block_link == own else task
     return replace(task, block_link=f" ^{task.id}")
+
+
+#: A line ending with a block id, as Obsidian reads one.
+_LINE_BLOCK_ID_RE = re.compile(r"(?:^|\s)\^([A-Za-z0-9-]+)\s*$", re.MULTILINE)
+
+
+def note_block_ids(text: str, except_lines: tuple[int, ...] = ()) -> set[str]:
+    """Every block id a line of `text` ends with, except at the 1-based `except_lines`."""
+    skip = set(except_lines)
+    out = set()
+    for number, line in enumerate(text.splitlines(), start=1):
+        if number in skip:
+            continue
+        if (m := _LINE_BLOCK_ID_RE.search(line)) is not None:
+            out.add(m.group(1))
+    return out
 
 
 def _remove_as_word(description: str, gf: str) -> str:

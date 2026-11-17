@@ -1766,15 +1766,12 @@ async def edit_task(
 ) -> TaskWriteResult:
     """Change one task's description or fields, as the Tasks plugin's "Edit task" dialog does.
 
-    Requires write permission. Counterpart: the Tasks plugin's "edit task" dialog.
-    Postpone a task by setting `scheduled` (⏳). Only that line changes; it
-    is written back in the plugin's field order, as the plugin itself does on
+    Requires write permission. Postpone a task by setting `scheduled` (⏳).
+    Only that line changes; it is written back in the plugin's field order, as the plugin itself does on
     any edit, a repeat rule (🔁) in the plugin's own wording. Status changes
     go through `set_task_status`. If the line cites agent-ledger entries
-    (`[F12]`), the result lists them as they stand now.
-    With `OPEN_NOTE_URL` set, the result carries `open_url`: give that link
-    when pointing the user to the task; it opens the note on the task's
-    own line when the line ends with a block id (`^…`).
+    (`[F12]`), the result lists them as they stand now. `open_url` (with
+    `OPEN_NOTE_URL`) is the task's link to give the user.
 
     Name the task by `id`. Refused, writing nothing, when no task or several
     carry it (`task_id_not_found`, `task_id_ambiguous`), when a task named
@@ -1806,8 +1803,7 @@ async def edit_task(
             global filter (e.g. `#task`) is put back in front, once; a copy
             given here as a whole word is dropped, even mid-sentence. The
             task's area tags (`#area/…`) stay even when left out here (change
-            them with `areas`); the result notes any other tag it no longer
-            has.
+            them with `areas`); the result names other tags it drops.
         priority: highest, high, medium, none, low or lowest.
         created / start / scheduled / due: `YYYY-MM-DD`, `today`, `tomorrow`
             or `yesterday`.

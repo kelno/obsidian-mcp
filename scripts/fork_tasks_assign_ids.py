@@ -44,7 +44,7 @@ from pathlib import Path
 from src.services.conflict_copies import is_conflict_copy
 from src.services.fork_tasks import format as tf
 from src.services.fork_tasks.ids import new_id
-from src.services.fork_tasks.ops import DAMAGING_WARNINGS, TaskOpError, _comparable, parse_line
+from src.services.fork_tasks.ops import DAMAGING_WARNINGS, TaskOpError, _comparable, note_block_ids, parse_line
 from src.services.fork_tasks.scan import scan_note, split_lines
 from src.services.fork_tasks.settings import read_settings
 from src.services.open_note_url import BLOCK_ID_RE
@@ -94,7 +94,7 @@ def _rows(text: str) -> list[tuple[int, str, str | None, str]]:
 
 
 def plan_note(rel: str, data: bytes, settings, registry, taken: set[str], *,
-              block_ids: bool = False) -> NotePlan | str | None:
+              block_ids: bool = False, shared: set[str] = frozenset()) -> NotePlan | str | None:
     """The changes for one note, a reason it is skipped, or None when it has nothing to change."""
     try:
         text = data.decode("utf-8")
@@ -105,6 +105,7 @@ def plan_note(rel: str, data: bytes, settings, registry, taken: set[str], *,
         return "an indented code fence nothing closes (line " + ", ".join(map(str, scan.unmatched_fence_lines)) + ")"
     lines = split_lines(text)
     plan = NotePlan(rel, data, text)
+    in_note = note_block_ids(text) if block_ids else set()
     written: dict[int, tf.Task] = {}
     for scanned in scan.lines:
         if scanned.kind != "task":
@@ -113,7 +114,14 @@ def plan_note(rel: str, data: bytes, settings, registry, taken: set[str], *,
         if task is None:
             continue
         if block_ids:
-            if not task.id or task.block_link or not BLOCK_ID_RE.fullmatch(task.id):
+            if not task.id or task.block_link:
+                continue
+            why = ("its id has characters a block id cannot hold" if not BLOCK_ID_RE.fullmatch(task.id)
+                   else "another task carries the same id" if task.id in shared
+                   else "another line of the note already ends with that block id" if task.id in in_note
+                   else None)
+            if why:
+                plan.left.append((scanned.line_number, scanned.text, why))
                 continue
         elif task.id:
             continue
@@ -194,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     notes = []
     skipped: list[tuple[str, str]] = []
     taken: set[str] = set()
+    shared: set[str] = set()
     for full, rel in _notes(root):
         if full.is_symlink():
             skipped.append((rel, "a symlink"))
@@ -211,12 +220,14 @@ def main(argv: list[str] | None = None) -> int:
             if scanned.kind == "task" and "🆔" in scanned.text:
                 task = parse_line(scanned.text, rel, settings, registry)
                 if task is not None and task.id:
+                    if task.id in taken:
+                        shared.add(task.id)
                     taken.add(task.id)
 
     plans: list[tuple[Path, NotePlan]] = []
     for full, rel, data in notes:
         try:
-            result = plan_note(rel, data, settings, registry, taken, block_ids=args.block_ids)
+            result = plan_note(rel, data, settings, registry, taken, block_ids=args.block_ids, shared=shared)
         except TaskOpError as exc:
             skipped.append((rel, str(exc)))
             continue

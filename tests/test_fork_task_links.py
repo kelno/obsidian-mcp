@@ -131,3 +131,41 @@ def test_with_block_id_rules():
     assert ops.with_block_id(replace(base, block_link=" ^own")).block_link == " ^own"
     assert ops.with_block_id(replace(base, block_link=" ^old"), "old").block_link == " ^x1"
     assert ops.with_block_id(replace(base, id="")).block_link == ""
+
+
+# --- found by the adversarial review ---------------------------------------------------
+
+async def test_no_block_id_another_line_of_the_note_already_has(indexed, blocks, links):
+    note(indexed, "n.md", "Context. ^intro\n")
+    result = await tools.create_task_impl("call", path="n.md", id="intro")
+    assert read(indexed, "n.md") == "Context. ^intro\n- [ ] call 🆔 intro\n"
+    assert result.open_url == BASE + "n"
+
+
+async def test_a_rename_to_an_id_no_block_can_hold_drops_the_old_block(indexed, blocks):
+    note(indexed, "n.md", "- [ ] c 🆔 c1 ^c1\n")
+    await tools.edit_task_impl(id="c1", new_id="c_2")
+    assert read(indexed, "n.md") == "- [ ] c 🆔 c_2\n"
+
+
+async def test_a_private_task_links_only_by_its_own_id(indexed, links, monkeypatch):
+    monkeypatch.setattr(tools.private_folders.settings, "private_folder_names", ["* (private)"])
+    note(indexed, "P (private)/n.md", "- [ ] lawyer 🆔 k3 ^custody\n- [ ] b 🆔 k4 ^k4\n")
+    first = await tools.edit_task_impl(id="k3", due="2026-11-05")
+    second = await tools.edit_task_impl(id="k4", due="2026-11-05")
+    assert first.text is None and "custody" not in first.open_url
+    assert second.open_url.endswith("%23%5Ek4")
+    item = tools._ledger_task_dict(CitingTask(ref="P (private)/n.md:1", status_type="TODO",
+                                              text="- [ ] lawyer [F1] 🆔 k3 ^custody", id="k3"))
+    assert "text" not in item and "custody" not in item["open_url"]
+
+
+def test_the_script_lists_shared_ids_and_ids_no_block_can_hold(tmp_path, capsys):
+    write_settings(tmp_path)
+    text = "- [ ] a 🆔 x1\n- [ ] b 🆔 x1\n- [ ] c 🆔 a_b\nPara ^y1\n- [ ] d 🆔 y1\n"
+    (tmp_path / "a.md").write_text(text, encoding="utf-8")
+    assert script.main([str(tmp_path), "--block-ids", "--apply"]) == 0
+    out = capsys.readouterr().out
+    assert (tmp_path / "a.md").read_text(encoding="utf-8") == text
+    assert "another task carries the same id" in out and "characters a block id cannot hold" in out
+    assert "already ends with that block id" in out
