@@ -38,7 +38,7 @@ from src.plugins.kelno_vault import rule_files as _rule_files
 from src.plugins.kelno_vault.area_result import AreaTask, OpenAreaResult
 from src.services import open_note_url as _open_note_url, private_folders
 from src.services.tool_outcomes import body_refusal as _body_refusal
-from src.services.vault import read_bytes
+from src.services.vault import parse_frontmatter, read_bytes
 
 #: The note listing every area in one table (columns "Related folders" and "Vault folder").
 AREAS_INDEX_PATH = "Areas/Areas.md"
@@ -57,6 +57,9 @@ AREAS_INDEX_PATH = "Areas/Areas.md"
 
 
 
+#: The main note's frontmatter flag marking an area worked as a code project (the vault's
+#: `_/agent/guides/coding-practices.md`, "Where code work starts"); listed in the vault's `_/Outside dependencies.md`.
+CODE_PROJECT_FIELD = "code_project"
 #: The main note's text is cut past this many characters.
 OPEN_AREA_NOTE_MAX_CHARS = 15000
 #: Active ledger entries listed (the rest: `ledger_search(area=…)`).
@@ -125,26 +128,35 @@ async def _open_area_rows(uid, notes: list[str]) -> list | None:
     return None
 
 
-async def _open_area_main_note(path: str, uid, notes: list[str]) -> tuple[str | None, int | None, str | None]:
-    """`(text, full length when cut, rules for agents)`.
+def _code_project(text_: str) -> bool | None:
+    """True when the main note's frontmatter sets `code_project: true`; None otherwise (broken frontmatter too)."""
+    frontmatter, _body = parse_frontmatter(text_)
+    return True if isinstance(frontmatter, dict) and frontmatter.get(CODE_PROJECT_FIELD) is True else None
+
+
+async def _open_area_main_note(path: str, uid, notes: list[str]) -> tuple[str | None, int | None, str | None,
+                                                                          bool | None]:
+    """`(text, full length when cut, rules for agents, code project)`.
 
     The text is the main note without frontmatter, its Tasks section and its
     rule sections (`## For agents`, as the vault's list of rule files names
     them), which come apart as the third item: None when the note has none.
+    The fourth is True when its frontmatter sets `code_project: true`.
     """
     try:
         text_ = await asyncio.to_thread(_read_vault_text, path, uid)
     except (FileNotFoundError, ValueError, OSError) as exc:
         notes.append(f"The main note {path} could not be read ({type(exc).__name__}).")
-        return None, None, None
+        return None, None, None, None
+    code_project = _code_project(text_)
     text_, _removed = _areas_index.strip_section(_areas_index.strip_frontmatter(text_), OPEN_AREA_TASKS_HEADING)
     text_, rules = await _open_area_rules(text_, path, uid, notes)
     text_ = text_.strip("\n") + "\n"
     if len(text_) <= OPEN_AREA_NOTE_MAX_CHARS:
-        return text_, None, rules
+        return text_, None, rules, code_project
     notes.append(f"The main note's text is cut at {OPEN_AREA_NOTE_MAX_CHARS:,} of {len(text_):,} characters: "
                  f"read_note(\"{path}\") has the rest.")
-    return text_[:OPEN_AREA_NOTE_MAX_CHARS], len(text_), rules
+    return text_[:OPEN_AREA_NOTE_MAX_CHARS], len(text_), rules, code_project
 
 
 async def _open_area_rules(text_: str, path: str, uid, notes: list[str]) -> tuple[str, str | None]:
@@ -391,7 +403,7 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
     if rows is not None and row is None:
         notes.append(f"The area has no row in {AREAS_INDEX_PATH}, so its related folders are unknown.")
     conventions = await _open_area_conventions(uid, notes)
-    text_, full_chars, for_agents = await _open_area_main_note(main_note, uid, notes)
+    text_, full_chars, for_agents, code_project = await _open_area_main_note(main_note, uid, notes)
     area_map = await _open_area_map(main_note, uid, notes)
     entries, entries_truncated = await _open_area_entries(tag, uid, notes)
     tasks, tasks_total = await _open_area_tasks(tag, uid, notes)
@@ -400,7 +412,7 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
         notes.insert(0, "This area is archived: its work is finished. Tell the owner before starting new work in it.")
     return OpenAreaResult(
         found=True, area=tag, tag="#" + tag, name=row.name if row else None, description=description,
-        main_note=main_note, main_note_open_url=_open_area_note_url(main_note), archived=archived,
+        code_project=code_project, main_note=main_note, main_note_open_url=_open_area_note_url(main_note), archived=archived,
         matched_folder=matched_folder, for_agents=for_agents, area_conventions=conventions, main_note_text=text_,
         main_note_chars=full_chars, related_folders=(row.folders or None) if row else None, map=area_map,
         entries=entries or None, entries_truncated=entries_truncated or None,
@@ -427,7 +439,10 @@ async def open_area(
     Read-only. Call it first when you start work in an area or answer a
     question about one, and when a session works in a folder outside the
     vault (`folder`), to find its area. One call returns the area's tag and
-    description, its rules for agents (`for_agents`, its main note's
+    description, `code_project: true` when the area is worked as a code
+    project (its main note's frontmatter flag; what that means is "Where
+    code work starts" in `_/agent/guides/coding-practices.md`), its rules
+    for agents (`for_agents`, its main note's
     `## For agents` section: the rules for working in this area; follow
     them; absent when the area has none), the vault's conventions for
     working on any area (`area_conventions`, the "Working on an area"
@@ -436,8 +451,8 @@ async def open_area(
     its For agents and Tasks sections), its related folders
     outside the vault, a `map` of its folder (each note's one-line
     `description`, each subfolder's note count and folder-note description,
-    capped; a note without a description is marked, add one when you work on
-    it), its active ledger entries (those filed under another
+    capped; a note without a description is marked), its active ledger
+    entries (those filed under another
     area but carrying one of its topics are marked `via_topic`), and its open
     tasks from every note carrying its tag, `#next` first, then by urgency.
     Both lists are capped; `notes` say where the rest is, say when the

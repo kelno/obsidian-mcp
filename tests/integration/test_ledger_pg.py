@@ -1171,6 +1171,20 @@ async def test_open_area_serves_the_main_notes_rules_for_agents_apart(sessionmak
     assert any("_/Rule files.md) could not be read (FileNotFoundError)" in n for n in unread.notes)
 
 
+async def test_open_area_shows_the_code_project_flag_from_the_main_notes_frontmatter(sessionmaker, ctx):
+    await _open_area_vault(sessionmaker, ctx)
+    plain = await open_area_impl(area="home")
+    assert plain.code_project is None and "code_project" not in plain.model_dump()
+
+    main = ctx / "projects" / "Home" / "Home.md"
+    main.write_text("---\narea_tag: area/home\ncode_project: true\n---\n## Current position\n\n- x\n",
+                    encoding="utf-8")
+    flagged = await open_area_impl(area="home")
+    assert flagged.code_project is True and "code_project" not in flagged.main_note_text
+    fields = list(type(flagged).model_fields)
+    assert fields.index("description") < fields.index("code_project") < fields.index("for_agents")
+
+
 async def test_open_area_gathers_the_note_folders_entries_and_tasks(sessionmaker, ctx, monkeypatch):
     monkeypatch.setattr(settings, "private_folder_names", ["* (private)"])
     await _open_area_vault(sessionmaker, ctx)

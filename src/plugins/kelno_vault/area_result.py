@@ -1,14 +1,14 @@
 """`open_area`'s structured result.
 
-Fields come in the order an agent needs them: which area, what it is for,
-its rules for agents, the vault's conventions for working on any area, its main note (its `## Current position`),
+Fields come in the order an agent needs them: which area, what it is for and
+whether it is worked as a code project, its rules for agents, the vault's conventions for working on any area, its main note (its `## Current position`),
 where else it lives, the map of its folder, then its ledger entries and its open tasks, and last
 the two lines saying what to do with all of it.
 """
 
 from __future__ import annotations
 
-from pydantic import PrivateAttr
+from pydantic import Field, PrivateAttr
 
 from src.mcp_server.ledger_result import EntrySummary
 from src.mcp_server.read_result import _OmitNone
@@ -47,6 +47,9 @@ class OpenAreaResult(_OmitNone):
     name: str | None = None
     #: The main note's `description` frontmatter: what the area is for.
     description: str | None = None
+    #: True when the main note's frontmatter sets `code_project: true`; absent otherwise.
+    code_project: bool | None = Field(
+        default=None, description="true: this area is worked as a code project (coding-practices)")
     main_note: str | None = None
     #: The http(s) link that opens the main note in the Obsidian app, when the
     #: server sets `OPEN_NOTE_URL`: give it to the owner when pointing them to the note.

@@ -26,30 +26,29 @@ from sqlalchemy import select
 
 from src import database, plugins
 from src.models.db import NoteMetadata
-from src.plugins.kelno_vault import link_paths, note_names, open_area, rule_notes, task_lines, title_heading
+from src.plugins.kelno_vault import conventions, link_paths, note_names, open_area, rule_notes, task_lines, title_heading
 from src.services.filters import apply_note_filters
 
 logger = logging.getLogger(__name__)
 
 _LINKS_TOOL_TEXT = (
-    "**Wikilinks get the note's full path.** Write links with the full path yourself (`[[Areas/Areas|Areas]]`); "
-    "this is a safety net. On the lines a write adds or changes (never on lines it leaves as they were, nor on "
-    "checkbox lines), a wikilink or note embed naming a note by bare name (`[[Areas]]`) that exactly one note has, "
-    "archived ones counted, gets that note's full path; its display text is kept, or, when it had none, the text "
-    "Obsidian showed is added, so it reads the same. The published text is then not byte for byte what you sent "
-    "(the reported `content_hash` is of what was written). The result lists each under `links_rewritten:`. A bare "
-    "name several notes have, or none, a full path to no note, and a path in code formatting after a link are left "
-    "as written and listed under `links_flagged:`. The write is never refused for a link."
+    f"**Wikilinks get the note's full path** {conventions.see(conventions.LINKS)}, as a safety net. On the lines a "
+    "write adds or changes (never on lines it leaves as they were, nor on checkbox lines), a wikilink or note embed "
+    "naming a note by bare name (`[[Areas]]`) that exactly one note has, archived ones counted, gets that note's "
+    "full path; its display text is kept, or, when it had none, the text Obsidian showed is added, so it reads the "
+    "same. The published text is then not byte for byte what you sent (the reported `content_hash` is of what was "
+    "written). The result lists each under `links_rewritten:`. A bare name several notes have, or none, a full "
+    "path to no note, and a path in code formatting after a link are left as written and listed under "
+    "`links_flagged:`. The write is never refused for a link."
 )
 
 _LINKS_GUIDE = (
     "## Links (this server)\n\n"
-    "Write links with the note's full path yourself (`[[Areas/Areas|Areas]]`). As a safety net, the note tools "
-    "(`edit_note`, `create_note`, `write_file` to a `.md`) give a bare-name link or note embed you write "
-    "(`[[Areas]]`) the note's full path when exactly one note has that name, archived notes counted (display text "
-    "kept, or added when there was none), on the lines you add or change only, and list it under "
-    "`links_rewritten:`. A name several notes share, or none has, is left as you wrote it and listed under "
-    "`links_flagged:`: write the full path of the note you mean."
+    f"{conventions.see_below(conventions.LINKS)} As a safety net, the note tools (`edit_note`, `create_note`, "
+    "`write_file` to a `.md`) give a bare-name link or note embed you write (`[[Areas]]`) the note's full path when "
+    "exactly one note has that name, archived notes counted (display text kept, or added when there was none), on "
+    "the lines you add or change only, and list it under `links_rewritten:`. A name several notes share, or none "
+    "has, is left as you wrote it and listed under `links_flagged:`: write the full path of the note you mean."
 )
 
 
@@ -85,36 +84,32 @@ async def _full_path_links(write: plugins.NoteWrite, new: str) -> tuple[str, lin
 
 
 _TITLE_HEADING_TOOL_TEXT = (
-    "**No title heading.** Obsidian shows the file name as the note's title, so when the body's first non-blank "
-    "line is a heading (`#` to `######`) whose text is exactly the note's name (its whole file name without `.md`, "
-    "a date included; case and surrounding spaces ignored, formatting such as `**` not stripped) and this write "
-    "adds or changes that line, it is removed with the blank lines after it, and the result says so under "
-    "`title_heading_removed:`; the reported `content_hash` is of what was written. Only exact repeats are caught: "
-    "a near repeat is yours to avoid. The write is never refused for it."
+    f"**No title heading** {conventions.see(conventions.TITLES)}. When the body's first non-blank line is a heading "
+    "(`#` to `######`) whose text is exactly the note's name (its whole file name without `.md`, a date included; "
+    "case and surrounding spaces ignored, formatting such as `**` not stripped) and this write adds or changes that "
+    "line, it is removed with the blank lines after it, and the result says so under `title_heading_removed:`; the "
+    "reported `content_hash` is of what was written. Only exact repeats are caught. The write is never refused for "
+    "it."
 )
 
 _TITLE_HEADING_GUIDE = (
     "## Titles (this server)\n\n"
-    "Obsidian shows a note's file name as its title, so don't start a note with a heading repeating its name. "
-    "When a write through the note tools adds or changes the body's first non-blank line and it is a heading "
-    "(`#` to `######`) whose text is exactly the note's name (the whole file name without `.md`, a date included; "
-    "case and surrounding spaces ignored, formatting such as `**` not stripped), the tool removes it and says so "
-    "under `title_heading_removed:`. A heading the write leaves as it was stays, and a near repeat "
-    "(`# Call with the vet` in `2026-11-12 Call with the vet`, `# **Dog food**`) is yours to avoid."
+    f"{conventions.see_below(conventions.TITLES)} When a write through the note tools adds or changes the body's "
+    "first non-blank line and it is a heading (`#` to `######`) whose text is exactly the note's name (the whole "
+    "file name without `.md`, a date included; case and surrounding spaces ignored, formatting such as `**` not "
+    "stripped), the tool removes it and says so under `title_heading_removed:`. A heading the write leaves as it "
+    "was stays, and a near repeat (`# Call with the vet` in `2026-11-12 Call with the vet`, `# **Dog food**`) is "
+    "not caught."
 )
 
 
 _OPEN_AREA_GUIDE = (
     "## Opening an area (this server)\n\n"
-    "`open_area` returns the area's rules for agents first, as `for_agents`: its main note's `## For agents` "
-    "section, kept out of `main_note_text`; follow them while you work in the area. An area with no such section "
-    "has no `for_agents`. Besides the area's main note, ledger entries and open tasks, it returns "
-    "`area_conventions`: the "
-    f"\"{open_area.OPEN_AREA_CONVENTIONS_HEADING}\" section of this vault's conventions note (the one below), read "
-    "at each call, so it is current. It holds the rules for working on any area; follow them. When the note or "
-    "the section cannot be read, a line in `notes` says so instead. Its `map` lists the notes in the area's folder "
-    "with their `description` frontmatter and each subfolder with its folder note's: open the note you need from "
-    "it, and give a note you work on a one-line `description` when it has none."
+    "`open_area` opens one of the vault's areas in one call; when to call it is in the "
+    f"\"{open_area.OPEN_AREA_CONVENTIONS_HEADING}\" section of the vault's conventions note, below. Its result "
+    "carries the area's own rules for agents (`for_agents`, its main note's `## For agents` section) and that "
+    "section itself (`area_conventions`, read at each call, so it is current): follow both while you work in the "
+    "area. Its description says what else it returns."
 )
 
 

@@ -22,6 +22,7 @@ from collections import Counter
 
 from src import plugins
 from src.config import settings
+from src.plugins.kelno_vault import conventions
 from src.services.fork_tasks import format as task_format, ops as task_ops
 from src.services.fork_tasks.scan import scan_note
 from src.services.fork_tasks.settings import TasksSettingsError, read_settings
@@ -91,20 +92,19 @@ async def check(write: plugins.NoteWrite) -> plugins.Refusal | None:
 
 
 TOOL_TEXT = (
-    "**Task lines go through the task tools.** A write that adds or changes a task line (a checkbox line the Tasks "
-    "plugin reads as a task, with the vault's global filter such as `#task`) is refused with `task_line_by_hand`, "
-    "naming the lines, and writes nothing: use `create_task`, `edit_task` or `set_task_status`. Deleting a task "
-    "line, keeping one unchanged (the same text, wherever it now sits in the note, so reordering is fine), and "
+    f"**Task lines go through the task tools** {conventions.see(conventions.TASKS)}. A write that adds or changes a "
+    "task line (a checkbox line the Tasks plugin reads as a task, with the vault's global filter such as `#task`) "
+    "is refused with `task_line_by_hand`, naming the lines and the task tool to use, and writes nothing. Deleting a "
+    "task line, keeping one unchanged (the same text, wherever it now sits in the note, so reordering is fine), and "
     "showing one in a code span or fenced code block are allowed."
 )
 
-WRITE_FILE_TEXT = ("A write that adds or changes a task line is refused like `edit_note`'s (`task_line_by_hand`): "
-                   "tasks go through the task tools.")
+WRITE_FILE_TEXT = "A write that adds or changes a task line is refused like `edit_note`'s (`task_line_by_hand`)."
 
 GUIDE = (
     "## Task lines (this server)\n\n"
-    "The note tools (`edit_note`, `create_note`, `write_file`) refuse a write that adds or changes a task line "
-    "(`task_line_by_hand`), naming the lines and writing nothing: add or change tasks with `create_task`, "
-    "`edit_task` and `set_task_status`. Deleting a task line with them, keeping one unchanged (the same text, "
-    "wherever it sits in the note), or showing one in a code span or fenced code block is allowed."
+    f"{conventions.see_below(conventions.TASKS)} The note tools (`edit_note`, `create_note`, `write_file`) refuse a "
+    "write that adds or changes a task line (`task_line_by_hand`), naming the lines and the task tool to use, and "
+    "write nothing. Deleting a task line with them, keeping one unchanged (the same text, wherever it sits in the "
+    "note), or showing one in a code span or fenced code block is allowed."
 )

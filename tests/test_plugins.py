@@ -380,6 +380,35 @@ def test_this_vaults_plugin_describes_its_rule_on_every_writer():
     assert loaded.check is not None
 
 
+def test_this_vaults_plugin_points_to_the_conventions_it_enforces_instead_of_restating_them():
+    """The vault states each convention once; the plugin's texts say what the tools do and point there."""
+    from src.plugins.kelno_vault import conventions
+
+    (loaded,) = plugins.load(("kelno_vault",))
+    note = f"`{conventions.CONVENTIONS_NOTE}`"
+    for name in ("create_note", "edit_note"):
+        text = loaded.tool_text[name]
+        for section in (conventions.LINKS, conventions.TITLES, conventions.TASKS):
+            assert f'"{section}" in {note}' in text, (name, section)
+        assert f'"{conventions.RULE_REFS}" in `{conventions.RULES_NOTE}`' in text, name
+    assert f'"{conventions.DATES}" in {note}' in loaded.tool_text["create_note"]
+    for section in (conventions.LINKS, conventions.TITLES, conventions.TASKS, conventions.DATES):
+        assert f'The convention is "{section}" in the vault\'s conventions note' in loaded.guide_text, section
+    # The conventions themselves are not restated: the date pattern, the reason for no title heading.
+    for text in (*loaded.tool_text.values(), loaded.guide_text):
+        assert "YYYY-MM-DD" not in text and "never 00" not in text and "shows the file name" not in text
+        assert "Obsidian shows a note's file name" not in text and "Write links with the" not in text
+
+
+def test_open_area_reads_the_code_project_flag_strictly():
+    from src.plugins.kelno_vault import open_area as kelno_open_area
+
+    assert kelno_open_area._code_project("---\narea_tag: area/x\ncode_project: true\n---\nText\n") is True
+    for text in ("---\ncode_project: false\n---\n", "---\ncode_project: \"true\"\n---\n", "---\nx: 1\n---\n",
+                 "No frontmatter.\n", "---\ncode_project: [true\n---\n", "Text\n---\ncode_project: true\n---\n"):
+        assert kelno_open_area._code_project(text) is None, text
+
+
 def test_without_this_vaults_plugin_a_title_heading_is_written_as_sent(vault, monkeypatch):
     use(monkeypatch)
     asyncio.run(tools.create_note_impl("Dog food.md", "# Dog food\n\nKibble.\n"))
@@ -492,5 +521,7 @@ def test_open_area_registered_as_the_server_does_keeps_its_schema():
     assert set(tool.inputSchema["properties"]) == {"area", "folder"}
     assert "slug" in tool.inputSchema["properties"]["area"]["description"]
     assert tool.outputSchema is not None and tool.annotations.readOnlyHint is True
-    assert tool.description.startswith("Open an area")
+    assert tool.description.startswith("Open an area") and "code_project: true" in tool.description
+    assert (tool.outputSchema["properties"]["code_project"]["description"]
+            == "true: this area is worked as a code project (coding-practices)")
 

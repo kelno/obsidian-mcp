@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from src.plugins.kelno_vault import rule_files
+from src.plugins.kelno_vault import conventions, rule_files
 from src.services import ledger_citations
 from src.services.note_lines import frontmatter_lines
 
@@ -101,14 +101,14 @@ def render(lines: list[tuple[int, str]], shift: int) -> str:
               "change of meaning the owner hasn't decided waits for their decision: ask first.")
 
 
+_SEE = conventions.see(conventions.RULE_REFS, conventions.RULES_NOTE)
+
 TOOL_TEXT = (
-    "**Rule edits carry their proposal.** In this vault's rules for agents (the rule files "
+    f"**Rule edits carry their proposal** {_SEE}. In this vault's rules for agents (the rule files "
     f"`{rule_files.RULE_FILES_PATH}` lists, such as the notes under `_/agent/` and the root `CLAUDE.md`, and a "
     "`## For agents` section in any note, whose lines alone count), when a write adds or changes rule lines "
     "(outside the frontmatter) and none of them carries a new proposal ref (`[P95]`), the result adds "
-    "`rule_change_unlogged:` with those lines: log an owner's decision with `ledger_add` (kind proposal) and cite "
-    "the ref it returns at the end of each changed line; a typo fix or wording that changes no meaning needs no "
-    "proposal. Never a refusal."
+    "`rule_change_unlogged:` with those lines and what to do. Never a refusal."
 )
 
 WRITE_FILE_TEXT = "A rule note written with no new proposal ref gets `rule_change_unlogged:` as in `edit_note`."
@@ -117,10 +117,8 @@ GUIDE = (
     "## Agent rules (this server)\n\n"
     f"This vault's rules for agents are the rule files `{rule_files.RULE_FILES_PATH}` lists: whole notes, such as "
     "the notes under `_/agent/` and the vault's root `CLAUDE.md`, and a `## For agents` section in any note (an "
-    "area's, a folder's, a machine's or a person's), whose lines alone are rules. Their lines end with the refs of "
-    "the proposals that shaped them (`[P54, P80]`). A write that adds or changes rule lines with none of them "
-    "carrying a new proposal ref gets `rule_change_unlogged:` in its result, with those lines. If the change "
-    "follows a decision of the owner's, log it with `ledger_add` (kind proposal) and add the ref it returns at the "
-    "end of each changed line; a typo fix or wording that changes no meaning needs nothing; a change of meaning the "
-    "owner hasn't decided waits for their decision."
+    "area's, a folder's, a machine's or a person's), whose lines alone are rules. How their lines cite the "
+    f"proposals that shaped them is \"{conventions.RULE_REFS}\" in `{conventions.RULES_NOTE}`. A write that adds "
+    "or changes rule lines with none of them carrying a new proposal ref gets `rule_change_unlogged:` in its "
+    "result, with those lines and what to do."
 )
