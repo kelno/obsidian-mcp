@@ -13,7 +13,8 @@ repeating the note's name is dropped (`title_heading`), then bare-name
 wikilinks get the note's full path (`link_paths`), in that order so the link
 report's line numbers are the written note's; last, a change to a rule note
 whose lines gain no proposal ref is pointed out (`rule_notes`, on the text
-as written). The vault-specific behaviours
+as written; what a rule file is, the notes and the `## For agents` sections,
+comes from a note in the vault, `rule_files`). The vault-specific behaviours
 still in the core, and the order they move here in, are in
 docs/architecture/plugins.md.
 """
@@ -105,7 +106,10 @@ _TITLE_HEADING_GUIDE = (
 
 _OPEN_AREA_GUIDE = (
     "## Opening an area (this server)\n\n"
-    "Besides the area's main note, ledger entries and open tasks, `open_area` returns `area_conventions`: the "
+    "`open_area` returns the area's rules for agents first, as `for_agents`: its main note's `## For agents` "
+    "section, kept out of `main_note_text`; follow them while you work in the area. An area with no such section "
+    "has no `for_agents`. Besides the area's main note, ledger entries and open tasks, it returns "
+    "`area_conventions`: the "
     f"\"{open_area.OPEN_AREA_CONVENTIONS_HEADING}\" section of this vault's conventions note (the one below), read "
     "at each call, so it is current. It holds the rules for working on any area; follow them. When the note or "
     "the section cannot be read, a line in `notes` says so instead. Its `map` lists the notes in the area's folder "
@@ -121,12 +125,13 @@ async def _rewrite(write: plugins.NoteWrite) -> plugins.Rewrite:
     """
     text, removed = title_heading.strip(write.old, write.new, write.path)
     text, links_report, links_failure = await _full_path_links(write, text)
-    rule_lines = await rule_notes.unlogged_lines(write.path, write.old, text)
+    rule_lines, rules_failure = await rule_notes.unlogged_lines(write.path, write.old, text, write.user_id)
 
     def report(shift: int, dry_run: bool) -> str:
         links = links_failure or (
             link_paths.render(link_paths.shifted(links_report, shift), dry_run=dry_run) if links_report else "")
-        return rule_notes.render(rule_lines, shift) + title_heading.render(removed, dry_run=dry_run) + links
+        rules = rules_failure or rule_notes.render(rule_lines, shift)
+        return rules + title_heading.render(removed, dry_run=dry_run) + links
 
     return plugins.Rewrite(text, report)
 

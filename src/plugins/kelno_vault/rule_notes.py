@@ -1,48 +1,80 @@
 """A rule edit with no proposal ref is pointed out (`rule_change_unlogged:`).
 
-This vault keeps its rules for agents in notes whose lines cite the proposals
-that shaped them (`[P95]`): a decided change logs one proposal in the agent
-ledger and adds its ref to each changed line. A write to one of those notes
-that adds or changes lines outside the frontmatter, none of them carrying a
-proposal ref the removed lines did not, gets a nudge in its result. Never a
-refusal.
+This vault keeps its rules for agents in rule files whose lines cite the
+proposals that shaped them (`[P95]`): a decided change logs one proposal in
+the agent ledger and adds its ref to each changed line. What a rule file is
+comes from the vault's own definition (`rule_files`, read at each write): a
+note matching one of its patterns is a rule note as a whole; in any other
+note, only the lines of a listed section (`## For agents`) are rules. A write
+that adds or changes rule lines outside the frontmatter, none of them carrying
+a proposal ref the removed rule lines did not, gets a nudge in its result.
+Never a refusal.
 """
 
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import logging
 
+from src.plugins.kelno_vault import rule_files
 from src.services import ledger_citations
 from src.services.note_lines import frontmatter_lines
 
 logger = logging.getLogger(__name__)
 
-#: The vault's rule notes: vault-relative globs (fnmatch, `*` crosses `/`).
-RULE_FILE_PATTERNS = ("_/agent/*", "CLAUDE.md")
 #: Changed rule lines listed in the block.
 SHOWN = 5
 
 
-def is_rule_note(path: str) -> bool:
-    return path.lower().endswith(".md") and any(fnmatch.fnmatchcase(path, p) for p in RULE_FILE_PATTERNS)
+def _lines(text: str) -> list[str]:
+    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
-async def unlogged_lines(path: str, old: str | None, new: str) -> list[tuple[int, str]]:
-    """The rule lines `new` adds or changes when none gains a proposal ref; [] when nothing to say.
+def _rule_part(text: str | None, definition: rule_files.RuleFiles) -> tuple[str | None, list[int]]:
+    """`(the lines of text's rule sections, joined; each one's 0-based line number in text)`."""
+    if text is None:
+        return None, []
+    lines = _lines(text)
+    numbers = [i for first, end in rule_files.section_ranges(lines, definition.sections, frontmatter_lines(lines))
+               for i in range(first, end)]
+    return "\n".join(lines[i] for i in numbers), numbers
 
-    Never raises: the nudge never fails the write it follows.
-    """
-    if not is_rule_note(path):
+
+def _unlogged(path: str, old: str | None, new: str, definition: rule_files.RuleFiles) -> list[tuple[int, str]]:
+    if definition.is_rule_file(path):
+        return ledger_citations.rule_lines_unlogged(old, new, skip_leading=frontmatter_lines(_lines(new)))
+    if not definition.sections:
         return []
+    old_part, _ = _rule_part(old, definition)
+    new_part, numbers = _rule_part(new, definition)
+    if not numbers:
+        return []
+    return [(numbers[n - 1] + 1, line) for n, line in ledger_citations.rule_lines_unlogged(old_part, new_part)]
+
+
+async def unlogged_lines(path: str, old: str | None, new: str, user_id) -> tuple[list[tuple[int, str]], str]:
+    """`(lines, failure)`: the rule lines `new` adds or changes when none gains a proposal ref.
+
+    `failure` is a result block when the definition of a rule file could not
+    be read, so nothing was checked; "" otherwise. Never raises: the nudge
+    never fails the write it follows.
+    """
+    if not path.lower().endswith(".md"):
+        return [], ""
     try:
-        skip = frontmatter_lines(new.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
-        return await asyncio.to_thread(ledger_citations.rule_lines_unlogged, old, new, skip_leading=skip)
+        definition = await asyncio.to_thread(rule_files.read, user_id)
+    except (FileNotFoundError, ValueError, OSError, rule_files.RuleFilesError) as exc:
+        why = str(exc) if isinstance(exc, rule_files.RuleFilesError) else type(exc).__name__
+        # debug, not warning: a caller drives this path (the D18 permit rule); the result says so.
+        logger.debug("rule files unreadable: %s", why)
+        return [], (f"\n\nrule_files_unreadable: the vault's list of rule files ({rule_files.RULE_FILES_PATH}) "
+                    f"could not be read ({why}), so this write was not checked for rule changes. Tell the owner.")
+    try:
+        return await asyncio.to_thread(_unlogged, path, old, new, definition), ""
     except Exception:  # noqa: BLE001 — a nudge never fails the write it follows
         # debug, not warning: a caller drives this path (the D18 permit rule).
         logger.debug("rule_change_unlogged could not be computed for %s", path, exc_info=True)
-        return []
+        return [], ""
 
 
 def render(lines: list[tuple[int, str]], shift: int) -> str:
@@ -62,19 +94,23 @@ def render(lines: list[tuple[int, str]], shift: int) -> str:
 
 
 TOOL_TEXT = (
-    "**Rule edits carry their proposal.** In this vault's rules for agents (the notes under `_/agent/` and the root `CLAUDE.md`), when a "
-    "write adds or changes lines (outside the frontmatter) and none of them carries a new proposal ref (`[P95]`), "
-    "the result adds `rule_change_unlogged:` with those lines: log an owner's decision with `ledger_add` (kind "
-    "proposal) and cite the ref it returns at the end of each changed line; a typo fix or wording that changes no "
-    "meaning needs no proposal. Never a refusal."
+    "**Rule edits carry their proposal.** In this vault's rules for agents (the rule files "
+    f"`{rule_files.RULE_FILES_PATH}` lists, such as the notes under `_/agent/` and the root `CLAUDE.md`, and a "
+    "`## For agents` section in any note, whose lines alone count), when a write adds or changes rule lines "
+    "(outside the frontmatter) and none of them carries a new proposal ref (`[P95]`), the result adds "
+    "`rule_change_unlogged:` with those lines: log an owner's decision with `ledger_add` (kind proposal) and cite "
+    "the ref it returns at the end of each changed line; a typo fix or wording that changes no meaning needs no "
+    "proposal. Never a refusal."
 )
 
 WRITE_FILE_TEXT = "A rule note written with no new proposal ref gets `rule_change_unlogged:` as in `edit_note`."
 
 GUIDE = (
     "## Agent rules (this server)\n\n"
-    "This vault's rules for agents are the notes under `_/agent/` and the vault's root `CLAUDE.md`; their lines end with the refs "
-    "of the proposals that shaped them (`[P54, P80]`). A write there that adds or changes lines with none of them "
+    f"This vault's rules for agents are the rule files `{rule_files.RULE_FILES_PATH}` lists: whole notes, such as "
+    "the notes under `_/agent/` and the vault's root `CLAUDE.md`, and a `## For agents` section in any note (an "
+    "area's, a folder's, a machine's or a person's), whose lines alone are rules. Their lines end with the refs of "
+    "the proposals that shaped them (`[P54, P80]`). A write that adds or changes rule lines with none of them "
     "carrying a new proposal ref gets `rule_change_unlogged:` in its result, with those lines. If the change "
     "follows a decision of the owner's, log it with `ledger_add` (kind proposal) and add the ref it returns at the "
     "end of each changed line; a typo fix or wording that changes no meaning needs nothing; a change of meaning the "

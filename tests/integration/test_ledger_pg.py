@@ -1134,6 +1134,41 @@ async def _open_area_vault(sessionmaker, root):
     await _task_note(sessionmaker, root, "plans.md")
     (root / "Secret (private)").mkdir()
     await _task_note(sessionmaker, root, "Secret (private)/s.md")
+    (root / "_").mkdir()
+    (root / "_" / "Rule files.md").write_text(
+        "Rule files.\n\n```rule-files\n_/agent/*\nCLAUDE.md\n## For agents\n```\n", encoding="utf-8")
+
+
+async def test_open_area_serves_the_main_notes_rules_for_agents_apart(sessionmaker, ctx, monkeypatch):
+    await _open_area_vault(sessionmaker, ctx)
+    main = ctx / "projects" / "Home" / "Home.md"
+    main.write_text(
+        "---\narea_tag: area/home\n---\nIntro.\n\n## For agents\n\n- Paint only with the windows open. [P1]\n"
+        "\n## Current position\n\n- Painting.\n\n## Tasks\n\n- [ ] #task t #area/home\n", encoding="utf-8")
+    result = await open_area_impl(area="home")
+    assert result.for_agents == "- Paint only with the windows open. [P1]\n"
+    assert result.main_note_text == "Intro.\n\n## Current position\n\n- Painting.\n"
+    fields = list(type(result).model_fields)
+    assert fields.index("for_agents") < fields.index("area_conventions") < fields.index("main_note_text")
+
+    # An empty section: no field, no note.
+    main.write_text("---\narea_tag: area/home\n---\nIntro.\n\n## For agents\n\n## Current position\n\n- x\n",
+                    encoding="utf-8")
+    empty = await open_area_impl(area="home")
+    assert empty.for_agents is None and "For agents" not in empty.main_note_text
+
+    # Cut past the cap, with a note naming the section to read.
+    monkeypatch.setattr(kelno_open_area, "OPEN_AREA_FOR_AGENTS_MAX_CHARS", 10)
+    main.write_text("---\narea_tag: area/home\n---\n## For agents\n- A long rule for agents.\n", encoding="utf-8")
+    cut = await open_area_impl(area="home")
+    assert cut.for_agents == "- A long r"
+    assert any('read_note("projects/Home/Home.md", section="For agents") has the rest' in n for n in cut.notes)
+
+    # Without the list of rule files, the section stays in the main note's text, with a note.
+    (ctx / "_" / "Rule files.md").unlink()
+    unread = await open_area_impl(area="home")
+    assert unread.for_agents is None and "## For agents" in unread.main_note_text
+    assert any("_/Rule files.md) could not be read (FileNotFoundError)" in n for n in unread.notes)
 
 
 async def test_open_area_gathers_the_note_folders_entries_and_tasks(sessionmaker, ctx, monkeypatch):
@@ -1156,6 +1191,7 @@ async def test_open_area_gathers_the_note_folders_entries_and_tasks(sessionmaker
     assert result.main_note == "projects/Home/Home.md" and result.related_folders == ["D:\\work\\home-repo"]
     assert result.main_note_text.startswith("Agents: read this first.") and "## Current position" in result.main_note_text
     assert "#task" not in result.main_note_text and "## Notes\n\n- kept" in result.main_note_text
+    assert result.for_agents is None and not any("rule files" in n for n in result.notes or [])
     assert {e.ref: e.via_topic for e in result.entries} == {own.ref: None, other.ref: "paint"}
     refs = [t.ref for t in result.tasks]
     assert refs[0] == f"plans.md:{first.line}" and result.tasks[0].next is True

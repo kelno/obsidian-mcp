@@ -34,6 +34,7 @@ from src.mcp_server.tools import (
 )
 from src.plugins.kelno_vault import area_map as _area_map
 from src.plugins.kelno_vault import areas_index as _areas_index
+from src.plugins.kelno_vault import rule_files as _rule_files
 from src.plugins.kelno_vault.area_result import AreaTask, OpenAreaResult
 from src.services import open_note_url as _open_note_url, private_folders
 from src.services.tool_outcomes import body_refusal as _body_refusal
@@ -46,8 +47,8 @@ AREAS_INDEX_PATH = "Areas/Areas.md"
 #
 # The one call an agent makes when it opens an area: to start work there, or
 # to answer a question about it. It gathers what the agent would otherwise
-# collect in several calls and may skip: the main note (agent rules at the
-# top, `## Current position`), the area's folders outside the vault, the map
+# collect in several calls and may skip: the area's rules for agents (its main
+# note's `## For agents` section), the main note (`## Current position`), the area's folders outside the vault, the map
 # of its notes, its ledger entries and its open tasks. See docs/architecture/open-area.md.
 #
 # Kept as one function per part so later parts slot in beside them: notes
@@ -70,6 +71,8 @@ OPEN_AREA_TASKS_HEADING = "Tasks"
 OPEN_AREA_CONVENTIONS_HEADING = "Working on an area"
 #: The conventions are cut past this many characters.
 OPEN_AREA_CONVENTIONS_MAX_CHARS = 8000
+#: The area's rules for agents (its main note's `## For agents` section) are cut past this many characters.
+OPEN_AREA_FOR_AGENTS_MAX_CHARS = 8000
 
 OPEN_AREA_INSTRUCTIONS = (
     "Starting work: check each task and entry against the work you're starting (read an entry with ledger_get "
@@ -122,20 +125,49 @@ async def _open_area_rows(uid, notes: list[str]) -> list | None:
     return None
 
 
-async def _open_area_main_note(path: str, uid, notes: list[str]) -> tuple[str | None, int | None]:
-    """`(text, full length when cut)`: the main note without frontmatter and its Tasks section."""
+async def _open_area_main_note(path: str, uid, notes: list[str]) -> tuple[str | None, int | None, str | None]:
+    """`(text, full length when cut, rules for agents)`.
+
+    The text is the main note without frontmatter, its Tasks section and its
+    rule sections (`## For agents`, as the vault's list of rule files names
+    them), which come apart as the third item: None when the note has none.
+    """
     try:
         text_ = await asyncio.to_thread(_read_vault_text, path, uid)
     except (FileNotFoundError, ValueError, OSError) as exc:
         notes.append(f"The main note {path} could not be read ({type(exc).__name__}).")
-        return None, None
+        return None, None, None
     text_, _removed = _areas_index.strip_section(_areas_index.strip_frontmatter(text_), OPEN_AREA_TASKS_HEADING)
+    text_, rules = await _open_area_rules(text_, path, uid, notes)
     text_ = text_.strip("\n") + "\n"
     if len(text_) <= OPEN_AREA_NOTE_MAX_CHARS:
-        return text_, None
+        return text_, None, rules
     notes.append(f"The main note's text is cut at {OPEN_AREA_NOTE_MAX_CHARS:,} of {len(text_):,} characters: "
                  f"read_note(\"{path}\") has the rest.")
-    return text_[:OPEN_AREA_NOTE_MAX_CHARS], len(text_)
+    return text_[:OPEN_AREA_NOTE_MAX_CHARS], len(text_), rules
+
+
+async def _open_area_rules(text_: str, path: str, uid, notes: list[str]) -> tuple[str, str | None]:
+    """`(text without its rule sections, their bodies or None)`; the text unchanged when the list can't be read."""
+    try:
+        definition = await asyncio.to_thread(_rule_files.read, uid)
+    except (FileNotFoundError, ValueError, OSError, _rule_files.RuleFilesError) as exc:
+        why = str(exc) if isinstance(exc, _rule_files.RuleFilesError) else type(exc).__name__
+        notes.append(f"The vault's list of rule files ({_rule_files.RULE_FILES_PATH}) could not be read ({why}), so "
+                     "the area's rules for agents, if any, are left in main_note_text.")
+        return text_, None
+    rest, bodies = _rule_files.split_sections(text_, definition.sections)
+    rules = "\n\n".join(body.strip("\n") for body in bodies if body.strip())
+    if not rules:
+        return rest, None
+    rules += "\n"
+    if len(rules) > OPEN_AREA_FOR_AGENTS_MAX_CHARS:
+        section = definition.sections[0] if len(definition.sections) == 1 else None
+        where = f"read_note(\"{path}\", section=\"{section}\")" if section else f"read_note(\"{path}\")"
+        notes.append(f"The area's rules for agents are cut at {OPEN_AREA_FOR_AGENTS_MAX_CHARS:,} of {len(rules):,} "
+                     f"characters: {where} has the rest.")
+        rules = rules[:OPEN_AREA_FOR_AGENTS_MAX_CHARS]
+    return rest, rules
 
 
 async def _open_area_conventions(uid, notes: list[str]) -> str | None:
@@ -359,7 +391,7 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
     if rows is not None and row is None:
         notes.append(f"The area has no row in {AREAS_INDEX_PATH}, so its related folders are unknown.")
     conventions = await _open_area_conventions(uid, notes)
-    text_, full_chars = await _open_area_main_note(main_note, uid, notes)
+    text_, full_chars, for_agents = await _open_area_main_note(main_note, uid, notes)
     area_map = await _open_area_map(main_note, uid, notes)
     entries, entries_truncated = await _open_area_entries(tag, uid, notes)
     tasks, tasks_total = await _open_area_tasks(tag, uid, notes)
@@ -369,7 +401,7 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
     return OpenAreaResult(
         found=True, area=tag, tag="#" + tag, name=row.name if row else None, description=description,
         main_note=main_note, main_note_open_url=_open_area_note_url(main_note), archived=archived,
-        matched_folder=matched_folder, area_conventions=conventions, main_note_text=text_,
+        matched_folder=matched_folder, for_agents=for_agents, area_conventions=conventions, main_note_text=text_,
         main_note_chars=full_chars, related_folders=(row.folders or None) if row else None, map=area_map,
         entries=entries or None, entries_truncated=entries_truncated or None,
         tasks=tasks or None, tasks_total=tasks_total if tasks_total > len(tasks) else None,
@@ -395,10 +427,13 @@ async def open_area(
     Read-only. Call it first when you start work in an area or answer a
     question about one, and when a session works in a folder outside the
     vault (`folder`), to find its area. One call returns the area's tag and
-    description, the vault's conventions for working on any area
-    (`area_conventions`, the "Working on an area" section of the vault's
-    conventions note, read at each call; follow them), its main note's text (the agent rules at its top and
-    `## Current position`; without its Tasks section), its related folders
+    description, its rules for agents (`for_agents`, its main note's
+    `## For agents` section: the rules for working in this area; follow
+    them; absent when the area has none), the vault's conventions for
+    working on any area (`area_conventions`, the "Working on an area"
+    section of the vault's conventions note, read at each call; follow
+    them), its main note's text (`## Current position` and the rest; without
+    its For agents and Tasks sections), its related folders
     outside the vault, a `map` of its folder (each note's one-line
     `description`, each subfolder's note count and folder-note description,
     capped; a note without a description is marked, add one when you work on

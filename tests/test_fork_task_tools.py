@@ -958,8 +958,13 @@ FILTERED = {**OWNER_SETTINGS, "globalFilter": "#task"}
 
 
 @pytest.fixture
-def kelno_vault(monkeypatch):
+def kelno_vault(vault, monkeypatch):
     monkeypatch.setattr(plugins, "active", lambda: plugins.load(("kelno_vault",)))
+    note(vault, "_/Rule files.md", RULE_FILES_NOTE)
+
+
+#: The vault's definition of a rule file, as `kelno_vault.rule_files` reads it.
+RULE_FILES_NOTE = "Rule files.\n\n```rule-files\n_/agent/*\nCLAUDE.md\n_/claude-code-hooks/*.py\n## For agents\n```\n"
 
 
 def test_without_the_vault_plugin_the_note_tools_write_task_lines(vault):
@@ -1152,6 +1157,47 @@ def test_the_rule_nudge_numbers_lines_as_written_when_the_stamp_adds_a_block(vau
     written = read(vault, "_/agent/Stamped.md").split("\n")
     line = written.index("- Rule two.") + 1
     assert line > 2 and f"- line {line}: - Rule two." in result, result
+
+
+def test_a_for_agents_section_is_a_rule_part_of_any_note(vault, kelno_vault):
+    area = "---\ndescription: d\n---\nTop.\n\n## For agents\n\n- Rule one. [P35]\n\n## Current position\n\n- Now.\n"
+    note(vault, "Areas/Home/Home.md", area)
+    # A line changed outside the section is no rule change.
+    outside = asyncio.run(tools.edit_note_impl("Areas/Home/Home.md", "- Later.", find="- Now."))
+    assert "rule_change_unlogged" not in outside
+    # A line changed inside it is, numbered as in the note.
+    inside = asyncio.run(tools.edit_note_impl("Areas/Home/Home.md", "- Rule one, reworded. [P35]",
+                                              find="- Rule one. [P35]", dry_run=True))
+    assert "rule_change_unlogged" in inside and "- line 8: - Rule one, reworded. [P35]" in inside
+    # A new ref on a section line carries the change, even beside a change outside the section.
+    both = asyncio.run(tools.edit_note_impl(
+        "Areas/Home/Home.md",
+        "Top!\n\n## For agents\n\n- Rule one, reworded. [P35, P95]\n\n## Current position\n\n- Later.\n"))
+    assert "rule_change_unlogged" not in both
+    # A section added to a new note, and a ref outside the section doesn't count for it.
+    created = asyncio.run(tools.create_note_impl(
+        "Reference/Servers/Box/Box.md", "Box. [P96]\n\n## For agents\n\n- Ask before reaching it.\n"))
+    assert "rule_change_unlogged" in created and "- line 5: - Ask before reaching it." in created
+    # The heading is read case-insensitively; a heading in a code fence is no section.
+    fenced = asyncio.run(tools.create_note_impl("Notes/Fenced.md", "```\n## For agents\n- not a rule\n```\n"))
+    assert "rule_change_unlogged" not in fenced
+    upper = asyncio.run(tools.create_note_impl("Notes/Upper.md", "## FOR AGENTS\n- a rule\n"))
+    assert "rule_change_unlogged" in upper
+    # A hook script is a rule file, but only notes get the nudge.
+    hook = asyncio.run(tools.write_file_impl("_/claude-code-hooks/x.py", "# a rule\n", encoding="text"))
+    assert "rule_change_unlogged" not in hook
+
+
+def test_an_unreadable_list_of_rule_files_says_so_and_never_fails_the_write(vault, kelno_vault):
+    (vault / "_" / "Rule files.md").unlink()
+    missing = asyncio.run(tools.create_note_impl("_/agent/New.md", "- A new rule.\n"))
+    assert read(vault, "_/agent/New.md") == "- A new rule.\n"
+    assert "rule_files_unreadable: the vault's list of rule files (_/Rule files.md) could not be read " \
+           "(FileNotFoundError)" in missing and "rule_change_unlogged" not in missing
+    note(vault, "_/Rule files.md", "No block.\n")
+    broken = asyncio.run(tools.create_note_impl("Notes/Any.md", "text\n"))
+    assert "(it has no `rule-files` code block)" in broken
+    assert "rule_files_unreadable" not in asyncio.run(tools.write_file_impl("x.txt", "t", encoding="text"))
 
 
 def test_without_the_vault_plugin_no_rule_nudge(vault):

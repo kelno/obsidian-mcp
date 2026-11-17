@@ -1,7 +1,7 @@
 """`open_area`'s structured result.
 
 Fields come in the order an agent needs them: which area, what it is for,
-the vault's conventions for working on any area, its main note (the agent rules at its top and its `## Current position`),
+its rules for agents, the vault's conventions for working on any area, its main note (its `## Current position`),
 where else it lives, the map of its folder, then its ledger entries and its open tasks, and last
 the two lines saying what to do with all of it.
 """
@@ -55,11 +55,16 @@ class OpenAreaResult(_OmitNone):
     archived: bool | None = None
     #: `folder=`: the listed folder it matched (it, or a folder above it).
     matched_folder: str | None = None
+    #: The rules for working in this area: the body of the main note's
+    #: `## For agents` section (as the vault's list of rule files names it),
+    #: kept out of `main_note_text`. Absent when the area has none.
+    for_agents: str | None = None
     #: The vault's conventions for working on any area: the `## Working on an
     #: area` section of the vault guide note (`VAULT_GUIDE_NOTE`), read at each call.
     area_conventions: str | None = None
-    #: The main note's text without its frontmatter and its `## Tasks` section
-    #: (the open tasks are below, from every note).
+    #: The main note's text without its frontmatter, its `## For agents`
+    #: section (`for_agents`) and its `## Tasks` section (the open tasks are
+    #: below, from every note).
     main_note_text: str | None = None
     #: Set when `main_note_text` was cut: the full length, in characters.
     main_note_chars: int | None = None
