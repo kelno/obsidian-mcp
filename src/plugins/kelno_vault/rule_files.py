@@ -14,7 +14,7 @@ non-blank line in it is either:
 - a level-2 heading (`## For agents`): that section, in any note, up to the
   next heading of level 1 or 2, is a rule section; only its lines are rules.
 
-The vault's `_/agent/Outside dependencies.md` records that this plugin
+The vault's `_/Outside dependencies.md` records that this plugin
 depends on the note's path and the block's format.
 """
 
@@ -64,15 +64,17 @@ def parse(text: str) -> RuleFiles:
         patterns, sections = [], []
         for body in lines[i + 1:]:
             stripped = body.strip()
-            if stripped.startswith(fence[0] * len(fence)) and not stripped.strip(fence[0]):
+            if closes_fence(stripped, fence):
                 break
             if not stripped:
                 continue
             heading = _HEADING_RE.match(stripped)
             if heading and len(heading.group(1)) == 2 and heading.group(2).strip():
                 sections.append(heading.group(2).strip())
-            elif heading:
-                raise RuleFilesError(f"{stripped!r} is not a level-2 heading")
+            elif stripped.startswith(("#", "-", "/")) or stripped.endswith("/"):
+                # A typo here would silently match nothing: say so instead.
+                raise RuleFilesError(f"{stripped!r} is neither a level-2 heading (`## Name`) nor a path pattern "
+                                     "(no leading `-` or `/`, no trailing `/`)")
             else:
                 patterns.append(stripped)
         else:
@@ -92,6 +94,24 @@ def read(user_id) -> RuleFiles:
     return parse(read_bytes(RULE_FILES_PATH, user_id, MAX_NOTE_BYTES).decode("utf-8", errors="replace"))
 
 
+def fence_opener(line: str) -> str | None:
+    """The fence a line opens (its run of backticks or tildes), or None.
+
+    As CommonMark reads it: a backtick fence's info string holds no backtick,
+    so "```code``` inline" opens nothing.
+    """
+    match = re.match(r"\s*(`{3,}|~{3,})(.*)$", line)
+    if not match or (match.group(1)[0] == "`" and "`" in match.group(2)):
+        return None
+    return match.group(1)
+
+
+def closes_fence(line: str, fence: str) -> bool:
+    """True when `line` closes `fence`: the same character, at least as many, and nothing after it."""
+    stripped = line.strip()
+    return len(stripped) >= len(fence) and stripped == fence[0] * len(stripped)
+
+
 def section_ranges(lines: list[str], headings: tuple[str, ...], start: int = 0) -> list[tuple[int, int]]:
     """`[(first, end)]`: 0-based line ranges of every level-2 section of `lines` named in `headings`.
 
@@ -105,12 +125,12 @@ def section_ranges(lines: list[str], headings: tuple[str, ...], start: int = 0) 
     open_at, fence = None, None
     for i in range(start, len(lines)):
         line = lines[i].rstrip("\r")
-        fence_match = re.match(r"\s*(`{3,}|~{3,})", line)
-        if fence is None and fence_match:
-            fence = fence_match.group(1)[0]
-            continue
-        if fence is not None:
-            if fence_match and fence_match.group(1)[0] == fence:
+        if fence is None:
+            fence = fence_opener(line)
+            if fence is not None:
+                continue
+        else:
+            if closes_fence(line, fence):
                 fence = None
             continue
         match = _HEADING_RE.match(line)

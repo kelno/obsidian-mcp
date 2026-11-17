@@ -40,8 +40,16 @@ def test_parse_takes_the_rule_files_block_wherever_it_is_and_any_fence():
     ("no block here\n", "no `rule-files` code block"),
     ("```rule-files\n\n```\n", "empty"),
     ("```rule-files\na/*\n", "not closed"),
-    ("```rule-files\n# Title\n```\n", "not a level-2 heading"),
-    ("```rule-files\n### Deep\n```\n", "not a level-2 heading"),
+    ("```rule-files\n# Title\n```\n", "neither a level-2 heading"),
+    ("```rule-files\n### Deep\n```\n", "neither a level-2 heading"),
+    # Typos that would otherwise match nothing, silently.
+    ("```rule-files\n##For agents\n```\n", "neither a level-2 heading"),
+    ("```rule-files\n- _/agent/*\n```\n", "no leading `-` or `/`"),
+    ("```rule-files\n/CLAUDE.md\n```\n", "no leading `-` or `/`"),
+    ("```rule-files\n_/agent/\n```\n", "no trailing `/`"),
+    # A shorter fence, or one with text after it, does not close the block.
+    ("````rule-files\na/*\n```\n", "not closed"),
+    ("```rule-files\na/*\n``` x\n", "not closed"),
 ])
 def test_parse_refuses_a_missing_or_unusable_block(text, why):
     with pytest.raises(rule_files.RuleFilesError, match=why):
@@ -70,6 +78,16 @@ def test_section_ranges_end_at_the_next_heading_of_level_one_or_two_and_skip_fen
     # Frontmatter lines are not read; a level-3 heading stays inside; a fenced heading is no heading;
     # a level-1 heading of the same name is not a section; the last section runs to the end.
     assert rule_files.section_ranges(lines, ("For agents",), start=3) == [(5, 11), (15, 16)]
+
+
+def test_section_ranges_read_fences_as_commonmark_does():
+    # A longer fence holding a shorter one, and an inline triple-backtick span, don't end the section early.
+    lines = ["## For agents", "````", "```", "## Inner", "```", "````", "- a", "```code``` inline",
+             "## Not inside", "- z"]
+    assert rule_files.section_ranges(lines, ("For agents",)) == [(1, 8)]
+    # A fence with text after it doesn't close; a tilde fence isn't closed by backticks.
+    lines = ["## For agents", "~~~", "```", "## Inner", "~~~ x", "~~~", "- a", "## Other"]
+    assert rule_files.section_ranges(lines, ("For agents",)) == [(1, 7)]
 
 
 def test_split_sections_takes_every_matching_section_out():

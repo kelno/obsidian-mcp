@@ -1200,6 +1200,16 @@ def test_an_unreadable_list_of_rule_files_says_so_and_never_fails_the_write(vaul
     assert "rule_files_unreadable" not in asyncio.run(tools.write_file_impl("x.txt", "t", encoding="text"))
 
 
+def test_a_write_to_the_list_of_rule_files_is_checked_against_its_own_new_text(vault, kelno_vault):
+    (vault / "_" / "Rule files.md").unlink()
+    fixed = asyncio.run(tools.create_note_impl("_/Rule files.md", RULE_FILES_NOTE))
+    assert "rule_files" not in fixed.split("content_hash")[1]
+    broken = asyncio.run(tools.edit_note_impl("_/Rule files.md", "- _/agent/*", find="_/agent/*"))
+    assert read(vault, "_/Rule files.md").count("- _/agent/*") == 1
+    assert "rule_files_broken: after this write, the vault's list of rule files cannot be read" in broken
+    assert "no leading `-` or `/`" in broken
+
+
 def test_without_the_vault_plugin_no_rule_nudge(vault):
     created = asyncio.run(tools.create_note_impl("_/agent/Unset.md", "- A new rule.\n"))
     assert "rule_change_unlogged" not in created

@@ -66,7 +66,7 @@ OPEN_AREA_TASKS_MAX = 30
 #: The section of the main note left out: the open tasks come from every note instead.
 OPEN_AREA_TASKS_HEADING = "Tasks"
 #: The section of the vault guide note (`VAULT_GUIDE_NOTE`) holding the conventions for working on any
-#: area; read at each call, its text never copied here. The vault's `_/agent/Outside dependencies.md`
+#: area; read at each call, its text never copied here. The vault's `_/Outside dependencies.md`
 #: records that this plugin depends on the heading's name.
 OPEN_AREA_CONVENTIONS_HEADING = "Working on an area"
 #: The conventions are cut past this many characters.
@@ -151,7 +151,7 @@ async def _open_area_rules(text_: str, path: str, uid, notes: list[str]) -> tupl
     """`(text without its rule sections, their bodies or None)`; the text unchanged when the list can't be read."""
     try:
         definition = await asyncio.to_thread(_rule_files.read, uid)
-    except (FileNotFoundError, ValueError, OSError, _rule_files.RuleFilesError) as exc:
+    except Exception as exc:  # noqa: BLE001 — the rest of the result still answers; the note says why
         why = str(exc) if isinstance(exc, _rule_files.RuleFilesError) else type(exc).__name__
         notes.append(f"The vault's list of rule files ({_rule_files.RULE_FILES_PATH}) could not be read ({why}), so "
                      "the area's rules for agents, if any, are left in main_note_text.")

@@ -61,9 +61,17 @@ async def unlogged_lines(path: str, old: str | None, new: str, user_id) -> tuple
     """
     if not path.lower().endswith(".md"):
         return [], ""
+    if path.replace("\\", "/").lstrip("/").casefold() == rule_files.RULE_FILES_PATH.casefold():
+        # The definition itself: check the text being written, not the one it replaces.
+        try:
+            rule_files.parse(new)
+        except rule_files.RuleFilesError as exc:
+            return [], (f"\n\nrule_files_broken: after this write, the vault's list of rule files cannot be read "
+                        f"({exc}): until it is fixed, no note write is checked for rule changes. Fix it now.")
+        return [], ""
     try:
         definition = await asyncio.to_thread(rule_files.read, user_id)
-    except (FileNotFoundError, ValueError, OSError, rule_files.RuleFilesError) as exc:
+    except Exception as exc:  # noqa: BLE001 — a nudge never fails the write it follows; the result says so
         why = str(exc) if isinstance(exc, rule_files.RuleFilesError) else type(exc).__name__
         # debug, not warning: a caller drives this path (the D18 permit rule); the result says so.
         logger.debug("rule files unreadable: %s", why)
