@@ -395,6 +395,30 @@ def test_no_description_exceeds_the_cap(tool):
     )
 
 
+def test_no_description_exceeds_the_cap_with_the_fork_owners_plugin():
+    """Fork: the cap holds for the description as served with `PLUGINS=["kelno_vault"]`, the
+    plugin's paragraphs included (owner's decision, ledger F110). The docstrings take the
+    plugins' text when the server module is imported, so a fresh interpreter imports it with
+    the setting."""
+    import subprocess
+    import sys
+
+    script = ("import asyncio, json, sys; sys.path.insert(0, sys.argv[1]); "
+              "from src.mcp_server.server import mcp; "
+              "print(json.dumps({t.name: t.description or '' for t in asyncio.run(mcp.list_tools())}))")
+    env = dict(os.environ, PLUGINS='["kelno_vault"]')
+    env.setdefault("OLLAMA_URL", "http://127.0.0.1:11434")
+    repo = str(Path(__file__).resolve().parents[1])
+    run = subprocess.run([sys.executable, "-c", script, repo], env=env, capture_output=True, text=True,
+                         timeout=300, cwd=tempfile.gettempdir())
+    assert run.returncode == 0, run.stderr[-3000:]
+    served = json.loads(run.stdout.strip().splitlines()[-1])
+    assert "task_line_by_hand" in served["create_note"], "the plugin's text did not reach the descriptions"
+    over = {name: len(text) for name, text in served.items()
+            if len(text) > FORK_DESCRIPTION_CAPS.get(name, DESCRIPTION_CAP)}
+    assert not over, f"characters on the wire with kelno_vault loaded: {over}"
+
+
 @pytest.mark.parametrize("name", RESTRUCTURED_WRITE_TOOLS + TASK_WRITE_TOOLS)
 def test_the_write_tools_lead_with_their_contract(name):
     tool = registered(name)

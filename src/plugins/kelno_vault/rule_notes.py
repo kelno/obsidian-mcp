@@ -101,18 +101,6 @@ def render(lines: list[tuple[int, str]], shift: int) -> str:
               "change of meaning the owner hasn't decided waits for their decision: ask first.")
 
 
-_SEE = conventions.see(conventions.RULE_REFS, conventions.RULES_NOTE, under=conventions.RULE_REFS_UNDER)
-
-TOOL_TEXT = (
-    f"**Rule edits carry their proposal** {_SEE}. In this vault's rules for agents (the rule files "
-    f"`{rule_files.RULE_FILES_PATH}` lists, such as the notes under `_/agent/` and the root `CLAUDE.md`, and a "
-    "`## For agents` section in any note, whose lines alone count), when a write adds or changes rule lines "
-    "(outside the frontmatter) and none of them carries a new proposal ref (`[P95]`), the result adds "
-    "`rule_change_unlogged:` with those lines and what to do. Never a refusal."
-)
-
-WRITE_FILE_TEXT = "A rule note written with no new proposal ref gets `rule_change_unlogged:` as in `edit_note`."
-
 GUIDE = (
     "## Agent rules (this server)\n\n"
     f"This vault's rules for agents are the rule files `{rule_files.RULE_FILES_PATH}` lists: whole notes, such as "

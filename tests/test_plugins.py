@@ -367,11 +367,13 @@ def test_the_served_descriptions_hold_no_marker_and_no_plugin_rule_without_the_p
 
 def test_this_vaults_plugin_describes_its_rule_on_every_writer():
     (loaded,) = plugins.load(("kelno_vault",))
-    assert set(loaded.tool_text) == {"create_note", "edit_note", "write_file", "move_note"}
-    writers = [loaded.tool_text[name] for name in ("create_note", "edit_note", "write_file")]
+    # edit_note's own description leaves no room under the cap: it gets none, and its "See
+    # `get_vault_guide`" line points to the sections below.
+    assert set(loaded.tool_text) == {"create_note", "write_file", "move_note"}
+    writers = [loaded.tool_text[name] for name in ("create_note", "write_file")]
     assert all("title_heading_removed" in text and "links_rewritten" in text and "task_line_by_hand" in text
-               and "rule_change_unlogged" in text for text in writers)
-    assert all("note_name_date" in loaded.tool_text[name] for name in ("create_note", "write_file", "move_note"))
+               and "rule_change_unlogged" in text and "note_name_date" in text for text in writers)
+    assert "as in `create_note`" in loaded.tool_text["move_note"]
     assert "## Note names (this server)" in loaded.guide_text and loaded.check_name is not None
     assert loaded.guide_text.startswith("## Task lines (this server)")
     assert "## Agent rules (this server)" in loaded.guide_text and "_/agent/" in loaded.guide_text
@@ -385,16 +387,12 @@ def test_this_vaults_plugin_points_to_the_conventions_it_enforces_instead_of_res
     from src.plugins.kelno_vault import conventions
 
     (loaded,) = plugins.load(("kelno_vault",))
-    note = f"`{conventions.CONVENTIONS_NOTE}`"
-    for name in ("create_note", "edit_note"):
-        text = loaded.tool_text[name]
-        for section in (conventions.LINKS, conventions.TITLES, conventions.TASKS):
-            assert f'"{section}" in {note}' in text, (name, section)
-        assert (f'the bullet "{conventions.RULE_REFS}" under "{conventions.RULE_REFS_UNDER}" in '
-                f'`{conventions.RULES_NOTE}`') in text, name
-    assert f'"{conventions.DATES}" in {note}' in loaded.tool_text["create_note"]
+    assert f"`{conventions.CONVENTIONS_NOTE}`" in loaded.tool_text["create_note"]
+    assert '"(this server)" sections of `get_vault_guide`' in loaded.tool_text["create_note"]
     for section in (conventions.LINKS, conventions.TITLES, conventions.TASKS, conventions.DATES):
         assert f'The convention is "{section}" in the vault\'s conventions note' in loaded.guide_text, section
+    assert (f'the bullet "{conventions.RULE_REFS}" under "{conventions.RULE_REFS_UNDER}" in '
+            f'`{conventions.RULES_NOTE}`') in loaded.guide_text
     # The conventions themselves are not restated: the date pattern, the reason for no title heading.
     for text in (*loaded.tool_text.values(), loaded.guide_text):
         assert "YYYY-MM-DD" not in text and "never 00" not in text and "shows the file name" not in text

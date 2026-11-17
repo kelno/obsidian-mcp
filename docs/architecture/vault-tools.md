@@ -100,7 +100,14 @@ Nothing may depend on a client having read them: claude.ai is reported to drop
 server instructions.
 
 **Descriptions are capped at 4,000 characters on the wire, and the wire
-string is the raw docstring.** `Tool.from_function` publishes
+string is the raw docstring**, a plugin's `tool_text` included (fork, owner's
+decision 2026-11-17, ledger F110: before it, the `kelno_vault` paragraphs took
+`create_note` to about 6,100 characters and `edit_note` to about 6,900, past
+Claude Code's cut). `test_no_description_exceeds_the_cap_with_the_fork_owners_plugin`
+imports the server in a fresh interpreter with `PLUGINS=["kelno_vault"]`, since
+the docstrings take the plugins' text at import. `edit_note`'s own text leaves
+that plugin no room under its 4,400, so it adds nothing there; see
+[plugins.md](plugins.md). `Tool.from_function` publishes
 `description or fn.__doc__ or ""` — no `inspect.cleandoc` — so indentation
 counts, and every length in the test is measured on `tool.description` from
 the registry. Claude Code cuts an upfront description at 4,096; before #343
@@ -577,7 +584,7 @@ With `LAST_AI_EDIT_FIELD` set, every tool that writes a note's text sets that fr
 - **`LAST_AI_EDIT_FIELD` must load as a string key**: `true`, `yes`, `null` and the like pass a name pattern but load as a bool or None, and are refused at startup.
 - **Accepted (review, 2026-11-10):** L1, `move_note` stamps in its preflight, so with many sources the stamp precedes the file's modification time by the planning time (seconds); the `Recent` view's tolerance is a minute. L2, a note left unstamped by a refusal above (duplicate keys already present, a column-0 list under the key, a block scalar with a blank line) is left so without a word: failing safe, not loudly. L3, the archive hint's `lstat` follows intermediate symlinks, so a configured `ARCHIVE_FOLDER` pointing outside the vault probes there; only a yes/no comes back, and the setting is the operator's. Local edits on the owner's PC do not go through the server; a Claude Code hook in the owner's setup stamps those, with the same line rules (no YAML parser there, so it refuses any quoted spelling of the key instead of re-parsing).
 
-The `kelno_vault` sections below say why each rule exists, for whoever maintains the code. What agents read is split (owner's decision, 2026-11-17): the vault's conventions note states each convention once, and the plugin's description paragraphs and guide sections say what the tool enforces and point to that note's section (`src/plugins/kelno_vault/conventions.py`); the refusals keep what an agent needs to fix the call on the spot. See [plugins.md](plugins.md).
+The `kelno_vault` sections below say why each rule exists, for whoever maintains the code. What agents read is split (owner's decision, 2026-11-17): the vault's conventions note states each convention once, and the plugin's guide sections say what the tool enforces and point to that note's section (`src/plugins/kelno_vault/conventions.py`); its description text names each check in a line, within the description cap ("Tool metadata" above); the refusals keep what an agent needs to fix the call on the spot. See [plugins.md](plugins.md).
 
 ### A first heading repeating the note's name is dropped (fork, owner's decision, 2026-11-12; `kelno_vault` plugin)
 

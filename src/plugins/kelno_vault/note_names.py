@@ -277,22 +277,6 @@ async def check_name(note: plugins.NoteName) -> plugins.NameCheck | None:
     return None
 
 
-TOOL_TEXT = (
-    f"**Dated note names** {conventions.see(conventions.DATES)}. Where a folder note (`<folder>/<folder>.md`) sets "
-    "`note_names: dated` (for that folder and the folders below it, and for a folder anywhere under an area or "
-    "`Archive/` named like a top-level one, unless a nearer folder note says otherwise), a new note's name that "
-    "doesn't start with the date it is about, written as the convention says, is refused with `note_name_date`, "
-    "writing nothing, naming the folder note and, when it can, the corrected name. Where it sets `note_names: undated`, a name starting with a date is "
-    "written and flagged (`note_name:`). No setting above: no check."
-)
-
-MOVE_TEXT = (
-    "The new name is checked as in `create_note` (`note_name_date`, `note_name:`), before anything moves. A move "
-    "into `Archive/` that keeps the note's name is not checked."
-)
-
-WRITE_FILE_TEXT = "A new `.md` note's name is checked like `create_note`'s (`note_name_date`)."
-
 GUIDE = (
     "## Note names (this server)\n\n"
     f"{conventions.see_below(conventions.DATES)} The tools read the setting from a folder note's "

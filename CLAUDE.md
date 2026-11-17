@@ -625,7 +625,9 @@ update it in the same change.** What stays here is the short list:
   `FastMCP(instructions=SERVER_INSTRUCTIONS)` is ≤ 2,000 characters with a
   ≤ 512-character lead that states the round trip *with its conditions* and
   `expected_hash` as optional. No description exceeds 4,000 characters on the
-  wire (the raw docstring is what ships); the four long ones lead with their
+  wire (the raw docstring is what ships; `edit_note` 4,400), the deployment's
+  plugin text included (owner, F110: with `kelno_vault` loaded, a test renders
+  them in a fresh interpreter); the four long ones lead with their
   contract and the reasoning moved to the vault-tools note. See
   [vault tools](docs/architecture/vault-tools.md), "Tool metadata".
   **`tools/list` is scoped by the presented credential** (#358): an OAuth
@@ -811,7 +813,8 @@ seven upstream tools registered and switched off (`SWITCHED_OFF` at the end of
 ([vault roots and tenancy](docs/architecture/vault-roots-and-tenancy.md)).
 Every registration carries `title=` and `annotations=` (one of four shared
 `ToolAnnotations` shapes); `tests/test_issue_343_tool_metadata.py` fails on a
-registration without them, on a description over 4,000 characters, and on a
+registration without them, on a description over 4,000 characters (also with
+`kelno_vault` loaded), and on a
 destructive set that drifts from the write bucket.
 
 A read-only OAuth grant **sees 20 of the 32** (#358): `tools/list` omits the

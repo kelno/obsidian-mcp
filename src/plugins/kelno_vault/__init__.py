@@ -31,24 +31,42 @@ from src.services.filters import apply_note_filters
 
 logger = logging.getLogger(__name__)
 
-_LINKS_TOOL_TEXT = (
-    f"**Wikilinks get the note's full path** {conventions.see(conventions.LINKS)}, as a safety net. On the lines a "
-    "write adds or changes (never on lines it leaves as they were, nor on checkbox lines), a wikilink or note embed "
-    "naming a note by bare name (`[[Areas]]`) that exactly one note has, archived ones counted, gets that note's "
-    "full path; its display text is kept, or, when it had none, the text Obsidian showed is added, so it reads the "
-    "same. The published text is then not byte for byte what you sent (the reported `content_hash` is of what was "
-    "written). The result lists each under `links_rewritten:`. A bare name several notes have, or none, a full "
-    "path to no note, and a path in code formatting after a link are left as written and listed under "
-    "`links_flagged:`. The write is never refused for a link."
+#: The tool descriptions name each check and its result in a line; the guide sections hold the detail.
+#: Every served description stays within the cap `tests/test_issue_343_tool_metadata.py` sets, this
+#: text included: `edit_note`'s own text leaves no room, so it gets none (its "See `get_vault_guide`"
+#: line points to the sections), and `move_note` gets one line.
+_WRITER_TEXT = (
+    "**This vault's checks**, on the lines a write adds or changes (conventions: "
+    f"`{conventions.CONVENTIONS_NOTE}`; details: the \"(this server)\" sections of `get_vault_guide`). A task line "
+    "is refused (`task_line_by_hand`): use the task tools. A first heading repeating the note's name is dropped "
+    "(`title_heading_removed:`). A bare-name wikilink one note has gets its full path (`links_rewritten:`; others "
+    "`links_flagged:`), so `content_hash` is of what was written. A rule line without a new proposal ref is "
+    "flagged (`rule_change_unlogged:`)."
 )
+
+_CREATE_NOTE_NAME_TEXT = (
+    "A new note's name is checked against its folder's `note_names` setting: in a dated folder, one not starting "
+    "with the date the note is about is refused with `note_name_date`; in an undated one, a dated name is flagged "
+    "(`note_name:`)."
+)
+
+_WRITE_FILE_TEXT = (
+    "On a `.md`, this vault's checks run as in `create_note` (`task_line_by_hand`, `note_name_date` for a new note, "
+    "`title_heading_removed:`, `links_rewritten:`, `rule_change_unlogged:`)."
+)
+
+_MOVE_NOTE_TEXT = "The name is checked as in `create_note`."
 
 _LINKS_GUIDE = (
     "## Links (this server)\n\n"
     f"{conventions.see_below(conventions.LINKS)} As a safety net, the note tools (`edit_note`, `create_note`, "
     "`write_file` to a `.md`) give a bare-name link or note embed you write (`[[Areas]]`) the note's full path when "
-    "exactly one note has that name, archived notes counted (display text kept, or added when there was none), on "
-    "the lines you add or change only, and list it under `links_rewritten:`. A name several notes share, or none "
-    "has, is left as you wrote it and listed under `links_flagged:`: write the full path of the note you mean."
+    "exactly one note has that name, archived notes counted (display text kept, or the text Obsidian showed added "
+    "when there was none), on the lines you add or change only, checkbox lines left alone, and list it under "
+    "`links_rewritten:`; the reported `content_hash` is of what was written, not what you sent. A name several "
+    "notes share, or none has, a full path to no note, and a path in code formatting after a link are left as you "
+    "wrote them and listed under `links_flagged:`: write the full path of the note you mean. A write is never "
+    "refused for a link."
 )
 
 
@@ -83,23 +101,15 @@ async def _full_path_links(write: plugins.NoteWrite, new: str) -> tuple[str, lin
                            "write each link with the note's full path yourself.")
 
 
-_TITLE_HEADING_TOOL_TEXT = (
-    f"**No title heading** {conventions.see(conventions.TITLES)}. When the body's first non-blank line is a heading "
-    "(`#` to `######`) whose text is exactly the note's whole file name without `.md`, its date too (case and "
-    "surrounding spaces ignored, formatting such as `**` not stripped) and this write adds or changes that line, it "
-    "is removed with the blank lines after it, and the result says so under `title_heading_removed:`; the reported "
-    "`content_hash` is of what was written. Only exact repeats are caught (`# Vet call` in `2026-11-12 Vet call` "
-    "stays). The write is never refused for it."
-)
-
 _TITLE_HEADING_GUIDE = (
     "## Titles (this server)\n\n"
     f"{conventions.see_below(conventions.TITLES)} When a write through the note tools adds or changes the body's "
-    "first non-blank line and it is a heading (`#` to `######`) whose text is exactly the note's name (the whole "
-    "file name without `.md`, a date included; case and surrounding spaces ignored, formatting such as `**` not "
-    "stripped), the tool removes it and says so under `title_heading_removed:`. A heading the write leaves as it "
-    "was stays, and a near repeat (`# Call with the vet` in `2026-11-12 Call with the vet`, `# **Dog food**`) is "
-    "not caught."
+    "first non-blank line and it is a heading (`#` to `######`) whose text is exactly the note's whole file name "
+    "without `.md`, its date too (case and surrounding spaces ignored, formatting such as `**` not stripped), the "
+    "tool removes it with the blank lines after it and says so under `title_heading_removed:`; the reported "
+    "`content_hash` is of what was written. A heading the write leaves as it was stays, and a near repeat "
+    "(`# Call with the vet` in `2026-11-12 Call with the vet`, `# **Dog food**`) is not caught. A write is never "
+    "refused for it."
 )
 
 
@@ -138,15 +148,9 @@ plugin = plugins.Plugin(
     check_name=note_names.check_name,
     tools=(open_area.TOOL,),
     tool_text={
-        "create_note": "\n\n".join((note_names.TOOL_TEXT, task_lines.TOOL_TEXT, rule_notes.TOOL_TEXT,
-                                     _TITLE_HEADING_TOOL_TEXT, _LINKS_TOOL_TEXT)),
-        "edit_note": "\n\n".join((task_lines.TOOL_TEXT, rule_notes.TOOL_TEXT, _TITLE_HEADING_TOOL_TEXT,
-                                   _LINKS_TOOL_TEXT)),
-        "move_note": note_names.MOVE_TEXT,
-        "write_file": " ".join((note_names.WRITE_FILE_TEXT, task_lines.WRITE_FILE_TEXT, rule_notes.WRITE_FILE_TEXT))
-                      + " A first heading repeating the note's name is dropped as in `edit_note` "
-                      "(`title_heading_removed:`), and bare-name wikilinks get the note's full path as in `edit_note` "
-                      "(`links_rewritten:`, `links_flagged:`).",
+        "create_note": f"{_WRITER_TEXT} {_CREATE_NOTE_NAME_TEXT}",
+        "move_note": _MOVE_NOTE_TEXT,
+        "write_file": _WRITE_FILE_TEXT,
     },
     guide_text="\n\n".join((task_lines.GUIDE, rule_notes.GUIDE, note_names.GUIDE, _LINKS_GUIDE,
                            _TITLE_HEADING_GUIDE, _OPEN_AREA_GUIDE)),
