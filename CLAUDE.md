@@ -100,7 +100,7 @@ The AI-managed rules above set the pace here. Anything on `main` may be deployed
 
 ### Following upstream
 
-This fork follows `maxkuminov/obsidian-mcp` under kelno's rules for forks, kept in kelno's private agent setup; they include an upstream check at the start of a session. What is specific here:
+This fork follows `maxkuminov/obsidian-mcp`. What is specific here:
 
 - The record of how the fork differs is `FORK.md`, "What differs from upstream": one row per difference, saying what differs and why.
 - An upstream tool the owner hasn't decided on is switched off by naming it in a `SWITCHED_OFF` list in `src/mcp_server/server.py`: its code stays, it is not registered, and its tests run with it registered. The first resync that leaves a tool off adds the list. Any other upstream feature stays off through its own setting.
@@ -143,7 +143,7 @@ results**, which an agent will act on without a human ever seeing the query.
 A piece of work that changes the write tools, section addressing, or the chunking/embedding path gets one adversarial review before its push to `main`: a separate agent, run in the background alongside the full checks, that tries to break it on plausible input. Its findings are triaged under the review budget above; fixing them needs no second review.
 
 **End-to-end check, not a browser pass**, for MCP-side changes — the consumer
-is an agent. Once the change is deployed, call the affected MCP tools against the live server, and say in the report which tools were called, or that the check waits for the deploy. A change to `panel.js`, or to the scripts, styles or `data-*` controls of the panel, auth or consent templates, gets a browser pass: the panel sits behind SSO, so the owner opens the affected page with devtools open, and zero CSP violations is the bar (see the `panel-csp` change, tasks §6). Text-only template changes don't need one.
+is an agent. Once the change is deployed, call the affected MCP tools against the live server, and say in the report which tools were called, or that the check waits for the deploy. A change to `panel.js`, or to the scripts, styles or `data-*` controls of the panel, auth or consent templates, gets a browser pass: the affected page opened with devtools open, zero CSP violations being the bar (see the `panel-csp` change, tasks §6). Text-only template changes don't need one.
 
 ## Key decisions
 
@@ -899,7 +899,7 @@ other tasks (unique ids, no dependency on a missing id, no cycle, no silent
 unblock of open tasks). Read
 [task tools](docs/architecture/tasks.md) first.
 
-**`open_area`** (fork; a tool of the `kelno_vault` plugin, served only with it loaded): the one call an agent makes when it opens an area (by name or by a folder outside the vault, through the list of areas `Areas/Areas.md`): the area's rules for agents (`for_agents`, its main note's `## For agents` section), the main note without that section and its Tasks section, related folders, a map of the area's folder from the index (each note's `description`, each subfolder's note count and folder-note description, capped at 30 lines), active ledger entries and open tasks, then three instruction lines. Class `scan`. Read [open_area](docs/architecture/open-area.md) first.
+**`open_area`** (fork; a tool of the `kelno_vault` plugin, served only with it loaded): the one call an agent makes when it opens an area (by name or by a folder outside the vault, through the vault's list of areas, `open_area.AREAS_INDEX_PATH`): the area's rules for agents (`for_agents`, its main note's `## For agents` section), the main note without that section and its Tasks section, related folders, a map of the area's folder from the index (each note's `description`, each subfolder's note count and folder-note description, capped at 30 lines), active ledger entries and open tasks, then three instruction lines. Class `scan`. Read [open_area](docs/architecture/open-area.md) first.
 
 **Agent ledger** (fork) — `ledger_search`, `ledger_get`, `ledger_add`,
 `ledger_update`, `ledger_digest`, `ledger_digest_edit`, `ledger_topics`,
