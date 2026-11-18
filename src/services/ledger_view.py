@@ -34,6 +34,7 @@ import hmac
 import json
 from dataclasses import dataclass, replace
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 
@@ -136,15 +137,19 @@ def decode(token: str, *, now: datetime.datetime | None = None) -> Claims | None
 def url_for(claims: Claims) -> str | None:
     """`<origin>/transfer/ledger#C146/until-2026-12-18/<token>`.
 
-    The ref and the end date (UTC) come first, readable, so whoever sees the
-    link, an agent included, sees it is temporary without a rule saying so
-    (owner, 2026-11-19). They are not checked: the page sends only the last
-    part, the token, which carries both signed.
+    The ref and the end date come first, readable, so whoever sees the link,
+    an agent included, sees it is temporary without a rule saying so (owner,
+    2026-11-19). The date is the owner's (`TASKS_TIMEZONE`), the one the
+    page's own "works until" shows: in UTC, a link made after 23:00 in
+    Brussels read a day earlier than the page (owner, 2026-11-19). They are
+    not checked: the page sends only the last part, the token, which carries
+    both signed.
     """
     base = settings.public_base_url
     if not base:
         return None
-    label = f"{quote(claims.ref, safe='')}/until-{claims.expires_at.date().isoformat()}"
+    end = claims.expires_at.astimezone(ZoneInfo(settings.tasks_timezone)).date()
+    label = f"{quote(claims.ref, safe='')}/until-{end.isoformat()}"
     return f"{base}{PAGE_PATH}#{label}/{encode(claims)}"
 
 

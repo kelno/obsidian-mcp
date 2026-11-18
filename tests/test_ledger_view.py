@@ -79,8 +79,19 @@ def test_the_link_shows_its_end_date_the_last_day_it_opens(monkeypatch):
     # 2026-11-19). A credential ending sooner shows its own, earlier date.
     monkeypatch.setattr(settings, "_public_origin_explicit", True)
     monkeypatch.setattr(settings, "base_url", "https://mcp.example.org")
-    early = int(datetime.datetime(2026, 11, 25, 23, 0, tzinfo=datetime.timezone.utc).timestamp())
+    early = int(datetime.datetime(2026, 11, 25, 21, 0, tzinfo=datetime.timezone.utc).timestamp())
     assert "#C146/until-2026-11-25/" in ledger_view.url_for(claims(expires=early))
+
+
+def test_the_date_is_the_owners_not_utcs(monkeypatch):
+    # 23:19 UTC is already the next day in Brussels, as the page's "works until" shows it.
+    monkeypatch.setattr(settings, "_public_origin_explicit", True)
+    monkeypatch.setattr(settings, "base_url", "https://mcp.example.org")
+    monkeypatch.setattr(settings, "tasks_timezone", "Europe/Brussels")
+    late = int(datetime.datetime(2026, 12, 18, 23, 19, tzinfo=datetime.timezone.utc).timestamp())
+    assert "#C146/until-2026-12-19/" in ledger_view.url_for(claims(expires=late))
+    monkeypatch.setattr(settings, "tasks_timezone", "UTC")
+    assert "#C146/until-2026-12-18/" in ledger_view.url_for(claims(expires=late))
 
 
 def test_no_public_origin_no_link(monkeypatch):

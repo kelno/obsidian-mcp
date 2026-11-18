@@ -884,7 +884,8 @@ class Settings(BaseSettings):
     # The owner's time zone. Every "today" the task tools use (done and
     # cancelled dates, `due before today`, urgency) is the date in this zone,
     # never the server clock's day, so it agrees with Obsidian on the owner's
-    # devices. Checked at startup: an unknown zone stops the server.
+    # devices. The agent-ledger entry links' readable end date uses it too.
+    # Checked at startup: an unknown zone stops the server.
     tasks_timezone: str = "Europe/Brussels"
     # The Tasks plugin's settings file inside the vault, read (never written)
     # on every task tool call.
