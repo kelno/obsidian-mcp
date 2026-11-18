@@ -71,7 +71,7 @@ async def test_a_missing_path_gets_its_own_error_and_the_others_still_come_back(
 async def test_a_call_that_reads_nothing_is_logged_as_the_first_refusal(vault):
     out = await tools.read_notes_impl(["missing.md", "../outside.md"])
     assert all(n.error for n in out.notes)
-    assert out._body_outcome is not None and out._body_outcome.refusal == "not_found"
+    assert out._body_outcome is not None and out._body_outcome.marker == "not_found"
 
 
 @pytest.mark.asyncio
@@ -80,7 +80,7 @@ async def test_an_empty_or_too_long_list_is_refused(vault, count):
     out = await tools.read_notes_impl(["a.md"] * count)
     assert out.notes is None
     assert f"give 1 to {READ_NOTES_MAX_PATHS} paths (got {count})" in out.error
-    assert out._body_outcome.refusal == "invalid_argument"
+    assert out._body_outcome.marker == "invalid_argument"
 
 
 @pytest.mark.asyncio

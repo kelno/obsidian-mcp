@@ -410,9 +410,8 @@ async def read_note(
       by a marker inside a field.
 
     Byte-identity holds for notes whose body newlines are LF: terminators inside the selected content come back
-    as LF. `read_file` on the same path is the byte-exact route to the file itself.
-
-    Several whole notes: `read_notes` reads up to 20 in one call.
+    as LF. `read_file` on the same path is the byte-exact route to the file itself. Several notes in one call:
+    `read_notes`.
 
     Args:
         path: Vault-relative path to the note (e.g. "Cards/My Note.md")

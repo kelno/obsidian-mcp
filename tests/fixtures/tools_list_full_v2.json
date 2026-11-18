@@ -90,7 +90,7 @@
     "openWorldHint": false,
     "readOnlyHint": true
    },
-   "description": "Read a note from the Obsidian vault by its relative path.\n\n    Arguments: `path`, an optional `section` (an ATX heading), and `offset` / `limit` for paging. Returns a\n    **structured result**, not a rendered document — read the fields:\n\n    - `content` — the selected note text. Whole-note reads: the body with a valid YAML frontmatter block\n      stripped, which is byte-exact input for `edit_note(path, content)` full replacement only when the read is\n      complete and unwindowed (`offset=0` and `truncated` false). Section reads: the section's **body only**,\n      byte-exact input for `edit_note(path, content, section=...)` under the same condition. Pass it straight\n      back; do not add, strip or split anything. Page a truncated read to the end before writing it back, or\n      full replacement replaces the whole body with the fragment.\n    - `heading` — section reads only: the matched heading line, with no line terminator. It is *not* part of\n      `content`; a section write never rewrites the heading line.\n    - `error` — set when the read failed (missing note, bad `offset`/`limit`, unknown section). A normal\n      result, not a transport error; the content-bearing fields are absent beside it.\n    - `content_hash` — the **whole file's** digest, `sha256:<64 lowercase hex>`, in every mode (a section or\n      truncated read returns the value a whole-note read would), and the token the write tools take as\n      `expected_hash`. It is not a hash of `content`: never compute it yourself, hand it back verbatim.\n    - `path`, `title`, `tags` — metadata as data.\n    - `open_url` — with `OPEN_NOTE_URL` set: give that link when pointing\n      the owner to the note.\n    - `frontmatter_yaml` — the frontmatter block's YAML source, fence lines excluded, LF-normalized (a CRLF\n      block comes back with LF terminators — the same declared residual `content` carries, because this tool\n      normalises and the write tools work on raw bytes; `edit_note` still reattaches the original block\n      byte-identically). This is the authoritative copy. `frontmatter` is a best-effort JSON view of the same\n      block and may be absent; `metadata_omissions` then says which fields were dropped and why. To change\n      frontmatter use `set_frontmatter`, or edit the raw block with `edit_note(find=...)`; never write back a\n      round trip of the JSON view.\n    - `truncated`, `offset`, `next_offset`, `total_chars` — truncation as data. `outline` (truncated whole-note\n      reads) lists every section with its `#N` ordinal so you can fetch the one you want directly, and `notice`\n      carries the guidance in prose. Read the one section you need with `section=` rather than paging a large\n      note; `content`, the outline and the metadata fields each have their own budget.\n    - `metadata_omissions` — any metadata field this response had to drop, and why. Nothing is ever signalled\n      by a marker inside a field.\n\n    Byte-identity holds for notes whose body newlines are LF: terminators inside the selected content come back\n    as LF. `read_file` on the same path is the byte-exact route to the file itself.\n\n    Args:\n        path: Vault-relative path to the note (e.g. \"Cards/My Note.md\")\n        section: Optional ATX heading to read instead of the whole note. Plain text (\"Balance Sheet\"), a\n            path-style chain (\"Parent/Child\") when the heading appears under different parents, or a \"#N\"\n            ordinal (\"#7\", 1-based document order) — the only form that can address duplicate headings\n            sharing the same parent; the outline of a truncated note carries the ordinal for every section.\n            A bare \"#N\" always selects by position; use \"Parent/#N\" to reach a heading titled \"#N\".\n        offset: Character offset to start reading from (default 0); continue from the reported `next_offset`.\n        limit: Maximum characters of `content` to return. Only lowers the server cap; it cannot raise it.\n    ",
+   "description": "Read a note from the Obsidian vault by its relative path.\n\n    Arguments: `path`, an optional `section` (an ATX heading), and `offset` / `limit` for paging. Returns a\n    **structured result**, not a rendered document — read the fields:\n\n    - `content` — the selected note text. Whole-note reads: the body with a valid YAML frontmatter block\n      stripped, which is byte-exact input for `edit_note(path, content)` full replacement only when the read is\n      complete and unwindowed (`offset=0` and `truncated` false). Section reads: the section's **body only**,\n      byte-exact input for `edit_note(path, content, section=...)` under the same condition. Pass it straight\n      back; do not add, strip or split anything. Page a truncated read to the end before writing it back, or\n      full replacement replaces the whole body with the fragment.\n    - `heading` — section reads only: the matched heading line, with no line terminator. It is *not* part of\n      `content`; a section write never rewrites the heading line.\n    - `error` — set when the read failed (missing note, bad `offset`/`limit`, unknown section). A normal\n      result, not a transport error; the content-bearing fields are absent beside it.\n    - `content_hash` — the **whole file's** digest, `sha256:<64 lowercase hex>`, in every mode (a section or\n      truncated read returns the value a whole-note read would), and the token the write tools take as\n      `expected_hash`. It is not a hash of `content`: never compute it yourself, hand it back verbatim.\n    - `path`, `title`, `tags` — metadata as data.\n    - `open_url` — with `OPEN_NOTE_URL` set: give that link when pointing\n      the owner to the note.\n    - `frontmatter_yaml` — the frontmatter block's YAML source, fence lines excluded, LF-normalized (a CRLF\n      block comes back with LF terminators — the same declared residual `content` carries, because this tool\n      normalises and the write tools work on raw bytes; `edit_note` still reattaches the original block\n      byte-identically). This is the authoritative copy. `frontmatter` is a best-effort JSON view of the same\n      block and may be absent; `metadata_omissions` then says which fields were dropped and why. To change\n      frontmatter use `set_frontmatter`, or edit the raw block with `edit_note(find=...)`; never write back a\n      round trip of the JSON view.\n    - `truncated`, `offset`, `next_offset`, `total_chars` — truncation as data. `outline` (truncated whole-note\n      reads) lists every section with its `#N` ordinal so you can fetch the one you want directly, and `notice`\n      carries the guidance in prose. Read the one section you need with `section=` rather than paging a large\n      note; `content`, the outline and the metadata fields each have their own budget.\n    - `metadata_omissions` — any metadata field this response had to drop, and why. Nothing is ever signalled\n      by a marker inside a field.\n\n    Byte-identity holds for notes whose body newlines are LF: terminators inside the selected content come back\n    as LF. `read_file` on the same path is the byte-exact route to the file itself. Several notes in one call:\n    `read_notes`.\n\n    Args:\n        path: Vault-relative path to the note (e.g. \"Cards/My Note.md\")\n        section: Optional ATX heading to read instead of the whole note. Plain text (\"Balance Sheet\"), a\n            path-style chain (\"Parent/Child\") when the heading appears under different parents, or a \"#N\"\n            ordinal (\"#7\", 1-based document order) — the only form that can address duplicate headings\n            sharing the same parent; the outline of a truncated note carries the ordinal for every section.\n            A bare \"#N\" always selects by position; use \"Parent/#N\" to reach a heading titled \"#N\".\n        offset: Character offset to start reading from (default 0); continue from the reported `next_offset`.\n        limit: Maximum characters of `content` to return. Only lowers the server cap; it cannot raise it.\n    ",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {
@@ -513,6 +513,445 @@
     "type": "object"
    },
    "title": "Read note"
+  },
+  {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false,
+    "readOnlyHint": true
+   },
+   "description": "Read several whole notes in one call (up to 20 paths).\n\n    Returns `notes`, one per path in the order given, each with a whole-note `read_note`'s fields (`content`,\n    `content_hash`, `truncated`, `next_offset`, `notice`, `error`).\n    ",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "paths": {
+      "items": {
+       "type": "string"
+      },
+      "title": "Paths",
+      "type": "array"
+     }
+    },
+    "required": [
+     "paths"
+    ],
+    "title": "read_notesArguments",
+    "type": "object"
+   },
+   "name": "read_notes",
+   "outputSchema": {
+    "$defs": {
+     "MetadataCoercion": {
+      "description": "One metadata value this response rendered in a canonicalized form.\n\nServer-authored, every field of it, exactly as `MetadataOmission` is: the\nchannel is out of band precisely so that nothing has to be signalled inside\nthe note-controlled field itself.",
+      "properties": {
+       "detail": {
+        "title": "Detail",
+        "type": "string"
+       },
+       "field": {
+        "title": "Field",
+        "type": "string"
+       },
+       "reason": {
+        "title": "Reason",
+        "type": "string"
+       }
+      },
+      "required": [
+       "field",
+       "reason",
+       "detail"
+      ],
+      "title": "MetadataCoercion",
+      "type": "object"
+     },
+     "MetadataOmission": {
+      "description": "One metadata field this response could not carry, and why.\n\nServer-authored, every field of it. This is the *only* channel that reports\na dropped field: nothing is ever signalled by writing a marker into the\nnote-controlled field itself.",
+      "properties": {
+       "detail": {
+        "title": "Detail",
+        "type": "string"
+       },
+       "field": {
+        "title": "Field",
+        "type": "string"
+       },
+       "reason": {
+        "title": "Reason",
+        "type": "string"
+       }
+      },
+      "required": [
+       "field",
+       "reason",
+       "detail"
+      ],
+      "title": "MetadataOmission",
+      "type": "object"
+     },
+     "NoteOutline": {
+      "description": "The outline, with its degraded states as data rather than as prose.\n\n`truncated` is the explicit marker the requirement asks for: when the\nbudget cannot hold even one entry, `entries` is empty and `truncated` is\ntrue, which is a statement, not a silence. `omitted`, `first_ordinal` and\n`last_ordinal` are present exactly when the listing is incomplete — a\ncomplete listing carries no omission summary, so nothing has to be reserved\nfor one.",
+      "properties": {
+       "entries": {
+        "default": [],
+        "items": {
+         "$ref": "#/$defs/OutlineEntry"
+        },
+        "title": "Entries",
+        "type": "array"
+       },
+       "first_ordinal": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "First Ordinal"
+       },
+       "last_ordinal": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Last Ordinal"
+       },
+       "omitted": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Omitted"
+       },
+       "truncated": {
+        "default": false,
+        "title": "Truncated",
+        "type": "boolean"
+       }
+      },
+      "title": "NoteOutline",
+      "type": "object"
+     },
+     "OutlineEntry": {
+      "description": "One section of a truncated whole-note read's heading outline.",
+      "properties": {
+       "depth": {
+        "title": "Depth",
+        "type": "integer"
+       },
+       "duplicate": {
+        "title": "Duplicate",
+        "type": "boolean"
+       },
+       "exceeds_cap": {
+        "title": "Exceeds Cap",
+        "type": "boolean"
+       },
+       "ordinal": {
+        "title": "Ordinal",
+        "type": "integer"
+       },
+       "size": {
+        "title": "Size",
+        "type": "integer"
+       },
+       "text": {
+        "title": "Text",
+        "type": "string"
+       }
+      },
+      "required": [
+       "ordinal",
+       "depth",
+       "text",
+       "size",
+       "exceeds_cap",
+       "duplicate"
+      ],
+      "title": "OutlineEntry",
+      "type": "object"
+     },
+     "ReadNoteResult": {
+      "description": "What `read_note` returns.\n\nEvery field is either server-controlled or a note-controlled value sitting\nalone in a field of its own. Nothing here is composed into a frame, so\nnothing note-controlled can change which field another value appears in —\nthat is the whole point (#149).\n\nOn an error result the content-bearing fields are absent: `error` is the\nanswer, and a caller must never find a half-response beside it.",
+      "properties": {
+       "content": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Content"
+       },
+       "content_hash": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Content Hash"
+       },
+       "error": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Error"
+       },
+       "frontmatter": {
+        "anyOf": [
+         {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Frontmatter"
+       },
+       "frontmatter_yaml": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Frontmatter Yaml"
+       },
+       "heading": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Heading"
+       },
+       "metadata_coercions": {
+        "anyOf": [
+         {
+          "items": {
+           "$ref": "#/$defs/MetadataCoercion"
+          },
+          "type": "array"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Metadata Coercions"
+       },
+       "metadata_omissions": {
+        "anyOf": [
+         {
+          "items": {
+           "$ref": "#/$defs/MetadataOmission"
+          },
+          "type": "array"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Metadata Omissions"
+       },
+       "next_offset": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Next Offset"
+       },
+       "notice": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Notice"
+       },
+       "offset": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Offset"
+       },
+       "open_url": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Open Url"
+       },
+       "outline": {
+        "anyOf": [
+         {
+          "$ref": "#/$defs/NoteOutline"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null
+       },
+       "path": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Path"
+       },
+       "tags": {
+        "anyOf": [
+         {
+          "items": {
+           "type": "string"
+          },
+          "type": "array"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Tags"
+       },
+       "title": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Title"
+       },
+       "total_chars": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Total Chars"
+       },
+       "truncated": {
+        "anyOf": [
+         {
+          "type": "boolean"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "Truncated"
+       }
+      },
+      "title": "ReadNoteResult",
+      "type": "object"
+     }
+    },
+    "description": "What `read_notes` returns: one whole-note read per path, in order.\n\nEach entry is a `ReadNoteResult` as `read_note` builds it for a whole note,\nwith a smaller budget (the call's notes share the response cap) and no\noutline. A path that fails carries its own `error`; the call's `error` is\nset only when the call itself is refused (no entries then).",
+    "properties": {
+     "error": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Error"
+     },
+     "notes": {
+      "anyOf": [
+       {
+        "items": {
+         "$ref": "#/$defs/ReadNoteResult"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Notes"
+     }
+    },
+    "title": "ReadNotesResult",
+    "type": "object"
+   },
+   "title": "Read notes"
   },
   {
    "annotations": {
