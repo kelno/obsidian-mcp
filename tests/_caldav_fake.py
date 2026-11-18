@@ -39,6 +39,7 @@ BASE = "https://cloud.example.test"
 ROOT = "/remote.php/dav"
 USER = "agent"
 PASSWORD = "app-password-not-for-logs"
+SESSION_COOKIE = "nc_session"
 
 D = "DAV:"
 C = "urn:ietf:params:xml:ns:caldav"
@@ -79,6 +80,10 @@ class FakeCalDav:
     garbled: dict[str, str] = field(default_factory=dict)
     #: How long each answer takes, in seconds: a slow server.
     delay_seconds: float = 0.0
+    #: Session ids handed out, as Nextcloud does on a login: a request carrying one is in its session.
+    sessions: set[str] = field(default_factory=set)
+    #: Requests that logged in (the login checked, no valid session): the slow kind on Nextcloud.
+    logins: int = 0
 
     principal: str = f"{ROOT}/principals/users/{USER}/"
     home: str = f"{ROOT}/calendars/{USER}/"
@@ -116,6 +121,27 @@ class FakeCalDav:
         expected = "Basic " + base64.b64encode(f"{USER}:{PASSWORD}".encode()).decode()
         if request.headers.get("authorization") != expected:
             return httpx.Response(401, headers={"WWW-Authenticate": 'Basic realm="Nextcloud"'})
+        new_session = None
+        if self.session_of(request) not in self.sessions:
+            # As Nextcloud: a login is checked (slowly, there) and a session cookie handed out.
+            self.logins += 1
+            new_session = f"s{self.logins}"
+            self.sessions.add(new_session)
+        response = self._answer(request)
+        if new_session is not None:
+            response.headers["Set-Cookie"] = f"{SESSION_COOKIE}={new_session}; Path=/; Secure; HttpOnly"
+        return response
+
+    @staticmethod
+    def session_of(request: httpx.Request) -> str | None:
+        """The session id a request carries, if any."""
+        for part in request.headers.get("cookie", "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == SESSION_COOKIE:
+                return value
+        return None
+
+    def _answer(self, request: httpx.Request) -> httpx.Response:
         path = urlsplit(str(request.url)).path
         method = request.method
         if method == "PROPFIND":

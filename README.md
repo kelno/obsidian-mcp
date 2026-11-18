@@ -2385,7 +2385,7 @@ reason.
 | `CALDAV_USERNAME` / `CALDAV_PASSWORD` | unset | The CalDAV login and its app password; best a dedicated user the calendars are shared with |
 | `CALDAV_CALENDARS` | empty | The calendars agents see, by name or id, in this order; the first writable one takes new events. Empty: every calendar of the login, with a default only when exactly one is writable |
 | `CALDAV_TIMEZONE` | `TASKS_TIMEZONE` | The IANA zone event times are shown in, and times without an offset are read in |
-| `CALDAV_TIMEOUT_SECONDS` | `20` | How long one calendar tool call may wait on the CalDAV server, all its requests together (up to 120) |
+| `CALDAV_TIMEOUT_SECONDS` | `60` | How long one calendar tool call may wait on the CalDAV server, all its requests together (up to 120); room for a new session's logins, which take seconds each on a small Nextcloud |
 | `TASKS_PLUGIN_SETTINGS_PATH` | `.obsidian/plugins/obsidian-tasks-plugin/data.json` | The Tasks plugin's settings file in the vault, read on every task call |
 | `VAULT_ALLOW_NAMED_STAGING_FALLBACK` | `false` | Accept named staging on filesystems without `O_TMPFILE`. One flag, both write paths. See [System requirements](#system-requirements). |
 | `WRITE_PRECONDITION_REQUIRED` | `false` | Require `expected_hash` on supported destructive calls. Creation is exempt; enable after clients adopt read hashes. A task write with a plain task id satisfies it, and `add_task` is exempt (see [Guarding edits against stale reads](#guarding-edits-against-stale-reads)). |

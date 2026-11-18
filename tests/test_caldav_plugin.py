@@ -79,10 +79,10 @@ def settings_env(monkeypatch):
     monkeypatch.setenv("CALDAV_TIMEZONE", "Europe/Brussels")
     monkeypatch.setattr(caldav_tools, "_now", lambda: NOW)
     caldav_config.current.cache_clear()
-    caldav_client.forget_discovery()
+    caldav_client.forget_server_state()
     yield monkeypatch
     caldav_config.current.cache_clear()
-    caldav_client.forget_discovery()
+    caldav_client.forget_server_state()
 
 
 def reconfigure(monkeypatch, **values):
@@ -93,7 +93,7 @@ def reconfigure(monkeypatch, **values):
         else:
             monkeypatch.setenv(name, value)
     caldav_config.current.cache_clear()
-    caldav_client.forget_discovery()
+    caldav_client.forget_server_state()
 
 
 @pytest.fixture(autouse=True)
@@ -265,6 +265,43 @@ async def test_discovery_runs_once_per_process(server):
     await call("list_calendars")()
     principal_lookups = [r for r in server.requests if r.method == "PROPFIND" and r.url.path.rstrip("/") == ROOT]
     assert len(principal_lookups) == 1
+
+
+async def test_the_session_is_kept_between_calls(server):
+    """Nextcloud checks a login slowly (8 s a request, measured on a home server) and a session fast
+    (0.25 s): after the first request, every request of every call rides the session it handed out."""
+    await call("list_calendars")()
+    first_call = len(server.requests)
+    await call("list_events")()
+    later = server.requests[first_call:]
+    assert later and all(server.session_of(r) in server.sessions for r in later)
+    assert server.logins == 1
+
+
+async def test_a_failed_call_still_keeps_its_session(server):
+    """The first call on a slow server may run out of time; the session it got is kept for the next one."""
+    server.failing_calendars = set(server.calendars)
+    assert code(await call("list_events")()) == "calendar_unavailable"
+    server.failing_calendars = set()
+    assert (await call("list_events")()).error is None
+    assert server.logins == 1
+
+
+async def test_an_expired_session_logs_in_again(server):
+    """The login goes with every request, so a session the server dropped costs one login, never a refusal."""
+    await call("list_calendars")()
+    server.sessions.clear()
+    assert (await call("list_calendars")()).error is None
+    assert server.logins == 2
+
+
+async def test_a_session_serves_only_its_own_login(monkeypatch, server):
+    await call("list_calendars")()
+    monkeypatch.setenv("CALDAV_USERNAME", "someone-else")
+    caldav_config.current.cache_clear()
+    before = len(server.requests)
+    assert code(await call("list_calendars")()) == "calendar_not_configured"   # the fake knows one login only
+    assert all(server.session_of(r) is None for r in server.requests[before:])
 
 
 # ── list_calendars ───────────────────────────────────────────────────────

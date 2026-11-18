@@ -45,10 +45,18 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 # moves while the server runs, so the two discovery requests run once.
 _HOMES: dict[tuple[str, str], str] = {}
 
+# The server's session cookies, per (CALDAV_URL, CALDAV_USERNAME), kept between calls.
+# Nextcloud checks a login slowly and a session fast: on a small home server, a request
+# that logs in took 8 s and one in a session 0.25 s (2026-11-18), so a call of three
+# requests ran out of time on logins alone. The login still goes with every request,
+# so a session the server has dropped costs one login, never a refusal.
+_SESSIONS: dict[tuple[str, str], httpx.Cookies] = {}
 
-def forget_discovery() -> None:
-    """Drop the discovered calendar homes (tests; a changed setting)."""
+
+def forget_server_state() -> None:
+    """Drop the discovered calendar homes and the sessions (tests; a changed setting)."""
     _HOMES.clear()
+    _SESSIONS.clear()
 
 
 class CalDavError(Exception):
@@ -132,6 +140,7 @@ class Client:
         parts = urlsplit(cfg.url.strip())
         self._origin = f"{parts.scheme}://{parts.netloc}"
         self._root = parts.path or "/"
+        self._login = (cfg.url.strip(), cfg.username)
         self._http: httpx.AsyncClient | None = None
         self._deadline = 0.0
 
@@ -142,11 +151,14 @@ class Client:
         self._http = httpx.AsyncClient(
             auth=httpx.BasicAuth(self._cfg.username, self._cfg.password.get_secret_value()),
             timeout=self._cfg.timeout_seconds, follow_redirects=False, trust_env=False,
-            headers={"User-Agent": core_settings.outbound_user_agent})
+            headers={"User-Agent": core_settings.outbound_user_agent}, cookies=_SESSIONS.get(self._login))
         return self
 
     async def __aexit__(self, *exc) -> None:
         assert self._http is not None
+        # Kept even when the call failed or ran out of time: the session its requests got
+        # spares the next call the slow logins.
+        _SESSIONS[self._login] = httpx.Cookies(self._http.cookies)
         await self._http.aclose()
 
     # ── Requests ────────────────────────────────────────────────────────
@@ -226,9 +238,8 @@ class Client:
         Raises:
             CalDavError: `calendar_not_configured` when `CALDAV_URL` leads to no calendar home.
         """
-        key = (self._cfg.url.strip(), self._cfg.username)
-        if key in _HOMES:
-            return _HOMES[key]
+        if self._login in _HOMES:
+            return _HOMES[self._login]
         principal = await self._href_prop(self._root, D, "current-user-principal") or self._root
         home = await self._href_prop(principal, C, "calendar-home-set")
         if home is None:
@@ -237,7 +248,7 @@ class Client:
                               "(for Nextcloud, https://<host>/remote.php/dav).")
         home = urlsplit(urljoin(self._origin + principal, home)).path
         home = home if home.endswith("/") else home + "/"
-        _HOMES[key] = home
+        _HOMES[self._login] = home
         return home
 
     async def calendars(self) -> list[CalendarInfo]:

@@ -213,12 +213,12 @@ def _calendar(monkeypatch):
     real_problems = caldav_config.problems
     monkeypatch.setattr(caldav_config, 'current', lambda: cfg)
     monkeypatch.setattr(caldav_config, 'problems', lambda c: [p for p in real_problems(c) if 'MULTI_USER_MODE' not in p])
-    caldav_client.forget_discovery()
+    caldav_client.forget_server_state()
     try:
         with _caldav_fake.serving(fake):
             yield fake
     finally:
-        caldav_client.forget_discovery()
+        caldav_client.forget_server_state()
 
 
 def _upload_id(text_):

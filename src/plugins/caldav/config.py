@@ -44,8 +44,9 @@ class CalDavSettings(BaseSettings):
     #: The IANA time zone that times without an offset are read in and every time is shown in.
     #: Empty: `TASKS_TIMEZONE`, the zone the task tools use.
     timezone: str = ""
-    #: How long one tool call may wait on the CalDAV server, all its requests together.
-    timeout_seconds: float = Field(20.0, gt=0, le=120)
+    #: How long one tool call may wait on the CalDAV server, all its requests together. Room for
+    #: a new session's logins: Nextcloud on a small home server took 8 and 11 s for the first two.
+    timeout_seconds: float = Field(60.0, gt=0, le=120)
 
     @field_validator("calendars", mode="before")
     @classmethod
