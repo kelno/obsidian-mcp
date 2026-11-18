@@ -709,12 +709,12 @@ def reads_it(sentence: str, at: int) -> bool:
 def moment_of(line: str, sentence: str, at: int = 0) -> str:
     """When the pointing line says to read the target: the guide index's "when to read it", a bullet's or the
     sentence's leading condition, "when met" for a plain reading verb aimed at it, else "unplaced"."""
-    s = re.sub(r"^\s*(?:[-*]|\d+\.)\s+", "", line).strip()
+    s = re.sub(r"^\s*(?:>\s*)*(?:[-*]|\d+\.)?\s*", "", line).strip()  # quote or callout marks, then a bullet
     s = re.sub(r"\s*\[[PQFC]\d+(?:,\s*[PQFC]\d+)*\]", "", s)  # ledger refs aren't part of a moment
     index = re.match(r"^\[\[[^\]]+\]\]:\s*(.+)", s)
     if index:  # the guide index's shape: the guide, then when to read it
         return re.split(r"(?<=[a-z\)])\.(?:\s|$)", index.group(1))[0].strip().rstrip(".")
-    candidates = [sentence]
+    candidates = [re.sub(r"^\s*(?:>\s*)+", "", sentence)]
     if re.match(r"^\s*(?:[-*]|\d+\.)\s", line):  # a bullet's leading condition covers the whole bullet
         candidates.insert(0, s)
     for cand in candidates:
