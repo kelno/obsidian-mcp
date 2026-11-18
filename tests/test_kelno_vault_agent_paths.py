@@ -161,7 +161,7 @@ def test_agent_path_draws_a_path_with_texts_hashes_and_known(vault):
     assert by_id["note:_/agent/Notes kept.md"].moment == "unplaced" and not by_id["note:_/agent/Notes kept.md"].always
     assert "note:Notes/Some note.md" not in by_id and first.structure.mentions_not_followed == 1
     # Already met through the guide index before the area opens, so code_project adds no second copy.
-    assert by_id["note:_/agent/guides/coding-practices.md"].moment == "any code work."
+    assert by_id["note:_/agent/guides/coding-practices.md"].moment == "any code work"
     # This server's texts as served come last.
     assert {"instructions:obsidian-mcp", "guide:obsidian-mcp", "tool:obsidian-mcp:read_note"} <= set(order)
     served = dict(asyncio.run(apt._served(None)).tools)
@@ -271,8 +271,8 @@ def test_reached_by_names_the_agents_and_chains_reaching_a_place(vault):
     result = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", None, None))
     assert result.error is None and result.matched_by == "the place itself"
     (hit,) = result.reached_by
-    # The typical worker is a worker in the area's folder too, so every worker run reaches it the same way.
-    assert hit["agents"] == ["a Claude Code worker, any related folder"]
+    # Grouped by run kind: the typical worker keeps its own name beside the per-folder runs.
+    assert hit["agents"] == ["a Claude Code worker in a repo", "a Claude Code worker, any related folder"]
     assert hit["via"] == ["hook:SessionStart/area-start.py", "note:_/agent/roles/Worker.md"]
     assert "note:_/agent/roles/Worker.md" in {p.id for p in result.pieces}
 

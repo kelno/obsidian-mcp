@@ -706,16 +706,20 @@ def moment_of(line: str, sentence: str, at: int = 0) -> str:
     """When the pointing line says to read the target: the guide index's "when to read it", a bullet's or the
     sentence's leading condition, "when met" for a plain reading verb aimed at it, else "unplaced"."""
     s = re.sub(r"^\s*(?:[-*]|\d+\.)\s+", "", line).strip()
+    s = re.sub(r"\s*\[[PQFC]\d+(?:,\s*[PQFC]\d+)*\]", "", s)  # ledger refs aren't part of a moment
     index = re.match(r"^\[\[[^\]]+\]\]:\s*(.+)", s)
     if index:  # the guide index's shape: the guide, then when to read it
-        return re.split(r"(?<=[a-z\)])\.\s", index.group(1))[0].strip()
+        return re.split(r"(?<=[a-z\)])\.(?:\s|$)", index.group(1))[0].strip().rstrip(".")
     candidates = [sentence]
     if re.match(r"^\s*(?:[-*]|\d+\.)\s", line):  # a bullet's leading condition covers the whole bullet
         candidates.insert(0, s)
     for cand in candidates:
         lead = MOMENT_LEAD.match(re.sub(r"^\*\*[^*]+\*\*\s*", "", cand).lstrip("*"))
         if lead:
-            return lead.group(1).strip().rstrip("*")
+            m = lead.group(1).strip().rstrip("*")
+            if m.count("(") > m.count(")"):  # cut by a comma inside a parenthesis: keep what comes before it
+                m = m[: m.rfind("(")].strip()
+            return m
     if reads_it(sentence, at):
         return "when met"
     return "unplaced"
@@ -890,18 +894,20 @@ def reached_by(setup: Setup, place: str) -> dict:
         key = (s.surface, tuple(generic(v, x) for x in c), b.pieces[pid].always,
                re.sub(r" on .*? \(", " on <the area> (", b.pieces[c[0]].arrives))
         groups.setdefault(key, []).append(label)
-    all_chats = {l for l, *_ in runs if l.startswith("a claude.ai chat working on")}
-    all_workers = {l for l, *_ in runs if l.startswith("a Claude Code worker in ")}
+    # Group by run kind, not by label: a typical agent's name may share the per-folder runs' prefix.
+    typical_names = {t.name for t in setup.points.typical}
+    chat_runs = {l for l, *_ in runs if l not in typical_names and l.startswith("a claude.ai chat working on")}
+    worker_runs = {l for l, *_ in runs if l not in typical_names and l.startswith("a Claude Code worker in ")}
     reached = []
     for (surface, c, always, first), labels in groups.items():
-        chats = [l for l in labels if l.startswith("a claude.ai chat working on")]
-        workers = [l for l in labels if l.startswith("a Claude Code worker in ")]
+        chats = [l for l in labels if l in chat_runs]
+        workers = [l for l in labels if l in worker_runs]
         named = [l for l in labels if l not in chats and l not in workers]
-        if chats and set(chats) == all_chats:
+        if chats and set(chats) == chat_runs:
             named.append("a claude.ai chat, any area")
         else:
             named += chats
-        if workers and set(workers) == all_workers:
+        if workers and set(workers) == worker_runs:
             named.append("a Claude Code worker, any related folder")
         else:
             named += workers
