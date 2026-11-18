@@ -85,7 +85,12 @@ switched off in this fork (`SWITCHED_OFF`).
 `read_notes` (fork) is class `light` beside `read_note`: up to twenty file
 reads in one call, under one share of the response cap, so no heavier than a
 few `read_note` calls. Adding it moved `TOOL_CLASSES`, so
-`CLASS_MAPPING_VERSION` is 8.
+`CLASS_MAPPING_VERSION` was 8.
+
+`agent_path` and `agent_path_reached_by` (fork, `kelno_vault`) are class `scan`:
+each call reads every rule note of the vault and draws one path, or many.
+Adding them moved `TOOL_CLASSES`, so `CLASS_MAPPING_VERSION` is 9. See
+[agent paths](agent-paths.md).
 
 ## The principal is the grant, not the token, and not (client, user)
 
@@ -1093,7 +1098,7 @@ ending in a 500, shared with the panel and `/token`.
 | `embedding` | `semantic_search`, `hybrid_search` (#354, `CLASS_MAPPING_VERSION` 5) | 1 | 1 |
 | `vector` | `find_related` | 1 | 1 |
 | `write` | the write-class tools (L3) | 1 | 2 |
-| `scan` | `keyword_search`, `list_notes`, `get_tags`, `get_neighborhood`, `find_orphans`, `list_files`, `list_tasks` (#350, `CLASS_MAPPING_VERSION` 3), `get_changes` (#351, `CLASS_MAPPING_VERSION` 4), `task_agenda` (#428, `CLASS_MAPPING_VERSION` 6), the fork's `open_area` and `index_status` (`CLASS_MAPPING_VERSION` 7) | 2 | 1 |
+| `scan` | `keyword_search`, `list_notes`, `get_tags`, `get_neighborhood`, `find_orphans`, `list_files`, `list_tasks` (#350, `CLASS_MAPPING_VERSION` 3), `get_changes` (#351, `CLASS_MAPPING_VERSION` 4), `task_agenda` (#428, `CLASS_MAPPING_VERSION` 6), the fork's `open_area` and `index_status` (`CLASS_MAPPING_VERSION` 7), `agent_path` and `agent_path_reached_by` (`CLASS_MAPPING_VERSION` 9) | 2 | 1 |
 | `light` | `read_note`, the fork's `read_notes` (`CLASS_MAPPING_VERSION` 8), `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download` | 4 | 1 |
 
 `hybrid_search` makes the same embedding-provider round trip as

@@ -41,7 +41,8 @@ from src.services.pool_budget import CLASS_CONNECTIONS, budget_terms
 # 6: complete_task, update_task, add_task added to write; task_agenda to scan (#428).
 # 7: the fork's tools and upstream's 6 in one mapping (resync, 2026-11-13).
 # 8: `read_notes` added to `light` (fork, 2026-11-18).
-CLASS_MAPPING_VERSION = 8
+# 9: `agent_path`, `agent_path_reached_by` added to `scan` (fork, kelno_vault, 2026-11-18).
+CLASS_MAPPING_VERSION = 9
 
 TOOL_CLASSES = {
     # `hybrid_search` makes the same provider round trip as `semantic_search`,
@@ -67,8 +68,7 @@ TOOL_CLASSES = {
                      # (switched off) because the fork's task tools keep theirs.
                      "upstream_list_tasks",
                      "open_area", "index_status",
-                     # kelno_vault's path tools read the vault's rule notes on each call. New names
-                     # reclassify no existing tool, so the mapping version stays (as for index_status).
+                     # kelno_vault's path tools read every rule note of the vault on each call.
                      "agent_path", "agent_path_reached_by"), "scan"),
     **dict.fromkeys(("read_note", "read_notes", "read_file", "get_recent", "get_vault_guide",
                      "get_backlinks", "get_links", "request_upload",

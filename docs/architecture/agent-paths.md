@@ -7,7 +7,7 @@ The fork owner's vault holds the rules its agents follow, spread over notes, `##
 - `agent_path(start, work, known)`, forward: "I'm this agent, doing this work: what do I meet?"
 - `agent_path_reached_by(place, known, machine)`, backward: "this rule lives here, or would: who meets it, and what's around it?"
 
-Both read-only, admission class `scan` (each call reads the vault's rule notes; added to `scan` without a mapping-version bump, as `index_status` was: new names reclassify no existing tool).
+Both read-only, admission class `scan` (each call reads the vault's rule notes; adding them moved `TOOL_CLASSES`, so `CLASS_MAPPING_VERSION` is 9).
 
 ## Where it comes from
 
