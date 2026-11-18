@@ -46,3 +46,4 @@ This fork follows `maxkuminov/obsidian-mcp`. What is specific here:
 | [open-area.md](docs/architecture/open-area.md) | `open_area` and the area index (`kelno_vault`) |
 | [agent-paths.md](docs/architecture/agent-paths.md) | `agent_path`, `agent_path_reached_by` (`kelno_vault`) |
 | [search.md](docs/architecture/search.md), "Private folders" | `PRIVATE_FOLDER_NAMES`, `include_private` |
+| [vault-tools.md](docs/architecture/vault-tools.md), "The agent-edit stamp" | `src/services/ai_edit_stamp.py`, `LAST_AI_EDIT_FIELD`, `ARCHIVE_FOLDER` |
