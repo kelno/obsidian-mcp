@@ -98,7 +98,7 @@ INSTRUCTIONS_LEAD = 512
 # explicitly so a read tool added without annotations fails on its name, not
 # only on a count.
 READ_TOOLS = frozenset({
-    "keyword_search", "semantic_search", "read_note", "list_notes", "get_tags",
+    "keyword_search", "semantic_search", "read_note", "read_notes", "list_notes", "get_tags",
     "get_recent", "get_vault_guide", "read_file", "list_files", "get_backlinks",
     "get_links", "get_neighborhood", "find_related", "find_orphans", "check_upload",
     "upstream_list_tasks",  # #350 (upstream's `list_tasks`, renamed in the fork)
@@ -218,8 +218,8 @@ def test_exactly_32_tools():
     # 25 → 26: `list_tasks` (#350); 26 → 27: `get_changes` (#351);
     # 27 → 28: `hybrid_search` (#354); 28 → 32: `task_agenda`,
     # `complete_task`, `update_task`, `add_task` (#428).
-    # Fork: its 41 core tools and upstream's seven it switches off (on in tests).
-    assert len(listed()) == 48
+    # Fork: its 42 core tools and upstream's seven it switches off (on in tests).
+    assert len(listed()) == 49
 
 
 @pytest.mark.parametrize("tool", listed(), ids=lambda t: t.name)
@@ -630,8 +630,8 @@ def test_the_extractor_recognises_each_form_and_skips_arguments():
     assert tool_shaped_references("the `read_note.frontmatter_yaml` field", words) == {"read_note"}
     assert tool_shaped_references("pass `content` and `expected_hash`; use `find`", words) == set()
     # A dotted typo is caught: its head is extracted and is not registered.
-    typo = tool_shaped_references("the `read_notes.frontmatter_yaml` field", words)
-    assert typo == {"read_notes"} and not typo <= registered_names()
+    typo = tool_shaped_references("the `read_notez.frontmatter_yaml` field", words)
+    assert typo == {"read_notez"} and not typo <= registered_names()
     # A refusal code is not a tool; a near-miss tool name still is.
     assert tool_shaped_references("refused `task_not_found`", words) == set()
     assert tool_shaped_references("call `task_agendas`", words) == {"task_agendas"}

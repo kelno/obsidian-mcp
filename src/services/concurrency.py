@@ -40,7 +40,8 @@ from src.services.pool_budget import CLASS_CONNECTIONS, budget_terms
 # 5: hybrid_search added to embedding (#354).
 # 6: complete_task, update_task, add_task added to write; task_agenda to scan (#428).
 # 7: the fork's tools and upstream's 6 in one mapping (resync, 2026-11-13).
-CLASS_MAPPING_VERSION = 7
+# 8: `read_notes` added to `light` (fork, 2026-11-18).
+CLASS_MAPPING_VERSION = 8
 
 TOOL_CLASSES = {
     # `hybrid_search` makes the same provider round trip as `semantic_search`,
@@ -66,7 +67,7 @@ TOOL_CLASSES = {
                      # (switched off) because the fork's task tools keep theirs.
                      "upstream_list_tasks",
                      "open_area", "index_status"), "scan"),
-    **dict.fromkeys(("read_note", "read_file", "get_recent", "get_vault_guide",
+    **dict.fromkeys(("read_note", "read_notes", "read_file", "get_recent", "get_vault_guide",
                      "get_backlinks", "get_links", "request_upload",
                      "check_upload", "request_download", "fetch_page", "ledger_get",
                      "ledger_digest", "ledger_topics"), "light"),

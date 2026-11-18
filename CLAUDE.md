@@ -804,7 +804,7 @@ update it in the same change.** What stays here is the short list:
 
 ## MCP tools
 
-42 tools offered (41 in the core, `open_area` from the `kelno_vault` plugin), plus
+43 tools offered (42 in the core, `open_area` from the `kelno_vault` plugin), plus
 seven upstream tools registered and switched off (`SWITCHED_OFF` at the end of
 `server.py`; see "Following upstream"). All are registered in
 `src/mcp_server/server.py` and all wrapped by
@@ -828,7 +828,7 @@ API keys and `readwrite` grants see all 32. See
 **Search and read** — `keyword_search`, `semantic_search`, `hybrid_search`
 (RRF of the two, for a query that is neither clearly an identifier nor a
 paraphrase; it and `semantic_search` take the optional `rerank` argument,
-#367), `read_note`, `list_notes`, `get_tags`, `get_recent`, `get_vault_guide`, `get_changes`
+#367), `read_note`, `read_notes` (fork: up to 20 whole notes in one call, sharing the read cap), `list_notes`, `get_tags`, `get_recent`, `get_vault_guide`, `get_changes`
 (the change feed, after an `ev:<seq>` cursor or a UTC date; `by` =
 `any | me | agents | human`), and `list_tasks` / `task_agenda` (see **Tasks** below).
 With `LIST_NOTES_DESCRIPTION_FIELD` set (fork, off by default), `list_notes`

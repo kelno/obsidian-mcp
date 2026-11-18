@@ -61,7 +61,9 @@ from src.mcp_server.auth import (
 from src.mcp_server.fetch_result import UNTRUSTED_NOTICE, FetchPageResult
 from src.mcp_server import task_render, tool_permissions
 from src.mcp_server.read_result import (
+    READ_NOTES_MAX_PATHS,
     ReadNoteResult,
+    ReadNotesResult,
     apply_metadata_budget,
     build_outline,
     frontmatter_view,
@@ -1708,7 +1710,7 @@ def _first_over_long_argument(bound, caps: dict[str, int]) -> tuple[str, int] | 
 #: Structured results that carry their outcome privately (`_body_outcome`).
 #: The task tools' two are appended where they are defined, at the end of
 #: this module.
-_TYPED_OUTCOME_RESULTS: tuple = (ReadNoteResult, FetchPageResult)
+_TYPED_OUTCOME_RESULTS: tuple = (ReadNoteResult, ReadNotesResult, FetchPageResult)
 
 
 def _tracked(
@@ -2456,6 +2458,29 @@ def _origin_label(section: str | None) -> str:
     return f"section '{_bounded(section, _NOTICE_SELECTOR_MAX)}'"
 
 
+def _truncation_lines(
+    path: str,
+    section: str | None,
+    offset: int,
+    shown_to: int,
+    total: int,
+    next_offset: int | None,
+) -> list[str]:
+    """What was shown and the call that reads on: the opening of every read notice."""
+    origin = _origin_label(section)
+    parts = [
+        f"Truncated: showing characters {offset:,}–{shown_to:,} of {total:,} "
+        f"for this {origin}."
+    ]
+    if next_offset is not None:
+        call = f'read_note(path="{path}"'
+        if section is not None:
+            call += f', section="{_bounded(section, _NOTICE_SELECTOR_MAX)}"'
+        call += f", offset={next_offset})"
+        parts.append(f"Continue with `{call}`.")
+    return parts
+
+
 def _read_notice(
     path: str,
     section: str | None,
@@ -2474,17 +2499,7 @@ def _read_notice(
     interpolates is bounded: `path` by `MAX_PATH_CHARS` at admission, the
     selector by `_NOTICE_SELECTOR_MAX`, the rest are integers.
     """
-    origin = _origin_label(section)
-    parts = [
-        f"Truncated: showing characters {offset:,}–{shown_to:,} of {total:,} "
-        f"for this {origin}."
-    ]
-    if next_offset is not None:
-        call = f'read_note(path="{path}"'
-        if section is not None:
-            call += f', section="{_bounded(section, _NOTICE_SELECTOR_MAX)}"'
-        call += f", offset={next_offset})"
-        parts.append(f"Continue with `{call}`.")
+    parts = _truncation_lines(path, section, offset, shown_to, total, next_offset)
 
     if section is None:
         if outline is not None and outline.entries:
@@ -2518,7 +2533,7 @@ def _read_notice(
 def _read_note_refusal(message: str) -> ReadNoteResult:
     """The admission gate's refusal, in the shape this tool declares.
 
-    `read_note` is the one tool with an MCP output schema, so the gate cannot
+    `read_note` declares a structured output schema, so the gate cannot
     hand back a bare string: FastMCP would fail output validation and the agent
     would see a protocol error where the contract promises an in-band one. The
     path is deliberately NOT echoed — the gate runs before any validation, so
@@ -2588,50 +2603,83 @@ async def read_note_impl(
     metadata_budget = settings.max_read_response_chars
     cap = settings.max_read_response_chars
 
-    def _fail(message: BodyOutcome) -> ReadNoteResult:
-        # `_scalar_safe` is the last line of defence, not the first: the path
-        # and the selector are both refused at admission when they carry an
-        # unpaired surrogate, precisely so no error message has to quote one.
-        # It stays because an error string that cannot be serialized is a
-        # protocol error, and this function is the only place every one of them
-        # passes through.
-        # Sanitize before truncation: escaping a surrogate expands its prose.
-        # Reserve the authoritative machine line, never truncate it away.
-        sentinel_budget = len(refusals.sentinel_line(message.refusal)) + 1
-        prose = _bounded(_scalar_safe(message.prose), metadata_budget - sentinel_budget)
-        outcome = message.with_prose(prose)
-        result = ReadNoteResult(error=str(outcome))
-        result._body_outcome = outcome
-        # An over-long or unencodable path is refused before it is echoed
-        # anywhere; every other error names the path the caller asked for,
-        # exactly.
-        if len(path) <= MAX_PATH_CHARS and is_encodable(path):
-            result.path = path
-        return result
-
     # Error precedence, in this order and no other: path resolution first, then
     # parameter validation, then section resolution. Exactly one error comes
     # back, and no content-bearing field rides with it.
-    try:
-        note = read_file(path, user_id=uid)
-    except FileNotFoundError:
-        return _fail(_body_refusal(f"Note not found: {path}", "not_found"))
-    except ValueError as e:
-        return _fail(_body_refusal(str(e), "validation_failed"))
+    note = _read_note_file(path, uid, metadata_budget)
+    if isinstance(note, ReadNoteResult):
+        return note
 
     if limit is not None:
         if limit < 1:
-            return _fail(_body_refusal(f"read_note: limit must be >= 1 (got {limit}).", "invalid_argument"))
+            return _read_note_error(
+                path, _body_refusal(f"read_note: limit must be >= 1 (got {limit}).", "invalid_argument"), metadata_budget
+            )
         cap = min(limit, cap)
     if offset < 0:
-        return _fail(_body_refusal(f"read_note: offset must be >= 0 (got {offset}).", "invalid_argument"))
+        return _read_note_error(
+            path, _body_refusal(f"read_note: offset must be >= 0 (got {offset}).", "invalid_argument"), metadata_budget
+        )
+    return _note_result(note, path, section, offset, cap, metadata_budget, with_outline=True)
+
+
+def _read_note_error(path: str, message: BodyOutcome, metadata_budget: int) -> ReadNoteResult:
+    """One note's error result: the refusal, bounded, naming the path asked for."""
+    # `_scalar_safe` is the last line of defence, not the first: the path
+    # and the selector are both refused at admission when they carry an
+    # unpaired surrogate, precisely so no error message has to quote one.
+    # It stays because an error string that cannot be serialized is a
+    # protocol error, and this function is the only place every one of them
+    # passes through.
+    # Sanitize before truncation: escaping a surrogate expands its prose.
+    # Reserve the authoritative machine line, never truncate it away.
+    sentinel_budget = len(refusals.sentinel_line(message.refusal)) + 1
+    prose = _bounded(_scalar_safe(message.prose), metadata_budget - sentinel_budget)
+    outcome = message.with_prose(prose)
+    result = ReadNoteResult(error=str(outcome))
+    result._body_outcome = outcome
+    # An over-long or unencodable path is refused before it is echoed
+    # anywhere; every other error names the path the caller asked for,
+    # exactly.
+    if len(path) <= MAX_PATH_CHARS and is_encodable(path):
+        result.path = path
+    return result
+
+
+def _read_note_file(path: str, uid: int | None, metadata_budget: int) -> dict | ReadNoteResult:
+    """`read_file`'s note, or the error result for a path that does not resolve."""
+    try:
+        return read_file(path, user_id=uid)
+    except FileNotFoundError:
+        return _read_note_error(path, _body_refusal(f"Note not found: {path}", "not_found"), metadata_budget)
+    except ValueError as e:
+        return _read_note_error(path, _body_refusal(str(e), "validation_failed"), metadata_budget)
+
+
+def _note_result(
+    note: dict,
+    path: str,
+    section: str | None,
+    offset: int,
+    cap: int,
+    metadata_budget: int,
+    *,
+    with_outline: bool,
+) -> ReadNoteResult:
+    """Build one note's read from `read_file`'s single read of it.
+
+    `cap` bounds `content` (and the outline, when there is one); every
+    metadata field shares `metadata_budget`. `read_notes` passes each note its
+    share of the response cap and no outline: a caller who wants a note's
+    sections reads that note with `read_note`.
+    """
     content = note["content"]
     heading: str | None = None
     body = content
     if section is not None:
         parts, err = extract_section_parts(content, section)
         if err is not None:
-            return _fail(_body_refusal(err, "selector_unresolved"))
+            return _read_note_error(path, _body_refusal(err, "selector_unresolved"), metadata_budget)
         heading, body = parts
 
     total = len(body)
@@ -2640,14 +2688,18 @@ async def read_note_impl(
         # Empty content at offset 0 is a successful read of an empty section;
         # only a *continuation* offset can run off the end.
         if offset == total:
-            return _fail(
+            return _read_note_error(
+                path,
                 _body_refusal(f"read_note: offset {offset:,} is exactly the end of "
                 f"{_origin_label(section)} in {path} ({total:,} chars) — the "
-                "whole selection has been read, there is nothing further.", "read_window_unavailable")
+                "whole selection has been read, there is nothing further.", "read_window_unavailable"),
+                metadata_budget,
             )
-        return _fail(
+        return _read_note_error(
+            path,
             _body_refusal(f"read_note: offset {offset:,} is past the end of "
-            f"{_origin_label(section)} in {path} ({total:,} chars).", "read_window_unavailable")
+            f"{_origin_label(section)} in {path} ({total:,} chars).", "read_window_unavailable"),
+            metadata_budget,
         )
 
     truncated = offset > 0 or next_offset is not None
@@ -2674,18 +2726,27 @@ async def read_note_impl(
         total_chars=total,
     )
     if truncated:
-        # The outline is a whole-note affordance: a caller who named a section
-        # has already chosen, and does not need the others listed.
-        if section is None:
-            result.outline = build_outline(content, cap)
+        shown_to = min(offset, total) + len(chunk)
         # `_scalar_safe` on the notice as well as the error. Nothing can reach
         # it today — the path and the selector it interpolates are both refused
         # at admission — but "cannot happen today" is the reasoning that kept
         # this class open for two audit rounds, and the guard is one call.
-        result.notice = _scalar_safe(_read_notice(
-            note["path"], section, offset, min(offset, total) + len(chunk),
-            total, next_offset, result.outline,
-        ))
+        if with_outline:
+            # The outline is a whole-note affordance: a caller who named a section
+            # has already chosen, and does not need the others listed.
+            if section is None:
+                result.outline = build_outline(content, cap)
+            result.notice = _scalar_safe(_read_notice(
+                note["path"], section, offset, shown_to, total, next_offset, result.outline,
+            ))
+        else:
+            # `read_notes`: the cut-off note carries its own warning, where the
+            # agent decides what to do with this content, rather than the
+            # description every call reads (owner, 2026-11-18; ledger C145).
+            result.notice = _scalar_safe("\n\n".join(
+                _truncation_lines(note["path"], section, offset, shown_to, total, next_offset)
+                + [_CUT_OFF_WRITE_BACK]
+            ))
     # Values that would not render are reported BEFORE the budget runs, so
     # `metadata_omissions` reads in decision order and the budget never spends
     # room on a field that is about to be dropped anyway.
@@ -2696,6 +2757,91 @@ async def read_note_impl(
     # from a dropped one, and the two lists never carry each other's entries
     # (#154, design D10).
     apply_metadata_budget(result, carried, metadata_budget, view_coercions)
+    return result
+
+
+#: A full replacement written from a cut-off note's `content` would replace
+#: the whole note with that part: the destructive write the round-trip rules
+#: exist to prevent (vault-tools.md, #149).
+_CUT_OFF_WRITE_BACK = (
+    "Don't write this note's `content` back with `edit_note` before reading "
+    "the rest: it would replace the whole note with this part."
+)
+
+
+def _read_notes_refusal(message: str) -> ReadNotesResult:
+    """The admission gate's refusal, in the shape `read_notes` declares (no paths echoed)."""
+    return ReadNotesResult(error=message)
+
+
+def share_budget(lengths: list[int], budget: int) -> list[int]:
+    """Split `budget` between notes of these lengths: equal shares, and what a
+    short note does not use goes to the others.
+
+    Shortest first: each note takes what it needs, up to an equal share of what
+    is left, so a share never shrinks as the loop goes on.
+    """
+    shares = [0] * len(lengths)
+    left = budget
+    remaining = len(lengths)
+    for i in sorted(range(len(lengths)), key=lambda i: lengths[i]):
+        shares[i] = min(lengths[i], left // remaining)
+        left -= shares[i]
+        remaining -= 1
+    return shares
+
+
+def _read_notes_files(paths: list[str], uid: int | None, metadata_budget: int) -> list[dict | ReadNoteResult]:
+    return [_read_note_file(path, uid, metadata_budget) for path in paths]
+
+
+@_tracked(
+    "read_notes",
+    ["paths"],
+    # Twenty paths of up to 1,024 characters each would land whole in
+    # `usage_logs.params`; the search tools' bound on logged paths applies.
+    transforms={"paths": timing.fit_result_paths},
+    refusal_result=_read_notes_refusal,
+)
+async def read_notes_impl(paths: list[str]) -> ReadNotesResult:
+    """Read up to `READ_NOTES_MAX_PATHS` whole notes in one call (ledger Q127).
+
+    Each note is built exactly as a whole-note `read_note` builds it, from one
+    read of its bytes, so every round-trip rule holds per note: `content` is
+    full-replacement input only when that note's `truncated` is false. The
+    notes share the response cap: `content` by `share_budget`, the metadata
+    fields by an equal split, and there is no outline, so the whole response
+    stays within what one `read_note` may return. A path that fails gets its
+    own error; the call is refused only for a bad `paths` list, and logged as
+    failed when no path could be read.
+    """
+    uid = current_user_id.get()
+    cap = settings.max_read_response_chars
+    if not paths or len(paths) > READ_NOTES_MAX_PATHS:
+        outcome = _body_refusal(
+            f"read_notes: give 1 to {READ_NOTES_MAX_PATHS} paths (got {len(paths)}).",
+            "invalid_argument",
+        )
+        result = ReadNotesResult(error=str(outcome))
+        result._body_outcome = outcome
+        return result
+
+    metadata_budget = cap // len(paths)
+    # Up to twenty file reads: off the event loop, in one hop.
+    reads = await asyncio.to_thread(_read_notes_files, paths, uid, metadata_budget)
+    lengths = [0 if isinstance(r, ReadNoteResult) else len(r["content"]) for r in reads]
+    shares = share_budget(lengths, cap)
+    notes = [
+        r if isinstance(r, ReadNoteResult)
+        # An empty note's share is 0; `_window` needs a positive one.
+        else _note_result(r, path, None, 0, max(shares[i], 1), metadata_budget, with_outline=False)
+        for i, (path, r) in enumerate(zip(paths, reads))
+    ]
+    result = ReadNotesResult(notes=notes)
+    if all(note.error is not None for note in notes):
+        # Nothing was read: the call's outcome is the first note's refusal, so
+        # the usage row records a failed call rather than a successful empty one.
+        result._body_outcome = notes[0]._body_outcome
     return result
 
 

@@ -21,7 +21,7 @@ from src.mcp_server.ledger_result import (
     LedgerTopicsResult,
     LedgerWriteResult,
 )
-from src.mcp_server.read_result import ReadNoteResult
+from src.mcp_server.read_result import ReadNoteResult, ReadNotesResult
 from src.mcp_server.task_result import TaskListResult, TaskWriteResult
 from src.services import ledger as _ledger_rules
 from src.services import private_folders as _private_folders
@@ -69,6 +69,7 @@ from src.mcp_server.tools import (
     move_note_impl,
     read_file_impl,
     read_note_impl,
+    read_notes_impl,
     request_download_impl,
     request_upload_impl,
     search_notes_impl,
@@ -411,6 +412,8 @@ async def read_note(
     Byte-identity holds for notes whose body newlines are LF: terminators inside the selected content come back
     as LF. `read_file` on the same path is the byte-exact route to the file itself.
 
+    Several whole notes: `read_notes` reads up to 20 in one call.
+
     Args:
         path: Vault-relative path to the note (e.g. "Cards/My Note.md")
         section: Optional ATX heading to read instead of the whole note. Plain text ("Balance Sheet"), a
@@ -422,6 +425,16 @@ async def read_note(
         limit: Maximum characters of `content` to return. Only lowers the server cap; it cannot raise it.
     """
     return await read_note_impl(path, section=section, offset=offset, limit=limit)
+
+
+@mcp.tool(title="Read notes", annotations=_READ_ONLY)
+async def read_notes(paths: list[str]) -> ReadNotesResult:
+    """Read several whole notes in one call (up to 20 paths).
+
+    Returns `notes`, one per path in the order given, each with a whole-note `read_note`'s fields (`content`,
+    `content_hash`, `truncated`, `next_offset`, `notice`, `error`).
+    """
+    return await read_notes_impl(paths)
 
 
 @mcp.tool(title="List notes", annotations=_READ_ONLY)

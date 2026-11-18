@@ -259,8 +259,8 @@ def test_registry_covers_exactly_the_five_classes():
     assert concurrency.CLASSES == {'embedding', 'vector', 'write', 'scan', 'light'}
     assert set(concurrency.TOOL_CLASSES.values()) == concurrency.CLASSES
     assert 'other' not in concurrency.TOOL_CLASSES.values()
-    # Upstream's 32 (`list_tasks` as `upstream_list_tasks`) and the fork's 17.
-    assert len(concurrency.TOOL_CLASSES) == 49
+    # Upstream's 32 (`list_tasks` as `upstream_list_tasks`) and the fork's 18.
+    assert len(concurrency.TOOL_CLASSES) == 50
 
 
 @tools._tracked('read_note', [])

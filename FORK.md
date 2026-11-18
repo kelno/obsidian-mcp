@@ -18,6 +18,7 @@ Each row says what differs and why; a row goes when the difference ends.
 | Change | Commit | Upstream status |
 | --- | --- | --- |
 | `move_file` tool: move or rename a non-markdown file with one non-replacing rename | `edf0394` | Not proposed yet |
+| `read_notes` tool: up to 20 whole notes in one call, sharing `MAX_READ_RESPONSE_CHARS`, no outline, a cut-off note's `notice` warning against writing it back; `read_note`'s description points to it; `CLASS_MAPPING_VERSION` 8. Why: the claude.ai app caps tool calls per reply and approval cards, so a voice relay's 14 parallel `read_note` calls failed (owner's choice, 2026-11-18) | (this change) | Not proposed yet |
 | `delete_folder` tool: remove an empty folder with one `rmdir`; new refusal code `folder_not_empty` | `bcfc113`, `9c4f5ee` | Not proposed yet |
 | `list_files` reports a missing folder as `not_found` ("Folder not found"), not `invalid_path` | `d0d67c1` | Not proposed yet |
 | `move_file` and `move_note` precondition refusals say "move" instead of "write" | `f3cfef6` | Not proposed yet; depends on `move_file` |

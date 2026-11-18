@@ -82,6 +82,11 @@ Upstream's task writers `complete_task`, `update_task` and `add_task` (#428) are
 write-class too (each publishes a note through `edit_note`'s envelope); they are
 switched off in this fork (`SWITCHED_OFF`).
 
+`read_notes` (fork) is class `light` beside `read_note`: up to twenty file
+reads in one call, under one share of the response cap, so no heavier than a
+few `read_note` calls. Adding it moved `TOOL_CLASSES`, so
+`CLASS_MAPPING_VERSION` is 8.
+
 ## The principal is the grant, not the token, and not (client, user)
 
 Every authenticated `/mcp` request binds `current_principal` (a ContextVar in
@@ -1089,7 +1094,7 @@ ending in a 500, shared with the panel and `/token`.
 | `vector` | `find_related` | 1 | 1 |
 | `write` | the write-class tools (L3) | 1 | 2 |
 | `scan` | `keyword_search`, `list_notes`, `get_tags`, `get_neighborhood`, `find_orphans`, `list_files`, `list_tasks` (#350, `CLASS_MAPPING_VERSION` 3), `get_changes` (#351, `CLASS_MAPPING_VERSION` 4), `task_agenda` (#428, `CLASS_MAPPING_VERSION` 6), the fork's `open_area` and `index_status` (`CLASS_MAPPING_VERSION` 7) | 2 | 1 |
-| `light` | `read_note`, `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download` | 4 | 1 |
+| `light` | `read_note`, the fork's `read_notes` (`CLASS_MAPPING_VERSION` 8), `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download` | 4 | 1 |
 
 `hybrid_search` makes the same embedding-provider round trip as
 `semantic_search`, so the two **share the one `embedding` slot**: under

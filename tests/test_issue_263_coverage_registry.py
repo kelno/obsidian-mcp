@@ -11,6 +11,7 @@ from pathlib import Path
 COVERAGE = {
     'keyword_search': [('success', 'test_issue_161_result_telemetry.py::test_keyword_search_logs_count_and_paths')],
     'read_note': [('refused', 'test_issue_263_tool_outcomes.py::test_read_error_private_metadata_budget_and_schema'), ('success', 'test_issue_263_tool_outcomes.py::test_successful_structured_note_with_forged_sentinel_stays_success')],
+    'read_notes': [('success', 'test_read_notes.py::test_each_note_is_what_read_note_returns_in_the_order_given'), ('refused', 'test_read_notes.py::test_a_call_that_reads_nothing_is_logged_as_the_first_refusal')],
     'list_notes': [('success', 'test_issue_263_tool_outcomes.py::test_metadata_empty_successes_and_graph_body_refusals')],
     'get_tags': [('success', 'test_issue_263_tool_outcomes.py::test_metadata_empty_successes_and_graph_body_refusals')],
     'get_recent': [('success', 'test_issue_263_tool_outcomes.py::test_metadata_empty_successes_and_graph_body_refusals')],
@@ -65,7 +66,8 @@ COVERAGE = {
 # inventory, which is a historical record and is not edited.
 ADDED_AFTER_INVENTORY = {'list_tasks', 'get_changes', 'hybrid_search',  # #350, #351, #354
                          'task_agenda', 'complete_task', 'update_task', 'add_task',  # #428
-                         'upstream_list_tasks'}  # upstream's list_tasks, renamed in the fork
+                         'upstream_list_tasks',  # upstream's list_tasks, renamed in the fork
+                         'read_notes'}  # fork
 #: Tools whose body is not `<tool>_impl` (fork: two `list_tasks`).
 IMPLEMENTATION = {'keyword_search': 'search_notes_impl', 'list_tasks': 'fork_list_tasks_impl',
                   'upstream_list_tasks': 'list_tasks_impl'}
@@ -83,8 +85,8 @@ def test_every_registered_tool_has_inventory_and_live_behavioral_references():
     from src.mcp_server.server import SWITCHED_OFF
     registered |= SWITCHED_OFF
     assert set(COVERAGE) == registered
-    # 41 core tools, `open_area` (kelno_vault) and upstream's seven switched off.
-    assert len(registered) == 49
+    # 42 core tools, `open_area` (kelno_vault) and upstream's seven switched off.
+    assert len(registered) == 50
     root = Path(__file__).resolve().parents[1]
     inventory = (root / 'openspec/changes/archive/2026-09-06-typed-tool-outcomes/inventory.md').read_text()
     for tool, references in COVERAGE.items():

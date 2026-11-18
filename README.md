@@ -400,6 +400,10 @@ the wire, so none is cut off by a client's description limit.
   [Response size limits](#response-size-limits). `section=<heading>`
   returns one section's body instead of the whole note; `offset`
   continues a truncated read.
+- `read_notes(paths)` reads up to 20 whole notes in one call: `notes`, one
+  whole-note `read_note` result per path in the order given. The notes share
+  `MAX_READ_RESPONSE_CHARS`; a note cut off says so in its own `notice`, and
+  a path that fails carries its own `error`.
 - `create_note(path, content)`, atomic write, refuses overwrite
 - `edit_note(path, …)` with four mutually exclusive modes: full
   replace (default), `append=True`, `find=…` (with optional
@@ -2183,7 +2187,7 @@ reason.
 | `OAUTH_GRANT_ABSOLUTE_LIFETIME_DAYS` | `90` | Absolute lifetime of an OAuth grant, in whole days (1–365), counted from when the application first receives its tokens. Refresh never extends it; after it the user must approve again. Stated on the consent page. **No off value** — empty, `null`, `none` and `0` refuse to start. Lowering it applies to every grant at its next request; raising it extends existing grants. |
 | `MAX_FILE_READ_BYTES` | `10485760` | `read_file` cap (10 MB); bounds what the server reads from disk |
 | `MAX_FILE_WRITE_BYTES` | `26214400` | `write_file` cap (25 MB), decoded byte length |
-| `MAX_READ_RESPONSE_CHARS` | `40000` | `read_note` / `read_file` cap on what is returned to the caller (≈10K tokens). See [Response size limits](#response-size-limits). |
+| `MAX_READ_RESPONSE_CHARS` | `40000` | `read_note` / `read_notes` / `read_file` cap on what is returned to the caller (≈10K tokens). See [Response size limits](#response-size-limits). |
 | `FTS_CONFIGS` | `english` | Keyword-search text-search config(s). JSON or CSV. See [Full-text search language(s)](#full-text-search-languages). |
 | `RANK_WEIGHTS` | `{0.02, 0.2, 0.4, 1.0}` | `keyword_search`'s `ts_rank_cd` weight array `{D, C, B, A}`: the title and aliases are indexed at `A`, the tags at `B`, the body at `D` (`C` is unused). At the default one two-word title match outweighs fifty body repetitions, and one tag match ranks below a title match and equals twenty body matches; PostgreSQL's own `D=0.1` lets ten body repetitions tie the title. Four finite numbers, each in [1e-6, 1]; body-only order never moves. |
 | `KEYWORD_EXCERPT_CHARS` | `20000` | Leading characters of each note's indexed text stored for `keyword_search` snippets (1000–100000). Applies to notes indexed afterwards; `make rebuild-tsvectors` rewrites the rest. The snippet cost grows roughly linearly with this; the 300 ms budget was measured at the defaults. |
@@ -2555,7 +2559,8 @@ an unbounded prompt — and the caller usually finds out only when its
 inference provider rejects the request.
 
 `MAX_READ_RESPONSE_CHARS` (default 40,000, roughly 10K tokens) bounds
-what `read_note` and the text results of `read_file` return. It is a
+what `read_note` and the text results of `read_file` return; `read_notes`
+splits it between the notes it reads. It is a
 **different limit** from `MAX_FILE_READ_BYTES`, which bounds what the
 server reads off disk. A 3 MB note is comfortably within the 10 MB read
 cap and will still destroy a context window; both caps are needed and
@@ -2738,7 +2743,7 @@ wait uses a bounded queue and one deadline. A retry hint is not a promise that
 a running call will finish by that time.
 
 Every tool belongs to one of five classes (`src/services/concurrency.py`,
-`CLASS_MAPPING_VERSION` 6), each with its own ceiling:
+`CLASS_MAPPING_VERSION` 8), each with its own ceiling:
 
 | Class | Tools | Default ceiling |
 | --- | --- | --- |
@@ -2746,7 +2751,7 @@ Every tool belongs to one of five classes (`src/services/concurrency.py`,
 | `vector` | `find_related` | 1 |
 | `write` | the eleven vault-mutating tools, including `complete_task`, `update_task` and `add_task` | 1 |
 | `scan` | `keyword_search`, `list_notes`, `get_tags`, `get_neighborhood`, `find_orphans`, `list_files`, `list_tasks`, `get_changes`, `task_agenda` | 2 |
-| `light` | `read_note`, `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download` | 4 |
+| `light` | `read_note`, `read_notes`, `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download` | 4 |
 
 Global, tenant and principal ceilings default to 6, 4 and 3. OAuth refresh
 keeps the same principal. Full request and per-bearer ceilings default to 64

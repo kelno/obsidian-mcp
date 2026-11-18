@@ -62,10 +62,10 @@ TWELVE = {
     "move_file", "delete_folder", "create_task", "edit_task", "set_task_status",
     "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit",
 }
-#: Fork: the full list is the fork's 41 core tools and upstream's seven it
-#: switches off (switched on for the tests); a read-only grant lists 27.
-FULL = 48
-READ_ONLY_COUNT = 27
+#: Fork: the full list is the fork's 42 core tools and upstream's seven it
+#: switches off (switched on for the tests); a read-only grant lists 28.
+FULL = 49
+READ_ONLY_COUNT = 28
 #: The four tools the task-tools change (#428) appended, in order.
 TASK_TOOLS = ("task_agenda", "complete_task", "update_task", "add_task")
 

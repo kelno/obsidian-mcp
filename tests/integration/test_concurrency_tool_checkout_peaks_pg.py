@@ -202,6 +202,7 @@ CALLS = [
     ('keyword_search', 'search_notes_impl', lambda s: (('quartzite',), {'limit': 5})),
     ('semantic_search', 'semantic_search_impl', lambda s: (('anything',), {'limit': 5})),
     ('read_note', 'read_note_impl', lambda s: (('a.md',), {})),
+    ('read_notes', 'read_notes_impl', lambda s: ((['a.md'],), {})),
     ('list_notes', 'list_notes_impl', lambda s: ((), {})),
     ('get_tags', 'get_tags_impl', lambda s: ((), {})),
     ('get_recent', 'get_recent_impl', lambda s: ((), {})),

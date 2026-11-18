@@ -814,3 +814,27 @@ def apply_metadata_budget(
     kept = [c for c in (coercions or []) if getattr(result, c.field, None) is not None]
     if kept:
         result.metadata_coercions = kept
+
+
+# ── read_notes ──────────────────────────────────────────────────────────────
+
+#: How many paths one `read_notes` call takes. A voice relay's fourteen
+#: parallel `read_note` calls failed in the claude.ai app (Q127); one call for
+#: two weeks of daily notes is the point of the tool, and twenty keeps each
+#: note's share of the response cap (2,000 characters at the default) useful.
+READ_NOTES_MAX_PATHS = 20
+
+
+class ReadNotesResult(_OmitNone):
+    """What `read_notes` returns: one whole-note read per path, in order.
+
+    Each entry is a `ReadNoteResult` as `read_note` builds it for a whole note,
+    with a smaller budget (the call's notes share the response cap) and no
+    outline. A path that fails carries its own `error`; the call's `error` is
+    set only when the call itself is refused (no entries then).
+    """
+
+    _body_outcome: BodyOutcome | None = PrivateAttr(default=None)
+
+    notes: list[ReadNoteResult] | None = None
+    error: str | None = None
