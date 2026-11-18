@@ -23,8 +23,8 @@
  "ledger_get",
  "ledger_digest",
  "ledger_topics",
+ "hybrid_search",
  "upstream_list_tasks",
  "get_changes",
- "hybrid_search",
  "task_agenda"
 ]

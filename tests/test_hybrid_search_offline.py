@@ -789,13 +789,15 @@ def test_the_hybrid_description_states_the_contract():
 
 
 def test_hybrid_search_is_registered_after_get_changes_with_read_only_annotations():
-    # Registered last when it shipped (#354); the four task tools of #428 and
-    # `move_task` (#430) are appended after it, so it is now sixth from the end.
+    # Registered after `get_changes` (#354); fork: served, so it keeps its
+    # registration place, and the switched-off tools `switch_on` puts back
+    # (`get_changes` among them) follow every served tool.
     listed = asyncio.run(server.mcp.list_tools())
     names = [t.name for t in listed]
     tool = listed[names.index("hybrid_search")]
-    assert names[-7:-5] == ["get_changes", "hybrid_search"]
+    assert "hybrid_search" not in server.SWITCHED_OFF
     assert names[-5:] == ["task_agenda", "complete_task", "update_task", "add_task", "move_task"]
+    assert names.index("hybrid_search") < names.index("upstream_list_tasks") < names.index("get_changes")
     assert tool.title == "Hybrid search"
     a = tool.annotations
     assert (a.readOnlyHint, a.destructiveHint, a.idempotentHint, a.openWorldHint) == (

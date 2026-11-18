@@ -67,7 +67,7 @@ THIRTEEN = {
     "move_file", "delete_folder", "create_task", "edit_task", "set_task_status",
     "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit",
 }
-#: Fork: the full list is the fork's 42 core tools and upstream's eight it
+#: Fork: the full list is the fork's 43 core tools and upstream's seven it
 #: switches off (switched on for the tests); a read-only grant lists 28. The
 #: fork's oracle is v3, regenerated for its surface; v2 and v1 stay upstream's.
 FULL = 50
