@@ -7,7 +7,7 @@
     "openWorldHint": false,
     "readOnlyHint": true
    },
-   "description": "Full-text keyword search via PostgreSQL tsvector. Use this for exact identifiers,\n    code symbols, proper nouns, titles, or known phrases — anywhere semantic noise hurts.\n\n    Exact identifiers, code symbols, titles or known phrases: `keyword_search`.\n    Conceptual or paraphrased questions: `semantic_search`.\n\n    **Bare terms are ANDed**: `budget forecast` matches only notes containing\n    both stems. Notes matching every term come first, tagged `match: all`;\n    when they do not fill the page, notes matching some of the terms follow,\n    tagged `match: any`, in their own rank order. The operators:\n    `\"exact phrase\"` (adjacent words), `budget OR forecast` (either), `-draft`\n    (exclude; honoured in the `any` block too). A note's title and frontmatter\n    `aliases` are indexed above its body, so a query that is a note's title\n    ranks that note first. A note's tags (frontmatter and inline `#tags`; a\n    nested `#a/b` also as `a` and `b`) are indexed below its title and\n    aliases and above its body.\n\n    Each result carries `rank` (a relative score: a body-only match scores in\n    the thousandths, a title match near 1, and an `any` row is scored against\n    the fallback query, so ranks compare only within one block of one page),\n    `match`, `matched_in` (the parts that alone match: `title` — title or\n    aliases — `tags`, `body`, comma-joined; or, when the terms are split\n    between parts, the first of `title+tags`, `title+body`, `tags+body`,\n    `title+tags+body` that matches), `terms` (`k/n`: how many of the query's\n    terms the note contains), and a second line: `snippet:` — the matching\n    body text with the matches in `«»` — or `head:` — the note's opening\n    words when the body alone does not match or the match is beyond the\n    stored excerpt (a note with no body has no second line). Snippets are\n    computed for the first rows of the page (the header says\n    `snippets: first N` when the page is longer). The header always carries the `all`/`any` counts and how many\n    rows have no stored excerpt yet (notes indexed before this version; the\n    footer names the one-time rebuild). Call `read_note` on a result's path\n    for the full note.\n\n    Args:\n        query: Keywords or phrase to match (websearch tsquery syntax: \"foo bar\", \"foo OR bar\", \"-bar\").\n        folder: Optional folder prefix (e.g. \"Cards/\", \"Projects/\").\n        limit: Maximum number of results (default 20).\n        tags: Optional list of tag names; only notes carrying ALL listed tags match\n            (e.g. [\"project\", \"active\"]).\n        frontmatter: Optional dict of frontmatter key/value pairs; only notes whose JSONB\n            frontmatter contains every pair match. Strict type matching — string \"0\" does\n            not match integer 0 (e.g. {\"status\": \"draft\"}).\n    ",
+   "description": "Full-text keyword search via PostgreSQL tsvector. Use this for exact identifiers,\n    code symbols, proper nouns, titles, or known phrases — anywhere semantic noise hurts.\n\n    Exact identifiers, code symbols, titles or known phrases: `keyword_search`.\n    Conceptual or paraphrased questions: `semantic_search`. Unsure which:\n    `hybrid_search`.\n\n    **Bare terms are ANDed**: `budget forecast` matches only notes containing\n    both stems. Notes matching every term come first, tagged `match: all`;\n    when they do not fill the page, notes matching some of the terms follow,\n    tagged `match: any`, in their own rank order. The operators:\n    `\"exact phrase\"` (adjacent words), `budget OR forecast` (either), `-draft`\n    (exclude; honoured in the `any` block too). A note's title and frontmatter\n    `aliases` are indexed above its body, so a query that is a note's title\n    ranks that note first. A note's tags (frontmatter and inline `#tags`; a\n    nested `#a/b` also as `a` and `b`) are indexed below its title and\n    aliases and above its body.\n\n    Each result carries `rank` (a relative score: a body-only match scores in\n    the thousandths, a title match near 1, and an `any` row is scored against\n    the fallback query, so ranks compare only within one block of one page),\n    `match`, `matched_in` (the parts that alone match: `title` — title or\n    aliases — `tags`, `body`, comma-joined; or, when the terms are split\n    between parts, the first of `title+tags`, `title+body`, `tags+body`,\n    `title+tags+body` that matches), `terms` (`k/n`: how many of the query's\n    terms the note contains), and a second line: `snippet:` — the matching\n    body text with the matches in `«»` — or `head:` — the note's opening\n    words when the body alone does not match or the match is beyond the\n    stored excerpt (a note with no body has no second line). Snippets are\n    computed for the first rows of the page (the header says\n    `snippets: first N` when the page is longer). The header always carries the `all`/`any` counts and how many\n    rows have no stored excerpt yet (notes indexed before this version; the\n    footer names the one-time rebuild). Call `read_note` on a result's path\n    for the full note.\n\n    Args:\n        query: Keywords or phrase to match (websearch tsquery syntax: \"foo bar\", \"foo OR bar\", \"-bar\").\n        folder: Optional folder prefix (e.g. \"Cards/\", \"Projects/\").\n        limit: Maximum number of results (default 20).\n        tags: Optional list of tag names; only notes carrying ALL listed tags match\n            (e.g. [\"project\", \"active\"]).\n        frontmatter: Optional dict of frontmatter key/value pairs; only notes whose JSONB\n            frontmatter contains every pair match. Strict type matching — string \"0\" does\n            not match integer 0 (e.g. {\"status\": \"draft\"}).\n    ",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {
@@ -1237,7 +1237,7 @@
     "openWorldHint": false,
     "readOnlyHint": true
    },
-   "description": "Vector similarity search over the vault's chunk embeddings. Use this for conceptual\n    or paraphrased queries — anywhere exact word matching would miss the point.\n\n    Exact identifiers, code symbols, titles or known phrases: `keyword_search`.\n    Conceptual or paraphrased questions: `semantic_search`.\n\n    Each result is one note (deduped) with its closest-matching chunk as a ~200-character preview.\n    Call `read_note` on a result's path to get the full note content.\n\n    The header line carries a stale count and a truncated count, always —\n    including when both are zero, so \"nothing here is degraded\" is\n    distinguishable from a build that does not report it.\n\n    `stale: true` on a row means the note changed after it was embedded: it was\n    matched and ranked against its **previous** content, and its preview is\n    **withheld** rather than shown, because that excerpt is text the note no\n    longer has. Its path, title and tags are current — the indexer refreshed\n    them, which is how the staleness is known at all — so `read_note` on that\n    path returns the true content and is the remedy. Stale notes are never\n    filtered out: during an embedding outage that would empty the result set\n    rather than degrade it.\n\n    `embedding_truncated: true` means the note is longer than the indexer's\n    per-note chunk cap and only its head was embedded. A match against such a\n    note is a match against its head; its tail is not reachable by semantic\n    search at all, though `keyword_search` still covers the whole note.\n\n    **Section locator.** A fresh row names the section it matched on its\n    result line: `§ \"<heading path>\" (#N)` for a heading's section, or\n    `§ (top of note)` for text before the first heading.\n    `read_note(path, section=\"#N\")` reads exactly that section. The quoted\n    path is note text; the `(#N)` after it is the server's. The locator is\n    omitted on stale rows and on rows not yet re-embedded since heading-aware\n    chunking. While any of your notes is not yet re-chunked, the line after\n    the header reads `index_transition: N notes not yet re-chunked; …`:\n    ranking across the two generations is approximate, so re-run once it is\n    gone. Previews are one line.\n\n    **The bound on the staleness signal, stated so it is not over-read:** it\n    reports what the index has *committed*. An edit that the indexer has not\n    yet scanned is not marked, so a note edited in the last few minutes may\n    come back unmarked with a superseded preview. The guarantee is \"no result\n    presents text the index knows to be superseded\", not \"no result is ever\n    out of date\".\n\n    `rerank=true` asks the deployment's reranker to reorder the candidates\n    this call already fetched; it can add up to the configured timeout. Its\n    rows are one-line quoted objects followed by server fields (with\n    `rerank_score` when reranked). The header says `reranked: true` or\n    `reranked: false (<reason>)`, and an unreranked page keeps the unreranked\n    order; `reranked: false (not_configured)` means this deployment has no\n    reranker.\n\n    The header also carries `confidence: ok` or `confidence: low` (the\n    closest match is under the deployment's threshold; `ok` when none is set).\n\n    Args:\n        query: Natural language description of what you're looking for.\n        limit: Maximum number of distinct notes to return (default 15).\n        folder: Optional folder prefix (e.g. \"Projects/\").\n        tags: Optional list of tag names; only notes carrying ALL listed tags match\n            (e.g. [\"product\"]).\n        frontmatter: Optional dict of frontmatter key/value pairs; strict type matching —\n            string \"0\" does not match integer 0 (e.g. {\"status\": \"active\"}).\n        rerank: Reorder the fetched candidates with the deployment's reranker\n            (default false).\n    ",
+   "description": "Vector similarity search over the vault's chunk embeddings. Use this for conceptual\n    or paraphrased queries — anywhere exact word matching would miss the point.\n\n    Exact identifiers, code symbols, titles or known phrases: `keyword_search`.\n    Conceptual or paraphrased questions: `semantic_search`. Unsure which:\n    `hybrid_search`.\n\n    Each result is one note (deduped) with its closest-matching chunk as a ~200-character preview.\n    Call `read_note` on a result's path to get the full note content.\n\n    The header line carries a stale count and a truncated count, always —\n    including when both are zero, so \"nothing here is degraded\" is\n    distinguishable from a build that does not report it.\n\n    `stale: true` on a row means the note changed after it was embedded: it was\n    matched and ranked against its **previous** content, and its preview is\n    **withheld** rather than shown, because that excerpt is text the note no\n    longer has. Its path, title and tags are current — the indexer refreshed\n    them, which is how the staleness is known at all — so `read_note` on that\n    path returns the true content and is the remedy. Stale notes are never\n    filtered out: during an embedding outage that would empty the result set\n    rather than degrade it.\n\n    `embedding_truncated: true` means the note is longer than the indexer's\n    per-note chunk cap and only its head was embedded. A match against such a\n    note is a match against its head; its tail is not reachable by semantic\n    search at all, though `keyword_search` still covers the whole note.\n\n    **Section locator.** A fresh row names the section it matched on its\n    result line: `§ \"<heading path>\" (#N)` for a heading's section, or\n    `§ (top of note)` for text before the first heading.\n    `read_note(path, section=\"#N\")` reads exactly that section. The quoted\n    path is note text; the `(#N)` after it is the server's. The locator is\n    omitted on stale rows and on rows not yet re-embedded since heading-aware\n    chunking. While any of your notes is not yet re-chunked, the line after\n    the header reads `index_transition: N notes not yet re-chunked; …`:\n    ranking across the two generations is approximate, so re-run once it is\n    gone. Previews are one line.\n\n    **The bound on the staleness signal, stated so it is not over-read:** it\n    reports what the index has *committed*. An edit that the indexer has not\n    yet scanned is not marked, so a note edited in the last few minutes may\n    come back unmarked with a superseded preview. The guarantee is \"no result\n    presents text the index knows to be superseded\", not \"no result is ever\n    out of date\".\n\n    `rerank=true` asks the deployment's reranker to reorder the candidates\n    this call already fetched; it can add up to the configured timeout. Its\n    rows are one-line quoted objects followed by server fields (with\n    `rerank_score` when reranked). The header says `reranked: true` or\n    `reranked: false (<reason>)`, and an unreranked page keeps the unreranked\n    order; `reranked: false (not_configured)` means this deployment has no\n    reranker.\n\n    The header also carries `confidence: ok` or `confidence: low` (the\n    closest match is under the deployment's threshold; `ok` when none is set).\n\n    Args:\n        query: Natural language description of what you're looking for.\n        limit: Maximum number of distinct notes to return (default 15).\n        folder: Optional folder prefix (e.g. \"Projects/\").\n        tags: Optional list of tag names; only notes carrying ALL listed tags match\n            (e.g. [\"product\"]).\n        frontmatter: Optional dict of frontmatter key/value pairs; strict type matching —\n            string \"0\" does not match integer 0 (e.g. {\"status\": \"active\"}).\n        rerank: Reorder the fetched candidates with the deployment's reranker\n            (default false).\n    ",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {
@@ -8055,6 +8055,94 @@
     "openWorldHint": false,
     "readOnlyHint": true
    },
+   "description": "Keyword and semantic search fused into one ranking, for a query that is not clearly an identifier or a paraphrase.\n\n    Exact identifiers, code symbols, titles or known phrases: `keyword_search`.\n    Conceptual or paraphrased questions: `semantic_search`. Unsure which:\n    `hybrid_search`.\n\n    Both arms run for the same query and filters in one database snapshot:\n    the `keyword_search` ranking and the `semantic_search` ranking, each taken\n    to its top 50. They are fused by reciprocal rank fusion over note paths\n    with equal votes: a note's score is the sum, over the arms that found it,\n    of `1/(k + rank)` (`k` is the server's `HYBRID_RRF_K`, shown as `rrf_k`).\n    A note outside both top-50 lists is not considered; the header's\n    `arm_depth: keyword n/50, semantic c/50 chunks` says when an arm was full.\n    Fusion helps when the query's kind is unclear, and a single arm can rank\n    better than it on its own kind of query (an exact identifier, or a pure\n    paraphrase); use that arm's tool then.\n\n    One line per result: a JSON object of the note-controlled fields\n    `{\"title\",\"path\",\"tags\",\"preview_kind\",\"preview\"}` (every value a JSON\n    string, so note text cannot forge a field), then the server fields:\n    `score`, semantic_rank (with similarity) or `-`, keyword_rank (with\n    `match` and `matched_in`) or `-`, and `explain` (the `1/(k+rank)` terms\n    that make the score). `preview_kind` is `snippet` (a keyword highlight in\n    `«»`), `head`, `chunk` (semantic), `stale_notice` or `none`, from the arm\n    that ranked the note better. `stale: true` and `embedding_truncated: true`\n    mean what they mean in `semantic_search`, and so do the semantic arm's\n    `§ \"<heading path>\" (#N)` / `§ (top of note)` field (read the section\n    with `read_note(path, section=\"#N\")`) and the `index_transition:` line\n    under the header. A long response drops whole rows\n    from the end and says how many; a first row that does not fit is cut and\n    labelled. Call `read_note` on a path for the full note.\n\n    The header always says `arms:`. `arms: both` is a fused answer. `arms:\n    keyword-only (semantic unavailable: provider_error | provider_input_rejected)`\n    means the embedding provider failed or refused the query: the page is the\n    keyword arm alone, in keyword order, and `semantic_search` will fail the\n    same way until the provider recovers.\n\n    `rerank=true` asks the deployment's reranker to reorder the candidates\n    this call already fetched; it can add up to the configured timeout. Its\n    rows are one-line quoted objects followed by server fields (with\n    `rerank_score` after them when reranked). The header says\n    `reranked: true` or `reranked: false (<reason>)`, and an unreranked page\n    keeps the unreranked order; `reranked: false (not_configured)` means\n    this deployment has no reranker.\n\n    Every page's header also says `confidence: ok` or `confidence: low`:\n    `low` means no note matched all the keyword terms and the closest\n    semantic candidate is under this deployment's similarity threshold (a\n    line then suggests `keyword_search` or `get_neighborhood`), and `ok` is\n    also what a deployment that set no threshold says, so it is not a\n    quality claim.\n\n    Args:\n        query: What you are looking for — words, a phrase or a question.\n        limit: Maximum number of results (default 10, at most 50).\n        folder: Optional folder prefix (e.g. \"Projects/\").\n        tags: Optional list of tag names; only notes carrying ALL listed tags match.\n        frontmatter: Optional dict of frontmatter key/value pairs; strict type matching —\n            string \"0\" does not match integer 0 (e.g. {\"status\": \"active\"}).\n        rerank: Reorder the first 50 fused candidates with the deployment's\n            reranker (default false).\n    ",
+   "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+     "folder": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Folder"
+     },
+     "frontmatter": {
+      "anyOf": [
+       {
+        "additionalProperties": true,
+        "type": "object"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Frontmatter"
+     },
+     "limit": {
+      "default": 10,
+      "title": "Limit",
+      "type": "integer"
+     },
+     "query": {
+      "title": "Query",
+      "type": "string"
+     },
+     "rerank": {
+      "default": false,
+      "title": "Rerank",
+      "type": "boolean"
+     },
+     "tags": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Tags"
+     }
+    },
+    "required": [
+     "query"
+    ],
+    "title": "hybrid_searchArguments",
+    "type": "object"
+   },
+   "name": "hybrid_search",
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "title": "Result",
+      "type": "string"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "hybrid_searchOutput",
+    "type": "object"
+   },
+   "title": "Hybrid search"
+  },
+  {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false,
+    "readOnlyHint": true
+   },
    "description": "List checkbox tasks (`- [ ] …`) across the vault in one call, from the index — no note is read.\n\n    For a dated overview (overdue, due today, scheduled, upcoming) use\n    `task_agenda`; use `list_tasks` to filter, search and page. Plain\n    checkboxes work; Tasks-plugin emoji fields (📅 due, ⏳ scheduled, 🛫 start,\n    ✅ done, 🔁 recurrence, priority) are optional and read when present. Query\n    blocks are text and are not evaluated; a checkbox in code is not a task.\n    The index follows each pass (default every 300 s); task writes refresh it\n    at once.\n\n    Each row: the raw marker, the path in backticks with `:line`, `— id <id>`,\n    the dates, priority, tags, `under:` heading and `text:` last. In a path,\n    whitespace and a backtick are shown as `\\n`, `\\t`, `\\uXXXX`\n    (a backtick is `\\u0060`) and `\\` as `\\\\`; the write tools take the\n    unescaped path.\n    `complete_task` and `update_task` take that id with the path; an id shaped\n    `<key>.<i>of<n>` (identical lines) also needs `expected_hash`, the note's\n    `content_hash` from `read_note`. `detail=\"brief\"` prints one short line per\n    task; `context=true` adds the indented lines under each task (`┆`).\n\n    Status: `[ ]`, `[/]` and other markers are `open`; `[x]`/`[X]` are `done`;\n    `[-]` is `cancelled` (only in `cancelled` and `all`). Dates accept\n    `YYYY-MM-DD`, `today`, `tomorrow`, `yesterday`, `+Nd` or `-Nd`, resolved in\n    your task timezone (the query line states it and each resolved date).\n    `*_from` / `*_by` are inclusive and exclude tasks without that date.\n\n    The header always states what the index could not show — notes not yet\n    scanned, tasks that could not be indexed, notes over the 5,000-task cap,\n    ids pending — and, under `scope=\"default\"`, how many tasks your excluded\n    folders, note tags and task rule removed, so \"no tasks\" does not mean\n    none exist.\n    When more rows match, the header says `more: yes` and the response ends\n    `next: <cursor>`: pass it back with the same arguments. A cursor from other\n    arguments, an older server version, or a relative-date query continued\n    after midnight is refused (`invalid_argument`): start again without one.\n    `response_cap_too_small`: the response cap cannot hold one row.\n\n    Args:\n        folder: Only notes under this path prefix (e.g. \"Projects/\").\n        status: `open` (default), `done`, `cancelled` or `all`.\n        due_by: Due on or before this date.\n        scheduled_by: Scheduled on or before this date.\n        tags: Tasks carrying every one of these tags on the task line, matched\n            by `/` segment and case-insensitively (`a` matches `#a` and `#A/b`,\n            not `#ab`). At most 32, a leading `#` optional.\n        limit: Tasks per page, 1–500 (default 100).\n        cursor: The `next` value from the previous page of the same query.\n        due_from: Due on or after this date.\n        scheduled_from: Scheduled on or after this date.\n        done_from: Done on or after this date.\n        done_by: Done on or before this date.\n        undated: true — neither a due nor a scheduled date; false — at least one.\n        has_due: true — with a due date; false — without.\n        text: 1–256 characters, at most 8 words; every word must occur in the\n            task's text, case-insensitively.\n        priority: Any of `highest`, `high`, `medium`, `none`, `low`, `lowest`.\n        recurring: true — with a 🔁 rule; false — without.\n        exclude_tags: Drop tasks carrying any of these tags (matched as `tags`).\n        path: Exactly this note.\n        order_by: `due` (default, undated last), `priority`, `scheduled`,\n            `done` (newest first) or `path`.\n        detail: `full` (default) or `brief`.\n        context: true to include each task's indented context lines.\n        scope: `default` applies your task settings: excluded folders,\n            excluded note tags and the task rule (which checkboxes count as\n            tasks); `all` ignores them.\n    ",
    "inputSchema": {
     "additionalProperties": false,
@@ -8384,94 +8472,6 @@
     "type": "object"
    },
    "title": "Change feed"
-  },
-  {
-   "annotations": {
-    "destructiveHint": false,
-    "idempotentHint": true,
-    "openWorldHint": false,
-    "readOnlyHint": true
-   },
-   "description": "Keyword and semantic search fused into one ranking, for a query that is not clearly an identifier or a paraphrase.\n\n    Exact identifiers, code symbols, titles or known phrases: `keyword_search`.\n    Conceptual or paraphrased questions: `semantic_search`. Unsure which:\n    `hybrid_search`.\n\n    Both arms run for the same query and filters in one database snapshot:\n    the `keyword_search` ranking and the `semantic_search` ranking, each taken\n    to its top 50. They are fused by reciprocal rank fusion over note paths\n    with equal votes: a note's score is the sum, over the arms that found it,\n    of `1/(k + rank)` (`k` is the server's `HYBRID_RRF_K`, shown as `rrf_k`).\n    A note outside both top-50 lists is not considered; the header's\n    `arm_depth: keyword n/50, semantic c/50 chunks` says when an arm was full.\n    Fusion helps when the query's kind is unclear, and a single arm can rank\n    better than it on its own kind of query (an exact identifier, or a pure\n    paraphrase); use that arm's tool then.\n\n    One line per result: a JSON object of the note-controlled fields\n    `{\"title\",\"path\",\"tags\",\"preview_kind\",\"preview\"}` (every value a JSON\n    string, so note text cannot forge a field), then the server fields:\n    `score`, semantic_rank (with similarity) or `-`, keyword_rank (with\n    `match` and `matched_in`) or `-`, and `explain` (the `1/(k+rank)` terms\n    that make the score). `preview_kind` is `snippet` (a keyword highlight in\n    `«»`), `head`, `chunk` (semantic), `stale_notice` or `none`, from the arm\n    that ranked the note better. `stale: true` and `embedding_truncated: true`\n    mean what they mean in `semantic_search`, and so do the semantic arm's\n    `§ \"<heading path>\" (#N)` / `§ (top of note)` field (read the section\n    with `read_note(path, section=\"#N\")`) and the `index_transition:` line\n    under the header. A long response drops whole rows\n    from the end and says how many; a first row that does not fit is cut and\n    labelled. Call `read_note` on a path for the full note.\n\n    The header always says `arms:`. `arms: both` is a fused answer. `arms:\n    keyword-only (semantic unavailable: provider_error | provider_input_rejected)`\n    means the embedding provider failed or refused the query: the page is the\n    keyword arm alone, in keyword order, and `semantic_search` will fail the\n    same way until the provider recovers.\n\n    `rerank=true` asks the deployment's reranker to reorder the candidates\n    this call already fetched; it can add up to the configured timeout. Its\n    rows are one-line quoted objects followed by server fields (with\n    `rerank_score` after them when reranked). The header says\n    `reranked: true` or `reranked: false (<reason>)`, and an unreranked page\n    keeps the unreranked order; `reranked: false (not_configured)` means\n    this deployment has no reranker.\n\n    Every page's header also says `confidence: ok` or `confidence: low`:\n    `low` means no note matched all the keyword terms and the closest\n    semantic candidate is under this deployment's similarity threshold (a\n    line then suggests `keyword_search` or `get_neighborhood`), and `ok` is\n    also what a deployment that set no threshold says, so it is not a\n    quality claim.\n\n    Args:\n        query: What you are looking for — words, a phrase or a question.\n        limit: Maximum number of results (default 10, at most 50).\n        folder: Optional folder prefix (e.g. \"Projects/\").\n        tags: Optional list of tag names; only notes carrying ALL listed tags match.\n        frontmatter: Optional dict of frontmatter key/value pairs; strict type matching —\n            string \"0\" does not match integer 0 (e.g. {\"status\": \"active\"}).\n        rerank: Reorder the first 50 fused candidates with the deployment's\n            reranker (default false).\n    ",
-   "inputSchema": {
-    "additionalProperties": false,
-    "properties": {
-     "folder": {
-      "anyOf": [
-       {
-        "type": "string"
-       },
-       {
-        "type": "null"
-       }
-      ],
-      "default": null,
-      "title": "Folder"
-     },
-     "frontmatter": {
-      "anyOf": [
-       {
-        "additionalProperties": true,
-        "type": "object"
-       },
-       {
-        "type": "null"
-       }
-      ],
-      "default": null,
-      "title": "Frontmatter"
-     },
-     "limit": {
-      "default": 10,
-      "title": "Limit",
-      "type": "integer"
-     },
-     "query": {
-      "title": "Query",
-      "type": "string"
-     },
-     "rerank": {
-      "default": false,
-      "title": "Rerank",
-      "type": "boolean"
-     },
-     "tags": {
-      "anyOf": [
-       {
-        "items": {
-         "type": "string"
-        },
-        "type": "array"
-       },
-       {
-        "type": "null"
-       }
-      ],
-      "default": null,
-      "title": "Tags"
-     }
-    },
-    "required": [
-     "query"
-    ],
-    "title": "hybrid_searchArguments",
-    "type": "object"
-   },
-   "name": "hybrid_search",
-   "outputSchema": {
-    "properties": {
-     "result": {
-      "title": "Result",
-      "type": "string"
-     }
-    },
-    "required": [
-     "result"
-    ],
-    "title": "hybrid_searchOutput",
-    "type": "object"
-   },
-   "title": "Hybrid search"
   },
   {
    "annotations": {
