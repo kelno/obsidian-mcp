@@ -1,4 +1,4 @@
-"""Upstream's tools the fork switches off are not offered (CLAUDE.md, "Following upstream").
+"""Upstream's tools the fork switches off are not offered (CLAUDE.fork.md, "Following upstream").
 
 The suite runs with them switched on (`conftest.pytest_configure`),
 so this test switches them off again, the state the server module leaves at

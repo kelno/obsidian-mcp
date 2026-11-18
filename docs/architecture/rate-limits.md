@@ -190,8 +190,9 @@ still empties a 2,577-note vault in about twenty minutes. **Neither bucket
 bounds totality**; only the daily quota does, and only for the credentials it
 reaches.
 
-> **Accepted limitation, owner-approved.** OAuth principals and pre-existing
-> NULL-limit API keys have **velocity bounds only** — no durable ceiling on
+> **Accepted limitation, owner-approved.** OAuth principals (#327),
+> pre-existing NULL-limit API keys and keys an administrator creates or
+> restores as unlimited (#323) have **velocity bounds only** — no durable ceiling on
 > total destructive work in a day. Closing it would mean either a quota for
 > OAuth (rejected in #162: panel OAuth is the operator, and an operator locked
 > out by their own ceiling cannot raise it) or a backfill onto existing keys
@@ -817,7 +818,11 @@ supplied code by design, and any of them can forge the header.
 **uvicorn's layer is switched off (`--no-proxy-headers`), not aligned.** Merely
 agreeing is a state an operator can break from the environment: uvicorn's
 `proxy_headers` defaults to *enabled* and its `forwarded_allow_ips` reads
-`$FORWARDED_ALLOW_IPS`. One control means one control.
+`$FORWARDED_ALLOW_IPS`. One control means one control. uvicorn's layer also
+acts first: it rewrites the client address *before* the app's middleware runs,
+so a narrowed `TRUSTED_PROXY_IPS` could not undo what it had already accepted.
+Do not re-enable it (the `Dockerfile` and every compose `command:` override
+pass `--no-proxy-headers`), and do not set `FORWARDED_ALLOW_IPS`.
 
 **Entries are stored canonicalised, and that is not cosmetic.**
 `ip_network("192.168.0.10/24", strict=False)` accepts host bits and answers

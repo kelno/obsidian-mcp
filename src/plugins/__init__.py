@@ -1,6 +1,6 @@
 """Plugins: behaviour that follows one vault's own conventions, kept out of the core.
 
-The core serves any Obsidian vault as it is (CLAUDE.md, "The core serves any
+The core serves any Obsidian vault as it is (CLAUDE.fork.md, "The core serves any
 vault"). What only one vault wants (its folder layout, its naming or linking
 rules) lives in a plugin: a module under `src/plugins/<name>/` exposing one
 `plugin` object, a `Plugin`. A deployment loads plugins by naming them in the

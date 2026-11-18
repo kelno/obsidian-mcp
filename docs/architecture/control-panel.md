@@ -1286,7 +1286,8 @@ The lifecycle, in one table — one implementation per phase:
   a password field was a latent 500 on four handlers and is now a form error.
   **The 72-byte truncation and the NUL rejection themselves are untouched** —
   every stored hash depends on them; read the module docstring before
-  "fixing" either.
+  "fixing" either. Hashes are direct `bcrypt` (modular-crypt `$2b$`, cost
+  12), keeping passlib's historical semantics so existing hashes stay valid.
 
 - **The four forms render `MIN_PASSWORD_LENGTH`; none of them writes a
   number.** `register.html`, `account.html`, `users.html` and `user_edit.html`

@@ -1,6 +1,6 @@
 # Plugins
 
-The core serves any Obsidian vault as it is (`CLAUDE.md`, "The core serves any vault"). Behaviour that follows one vault's own conventions lives in a plugin: a module under `src/plugins/<name>/` exposing one `plugin` object, a `src.plugins.Plugin`. A deployment loads plugins by naming them in `PLUGINS` (JSON list or comma-separated), in the order they run. With none, the server is the plain core.
+The core serves any Obsidian vault as it is (`CLAUDE.fork.md`, "The core serves any vault"). Behaviour that follows one vault's own conventions lives in a plugin: a module under `src/plugins/<name>/` exposing one `plugin` object, a `src.plugins.Plugin`. A deployment loads plugins by naming them in `PLUGINS` (JSON list or comma-separated), in the order they run. With none, the server is the plain core.
 
 The interface, the loader and the runner are all in `src/plugins/__init__.py`. Plugins live in this repo and change with it; there is no versioned interface, no packaging, no third-party loading.
 

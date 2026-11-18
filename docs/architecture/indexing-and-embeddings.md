@@ -642,6 +642,11 @@ yields one chunk where #355 yielded none.
 
 ## Indexing decisions
 
+- Links: the wikilink graph is extracted from note bodies into `note_links`
+  (`src/services/links.py`, code stripped first) and resolved at index time,
+  Obsidian-style: filename first, a bare name shared by several notes going to
+  the one in the source's own folder, else the first alphabetically. On
+  startup an empty `note_links` triggers a one-shot backfill.
 - Embeddings: pluggable provider, `EmbeddingProvider` Protocol with three
   implementations (Ollama, OpenAI, native TEI). Single `EMBEDDING_PROVIDER`
   env var picks the backend; `get_provider()` is a cached singleton. Default is
@@ -1250,6 +1255,20 @@ below close the NUL route and two same-class routes a bug hunt found;
   the same way (its consequence is the same full-scope re-derive next tick),
   so only a lock or assignment race that persists for
   `INDEXER_DEGRADED_AFTER_FAILURES` passes reaches degraded.
+
+### Failure accounting reaches `/health`, which stays 200 (#308)
+
+`src/services/indexer_health.py` holds per-scope consecutive index and embed
+failures and incomplete re-derives, a tick-level enumeration counter and "task
+not running", updated from **every** entrypoint: the startup pass, the periodic
+stages in both modes and the panel's Reindex. Any counter at
+`INDEXER_DEGRADED_AFTER_FAILURES` (3), a dead task, a quarantined note, a
+stalled loop or embedding without progress (below) makes `/health`
+`status: "degraded"`, counts only (no path, error or user id), and logs one
+CRITICAL line, re-armed when the counter resets. **The HTTP status stays 200**:
+`/health` is the liveness probe, and a restart cannot fix vault content. In
+single-user mode an index failure does not skip the embed stage, and
+`cleanup_expired_tokens` runs in the tick's `finally`.
 
 ### The poison-note quarantine (#308, D3, D5)
 
@@ -2479,10 +2498,14 @@ already sits.
   old clause avoided, a first index spread over five-minute-spaced passes, is
   removed rather than accepted: a budget stop reports `EmbedStop.BUDGET`
   (`EmbedPassResult.stopped`), `record_embed_outcome` notes it, and
-  `run_indexer_loop` starts the next tick after `EMBED_BACKLOG_RETICK_SECONDS`
+  `run_embed_loop` starts the next tick after `EMBED_BACKLOG_RETICK_SECONDS`
   (5) instead of the interval. A large backlog therefore drains at the same
-  speed as before, in 300 s slices with an index stage between them. The scope
-  count (`_active_scope_count`) is gone with the clause.
+  speed as before, in 300 s slices. The scope
+  count (`_active_scope_count`) is gone with the clause. Since the stages got
+  separate loops (2026-11-09, "Two stage locks" below) the index stage no
+  longer waits for the embed stage, but the budget still bounds how long an
+  embed stage holds `embed_pass_lock`, which the search pre-warm and a panel
+  reset wait for. Do not restore the "only with more than one scope" clause.
 - **A stop is not a failure and writes nothing to `error`.** It is a deliberate
   decision, the same class of event as a pause, and writing it into
   `indexer_runs.error` would fire #201's own outage signal on a healthy server.

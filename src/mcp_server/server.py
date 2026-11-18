@@ -3132,7 +3132,7 @@ if settings.mcp_reject_unknown_arguments:
 
 # ── Upstream tools switched off (fork) ──────────────────────────────────────
 #
-# Upstream tools switched off (CLAUDE.md, "Following upstream"): the five
+# Upstream tools switched off (CLAUDE.fork.md, "Following upstream"): the five
 # task tools and `move_task` (#430) for good (owner's decisions 2026-11-15 and
 # 2026-11-18, FORK.md), `get_changes` and `hybrid_search` until the owner
 # decides on them. Their code is kept as upstream wrote it and registered like any

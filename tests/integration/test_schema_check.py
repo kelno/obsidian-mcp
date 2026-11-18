@@ -168,7 +168,7 @@ def fetchval(url: str, statement: str, *args):
 
 def alembic_version(url: str, fork: bool = False) -> str:
     """The recorded revision. Below the merge revision 1003 the fork's own
-    branch (1001, 1002) can be recorded beside upstream's (CLAUDE.md, "Fork
+    branch (1001, 1002) can be recorded beside upstream's (schema-and-migrations.md, "Fork
     migrations"): then upstream's row, or with `fork=True` the fork's."""
     rows = [r["version_num"] for r in fetch(url, "SELECT version_num FROM alembic_version")]
     if len(rows) == 1:

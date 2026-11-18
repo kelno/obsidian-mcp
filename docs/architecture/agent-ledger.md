@@ -8,7 +8,7 @@ The agent ledger holds the logs agents keep for each other: **quirks** (Q: what 
 
 Set by the owner (the design was reviewed with them on 2026-11-05); they outweigh any technical choice below.
 
-1. **It is primary data.** Nothing in the vault rebuilds it, so it is backed up with the database, never re-derived. It is the first content in this database with that property (accounts and usage logs are the server's own bookkeeping).
+1. **It is primary data.** Nothing in the vault rebuilds it, so it is backed up with the database, never re-derived: a restore of last night's dump loses the day's entries. It is the first content in this database with that property (accounts and usage logs are the server's own bookkeeping).
 2. **Real foreign keys and constraints wherever possible**, rather than IDs checked only by code: same-owner checks on every link between ledger rows; each kind's own fields as real columns with checks; the database itself refusing deletes and history rewrites. The one exception is links to the vault (an entry's or topic's area), so a reindex or prune can never reach the ledger.
 3. **Nothing is ever lost.** No delete tool; every change states a reason and the revision it was based on, and is refused if the entry moved since; the previous version goes into an append-only history. Removing something for good (a sensitive detail logged by mistake) is the owner's act, from `psql`.
 4. **Writes never wait for an embedding.** The reference server's Ollama is CPU-only and slow, and the claude.ai app drops a tool call after about 30 s.

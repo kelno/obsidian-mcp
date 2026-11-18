@@ -57,6 +57,13 @@ credential and then opens the Usage page to see what it did was shown
   `user_id`". An unresolvable name deliberately clears all three: losing the
   scoping beats losing the row. The broad `except` stays last: usage logging
   must never fail a call that already did its work.
+- **Bookkeeping commits asynchronously; credential writes never do (#279).**
+  `SET LOCAL synchronous_commit = off` is issued in exactly three places: the
+  `api_keys.last_used_at` UPDATE (itself skipped when the stamp is under 60 s
+  old), `_insert_usage`, and quota admission (rate-limits.md). Token
+  rotation and revocation, code exchange and transfer-token writes stay
+  synchronous, and an AST test pins the allow-list. They were sized for PGDATA
+  on a spinning disk; on NVMe they matter far less, but they stay.
 - **`True` means "committed and visible", not "durable across a server
   crash" (L2, performance-2026-09 #279).** `_insert_usage` issues
   `SET LOCAL synchronous_commit = off` as the first statement of its

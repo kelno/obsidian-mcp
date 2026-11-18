@@ -629,7 +629,7 @@ def test_the_recipe_runs_the_harness_under_min_statement():
     assert embeddings.CLEN_SQL.format(col="ne.chunk_text") in db.UNDER_MIN_SQL
     deployment = (root / "DEPLOYMENT.md").read_text(encoding="utf-8")
     assert db.UNDER_MIN_SQL.replace(":m", str(CHUNK_MIN_CHARS)) in deployment
-    for doc in [root / "README.md", root / "DEPLOYMENT.md", root / "CLAUDE.md",
+    for doc in [root / "README.md", root / "DEPLOYMENT.md", root / "CLAUDE.md", root / "CLAUDE.fork.md",
                 *sorted((root / "docs").rglob("*.md"))]:
         body = doc.read_text(encoding="utf-8")
         assert "IS DISTINCT FROM 1`" not in body, doc
