@@ -188,8 +188,8 @@ _READ_ONLY_OPEN_WORLD = ToolAnnotations(
 # depend on a client having read this (claude.ai is reported to drop it).
 SERVER_INSTRUCTIONS = (
     "Agent memory in a markdown Obsidian vault. Search with `keyword_search` "
-    "(identifiers) or `semantic_search` (paraphrase); read with "
-    "`read_note`; write with `create_note` or "
+    "(identifiers), `semantic_search` (paraphrase) or `hybrid_search` "
+    "(unsure); read with `read_note`; write with `create_note` or "
     "`edit_note` (`dry_run=true` first). `get_vault_guide` describes this "
     "vault's conventions (one call per session). `create_note` never "
     "overwrites. Edits take `expected_hash` and refuse, writing nothing, if "
@@ -215,13 +215,9 @@ SERVER_INSTRUCTIONS = (
     "does not run); `create_task` adds a task, and `edit_task` and "
     "`set_task_status` change one, named by its `id` (🆔), as `list_tasks` gives it."
 )
-# Fork: the text above names only tools this fork serves. Upstream's lead
-# also routes "unsure" searches to `hybrid_search`, and its task sentence
-# names its own task tools; switching one of those on (`SWITCHED_OFF`, end of
-# this file) brings its mention back here, in `keyword_search`'s and
-# `semantic_search`'s routing lines, and in `get_recent`'s pointer to
-# `get_changes`; `hybrid_search` also joins the searches the vault guide's
-# private-folders section names (`tools._private_folders_guide`).
+# Fork: the text above names only tools this fork serves. Upstream's task
+# sentence names its own task tools; switching `get_changes` on (`SWITCHED_OFF`,
+# end of this file) brings back `get_recent`'s pointer to it.
 
 
 class _ScopedFastMCP(FastMCP):
@@ -322,7 +318,8 @@ async def keyword_search(
     code symbols, proper nouns, titles, or known phrases — anywhere semantic noise hurts.
 
     Exact identifiers, code symbols, titles or known phrases: `keyword_search`.
-    Conceptual or paraphrased questions: `semantic_search`.
+    Conceptual or paraphrased questions: `semantic_search`. Unsure which:
+    `hybrid_search`.
 
     **Bare terms are ANDed**: `budget forecast` matches only notes containing
     both stems. Notes matching every term come first, tagged `match: all`;
@@ -546,7 +543,8 @@ async def semantic_search(
     or paraphrased queries — anywhere exact word matching would miss the point.
 
     Exact identifiers, code symbols, titles or known phrases: `keyword_search`.
-    Conceptual or paraphrased questions: `semantic_search`.
+    Conceptual or paraphrased questions: `semantic_search`. Unsure which:
+    `hybrid_search`.
 
     Each result is one note (deduped) with its closest-matching chunk as a ~200-character preview.
     Call `read_note` on a result's path to get the full note content.
@@ -3101,15 +3099,16 @@ if settings.mcp_reject_unknown_arguments:
 #
 # Upstream tools switched off (CLAUDE.fork.md, "Following upstream"): the five
 # task tools and `move_task` (#430) for good (owner's decisions 2026-11-15 and
-# 2026-11-18, FORK.md), `get_changes` and `hybrid_search` until the owner
-# decides on them. Their code is kept as upstream wrote it and registered like any
+# 2026-11-18, FORK.md), `get_changes` until the owner decides on it.
+# `hybrid_search` was switched on by the owner's decision of 2026-11-18,
+# once it left private folders out like the other searches. Their code is kept as upstream wrote it and registered like any
 # other tool above, then taken off the list here, so no client is offered them.
 # Removing a name switches that tool on. `switch_on` puts them back for
 # upstream's tests of them. `upstream_list_tasks` is upstream's `list_tasks`,
 # renamed because the fork's own task tools keep that name.
 SWITCHED_OFF = frozenset({
     "upstream_list_tasks", "task_agenda", "complete_task", "update_task", "add_task",
-    "get_changes", "hybrid_search", "move_task",
+    "get_changes", "move_task",
 })
 _SWITCHED_OFF_TOOLS: dict = {}
 

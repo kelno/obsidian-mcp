@@ -331,12 +331,11 @@ def test_the_instructions_state_the_round_trip_with_its_conditions():
 
 
 #: The instructions' lead as it stood before #428, which must not move: only
-#: the `list_tasks` sentence after it is replaced (D15). Fork: without
-#: `hybrid_search`, which is switched off.
+#: the `list_tasks` sentence after it is replaced (D15).
 LEAD_BEFORE_428 = (
     "Agent memory in a markdown Obsidian vault. Search with `keyword_search` "
-    "(identifiers) or `semantic_search` (paraphrase); read with "
-    "`read_note`; write with `create_note` or "
+    "(identifiers), `semantic_search` (paraphrase) or `hybrid_search` "
+    "(unsure); read with `read_note`; write with `create_note` or "
     "`edit_note` (`dry_run=true` first). `get_vault_guide` describes this "
     "vault's conventions (one call per session). `create_note` never "
     "overwrites. Edits take `expected_hash` and refuse, writing nothing, if "

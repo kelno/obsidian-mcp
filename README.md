@@ -12,7 +12,7 @@ A self-hosted [Model Context Protocol](https://modelcontextprotocol.io)
 server that turns an Obsidian vault into long-term memory for every
 agent you use. Agents search it by meaning or by exact words, follow
 its wikilinks, see what changed since their last session, keep their
-to-dos in it, and write back through guarded, atomic edits. 50 tools
+to-dos in it, and write back through guarded, atomic edits. 51 tools
 over plain markdown files that you can open,
 edit and grep.
 
@@ -281,16 +281,16 @@ looks the way it does.
 
 ## What's in the box
 
-The server exposes 50 MCP tools (42 in the core, `open_area`, `agent_path`
+The server exposes 51 MCP tools (43 in the core, `open_area`, `agent_path`
 and `agent_path_reached_by` from the `kelno_vault` plugin, and five calendar
-tools from the `caldav` plugin), plus the auth and ops layer around them. It also registers eight of upstream's tools that this
+tools from the `caldav` plugin), plus the auth and ops layer around them. It also registers seven of upstream's tools that this
 fork switches off ([FORK.md](FORK.md)): upstream's five task tools and
-`move_task`, for good, and `get_changes` and `hybrid_search` until the owner
+`move_task`, for good, and `get_changes` until the owner
 decides. They stay described below where upstream describes them, each marked
 as switched off.
 
 Every tool is published with a `title` and MCP `ToolAnnotations`, all
-four hints set explicitly: `readOnlyHint` on the twenty-eight tools that only
+four hints set explicitly: `readOnlyHint` on the twenty-nine tools that only
 read (search, read, list, graph, `list_tasks`, `index_status`, the four
 ledger readers, `check_upload`, `fetch_page`, `open_area`, the two path
 tools, `list_calendars` and `list_events`), `destructiveHint` on the fourteen
@@ -335,8 +335,7 @@ the wire, so none is cut off by a client's description limit.
   and rows not yet re-embedded since the upgrade to heading-aware chunks,
   carry no locator. While any of your notes is still on the old chunking,
   each response says so on an `index_transition:` line under its header
-- **Switched off in this fork** until the owner decides ([FORK.md](FORK.md)).
-  `hybrid_search(query, limit=10, folder?, tags?, frontmatter?, rerank=false)`, both
+- `hybrid_search(query, limit=10, folder?, tags?, frontmatter?, rerank=false)`, both
   of the above fused by reciprocal rank fusion over each arm's top 50, one
   line per note with its fused score, each arm's rank and the `1/(k+rank)`
   terms behind the score. The three are peers, and every description
@@ -1549,8 +1548,8 @@ the tools' names (28 at 1.0, 32 since the task tools, 33 since
 `move_task`), their argument
 schemas, the shape of their result lines, and the `MCP-REFUSAL` codes.
 An agent written against 1.0 keeps working against every 1.x.
-That promise is upstream's: this fork serves its own surface (50 tools
-with its two plugins, upstream's eight switched off), and its `tools_list_full_v3.json` holds
+That promise is upstream's: this fork serves its own surface (51 tools
+with its two plugins, upstream's seven switched off), and its `tools_list_full_v3.json` holds
 that surface, with the switched-off tools turned on for the tests
 ([FORK.md](FORK.md)).
 
@@ -2896,15 +2895,15 @@ Every tool belongs to one of five classes (`src/services/concurrency.py`,
 
 | Class | Tools | Default ceiling |
 | --- | --- | --- |
-| `embedding` | `semantic_search`, `ledger_search` | 1 |
+| `embedding` | `semantic_search`, `hybrid_search`, `ledger_search` | 1 |
 | `vector` | `find_related` | 1 |
 | `write` | the seventeen writers: the ten that change vault files (`create_note`, `edit_note`, `move_note`, `delete_note`, `set_frontmatter`, `write_file`, `delete_file`, `move_file`, `delete_folder`, `import_from_url`), the three task writers (`create_task`, `edit_task`, `set_task_status`) and the four ledger writers | 1 |
 | `scan` | `keyword_search`, `list_notes`, `get_tags`, `get_neighborhood`, `find_orphans`, `list_files`, `list_tasks`, `index_status`, `open_area`, `agent_path`, `agent_path_reached_by` | 2 |
 | `light` | `read_note`, `read_notes`, `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download`, `fetch_page`, `ledger_get`, `ledger_digest`, `ledger_topics`, and the five calendar tools (`caldav`), whose three writers still spend the write rate limit: they wait on an outside server and must not hold the vault writers' slot | 4 |
 
-Upstream's switched-off tools keep their classes: `hybrid_search` is
-`embedding`, its task writers and `move_task` `write`, and `get_changes`,
-`task_agenda` and its `list_tasks` `scan`.
+Upstream's switched-off tools keep their classes: its task writers and
+`move_task` are `write`, and `get_changes`, `task_agenda` and its `list_tasks`
+are `scan`.
 
 Global, tenant and principal ceilings default to 6, 4 and 3. OAuth refresh
 keeps the same principal. Full request and per-bearer ceilings default to 64
@@ -2931,7 +2930,7 @@ adds a writer wait or drops a usage row because of its observed pressure.
 │ MCP clients  │   HTTP + Bearer key   │   FastAPI app        │
 │  Claude Desk │ ────────────────────▶ │  ┌────────────────┐  │
 │  Claude Code │                       │  │  MCP server    │  │
-│  n8n agents  │                       │  │  (50 tools)    │  │
+│  n8n agents  │                       │  │  (51 tools)    │  │
 │  OpenWebUI   │                       │  └─────┬──────────┘  │
 └──────────────┘                       │        ▼             │
                                        │  ┌────────────────┐  │

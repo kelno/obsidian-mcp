@@ -36,9 +36,12 @@ from src.services.hybrid import HybridResult, HybridRow  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 
 #: Every served tool that takes `include_private` when private folders are configured.
-PRIVATE_TOOLS = {"keyword_search", "semantic_search", "find_related", "list_tasks", "ledger_get", "ledger_update"}
+PRIVATE_TOOLS = {
+    "keyword_search", "semantic_search", "hybrid_search", "find_related", "list_tasks", "ledger_get",
+    "ledger_update",
+}
 #: Switched-off upstream tools that take it too, once switched on.
-SWITCHED_OFF_PRIVATE_TOOLS = {"hybrid_search"}
+SWITCHED_OFF_PRIVATE_TOOLS: set = set()
 
 
 @pytest.fixture
@@ -345,9 +348,8 @@ def enabled(tmp_path_factory):
     return _enabled_schemas(tmp_path_factory.mktemp("enabled"))
 
 
-def test_with_the_setting_the_six_served_tools_take_it(enabled):
+def test_with_the_setting_the_seven_served_tools_take_it(enabled):
     assert set(enabled["served"]) == PRIVATE_TOOLS
-    # Switched on, hybrid_search takes it too: its filter is ready.
     assert set(enabled["switched_on"]) == PRIVATE_TOOLS | SWITCHED_OFF_PRIVATE_TOOLS
     for name, got in enabled["switched_on"].items():
         prop = got["prop"]
