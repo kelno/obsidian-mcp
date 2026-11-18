@@ -54,16 +54,18 @@ class PathPiece(_OmitNone):
     #: When it arrives: loaded at the start, session-start hook, read at the start, at the first bridge
     #: result, when the work's area is opened, when its moment comes, when the connector's tools load.
     stage: str
-    #: How it arrives, in words: what loads it or points to it.
-    arrives: str
+    #: How it arrives, in words: what loads it or points to it. Left out, with `where`, `chars`, `via` and
+    #: `also_pointed_by`, for a piece you hold (`unchanged`) and one whose text comes later (`text_withheld`):
+    #: the short form, its details coming with its text.
+    arrives: str | None = None
     #: False when it arrives only if its moment comes (`moment`).
     always: bool
     #: Where it lives: a path on the PC, a vault path, or this server.
-    where: str
-    chars: int
+    where: str | None = None
+    chars: int | None = None
     #: The first 12 hex digits of the sha256 of its text: the same hash means the same text.
     hash: str
-    #: The line that points to it, word for word.
+    #: The line that points to it, word for word up to 240 characters, then cut with "…".
     via: str | None = None
     #: When that line says to read it; "unplaced" when it doesn't say.
     moment: str | None = None
@@ -73,10 +75,11 @@ class PathPiece(_OmitNone):
     status: Literal["new", "changed", "unchanged"] | None = None
     #: The piece's text: given when it is new or changed (always, without `known`), within the size budget.
     text: str | None = None
-    #: True when the text did not fit in this result: call again, passing as `known` the hashes of the
-    #: pieces whose text you received, and the rest comes next.
+    #: True when the text did not fit in this result: the piece comes in short form; call again, passing as
+    #: `known` the hashes of the pieces whose text you received, and it comes next with its details.
     text_withheld: bool | None = None
-    #: True when the text is too long for any one result: it comes in parts, asked for with `read_from`.
+    #: True when the text is too long for the room in this result: it comes in parts, asked for with
+    #: `read_from` (a call carrying this piece alone; often one part is the whole text).
     text_in_parts: bool | None = None
     #: With `read_from`: where this part of the text starts, and where the next one does (none after the last).
     text_offset: int | None = None
@@ -98,12 +101,15 @@ class PathStructure(_OmitNone):
     #: Links to notes that aren't rule files, with no reading verb: counted, not followed.
     mentions_not_followed: int | None = None
     #: Of those, the links to rule files: a link that says neither when nor "read" is a mention, not a
-    #: pointer, so the rule file it names is not put on the path.
+    #: pointer, so the rule file it names is not put on the path. One entry per rule file
+    #: (`{target, from: [...]}`), the notes linking to it.
     rule_file_mentions: list[dict] | None = None
     #: Pointers to nothing found.
     broken_pointers: list[dict] | None = None
     #: What the path leaves out because it cannot be followed yet.
     not_followed: list[str] | None = None
+    #: The lists above cut short to keep the result within its size budget, if any.
+    cut: list[str] | None = None
 
 
 # One typical agent in the overview: one line per piece, tool texts as one line.

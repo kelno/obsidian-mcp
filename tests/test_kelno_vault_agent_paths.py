@@ -206,6 +206,51 @@ def test_the_relay_role_adds_the_relays_notes(vault):
     assert not any("changed nothing" in n for n in result.notes or [])
 
 
+def test_mentions_are_grouped_by_rule_file_and_held_pieces_come_short(vault):
+    first = path(PathStart(typical=3))
+    assert first.structure.rule_file_mentions == [
+        {"target": "_/agent/Notes kept.md", "from": ["note:_/agent/Common-rules.md"]}]
+    again = path(PathStart(typical=3), known={p.id: p.hash for p in first.pieces})
+    for p in again.pieces:
+        assert p.status == "unchanged" and p.arrives is None and p.where is None and p.via is None
+        assert p.stage and p.hash
+
+
+def test_a_result_whose_metadata_passes_the_budget_is_cut_down_and_every_text_arrives(vault, monkeypatch):
+    monkeypatch.setattr(apt.settings, "max_read_response_chars", 12_000)
+    first = path(PathStart(typical=3))
+    assert len(first.model_dump_json()) <= 12_000
+    # Pieces whose text waits come in short form; those with a text carry their details.
+    waiting = [p for p in first.pieces if p.text_withheld]
+    assert waiting and all(p.arrives is None and p.where is None and p.hash for p in waiting)
+    assert all(p.arrives and p.where for p in first.pieces if p.text is not None)
+    assert any("short form" in n for n in first.notes)
+    # Passing what it now holds, the caller gets the rest: every text arrives within a few calls.
+    # (A text too long for one result is read in parts: counted as held here.)
+    held, rounds = {}, 0
+    while rounds < 30:
+        r = path(PathStart(typical=3), known=held or None)
+        assert len(r.model_dump_json()) <= 12_000
+        held |= {p.id: p.hash for p in r.pieces
+                 if p.text is not None or p.status == "unchanged" or p.text_in_parts}
+        rounds += 1
+        if all(p.status == "unchanged" or p.private or p.text_in_parts for p in r.pieces) and not any(
+                "left out" in n for n in r.notes or []):
+            break
+    assert rounds < 30
+    monkeypatch.setattr(apt.settings, "max_read_response_chars", 400_000)
+    full = path(PathStart(typical=3))
+    assert set(held) == {p.id for p in full.pieces if not p.private}
+
+
+def test_the_overview_stays_within_the_budget(vault, monkeypatch):
+    monkeypatch.setattr(apt.settings, "max_read_response_chars", 2_500)
+    over = path()
+    assert len(over.model_dump_json()) <= 2_500
+    assert any("cut short" in n for n in over.notes)
+    assert any(line.startswith("… ") for t in over.typical for line in t.pieces)
+
+
 def test_a_hook_script_changed_since_the_snapshot_is_said(vault):
     script = "_/claude-code-hooks/area-start.py"
     (vault / script).parent.mkdir(parents=True, exist_ok=True)

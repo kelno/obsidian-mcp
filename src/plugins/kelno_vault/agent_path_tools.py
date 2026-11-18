@@ -41,8 +41,14 @@ from src.services import private_folders
 from src.services.tool_outcomes import body_refusal as _body_refusal
 from src.services.vault import _vault_root, read_bytes
 
-#: Characters kept free of texts for the notes added after them (the withheld line among them).
-_NOTES_RESERVE = 500
+#: Characters kept free of texts for the notes added after them (the withheld, in-parts and cut lines).
+_NOTES_RESERVE = 1_000
+#: What a `read_from` call carries besides the piece itself (start, work, machine, notes): a text that
+#: wouldn't fit beside that in any result comes in parts.
+_PART_SHELL = 1_000
+#: A pointing line (`via`) longer than this is cut, ending with "…": the whole line is in the text of the
+#: piece that points (its `arrives`), and on a large path the lines alone ran past the result's budget.
+_VIA_MAX = 240
 #: The PC hook that writes the snapshots; `run` refreshes one at once (named in the stale-snapshot notice).
 _SNAPSHOT_SCRIPT = "_/claude-code-hooks/agent-paths-snapshot.py"
 #: Roles whose start adds more than a role note: the relay is handed its notes by the bridge.
@@ -154,54 +160,153 @@ def _piece(p: ap.Piece, known: dict | None) -> PathPiece:
     status = None if known is None else ("unchanged" if known.get(p.id) == p.hash
                                          else "changed" if p.id in known else "new")
     path = p.id.split(":", 1)[1].split("#")[0] if p.id.startswith(("note:", "section:")) else None
+    moment = p.moment if p.moment and p.moment != "when met" else None
+    if status == "unchanged":
+        # The caller holds this piece from an earlier call: what places it on the path, and its hash, are
+        # enough; the rest (where, how, the pointing line) came then. Keeps a call with `known` small, so
+        # withheld texts always find room on the next one.
+        return PathPiece(id=p.id, stage=ap.STAGE_NAMES[p.stage], always=p.always, moment=moment, hash=p.hash,
+                         status=status)
     return PathPiece(
         id=p.id, stage=ap.STAGE_NAMES[p.stage], arrives=p.arrives, always=p.always, where=p.where, chars=p.chars,
-        hash=p.hash, via=p.via, moment=p.moment if p.moment and p.moment != "when met" else None,
+        hash=p.hash, via=_short(p.via, _VIA_MAX) if p.via else None, moment=moment,
         also_pointed_by=p.also or None, status=status,
         private=True if path and private_folders.is_private(path) else None)
+
+
+_DETAILS = ("arrives", "where", "chars", "via", "also_pointed_by")
+
+
+def _short_form(o: PathPiece) -> dict:
+    """Strip a piece to what places it on the path and its hash; the details taken, to give back with its
+    text."""
+    taken = {k: getattr(o, k) for k in _DETAILS}
+    for k in _DETAILS:
+        setattr(o, k, None)
+    return taken
 
 
 def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: list[str]) -> None:
     """Fill in the texts of new or changed pieces, in path order, while the result stays within the budget.
 
-    Sets `result.notes`. The texts are added by an estimate of their serialized length, then the whole result
-    is measured, and the last texts given are taken back until it fits.
+    Sets `result.notes`. A piece whose text waits for a later call comes in short form (id, stage, always,
+    moment, hash) and gets its details (how it arrives, where, its pointing line) with its text: a backward
+    question gathers a hundred and fifty pieces, whose details alone filled the budget on the owner's vault
+    (50,000 characters), leaving one text per call. In short form the whole path shows on the first call and
+    most of the budget goes to texts. Every call makes progress: the first text due either arrives or, longer
+    than the room left, is marked to come in parts (`read_from`, one call, which carries the piece alone).
     """
     budget = settings.max_read_response_chars - _NOTES_RESERVE
+    due = [(p, o) for p, o in zip(pieces, out) if o.status != "unchanged" and not o.private]
+    details = {id(o): _short_form(o) for _, o in due}
     used = len(result.model_dump_json())
-    room = budget - used  # what a call holding every other text would have for this one
     given: list[PathPiece] = []
-    wanted = in_parts = 0
-    for p, o in zip(pieces, out):
-        if o.status == "unchanged" or o.private:
+    in_parts = 0
+    for p, o in due:
+        taken = details[id(o)]
+        for k, v in taken.items():
+            setattr(o, k, v)
+        meta = len(o.model_dump_json())
+        _short_form(o)
+        meta -= len(o.model_dump_json())
+        cost = len(json.dumps(p.text, ensure_ascii=False)) + len(',"text":') + meta
+        whole = budget - len(o.model_dump_json()) - meta - _PART_SHELL  # a read_from call, this piece alone
+        if cost > whole or (not given and used + cost > budget):
+            # Too long for any one result, or for the room this one leaves when it is the first text due:
+            # either way it comes in parts (`read_from`), so every call makes progress.
+            for k, v in taken.items():
+                setattr(o, k, v)
+            o.text_in_parts, in_parts = True, in_parts + 1
+            used = len(result.model_dump_json())
             continue
-        cost = len(json.dumps(p.text, ensure_ascii=False)) + len(',"text":')
-        if cost > room:
-            # No later call could carry it whole either: saying it comes next would send the caller round
-            # forever. It comes in parts instead, one call each (`read_from`).
-            o.text_in_parts, used, in_parts = True, used + len(',"text_in_parts":true'), in_parts + 1
-            continue
-        wanted += 1
         if used + cost <= budget:
+            for k, v in taken.items():
+                setattr(o, k, v)
             o.text, used = p.text, used + cost
             given.append(o)
         else:
             o.text_withheld, used = True, used + len(',"text_withheld":true')
 
     def withheld_note() -> list[str]:
-        n = wanted - len(given)
-        lines = [f"{n} texts did not fit in this result (text_withheld): call again with the same arguments, "
-                 "passing in known the hash of every piece whose text you now hold, and they come next."] if n else []
+        n = sum(1 for o in result.pieces or [] if o.text_withheld)
+        lines = [f"{n} texts did not fit in this result (text_withheld): those pieces come in short form. Call "
+                 "again with the same arguments, passing in known the hash of every piece whose text you now "
+                 "hold, and they come next with their details."] if n else []
         if in_parts:
-            lines.append(f"{in_parts} texts are too long for one result (text_in_parts): call again with the same "
-                         "arguments and read_from={id, offset: 0} for each; each part gives the next offset.")
+            lines.append(f"{in_parts} texts are too long for the room in this result (text_in_parts): call again "
+                         "with the same arguments and read_from={id, offset: 0} for each; each part gives the next "
+                         "offset.")
         return lines
 
+    def take_back(cap: int) -> None:
+        while len(given) > 1 and len(result.model_dump_json()) > cap:
+            last = given.pop()  # the estimate fell short: the last texts given go back (never the first)
+            last.text, last.text_withheld = None, True
+            _short_form(last)
+            result.notes = (notes + withheld_note()) or None
+
+    take_back(budget)
+    _fit_metadata(result, notes, budget)
     result.notes = (notes + withheld_note()) or None
-    while given and len(result.model_dump_json()) > settings.max_read_response_chars:
-        last = given.pop()
-        last.text, last.text_withheld = None, True
-        result.notes = (notes + withheld_note()) or None
+    take_back(settings.max_read_response_chars)
+
+
+def _fit_metadata(result, notes: list[str], cap: int) -> None:
+    """Past the budget even in short form (some four hundred pieces), the last pieces waiting for their text
+    are left out, then the structure's lists cut short; said in the notes."""
+
+    def size():
+        return len(result.model_dump_json())
+
+    pieces = result.pieces or []
+    dropped = 0
+    while size() > cap and pieces and pieces[-1].text is None:
+        pieces.pop()
+        dropped += 1
+    st = result.structure
+    if st is not None:
+        for name in ("rule_file_mentions", "unplaced_pointers", "pointers_outside_rule_files", "into_areas",
+                     "broken_pointers"):
+            items = getattr(st, name)
+            while items and size() > cap:
+                items.pop()
+                st.cut = sorted(set((st.cut or []) + [name]))
+    if dropped:
+        notes.append(f"The last {dropped} pieces are left out: even in short form, the pieces pass the size "
+                     "budget. Call again passing in known the hashes of the pieces you hold, and the rest come "
+                     "next.")
+    if st is not None and st.cut:
+        notes.append(f"Some lists of structure are cut short to fit ({', '.join(st.cut)}).")
+
+
+def _fit_overview(result) -> None:
+    """Keep the overview within the budget: the structure lists are cut short from the last typical agent
+    back, then those across every area, each cut said in its `cut` and in the notes."""
+    cap = settings.max_read_response_chars - _NOTES_RESERVE
+    structures = [t.structure for t in reversed(result.typical or [])] + [result.across_every_area]
+    names = ("rule_file_mentions", "unplaced_pointers", "pointers_outside_rule_files", "into_areas",
+             "broken_pointers")
+    cut = False
+    for st in structures:
+        for name in names:
+            items = getattr(st, name) if st else None
+            while items and len(result.model_dump_json()) > cap:
+                items.pop()
+                st.cut, cut = sorted(set((st.cut or []) + [name])), True
+    # Then the piece lines, from the last typical agent back, each ending on how many are left out.
+    for t in reversed(result.typical or []):
+        left = 0
+        while len(t.pieces) > 1 and len(result.model_dump_json()) > cap:
+            if left:
+                t.pieces.pop()  # the "… more" line
+            t.pieces.pop()
+            left += 1
+            t.pieces.append(f"… {left} more: pass start={{typical: {t.number}}} for the whole path")
+        cut = cut or bool(left)
+    if cut:
+        result.notes = (result.notes or []) + [
+            "This overview is cut short to fit the size budget (each structure's cut says which of its lists, "
+            "and a cut path ends on how many pieces it leaves out): pass start for one agent's path in full."]
 
 
 def _one_part(result, p: ap.Piece, o: PathPiece, offset: int) -> None:
@@ -266,13 +371,29 @@ def _left_path(known: dict | None, on_path) -> list[str] | None:
     return gone or None
 
 
+def _clip_vias(items: list[dict] | None) -> list[dict] | None:
+    return [{**x, "via": _short(x["via"], _VIA_MAX)} if x.get("via") else x for x in items] if items else None
+
+
+def _grouped_mentions(ms: list[dict] | None) -> list[dict] | None:
+    """The links to rule files that are mentions, one entry per rule file with the notes linking to it: a
+    path meets sixty of them, and quoting each line ran past the result's budget (the line is in the text of
+    the note it comes from)."""
+    out: dict[str, list[str]] = {}
+    for m in ms or []:
+        froms = out.setdefault(m["target"], [])
+        if m["from"] not in froms:
+            froms.append(m["from"])
+    return [{"target": t, "from": f} for t, f in out.items()] or None
+
+
 def _structure(st: dict) -> PathStructure:
     return PathStructure(
-        size=st.get("size"), unplaced_pointers=st.get("unplaced_pointers") or None,
-        pointers_outside_rule_files=st.get("pointers_outside_rule_files") or None,
-        into_areas=st.get("into_areas") or None, mentions_not_followed=st.get("mentions_not_followed"),
-        rule_file_mentions=st.get("rule_file_mentions") or None,
-        broken_pointers=st.get("broken_pointers") or None, not_followed=st.get("not_followed") or None)
+        size=st.get("size"), unplaced_pointers=_clip_vias(st.get("unplaced_pointers")),
+        pointers_outside_rule_files=_clip_vias(st.get("pointers_outside_rule_files")),
+        into_areas=_clip_vias(st.get("into_areas")), mentions_not_followed=st.get("mentions_not_followed"),
+        rule_file_mentions=_grouped_mentions(st.get("rule_file_mentions")),
+        broken_pointers=_clip_vias(st.get("broken_pointers")), not_followed=st.get("not_followed") or None)
 
 
 def _short(s: str | None, n: int) -> str:
@@ -342,8 +463,10 @@ async def agent_path_impl(start: PathStart | None, work: PathWork | None, known:
                        for label, s, _w, b in runs[: len(setup.points.typical)]]
             notes.append("Pass start (a typical agent's number, or a surface and folder) for one path with its "
                          "texts.")
-            return AgentPathResult(typical=typical, rule_files_no_path_reaches=ap.unreached_rule_files(setup, runs),
-                                   across_every_area=_structure(ap.across_runs(runs)), notes=notes, **common)
+            result = AgentPathResult(typical=typical, rule_files_no_path_reaches=ap.unreached_rule_files(setup, runs),
+                                     across_every_area=_structure(ap.across_runs(runs)), notes=notes, **common)
+            _fit_overview(result)
+            return result
         s = _start_of(start, setup.points)
         w = ap.Work(work.area, work.kind) if work else ap.Work()
         b = ap.run(setup, s, w)
