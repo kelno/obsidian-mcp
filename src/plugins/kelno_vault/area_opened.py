@@ -11,7 +11,9 @@ result. Never a refusal: scripts and quick edits the owner asked for go ahead.
 
 "The caller" is the credential (`current_principal`: the API key, or the OAuth
 grant) and the user: the MCP transport is stateless, so there is no session to
-key on. The map lives in this process's memory, bounded, lost on restart.
+key on. The map lives in this process's memory, bounded, lost on restart; for
+`WINDOW_SECONDS` after the process started, the nudge says so (ledger F112),
+so an agent that opened the area before the restart can tell it apart.
 Accepted limitations in docs/architecture/open-area.md.
 """
 
@@ -36,6 +38,20 @@ _opened: dict[tuple, float] = {}
 
 def _now() -> float:
     return time.monotonic()
+
+
+#: When this process started remembering (the module's import, at startup): the map is empty before it.
+_STARTED = _now()
+
+
+def _restart_note() -> str:
+    """A sentence saying the server restarted, while that may explain the nudge; else ""."""
+    minutes = int((_now() - _STARTED) // 60)
+    if minutes * 60 >= WINDOW_SECONDS:
+        return ""
+    ago = "less than a minute ago" if minutes < 1 else f"{minutes} minute{'s' if minutes > 1 else ''} ago"
+    return (f" The server restarted {ago} and forgot open_area calls made before then: if you opened this area "
+            "before the restart, you already have its rules (calling open_area again stops this note).")
 
 
 async def _area_index(uid):
@@ -100,7 +116,7 @@ def render(found: tuple[str, str] | None, dry_run: bool = False) -> str:
              "This write went ahead: check it against those rules, and if it breaks one, tell the owner what "
              "you wrote rather than undoing it yourself.")
     return (f"\n\narea_not_opened: this note is in the area {name} (#{tag}), and open_area hasn't been called "
-            f"for it in the last hour. Call open_area(area=\"{slug}\") before more work there: it returns the "
+            f"for it in the last hour.{_restart_note()} Call open_area(area=\"{slug}\") before more work there: it returns the "
             "area's rules for agents (how freely you may edit, how to report changes), its ledger entries and "
             "open tasks. " + after)
 

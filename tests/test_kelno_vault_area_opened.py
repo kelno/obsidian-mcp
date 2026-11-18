@@ -124,3 +124,17 @@ def test_the_map_stays_bounded(monkeypatch):
         area_opened.record(f"area/a{i}", None)
     assert len(area_opened._opened) <= 3
     assert area_opened.opened("area/a9", None)
+
+
+async def test_after_a_restart_the_nudge_says_earlier_calls_were_forgotten(monkeypatch):
+    """Ledger F112: the memory of opened areas does not survive a restart, so the nudge says so for an hour."""
+    now = [100_000.0]
+    monkeypatch.setattr(area_opened, "_now", lambda: now[0])
+    monkeypatch.setattr(area_opened, "_STARTED", now[0] - 17 * 60)
+    text = await report_for(NOTE)
+    assert "area_not_opened:" in text and "restarted 17 minutes ago" in text
+    assert text.index("restarted") < text.index("Call open_area")
+    monkeypatch.setattr(area_opened, "_STARTED", now[0] - 20)
+    assert "restarted less than a minute ago" in await report_for(NOTE)
+    monkeypatch.setattr(area_opened, "_STARTED", now[0] - area_opened.WINDOW_SECONDS - 1)
+    assert "restarted" not in await report_for(NOTE)
