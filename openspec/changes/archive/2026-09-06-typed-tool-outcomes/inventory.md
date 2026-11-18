@@ -366,6 +366,28 @@ Each entry identifies every direct return branch. PROPAGATE means classify at th
 - **REFUSE invalid_argument**: an unknown machine, the vault's list of rule files or its starting points unreadable.
 - **SUCCESS — no outcome marker**: `reached_by`, pieces and structure; a place no path reaches is `matched_by: nothing…`, not a refusal.
 
+### list_calendars_impl — src/plugins/caldav/tools.py (caldav plugin, fork)
+- Structured result (`CalendarListResult`), `refusal_result` from the plugin's `PluginTool`. Every calendar tool shares the refusals of this entry.
+- **REFUSE calendar_not_configured** for a `CALDAV_*` setting missing or wrong or `MULTI_USER_MODE` on (before any request), a login the server refuses (401) or a redirect; **calendar_unavailable** for a server that cannot be reached, answers an error, answers more than 4 MB, or takes longer than `CALDAV_TIMEOUT_SECONDS` in all; **not_found** for an unknown calendar or event (404).
+- **SUCCESS — no outcome marker**: the calendars, the time zone, notes on what was left out.
+
+### list_events_impl — src/plugins/caldav/tools.py (caldav plugin, fork)
+- As `list_calendars_impl`; also **REFUSE invalid_argument** for a date or time that does not parse, an `end` before `start`, a range over 366 days, a `limit` outside 1..500, before any request.
+- **SUCCESS — no outcome marker**: the occurrences (an empty list is a success); notes for events the server did not expand or that cannot be read, for a calendar that cannot be read while others can, and for the limit. Every calendar failing is that failure's refusal.
+
+### create_event_impl — src/plugins/caldav/tools.py (caldav plugin, fork)
+- **PROPAGATE** write permission (`permission_denied`), before any request.
+- **REFUSE invalid_argument** for an empty title, a start and end of different kinds or out of order, a repeat rule that does not parse, no calendar named and no default, an event the server refuses (400/409/415/422); **calendar_read_only** for a read-only calendar (by its privileges, or a 403); **duplicate_event** for the same title at the same start; **calendar_conflict** (412).
+- **SUCCESS — no outcome marker**: the event as written, with its id.
+
+### update_event_impl — src/plugins/caldav/tools.py (caldav plugin, fork)
+- As `create_event_impl`; also **REFUSE occurrence_required** for a repeating event without `occurrence` or `all_occurrences`; **event_has_attendees**; **event_not_editable** for an event marked confidential or private, or with times without a zone; **not_found** for an occurrence the series does not have; **invalid_argument** for nothing to change, both scopes, a scope on an event that does not repeat, moving a whole series, `repeat` with `occurrence`.
+- **SUCCESS — no outcome marker**: the event or occurrence as written and `changed`; `changed` empty, nothing written, when nothing differed.
+
+### delete_event_impl — src/plugins/caldav/tools.py (caldav plugin, fork)
+- As `update_event_impl` for the scope, the attendees, confidential events, read-only calendars and conflicts; **event_not_editable** for one occurrence of an event with times without a zone (the whole one may be deleted). An HTTP 500 on deleting one occurrence of a series that has a last occurrence (`calendar_unavailable`) says to tell the owner and delete the whole series only if they agree; other failures say nothing of the kind.
+- **SUCCESS — no outcome marker**: what was deleted (one occurrence by an `EXDATE`, or the event or series whole).
+
 ## Shared/nested helper inventory
 
 ### _confirmed_publication — tools.py:706

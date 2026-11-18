@@ -247,9 +247,12 @@ def test_every_registered_tool_class_matches_wrapper_and_write_class():
                 seen[name]=cls
     # The plugins' tools, wrapped by the core as the server registers them.
     from src import plugins
-    for spec,tracked in tools.plugin_tool_impls(plugins.load(('kelno_vault',))):
+    # The calendar writers wait on an outside server, so they are `light` (never holding the
+    # vault writers' single `write` slot) while still drawing on the write budget.
+    calendar_writers={'create_event','update_event','delete_event'}
+    for spec,tracked in tools.plugin_tool_impls(plugins.load(('kelno_vault','caldav'))):
         cls=concurrency.TOOL_CLASSES[spec.name]
-        assert (cls=='write') is spec.write_class
+        assert (cls=='write') is (spec.write_class and spec.name not in calendar_writers)
         assert tracked.__concurrency_class__==cls
         seen[spec.name]=cls
     assert seen==concurrency.TOOL_CLASSES
@@ -259,8 +262,8 @@ def test_registry_covers_exactly_the_five_classes():
     assert concurrency.CLASSES == {'embedding', 'vector', 'write', 'scan', 'light'}
     assert set(concurrency.TOOL_CLASSES.values()) == concurrency.CLASSES
     assert 'other' not in concurrency.TOOL_CLASSES.values()
-    # Upstream's 33 (`list_tasks` as `upstream_list_tasks`) and the fork's 20.
-    assert len(concurrency.TOOL_CLASSES) == 53
+    # Upstream's 33 (`list_tasks` as `upstream_list_tasks`), the fork's 20 and the `caldav` plugin's 5.
+    assert len(concurrency.TOOL_CLASSES) == 58
 
 
 @tools._tracked('read_note', [])

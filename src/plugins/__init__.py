@@ -139,8 +139,11 @@ class PluginTool:
             `Annotated` descriptions) and docstring are what agents see. Its
             module must not use `from __future__ import annotations`: the
             server reads the annotations through the core's wrapper.
+        title: the name clients show for it (`tools/list`), distinct from every other tool's,
+            as every core tool has one (#343); checked when the plugin loads.
         logged_args: the arguments its usage row records.
-        annotations: its MCP tool annotations (read-only, …).
+        annotations: its MCP tool annotations, with all four hints set (read-only,
+            destructive, idempotent, open-world): an absent hint reads as the worst case.
         refusal_result: maps a pre-body refusal's message onto the tool's
             result type, for a tool returning a structured result.
         write_class: True for a tool that writes (the write rate bucket).
@@ -153,6 +156,7 @@ class PluginTool:
 
     name: str
     fn: Callable[..., Awaitable[object]]
+    title: str = ""
     logged_args: tuple[str, ...] = ()
     annotations: object = None
     refusal_result: Callable[[str], object] | None = None
@@ -271,6 +275,8 @@ def load(names: tuple[str, ...]) -> tuple[Plugin, ...]:
             if not isinstance(tool, PluginTool) or tool.name not in TOOL_CLASSES:
                 raise PluginLoadError(f"src/plugins/{name} adds a tool {getattr(tool, 'name', tool)!r} that is not a "
                                       "PluginTool with an admission class in concurrency.TOOL_CLASSES")
+            if not tool.title.strip():
+                raise PluginLoadError(f"src/plugins/{name} adds the tool {tool.name!r} without a title")
             if any(tool.name == other.name for p in loaded for other in p.tools):
                 raise PluginLoadError(f"two plugins add a tool named {tool.name!r}")
         loaded.append(plugin)

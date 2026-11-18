@@ -62,6 +62,12 @@ COVERAGE = {
     'update_task': [('refused', 'test_task_tools_e2e.py::test_update_task_status_done_names_complete_task'), ('success', 'test_task_tools_e2e.py::test_update_task_sets_a_relative_due_date_and_echoes_it')],
     'add_task': [('refused', 'test_task_tools_e2e.py::test_add_task_refuses_a_missing_note_and_creates_nothing'), ('success', 'test_task_tools_e2e.py::test_add_task_inserts_after_the_task_list_and_lists_similar_tasks')],
     'move_task': [('refused', 'test_task_move_e2e.py::test_a_missing_destination_is_never_created'), ('success', 'test_task_move_e2e.py::test_a_task_moves_with_its_context_and_sub_task'), ('partial', 'test_task_move_e2e.py::test_the_source_removal_conflicts_with_a_hash')],
+    # The `caldav` plugin's calendar tools.
+    'list_calendars': [('refused', 'test_caldav_plugin.py::test_missing_settings_are_named_and_nothing_is_sent'), ('success', 'test_caldav_plugin.py::test_list_calendars_shows_event_calendars_with_their_rights')],
+    'list_events': [('refused', 'test_caldav_plugin.py::test_an_unknown_calendar_is_not_found_and_names_the_calendars'), ('success', 'test_caldav_plugin.py::test_a_weekly_event_keeps_its_local_time_across_the_clock_change')],
+    'create_event': [('refused', 'test_caldav_plugin.py::test_a_read_only_calendar_is_refused_before_writing'), ('success', 'test_caldav_plugin.py::test_create_a_timed_event_lasts_an_hour_by_default')],
+    'update_event': [('refused', 'test_caldav_plugin.py::test_a_repeating_event_needs_an_occurrence_or_all_occurrences'), ('success', 'test_caldav_plugin.py::test_one_occurrence_moves_and_the_others_stay')],
+    'delete_event': [('refused', 'test_caldav_plugin.py::test_deleting_a_repeating_event_needs_an_occurrence_or_all_occurrences'), ('success', 'test_caldav_plugin.py::test_delete_one_occurrence_leaves_the_rest')],
 }
 
 # Tools registered after the typed-tool-outcomes inventory was archived. Their
@@ -81,17 +87,17 @@ def test_every_registered_tool_has_inventory_and_live_behavioral_references():
     from src.mcp_server.server import mcp
     from src import plugins
     registered = {tool.name for tool in mcp._tool_manager.list_tools()}
-    # The suite runs with PLUGINS empty: this vault's plugin tools are counted from the plugin.
-    plugin_tools = {tool.name for tool in plugins.load(("kelno_vault",))[0].tools}
+    # The suite runs with PLUGINS empty: the plugins' tools are counted from the plugins.
+    plugin_tools = {tool.name for plugin in plugins.load(("kelno_vault", "caldav")) for tool in plugin.tools}
     assert not registered & plugin_tools
     registered |= plugin_tools
     # Upstream's tools the fork switched off are not registered, but are covered.
     from src.mcp_server.server import SWITCHED_OFF
     registered |= SWITCHED_OFF
     assert set(COVERAGE) == registered
-    # 42 core tools, `open_area`, `agent_path` and `agent_path_reached_by` (kelno_vault) and upstream's
-    # eight switched off.
-    assert len(registered) == 53
+    # 42 core tools, `open_area`, `agent_path` and `agent_path_reached_by` (kelno_vault), caldav's five
+    # and upstream's eight switched off.
+    assert len(registered) == 58
     root = Path(__file__).resolve().parents[1]
     inventory = (root / 'openspec/changes/archive/2026-09-06-typed-tool-outcomes/inventory.md').read_text()
     for tool, references in COVERAGE.items():

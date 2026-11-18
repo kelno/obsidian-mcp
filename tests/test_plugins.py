@@ -504,6 +504,33 @@ def test_a_plugin_tool_needs_an_admission_class(monkeypatch):
         plugins.load(("toolish",))
 
 
+def test_a_plugin_tool_needs_a_title(monkeypatch):
+    import types
+
+    module = types.ModuleType("src.plugins.untitled")
+    module.plugin = plugins.Plugin("untitled", tools=(plugins.PluginTool(name="open_area", fn=a_tool),))
+    monkeypatch.setitem(__import__("sys").modules, "src.plugins.untitled", module)
+    with pytest.raises(plugins.PluginLoadError, match="without a title"):
+        plugins.load(("untitled",))
+
+
+def test_every_plugin_tool_has_a_distinct_title_and_four_explicit_hints():
+    """As every core tool (#343, `test_issue_343_tool_metadata.py`), which runs with no plugin loaded."""
+    from mcp.types import ToolAnnotations
+
+    from src.mcp_server.server import mcp
+
+    titles = [tool.title for tool in mcp._tool_manager.list_tools()]
+    for plugin in plugins.load(("kelno_vault", "caldav")):
+        for spec in plugin.tools:
+            assert spec.title.strip() and spec.title not in titles, spec.name
+            titles.append(spec.title)
+            assert isinstance(spec.annotations, ToolAnnotations), spec.name
+            for hint in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
+                assert isinstance(getattr(spec.annotations, hint), bool), (spec.name, hint)
+            assert spec.annotations.readOnlyHint is not spec.write_class, spec.name
+
+
 def test_without_this_vaults_plugin_open_area_is_not_served():
     from src.mcp_server.server import mcp
 

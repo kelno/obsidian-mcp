@@ -12,7 +12,7 @@ A self-hosted [Model Context Protocol](https://modelcontextprotocol.io)
 server that turns an Obsidian vault into long-term memory for every
 agent you use. Agents search it by meaning or by exact words, follow
 its wikilinks, see what changed since their last session, keep their
-to-dos in it, and write back through guarded, atomic edits. 45 tools
+to-dos in it, and write back through guarded, atomic edits. 50 tools
 over plain markdown files that you can open,
 edit and grep.
 
@@ -59,6 +59,7 @@ backend of your choice (Ollama, OpenAI or Hugging Face TEI; see
 - [What's in the box](#whats-in-the-box)
   - [Tasks (fork)](#tasks-fork)
   - [Agent ledger (fork)](#agent-ledger-fork)
+  - [Calendar (optional plugin)](#calendar-optional-plugin)
 - [vs. other Obsidian MCP servers](#vs-other-obsidian-mcp-servers)
   - [vs. hosted memory systems](#vs-hosted-memory-systems)
   - [vs. an agent with raw file access](#vs-an-agent-with-raw-file-access)
@@ -280,25 +281,26 @@ looks the way it does.
 
 ## What's in the box
 
-The server exposes 45 MCP tools (42 in the core, and `open_area`, `agent_path`
-and `agent_path_reached_by` from the `kelno_vault` plugin), plus the auth and
-ops layer around them. It also registers eight of upstream's tools that this
+The server exposes 50 MCP tools (42 in the core, `open_area`, `agent_path`
+and `agent_path_reached_by` from the `kelno_vault` plugin, and five calendar
+tools from the `caldav` plugin), plus the auth and ops layer around them. It also registers eight of upstream's tools that this
 fork switches off ([FORK.md](FORK.md)): upstream's five task tools and
 `move_task`, for good, and `get_changes` and `hybrid_search` until the owner
 decides. They stay described below where upstream describes them, each marked
 as switched off.
 
 Every tool is published with a `title` and MCP `ToolAnnotations`, all
-four hints set explicitly: `readOnlyHint` on the twenty-six tools that only
+four hints set explicitly: `readOnlyHint` on the twenty-eight tools that only
 read (search, read, list, graph, `list_tasks`, `index_status`, the four
-ledger readers, `check_upload`, `fetch_page`, `open_area` and the two path
-tools), `destructiveHint` on the twelve that can replace or remove something
-(`edit_note`, `move_note`, `delete_note`, `set_frontmatter`, `write_file`,
-`delete_file`, `move_file`, `delete_folder`, `import_from_url`,
-`edit_task`, `set_task_status`, and `request_upload`, whose link can
-overwrite on redemption), `openWorldHint` on `import_from_url` and
-`fetch_page`. `create_note`, `create_task`, `request_download` and the four
-ledger writers are additive. Clients that honour
+ledger readers, `check_upload`, `fetch_page`, `open_area`, the two path
+tools, `list_calendars` and `list_events`), `destructiveHint` on the fourteen
+that can replace or remove something (`edit_note`, `move_note`, `delete_note`,
+`set_frontmatter`, `write_file`, `delete_file`, `move_file`, `delete_folder`,
+`import_from_url`, `edit_task`, `set_task_status`, `update_event`,
+`delete_event`, and `request_upload`, whose link can overwrite on
+redemption), `openWorldHint` on `import_from_url`, `fetch_page` and the five
+calendar tools. `create_note`, `create_task`, `create_event`,
+`request_download` and the four ledger writers are additive. Clients that honour
 annotations run read-only tools without a per-call confirmation (Claude
 Code also runs them in parallel) and keep prompting on destructive ones.
 They are hints: the server enforces read-only credentials itself,
@@ -887,6 +889,30 @@ rules, main note, folder map, ledger entries and open tasks in one call, and
 reads, in order. See [plugins](docs/architecture/plugins.md),
 [open_area](docs/architecture/open-area.md) and
 [agent paths](docs/architecture/agent-paths.md).
+
+### Calendar (optional plugin)
+
+With the `caldav` plugin loaded (`PLUGINS` includes `caldav`) and the
+`CALDAV_*` settings below, five tools read and change calendars on a CalDAV
+server (written against Nextcloud), beside the vault:
+
+- `list_calendars()`, the calendars the login sees, which are writable, and
+  which one takes new events;
+- `list_events(start?, end?, calendar?, text?, limit=100)`, events between
+  two dates (the week from today by default), repeating events expanded by
+  the server into occurrences, times in the calendar's time zone;
+- `create_event(summary, start, end?, calendar?, location?, description?, repeat?)`,
+  an all-day event (dates) or a timed one, optionally repeating (an
+  iCalendar RRULE);
+- `update_event(event, occurrence?, all_occurrences?, …)` and
+  `delete_event(event, occurrence?, all_occurrences?)`: on a repeating
+  event, one occurrence or the whole series, named explicitly.
+
+Best with a dedicated login that the calendars are shared with, so the app
+password reaches nothing else. One login serves the deployment, so the tools
+refuse in multi-user mode. A missing setting makes each call refuse with
+`calendar_not_configured`; the server still starts. See
+[docs/architecture/calendar.md](docs/architecture/calendar.md).
 
 ### Wikilink graph
 - `get_backlinks(path, limit=50)`, notes linking TO `path`
@@ -1523,8 +1549,8 @@ the tools' names (28 at 1.0, 32 since the task tools, 33 since
 `move_task`), their argument
 schemas, the shape of their result lines, and the `MCP-REFUSAL` codes.
 An agent written against 1.0 keeps working against every 1.x.
-That promise is upstream's: this fork serves its own surface (45 tools,
-upstream's eight switched off), and its `tools_list_full_v3.json` holds
+That promise is upstream's: this fork serves its own surface (50 tools
+with its two plugins, upstream's eight switched off), and its `tools_list_full_v3.json` holds
 that surface, with the switched-off tools turned on for the tests
 ([FORK.md](FORK.md)).
 
@@ -2328,6 +2354,12 @@ reason.
 | `VAULT_GUIDE_NOTE` | `CLAUDE.md` | The vault note `get_vault_guide` serves as the vault's own conventions, a vault-relative `.md` path such as `_/agent/Vault conventions.md`, for a vault whose root `CLAUDE.md` holds only Claude Code imports. A path that is absolute, holds `..`, `.` or a hidden folder, or is not `.md` stops the server at startup. A missing note gets the guide's "create one" message naming it, never the root `CLAUDE.md` in its place. With the `kelno_vault` plugin, `open_area` also returns this note's `## Working on an area` section |
 | `LIST_NOTES_DESCRIPTION_FIELD` | unset | A frontmatter field (e.g. `description`) that `list_notes` shows at the end of each note's line, before `open_url`, as ` — description: "…"`: one JSON-quoted line, a string value only, cut at 300 characters, read from the index. Not shown for a note in a private folder. Unset: listings as before |
 | `ARCHIVE_FOLDER` | unset | A folder mirroring the tree (e.g. `Archive`); `move_note` says when the folder a note left has a counterpart there |
+| `PLUGINS` | empty | Plugins loaded from `src/plugins/`, in the order they run (JSON list or comma-separated): `caldav` (the calendar tools above), `kelno_vault` (one vault's own conventions). A name that does not load stops the server at startup. See [docs/architecture/plugins.md](docs/architecture/plugins.md). |
+| `CALDAV_URL` | unset | With the `caldav` plugin: the CalDAV server's address (Nextcloud: `https://<host>/remote.php/dav`); https, or http to this machine only |
+| `CALDAV_USERNAME` / `CALDAV_PASSWORD` | unset | The CalDAV login and its app password; best a dedicated user the calendars are shared with |
+| `CALDAV_CALENDARS` | empty | The calendars agents see, by name or id, in this order; the first writable one takes new events. Empty: every calendar of the login, with a default only when exactly one is writable |
+| `CALDAV_TIMEZONE` | `TASKS_TIMEZONE` | The IANA zone event times are shown in, and times without an offset are read in |
+| `CALDAV_TIMEOUT_SECONDS` | `20` | How long one calendar tool call may wait on the CalDAV server, all its requests together (up to 120) |
 | `TASKS_PLUGIN_SETTINGS_PATH` | `.obsidian/plugins/obsidian-tasks-plugin/data.json` | The Tasks plugin's settings file in the vault, read on every task call |
 | `VAULT_ALLOW_NAMED_STAGING_FALLBACK` | `false` | Accept named staging on filesystems without `O_TMPFILE`. One flag, both write paths. See [System requirements](#system-requirements). |
 | `WRITE_PRECONDITION_REQUIRED` | `false` | Require `expected_hash` on supported destructive calls. Creation is exempt; enable after clients adopt read hashes. A task write with a plain task id satisfies it, and `add_task` is exempt (see [Guarding edits against stale reads](#guarding-edits-against-stale-reads)). |
@@ -2860,7 +2892,7 @@ wait uses a bounded queue and one deadline. A retry hint is not a promise that
 a running call will finish by that time.
 
 Every tool belongs to one of five classes (`src/services/concurrency.py`,
-`CLASS_MAPPING_VERSION` 10), each with its own ceiling:
+`CLASS_MAPPING_VERSION` 11), each with its own ceiling:
 
 | Class | Tools | Default ceiling |
 | --- | --- | --- |
@@ -2868,7 +2900,7 @@ Every tool belongs to one of five classes (`src/services/concurrency.py`,
 | `vector` | `find_related` | 1 |
 | `write` | the seventeen writers: the ten that change vault files (`create_note`, `edit_note`, `move_note`, `delete_note`, `set_frontmatter`, `write_file`, `delete_file`, `move_file`, `delete_folder`, `import_from_url`), the three task writers (`create_task`, `edit_task`, `set_task_status`) and the four ledger writers | 1 |
 | `scan` | `keyword_search`, `list_notes`, `get_tags`, `get_neighborhood`, `find_orphans`, `list_files`, `list_tasks`, `index_status`, `open_area`, `agent_path`, `agent_path_reached_by` | 2 |
-| `light` | `read_note`, `read_notes`, `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download`, `fetch_page`, `ledger_get`, `ledger_digest`, `ledger_topics` | 4 |
+| `light` | `read_note`, `read_notes`, `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download`, `fetch_page`, `ledger_get`, `ledger_digest`, `ledger_topics`, and the five calendar tools (`caldav`), whose three writers still spend the write rate limit: they wait on an outside server and must not hold the vault writers' slot | 4 |
 
 Upstream's switched-off tools keep their classes: `hybrid_search` is
 `embedding`, its task writers and `move_task` `write`, and `get_changes`,
@@ -2899,7 +2931,7 @@ adds a writer wait or drops a usage row because of its observed pressure.
 │ MCP clients  │   HTTP + Bearer key   │   FastAPI app        │
 │  Claude Desk │ ────────────────────▶ │  ┌────────────────┐  │
 │  Claude Code │                       │  │  MCP server    │  │
-│  n8n agents  │                       │  │  (45 tools)    │  │
+│  n8n agents  │                       │  │  (50 tools)    │  │
 │  OpenWebUI   │                       │  └─────┬──────────┘  │
 └──────────────┘                       │        ▼             │
                                        │  ┌────────────────┐  │

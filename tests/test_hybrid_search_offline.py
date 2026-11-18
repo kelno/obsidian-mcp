@@ -829,9 +829,9 @@ def test_the_instructions_lead_names_the_live_search_peers():
 
 def test_the_class_mapping():
     assert concurrency.TOOL_CLASSES["hybrid_search"] == "embedding"
-    # 6 since #428 (the task tools); the fork's 10 since #430's `move_task`;
+    # 6 since #428 (the task tools); the fork's 11 since its calendar tools;
     # hybrid_search's class is unchanged.
-    assert concurrency.CLASS_MAPPING_VERSION == 10
+    assert concurrency.CLASS_MAPPING_VERSION == 11
 
 
 @pytest.mark.parametrize("value", [0, 1001])

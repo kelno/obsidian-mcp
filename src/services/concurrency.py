@@ -43,7 +43,8 @@ from src.services.pool_budget import CLASS_CONNECTIONS, budget_terms
 # 8: `read_notes` added to `light` (fork, 2026-11-18).
 # 9: `agent_path`, `agent_path_reached_by` added to `scan` (fork, kelno_vault, 2026-11-18).
 # 10: upstream's `move_task` added to `write` (#430, resync 2026-11-18).
-CLASS_MAPPING_VERSION = 10
+# 11: the `caldav` plugin's five calendar tools added to `light` (fork, 2026-11-18).
+CLASS_MAPPING_VERSION = 11
 
 TOOL_CLASSES = {
     # `hybrid_search` makes the same provider round trip as `semantic_search`,
@@ -77,7 +78,15 @@ TOOL_CLASSES = {
     **dict.fromkeys(("read_note", "read_notes", "read_file", "get_recent", "get_vault_guide",
                      "get_backlinks", "get_links", "request_upload",
                      "check_upload", "request_download", "fetch_page", "ledger_get",
-                     "ledger_digest", "ledger_topics"), "light"),
+                     "ledger_digest", "ledger_topics",
+                     # The `caldav` plugin's tools: requests to the calendar
+                     # server, no database work but the usage row. Its writers
+                     # too: a call waits on the calendar server for up to
+                     # CALDAV_TIMEOUT_SECONDS, and must not hold the vault
+                     # writers' `write` slot meanwhile; they still draw on the
+                     # write budget (`write_class`), like the ledger's writers.
+                     "list_calendars", "list_events",
+                     "create_event", "update_event", "delete_event"), "light"),
 }
 CLASSES = frozenset(("embedding", "vector", "write", "scan", "light"))
 assert CLASSES == frozenset(CLASS_CONNECTIONS)

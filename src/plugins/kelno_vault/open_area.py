@@ -468,8 +468,9 @@ async def open_area(
 TOOL = plugins.PluginTool(
     name="open_area",
     fn=open_area,
+    title="Open area",
     logged_args=("area", "folder"),
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
     refusal_result=_open_area_refusal,
     result_type=OpenAreaResult,
 )

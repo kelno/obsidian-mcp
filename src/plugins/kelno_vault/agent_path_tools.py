@@ -615,11 +615,12 @@ def _reached_by_refusal(message: str) -> ReachedByResult:
 
 TOOLS = (
     plugins.PluginTool(
-        name="agent_path", fn=agent_path, logged_args=("start", "work"),
-        annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
+        name="agent_path", fn=agent_path, logged_args=("start", "work"), title="Agent path",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
         refusal_result=_path_refusal, result_type=AgentPathResult, meta=_RESULT_META),
     plugins.PluginTool(
         name="agent_path_reached_by", fn=agent_path_reached_by, logged_args=("place", "machine"),
-        annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
+        title="Agents reaching a place",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
         refusal_result=_reached_by_refusal, result_type=ReachedByResult, meta=_RESULT_META),
 )

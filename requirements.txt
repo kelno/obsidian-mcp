@@ -51,6 +51,13 @@ numpy==2.5.1
 markdownify==1.2.3
 beautifulsoup4==4.15.0
 
+# The `caldav` plugin (`src/plugins/caldav/`): icalendar reads and writes the
+# events' iCalendar text. HTTP goes through httpx above, and the CalDAV server
+# expands repeating events itself (RFC 4791 `expand`), so no expansion
+# library. The `caldav` client library was passed over: it is synchronous and
+# brings lxml, niquests, dnspython and more.
+icalendar==7.3.0
+
 # YAML parsing
 pyyaml==6.0.3
 

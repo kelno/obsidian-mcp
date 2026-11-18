@@ -395,10 +395,10 @@ def test_no_description_exceeds_the_cap(tool):
     )
 
 
-def test_no_description_exceeds_the_cap_with_the_fork_owners_plugin():
-    """Fork: the cap holds for the description as served with `PLUGINS=["kelno_vault"]`, the
-    plugin's paragraphs included (owner's decision, ledger F110). The docstrings take the
-    plugins' text when the server module is imported, so a fresh interpreter imports it with
+def test_no_description_exceeds_the_cap_with_the_fork_owners_plugins():
+    """Fork: the cap holds for the description as served with `PLUGINS=["kelno_vault", "caldav"]`,
+    the plugins' paragraphs and tools included (owner's decision, ledger F110). The docstrings take
+    the plugins' text when the server module is imported, so a fresh interpreter imports it with
     the setting."""
     import subprocess
     import sys
@@ -414,7 +414,7 @@ def test_no_description_exceeds_the_cap_with_the_fork_owners_plugin():
         "DATABASE_URL": "postgresql+asyncpg://test:test@localhost/test",
         "VAULT_PATH": "/tmp/test-vault",
         "OLLAMA_URL": "http://127.0.0.1:11434",
-        "PLUGINS": '["kelno_vault"]',
+        "PLUGINS": '["kelno_vault", "caldav"]',
     }
     if "SYSTEMROOT" in os.environ:
         env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
@@ -424,10 +424,11 @@ def test_no_description_exceeds_the_cap_with_the_fork_owners_plugin():
     assert run.returncode == 0, run.stderr[-3000:]
     served = json.loads(run.stdout.strip().splitlines()[-1])
     assert "task_line_by_hand" in served["create_note"], "the plugin's text did not reach the descriptions"
+    assert "update_event" in served, "the caldav plugin's tools were not served"
     over = {name: len(text) for name, text in served.items()
             if len(text) > DESCRIPTION_CAP}
-    assert not over, (f"characters on the wire with kelno_vault loaded: {over}; trim the plugin's tool_text "
-                      "(src/plugins/kelno_vault/__init__.py) or the tool's own docstring")
+    assert not over, (f"characters on the wire with the plugins loaded: {over}; trim the plugin's tool_text "
+                      "(src/plugins/<name>/__init__.py) or the tool's own docstring")
 
 
 @pytest.mark.parametrize("name", RESTRUCTURED_WRITE_TOOLS + TASK_WRITE_TOOLS)

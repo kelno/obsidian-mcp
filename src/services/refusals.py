@@ -168,6 +168,16 @@ BODY_CODES = frozenset({
     # Agent ledger (fork): the entry, line or topic changed since the
     # revision the caller read; the result carries `current_revision`.
     "stale_revision",
+    # The `caldav` plugin's calendar tools: a setting missing or wrong, or the
+    # login refused (the owner's to fix); the calendar server unreachable or
+    # failing (try later); a calendar the login may only read; the event
+    # changed since it was read (HTTP 412); a repeating event named without
+    # `occurrence` or `all_occurrences`; the same title at the same start
+    # already there; an event with attendees, left to the owner; an event
+    # the login sees only in part (confidential) or whose times have no zone,
+    # also left to the owner.
+    "calendar_not_configured", "calendar_unavailable", "calendar_read_only", "calendar_conflict",
+    "occurrence_required", "duplicate_event", "event_has_attendees", "event_not_editable",
 } | TASK_CODES)
 
 CODES = frozenset(

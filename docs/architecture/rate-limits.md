@@ -97,7 +97,15 @@ and **one** write token and one write slot per call, like `move_note`'s
 rewrites (one move is one intent, upstream's owner decision Q7). It is
 switched off for good in this fork (owner's decision 2026-11-18,
 `SWITCHED_OFF`). Adding it moved `TOOL_CLASSES`, so `CLASS_MAPPING_VERSION`
-is 10.
+was 10.
+
+The `caldav` plugin's five calendar tools (fork) are class `light`, its three
+writers included: a call waits on the calendar server, not on the vault or
+the database, and in `write` a hung calendar server would hold the vault
+writers' one slot. The writers still spend the write rate limit
+(`write_class`). One deadline, `CALDAV_TIMEOUT_SECONDS`, bounds all of a
+call's requests together. Adding them moved `TOOL_CLASSES`, so
+`CLASS_MAPPING_VERSION` is 11. See [calendar](calendar.md).
 
 ## The principal is the grant, not the token, and not (client, user)
 
@@ -1111,7 +1119,7 @@ ending in a 500, shared with the panel and `/token`.
 | `vector` | `find_related` | 1 | 1 |
 | `write` | the write-class tools (L3; upstream's `move_task` since #430, the fork's `CLASS_MAPPING_VERSION` 10, one slot held through both of its publications) | 1 | 2 |
 | `scan` | `keyword_search`, `list_notes`, `get_tags`, `get_neighborhood`, `find_orphans`, `list_files`, `list_tasks` (#350, `CLASS_MAPPING_VERSION` 3), `get_changes` (#351, `CLASS_MAPPING_VERSION` 4), `task_agenda` (#428, `CLASS_MAPPING_VERSION` 6), the fork's `open_area` and `index_status` (`CLASS_MAPPING_VERSION` 7), `agent_path` and `agent_path_reached_by` (`CLASS_MAPPING_VERSION` 9) | 2 | 1 |
-| `light` | `read_note`, the fork's `read_notes` (`CLASS_MAPPING_VERSION` 8), `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download` | 4 | 1 |
+| `light` | `read_note`, the fork's `read_notes` (`CLASS_MAPPING_VERSION` 8), `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download`, the `caldav` plugin's five calendar tools (`CLASS_MAPPING_VERSION` 11) | 4 | 1 |
 
 `hybrid_search` makes the same embedding-provider round trip as
 `semantic_search`, so the two **share the one `embedding` slot**: under

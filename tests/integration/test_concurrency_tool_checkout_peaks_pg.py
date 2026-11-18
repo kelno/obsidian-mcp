@@ -191,6 +191,36 @@ def identity(env):
             var.reset(token)
 
 
+PEAKS_EVENT = 'patipa_shared_by_owner/peaks.ics'
+
+
+@contextmanager
+def _calendar(monkeypatch):
+    """A stand-in calendar server and settings for the `caldav` plugin's tools, which use no database of their own.
+
+    This module's fixture runs multi-user for the vault tools, a mode the calendar tools refuse; the
+    refusal is waved here so their calls do real work.
+    """
+    from src.plugins.caldav import client as caldav_client, config as caldav_config
+    from tests import _caldav_fake
+
+    fake = _caldav_fake.nextcloud_like()
+    fake.put_object('patipa_shared_by_owner', 'peaks.ics',
+                    _caldav_fake.event_text('peaks-1', 'peaks', '20261118T100000', '20261118T110000'))
+    cfg = caldav_config.CalDavSettings(_env_file=None, url=_caldav_fake.BASE + _caldav_fake.ROOT,
+                                       username=_caldav_fake.USER, password=_caldav_fake.PASSWORD,
+                                       timezone='Europe/Brussels')
+    real_problems = caldav_config.problems
+    monkeypatch.setattr(caldav_config, 'current', lambda: cfg)
+    monkeypatch.setattr(caldav_config, 'problems', lambda c: [p for p in real_problems(c) if 'MULTI_USER_MODE' not in p])
+    caldav_client.forget_discovery()
+    try:
+        with _caldav_fake.serving(fake):
+            yield fake
+    finally:
+        caldav_client.forget_discovery()
+
+
 def _upload_id(text_):
     match = re.search(r'upload_id\W+([A-Za-z0-9_-]{22})', text_)
     return match.group(1) if match else 'A' * 22
@@ -251,6 +281,13 @@ CALLS = [
     # No starting points in this vault: a refusal, which still holds its admission and writes its row.
     ('agent_path', 'plugin:agent_path', lambda s: ((), {})),
     ('agent_path_reached_by', 'plugin:agent_path_reached_by', lambda s: ((), {'place': 'nowhere.md'})),
+    # The `caldav` plugin's calendar tools, against the stand-in calendar server
+    # (`_calendar`); the update and the delete act on the event it holds.
+    ('list_calendars', 'plugin:list_calendars', lambda s: ((), {})),
+    ('list_events', 'plugin:list_events', lambda s: ((), {'start': '2026-11-18', 'end': '2026-11-18'})),
+    ('create_event', 'plugin:create_event', lambda s: (('peaks event', '2026-11-19T10:00'), {'calendar': 'Patipa'})),
+    ('update_event', 'plugin:update_event', lambda s: ((PEAKS_EVENT,), {'summary': 'peaks, renamed'})),
+    ('delete_event', 'plugin:delete_event', lambda s: ((PEAKS_EVENT,), {})),
     ('index_status', 'index_status_impl', lambda s: ((), {})),
     ('create_task', 'create_task_impl', lambda s: (('peaks task',), {})),
     ('edit_task', 'edit_task_impl',
@@ -286,7 +323,7 @@ def _impl(name: str):
     """A core tool's tracked body in `tools`, or a plugin tool as the server registers it (`plugin:<tool>`)."""
     if name.startswith("plugin:"):
         tool = name.removeprefix("plugin:")
-        loaded = plugins.load(("kelno_vault",))
+        loaded = plugins.load(("kelno_vault", "caldav"))
         (tracked,) = [fn for spec, fn in tools.plugin_tool_impls(loaded) if spec.name == tool]
         return tracked
     return getattr(tools, name)
@@ -303,9 +340,9 @@ def test_the_call_table_covers_every_registered_tool():
         assert _impl(impl).__tracked_tool__ == name
 
 
-async def test_every_registered_tool_stays_within_its_class_multiplier(env):
+async def test_every_registered_tool_stays_within_its_class_multiplier(env, monkeypatch):
     outputs, measured, over = {}, {}, []
-    with identity(env):
+    with identity(env), _calendar(monkeypatch):
         for name, impl, args in CALLS:
             cls = concurrency.TOOL_CLASSES[name]
             positional, keywords = args(outputs)
