@@ -234,6 +234,28 @@ def _part_of(result, pieces: list[ap.Piece], out: list[PathPiece], read_from: Re
     return result
 
 
+def _changed_hook_scripts(setup: ap.Setup, piece_ids) -> list[str]:
+    """Notes for each hook on the path whose script, a vault file read live here, differs from the one the
+    snapshot ran (format 2's `hook_scripts`): its message on the path may be out of date."""
+    snap = setup.snapshot
+    if not snap or not snap.hook_scripts:
+        return []
+    out = []
+    for pid in piece_ids:
+        if not pid.startswith("hook:"):
+            continue
+        script = pid.split("/", 1)[-1]
+        for sid, then in snap.hook_scripts.items():
+            if not (sid.startswith("note:") and posixpath.basename(sid) == script):
+                continue
+            now = setup.vault.text(sid[len("note:"):])
+            if then and now is not None and ap.digest(now) != then:
+                out.append(f"{sid[len('note:'):]} changed since the snapshot ({snap.made}): the message of {pid} "
+                           f"here may be out of date. A Claude Code session start on {snap.machine}, or an edit "
+                           f"made there, refreshes it.")
+    return out
+
+
 def _left_path(known: dict | None, on_path) -> list[str] | None:
     """The pieces the caller holds that are no longer on the path: a removal, which no status could show."""
     gone = [pid for pid in (known or {}) if pid not in on_path]
@@ -306,15 +328,13 @@ async def agent_path_impl(start: PathStart | None, work: PathWork | None, known:
     def draw() -> AgentPathResult:
         setup = _setup(uid, machine, served)
         notes = list(setup.notes)
-        hand = ap.handwritten_paths(setup.vault)
         snap = setup.snapshot
         common = {"machine": snap.machine if snap else None, "snapshot_made": snap.made if snap else None}
         if start is None:
             if read_from is not None:
                 raise _SetupError("read_from needs the start (and work) of the call that gave text_in_parts.")
             runs = ap.all_runs(setup)
-            typical = [TypicalPath(number=s.handwritten, name=label, handwritten=hand.get(s.handwritten),
-                                   pieces=_overview_lines(b, known), structure=_structure(ap.structure_of(b)))
+            typical = [TypicalPath(number=s.handwritten, name=label, pieces=_overview_lines(b, known), structure=_structure(ap.structure_of(b)))
                        for label, s, _w, b in runs[: len(setup.points.typical)]]
             notes.append("Pass start (a typical agent's number, or a surface and folder) for one path with its "
                          "texts.")
@@ -323,11 +343,16 @@ async def agent_path_impl(start: PathStart | None, work: PathWork | None, known:
         s = _start_of(start, setup.points)
         w = ap.Work(work.area, work.kind) if work else ap.Work()
         b = ap.run(setup, s, w)
+        if s.role and not b.role_picked and not _ROLE_EXTRAS.get(s.role):
+            # Nothing on this path offers a choice of role note (on claude.ai, no session-start hook does):
+            # said, so a path drawn for a start that isn't a real case isn't taken for its answer (owner).
+            notes.append(f"role: {s.role} changed nothing: no line on this path picks a role note.")
+        notes += _changed_hook_scripts(setup, b.order)
         pieces = [b.pieces[i] for i in b.order]
         out = [_piece(p, known) for p in pieces]
         result = AgentPathResult(
             start={k: v for k, v in vars(s).items() if v}, work={k: v for k, v in vars(w).items() if v} or None,
-            handwritten=hand.get(s.handwritten), pieces=out, left_path=_left_path(known, b.order),
+            pieces=out, left_path=_left_path(known, b.order),
             structure=_structure(ap.structure_of(b)), notes=notes or None, **common)
         if read_from is not None:
             return _part_of(result, pieces, out, read_from)
@@ -349,6 +374,7 @@ async def agent_path_reached_by_impl(place: str, known: dict | None, machine: st
         setup = _setup(uid, machine, served)
         notes = list(setup.notes)
         r = ap.reached_by(setup, place.strip())
+        notes += _changed_hook_scripts(setup, r["pieces"])
         pieces = list(r["pieces"].values())
         out = [_piece(p, known) for p in pieces]
         snap = setup.snapshot

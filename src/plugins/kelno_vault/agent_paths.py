@@ -45,7 +45,8 @@ from dataclasses import dataclass, field
 #: The folder the PC-side snapshots are written to, one `<machine>.json` per PC.
 SNAPSHOT_FOLDER = "_/agent-paths"
 #: The snapshot shape this module reads (the hook's `FORMAT`).
-SNAPSHOT_FORMAT = 1
+#: Format 2 adds `hook_scripts`; nothing else changed shape.
+SNAPSHOT_FORMATS = (1, 2)
 #: The hand-written starting points: what each surface loads first, and the typical agents.
 STARTING_POINTS_PATH = "_/agent-paths/starting-points.toml"
 MEMORY_NOTE = "_/agent/Memory reference.md"
@@ -171,16 +172,20 @@ class Snapshot:
     hooks: list[dict]
     relay_notes: list[str]
     relay_config: str
+    #: Format 2: each registered hook script's id (`note:<vault path>` or `file:<path>`) and the digest of its
+    #: file as the snapshot read it (None when it couldn't), so a script changed since can be told.
+    hook_scripts: dict[str, str | None] = field(default_factory=dict)
 
     @classmethod
     def parse(cls, text: str) -> "Snapshot":
         data = json.loads(text)
-        if data.get("format") != SNAPSHOT_FORMAT:
-            raise ValueError(f"format {data.get('format')!r}, where this server reads format {SNAPSHOT_FORMAT}")
+        if data.get("format") not in SNAPSHOT_FORMATS:
+            raise ValueError(f"format {data.get('format')!r}, where this server reads formats "
+                             f"{', '.join(map(str, SNAPSHOT_FORMATS))}")
         return cls(data["machine"], data.get("made"), pc_norm(data["vault"]), pc_norm(data["home"]),
                    {pc_norm(k).lower(): v for k, v in data.get("folders", {}).items()},
                    {k.lower(): v for k, v in data.get("files", {}).items()}, data.get("hooks", []),
-                   data.get("relay_notes", []), data.get("relay_config", ""))
+                   data.get("relay_notes", []), data.get("relay_config", ""), data.get("hook_scripts") or {})
 
     def folder(self, folder: str) -> tuple[str, dict] | None:
         """The snapshot's entry for `folder`, or for the deepest folder above it that it holds."""
@@ -380,6 +385,7 @@ class PathBuilder:
         self.mentions: list[dict] = []  # links to non-rule notes with no reading verb: not followed
         self.broken: list[dict] = []
         self.not_followed: list[str] = []
+        self.role_picked = False  # whether a line naming several role notes was narrowed to the start's role
 
     # --- queueing -----------------------------------------------------------------------------------------
     def push(self, piece: Piece) -> None:
@@ -427,6 +433,8 @@ class PathBuilder:
             return targets
         mine = [t for t in roles
                 if posixpath.basename(self.v.resolve(t[0]))[:-3].lower() == self.start.role.lower()]
+        if mine:
+            self.role_picked = True  # connector only: lets the tool say when a role changed nothing
         return [t for t in targets if t not in roles or t in mine] if mine else targets
 
     def follow_imports(self, p: Piece) -> None:

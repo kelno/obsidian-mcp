@@ -110,8 +110,6 @@ class PathStructure(_OmitNone):
 class TypicalPath(_OmitNone):
     number: int | None = None
     name: str
-    #: That agent's path as written by hand in the vault, to compare with the drawn one.
-    handwritten: str | None = None
     #: `<n>. <id>  <chars> chars  #<hash>`, with `[status]` against `known` and `when: <moment>` for a piece
     #: that arrives only when its moment comes.
     pieces: list[str]
@@ -128,8 +126,6 @@ class AgentPathResult(_OmitNone):
     #: The PC whose snapshot gave the PC side, and when that side last changed.
     machine: str | None = None
     snapshot_made: str | None = None
-    #: A typical agent's path as written by hand in the vault, to compare with the drawn one.
-    handwritten: str | None = None
     pieces: list[PathPiece] | None = None
     #: With `known`: the pieces you hold that are no longer on the path.
     left_path: list[str] | None = None

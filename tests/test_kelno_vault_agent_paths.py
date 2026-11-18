@@ -169,7 +169,6 @@ def test_agent_path_draws_a_path_with_texts_hashes_and_known(vault):
     served = dict(asyncio.run(apt._served(None)).tools)
     assert "Read a note" in served["read_note"] and by_id["tool:obsidian-mcp:read_note"].hash == ap.digest(
         served["read_note"])
-    assert first.handwritten == "A worker: Common-rules, the hook, Worker."
     # Every text on a first call, its hash the digest of it, until the budget: the tool texts don't all fit.
     assert len(first.model_dump_json()) <= tools.settings.max_read_response_chars
     for p in first.pieces:
@@ -202,8 +201,40 @@ def test_a_claude_ai_chat_starts_from_memory_and_reads_what_its_lines_point_to(v
 
 
 def test_the_relay_role_adds_the_relays_notes(vault):
-    order = ids(path(PathStart(surface="claude-ai", role="relay")))
-    assert "note:_/agent/roles/Relay.md" in order
+    result = path(PathStart(surface="claude-ai", role="relay"))
+    assert "note:_/agent/roles/Relay.md" in ids(result)
+    assert not any("changed nothing" in n for n in result.notes or [])
+
+
+def test_a_hook_script_changed_since_the_snapshot_is_said(vault):
+    script = "_/claude-code-hooks/area-start.py"
+    (vault / script).parent.mkdir(parents=True, exist_ok=True)
+    (vault / script).write_text("print('hello')\n", encoding="utf-8")
+    snap = {**SNAPSHOT, "format": 2, "hook_scripts": {f"note:{script}": ap.digest("print('hello')\n"),
+                                                      "file:C:/elsewhere/other.py": None}}
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
+    same = path(PathStart(typical=3))
+    assert same.error is None and not any("changed since the snapshot" in n for n in same.notes or [])
+    (vault / script).write_text("print('changed')\n", encoding="utf-8")
+    changed = path(PathStart(typical=3))
+    assert any(n.startswith(f"{script} changed since the snapshot") and "hook:SessionStart/area-start.py" in n
+               for n in changed.notes)
+    reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", None, None))
+    assert any("changed since the snapshot" in n for n in reached.notes)
+
+
+def test_a_snapshot_in_an_unknown_format_is_left_out_with_a_note(vault):
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps({**SNAPSHOT, "format": 3}), encoding="utf-8")
+    result = path(PathStart(typical=3))
+    assert result.machine is None and any("format 3" in n for n in result.notes)
+
+
+def test_a_role_that_picks_nothing_on_the_path_is_said(vault):
+    chat = path(PathStart(surface="claude-ai", role="coordinator"))
+    assert ids(chat) == ids(path(PathStart(surface="claude-ai")))
+    assert "role: coordinator changed nothing: no line on this path picks a role note." in chat.notes
+    worker = path(PathStart(surface="claude-code", folder="D:/work/repo", role="worker"))
+    assert not any("changed nothing" in n for n in worker.notes or [])
 
 
 def test_a_folder_the_snapshot_does_not_hold_uses_the_one_above_and_says_so(vault):
