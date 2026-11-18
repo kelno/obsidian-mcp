@@ -44,8 +44,11 @@ from src.services.vault import _vault_root, read_bytes
 #: One result's size, past the server's read cap (`MAX_READ_RESPONSE_CHARS`, 40,000) for these two tools
 #: alone: a full read of a path took 12 to 20 calls at 40,000 (owner, 2026-11-18, on trial). Claude Code
 #: shows a model at most `MAX_MCP_OUTPUT_TOKENS` (25,000 tokens by default, about 50,000 characters of this
-#: JSON) and saves a longer result to a file instead; the owner's PCs raise it.
+#: JSON) and refuses a longer one, which the owner's PCs raise; and it saves to a file any result past 50,000
+#: characters unless the tool declares a larger size in its listing (`_RESULT_META`; live check 3, 2026-11-18).
 PAGE_CHARS = 80_000
+#: Claude Code's `anthropic/maxResultSizeChars`: above a page, for the JSON's own spacing.
+_RESULT_META = {"anthropic/maxResultSizeChars": PAGE_CHARS + 20_000}
 #: Characters kept free of texts for the notes added after them (the withheld, in-parts and cut lines).
 _NOTES_RESERVE = 1_000
 #: What a `read_from` call carries besides the piece itself (start, work, machine, notes): a text that
@@ -614,9 +617,9 @@ TOOLS = (
     plugins.PluginTool(
         name="agent_path", fn=agent_path, logged_args=("start", "work"),
         annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
-        refusal_result=_path_refusal, result_type=AgentPathResult),
+        refusal_result=_path_refusal, result_type=AgentPathResult, meta=_RESULT_META),
     plugins.PluginTool(
         name="agent_path_reached_by", fn=agent_path_reached_by, logged_args=("place", "machine"),
         annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
-        refusal_result=_reached_by_refusal, result_type=ReachedByResult),
+        refusal_result=_reached_by_refusal, result_type=ReachedByResult, meta=_RESULT_META),
 )

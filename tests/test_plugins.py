@@ -515,8 +515,9 @@ def test_open_area_registered_as_the_server_does_keeps_its_schema():
 
     server = FastMCP("t")
     for spec, tracked in tools.plugin_tool_impls(plugins.load(("kelno_vault",))):
-        server.tool(name=spec.name, annotations=spec.annotations)(tracked)
-    tool = next(t for t in asyncio.run(server.list_tools()) if t.name == "open_area")
+        server.tool(name=spec.name, annotations=spec.annotations, meta=spec.meta)(tracked)
+    listed = {t.name: t for t in asyncio.run(server.list_tools())}
+    tool = listed["open_area"]
     assert tool.inputSchema["title"] == "open_areaArguments"
     assert set(tool.inputSchema["properties"]) == {"area", "folder"}
     assert "slug" in tool.inputSchema["properties"]["area"]["description"]
@@ -524,4 +525,9 @@ def test_open_area_registered_as_the_server_does_keeps_its_schema():
     assert tool.description.startswith("Open an area") and "code_project: true" in tool.description
     assert (tool.outputSchema["properties"]["code_project"]["description"]
             == "true: this area is worked as a code project (`_/agent/guides/coding-practices.md`)")
+    # A plugin tool's meta is its listing's _meta: the path tools tell Claude Code their result size.
+    assert tool.meta is None
+    for name in ("agent_path", "agent_path_reached_by"):
+        assert listed[name].meta == {"anthropic/maxResultSizeChars": 100_000}
+        assert listed[name].model_dump(by_alias=True, exclude_none=True)["_meta"] == listed[name].meta
 

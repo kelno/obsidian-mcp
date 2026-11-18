@@ -3119,7 +3119,7 @@ try:
 except _plugins.PluginLoadError:
     _plugin_tools = []
 for _spec, _impl in _plugin_tools:
-    mcp.tool(name=_spec.name, annotations=_spec.annotations)(_impl)
+    mcp.tool(name=_spec.name, annotations=_spec.annotations, meta=_spec.meta)(_impl)
 
 if not _private_folders.enabled():
     _drop_include_private(mcp)

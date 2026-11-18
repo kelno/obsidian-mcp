@@ -146,6 +146,9 @@ class PluginTool:
         write_class: True for a tool that writes (the write rate bucket).
         result_type: its structured result type, whose `_body_outcome`
             decides the usage outcome.
+        meta: the `_meta` its `tools/list` entry carries, for what a client
+            reads there (Claude Code: `anthropic/maxResultSizeChars`, the
+            result size past which it saves the result to a file).
     """
 
     name: str
@@ -155,6 +158,7 @@ class PluginTool:
     refusal_result: Callable[[str], object] | None = None
     write_class: bool = False
     result_type: type | None = None
+    meta: dict | None = None
 
 
 @dataclass(frozen=True)
