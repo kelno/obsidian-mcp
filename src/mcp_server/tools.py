@@ -11928,6 +11928,9 @@ async def ledger_view_payload(claims: "_ledger_view.Claims") -> dict | None:
     text of tasks in private folders, so the page shows exactly what an agent
     reads. Each ref the entry points to gets its own link (`links`), with the
     same credential and end as this one: following links never extends a link.
+    `ledger_get`'s notes are left out: they are written for agents (call again
+    with…, mention it to the owner only as…), and the page shows what they
+    describe itself (a task in a private folder says so on its line).
     """
     result = await _ledger_get_body(claims.user_id, [claims.ref], history=True, include_private=False,
                                     view=None)
@@ -11943,7 +11946,6 @@ async def ledger_view_payload(claims: "_ledger_view.Claims") -> dict | None:
         "entry": entry,
         "links": {ref: _ledger_view.for_ref(claims, ref) for ref in sorted(refs)},
         "expires_at": claims.expires_at.isoformat(),
-        "notes": result.notes or [],
     }
 
 

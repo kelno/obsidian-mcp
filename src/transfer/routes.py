@@ -537,6 +537,18 @@ async def ledger_info(request: Request, token: str | None = Depends(_bearer)) ->
     payload = await ledger_view_payload(claims)
     if payload is None:
         return await _refuse(request, reason="ledger_entry_missing", token=token)
+    # A link is a 30-day read with no login: each opening leaves a record.
+    security_events.emit(
+        "ledger_link_opened",
+        subject=security_events.subject_for(request=request),
+        level=logging.INFO,
+        token_tag=security_events.redacted_token_tag(token),
+        route=request.url.path,
+        method=request.method,
+        client_ip=security_events.client_ip(request),
+        user_id=claims.user_id,
+        key_id=claims.key_id,
+    )
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 

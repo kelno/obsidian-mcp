@@ -313,7 +313,6 @@
       main.appendChild(fold);
     }
 
-    (data.notes || []).forEach(function (n) { main.appendChild(el("p", n, "muted")); });
     main.appendChild(el("p", "This link works until " + new Date(data.expires_at).toLocaleString() + ".", "muted"));
   }
 

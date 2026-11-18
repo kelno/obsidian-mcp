@@ -443,6 +443,13 @@ EVENT_FIELDS: dict[str, frozenset[str]] = {
             "error_type",
         }
     ),
+    # Fork: a ledger entry link redeemed (`/transfer/ledger/info`): who minted
+    # it (`user_id`, `key_id`; an OAuth link's grant is not a field) and from
+    # where it was opened, so a leaked link that someone opens can be seen.
+    # `token_tag` correlates the openings of one link; the ref is not logged.
+    "ledger_link_opened": frozenset(
+        {"token_tag", "route", "method", "client_ip", "user_id", "key_id"}
+    ),
     # `PUT /transfer/upload` refused by the **minting** principal's write
     # bucket (#194). Its own event rather than a `reason` on `transfer_refused`
     # for the reason that one exists: `transfer_refused` accompanies the

@@ -11,6 +11,7 @@ Skipped unless `PGVECTOR_TEST_ADMIN_URL` is set — see `_harness.py`.
 """
 import contextlib
 import datetime
+import logging
 import uuid
 
 import httpx
@@ -24,9 +25,9 @@ from src.auth.session import current_user_id
 from src.config import settings
 from src.mcp_server import tools
 from src.mcp_server.auth import current_api_key_id, current_oauth_token_id, current_permission
-from src.models.db import APIKey, OAuthClient, OAuthToken
+from src.models.db import APIKey, OAuthClient, OAuthToken, User
 from src.oauth.grants import new_grant_id
-from src.services import ledger_embed, ledger_view
+from src.services import ledger, ledger_embed, ledger_view, security_events
 from src.transfer import routes as transfer_routes
 import _harness
 
@@ -71,7 +72,7 @@ async def ctx(sessionmaker, monkeypatch):
     async with sessionmaker() as session:
         await session.execute(text("SET LOCAL ledger.allow_delete = 'on'"))
         for table in ("ledger_case_rules", "ledger_revisions", "ledger_entry_topics", "ledger_entry_links",
-                      "ledger_entries", "ledger_ref_counters", "oauth_tokens", "oauth_clients", "api_keys"):
+                      "ledger_entries", "ledger_ref_counters", "oauth_tokens", "oauth_clients", "api_keys", "users"):
             await session.execute(text(f"DELETE FROM {table}"))
         key = APIKey(name="k", key_hash=uuid.uuid4().hex * 2, key_prefix="omcp_test", permission="readwrite",
                      is_active=True)
@@ -207,3 +208,95 @@ async def test_no_credential_no_link(ctx):
     with calling_as():
         added = await tools.ledger_add_impl("quirk", "Unkeyed", details={"certainty": "tested"})
     assert added.error is None and added.view_url is None
+
+
+# ── Two owners, multi-user mode (review round 1, 2026-11-18) ────────────────
+
+
+class _Capture(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+    def named(self, event):
+        standard = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {"message", "asctime", "taskName"}
+        return [{k: v for k, v in r.__dict__.items() if k not in standard}
+                for r in self.records if r.getMessage() == event]
+
+
+@pytest.fixture
+def captured():
+    handler = _Capture()
+    logger = security_events.logger
+    logger.addHandler(handler)
+    propagate, level = logger.propagate, logger.level
+    logger.propagate = False
+    logger.setLevel(logging.DEBUG)
+    security_events.reset_state()
+    try:
+        with security_events.suppression_disabled():
+            yield handler
+    finally:
+        logger.removeHandler(handler)
+        logger.propagate = propagate
+        logger.setLevel(level)
+        security_events.reset_state()
+
+
+@pytest_asyncio.fixture(loop_scope="module")
+async def owners(ctx, sessionmaker, monkeypatch):
+    """Users A and B, each with a vault, a key and ledger entries: A has Q1; B has Q1 and Q2."""
+    monkeypatch.setattr(settings, "multi_user_mode", True)
+    async with sessionmaker() as session:
+        a = User(username=f"a{uuid.uuid4().hex[:8]}", password_hash="x", is_active=True, vault_path="/vaults/a")
+        b = User(username=f"b{uuid.uuid4().hex[:8]}", password_hash="x", is_active=True, vault_path="/vaults/b")
+        session.add_all([a, b])
+        await session.flush()
+        keys = {}
+        for user in (a, b):
+            keys[user.id] = APIKey(user_id=user.id, name="k", key_hash=uuid.uuid4().hex * 2, key_prefix="omcp_test",
+                                   permission="read", is_active=True)
+        session.add_all(keys.values())
+        await session.commit()
+    for uid, titles in ((a.id, ["A's own"]), (b.id, ["B's first", "B's second"])):
+        for title in titles:
+            async with sessionmaker() as session:
+                await ledger.add_entry(session, uid, kind="quirk", title=title, details={"certainty": "tested"})
+    async with sessionmaker() as session:
+        claims_a = await ledger_view.principal_claims(session, key_id=keys[a.id].id, oauth_token_id=None,
+                                                      user_id=a.id)
+    assert claims_a is not None
+    return {"a": a, "b": b, "key_a": keys[a.id], "claims_a": claims_a}
+
+
+async def test_a_link_reads_only_its_owners_ledger(owners, client, captured):
+    own = await info(client, ledger_view.link(owners["claims_a"], "Q1"))
+    assert own.status_code == 200 and own.json()["entry"]["title"] == "A's own"
+    assert captured.named("ledger_link_opened")[-1]["user_id"] == owners["a"].id
+    # B has a Q2; A has none. A's link, re-signed for Q2, reads A's ledger only.
+    other = await info(client, ledger_view.link(owners["claims_a"], "Q2"))
+    assert other.status_code == 404 and other.content == await refused_body(client)
+    assert captured.named("transfer_refused")[-2]["reason"] == "ledger_entry_missing"
+
+
+@pytest.mark.parametrize("change", ["no_vault", "deactivated", "key_reassigned"])
+async def test_the_owners_state_now_decides(owners, sessionmaker, client, captured, change):
+    url = ledger_view.link(owners["claims_a"], "Q1")
+    assert (await info(client, url)).status_code == 200
+    async with sessionmaker() as session:
+        if change == "no_vault":
+            await session.execute(update(User).where(User.id == owners["a"].id).values(vault_path=None))
+        elif change == "deactivated":
+            await session.execute(update(User).where(User.id == owners["a"].id).values(is_active=False))
+        else:
+            await session.execute(update(APIKey).where(APIKey.id == owners["key_a"].id).values(
+                user_id=owners["b"].id))
+        await session.commit()
+    r = await info(client, url)
+    assert r.status_code == 404 and r.content == await refused_body(client)
+    refused = captured.named("transfer_refused")
+    assert refused[-2]["reason"] == "ledger_link_credential"
+    assert refused[-2]["route"] == "/transfer/ledger/info" and refused[-2]["token_tag"].startswith("sha:")
