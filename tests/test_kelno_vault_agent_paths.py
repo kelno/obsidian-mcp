@@ -273,15 +273,14 @@ def test_a_hook_script_changed_since_the_snapshot_is_said(vault):
     assert any("changed since the snapshot" in n for n in reached.notes)
 
 
-def test_rule_copies_load_at_the_start_and_a_skipped_import_is_a_structural_fact(vault):
-    # A missing user CLAUDE.md loads nothing; a read-only copy in ~/.claude/rules/ is the vault note it copies; an
-    # import outside the session's folder is skipped by Claude Code, listed by the snapshot, not loaded.
-    rules = "loaded at the start by Claude Code (user rules) (a read-only copy)"
+def test_user_rules_load_at_the_start_and_a_skipped_import_is_a_structural_fact(vault):
+    # A missing user CLAUDE.md loads nothing; a file in ~/.claude/rules/ loads at the start; an import outside the
+    # session's folder is skipped by Claude Code, listed by the snapshot, not loaded.
+    rules = "loaded at the start by Claude Code (user rules)"
     loads = [
         {"id": "file:C:/Users/me/.claude/CLAUDE.md", "exists": False,
          "arrives": "loaded at the start by Claude Code (user CLAUDE.md)"},
-        {"id": "note:_/agent/Common-rules.md", "exists": True, "arrives": rules,
-         "copy": "C:/Users/me/.claude/rules/Common-rules.md"},
+        {"id": "file:C:/Users/me/.claude/rules/mine.md", "exists": True, "arrives": rules},
         {"id": "file:D:/work/repo/CLAUDE.md", "exists": True,
          "arrives": "loaded at the start by Claude Code (D:/work/repo)"},
         {"id": "file:D:/work/repo/CLAUDE.fork.md", "exists": True, "arrives": "imported by file:D:/work/repo/CLAUDE.md"}]
@@ -292,7 +291,8 @@ def test_rule_copies_load_at_the_start_and_a_skipped_import_is_a_structural_fact
         "D:/work/repo": {**SNAPSHOT["folders"]["D:/work/repo"], "loads": loads, "skipped_imports": skipped}},
         "files": {"file:D:/work/repo/CLAUDE.md": {"text": (
             "Repo rules.\n@CLAUDE.fork.md\n@D:/vault/_/agent/roles/Coordinator.md\n")},
-            "file:D:/work/repo/CLAUDE.fork.md": {"text": "Fork rules.\n"}}}
+            "file:D:/work/repo/CLAUDE.fork.md": {"text": "Fork rules.\n"},
+            "file:C:/Users/me/.claude/rules/mine.md": {"text": "My rules.\n"}}}
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
     (vault / ap.STARTING_POINTS_PATH).write_text(STARTING_POINTS.replace(
         '"user_claude_md", "folder_claude_md"', '"user_claude_md", "user_rules", "folder_claude_md"'), encoding="utf-8")
@@ -300,12 +300,11 @@ def test_rule_copies_load_at_the_start_and_a_skipped_import_is_a_structural_fact
     first = path(PathStart(typical=3))
     assert first.error is None
     by_id = {p.id: p for p in first.pieces}
-    # The copy is the vault note, found where Claude Code reads it, first; the missing user CLAUDE.md is nothing.
-    assert ids(first)[:3] == ["note:_/agent/Common-rules.md", "file:D:/work/repo/CLAUDE.md",
+    # The rules file comes first; the missing user CLAUDE.md is nothing.
+    assert ids(first)[:3] == ["file:C:/Users/me/.claude/rules/mine.md", "file:D:/work/repo/CLAUDE.md",
                               "file:D:/work/repo/CLAUDE.fork.md"]
-    common = by_id["note:_/agent/Common-rules.md"]
-    assert common.where == "C:/Users/me/.claude/rules/Common-rules.md" and common.arrives == rules
-    assert common.text == NOTES["_/agent/Common-rules.md"] and "file:C:/Users/me/.claude/CLAUDE.md" not in by_id
+    mine = by_id["file:C:/Users/me/.claude/rules/mine.md"]
+    assert mine.arrives == rules and mine.text == "My rules.\n" and "file:C:/Users/me/.claude/CLAUDE.md" not in by_id
     assert not first.structure.broken_pointers
     # The import in the folder loads; the one outside it is a fact, and the role note it names isn't loaded by it.
     assert by_id["file:D:/work/repo/CLAUDE.fork.md"].arrives == "imported by file:D:/work/repo/CLAUDE.md"
@@ -313,11 +312,11 @@ def test_rule_copies_load_at_the_start_and_a_skipped_import_is_a_structural_fact
         "from": "file:D:/work/repo/CLAUDE.md", "import": "@D:/vault/_/agent/roles/Coordinator.md",
         "target": "note:_/agent/roles/Coordinator.md", "why": "outside the session's folder"}]
     assert "note:_/agent/roles/Coordinator.md" not in by_id
-    # The home folder (a claude.ai-free Claude Code start with no folder) gets the copy too.
+    # The home folder (a Claude Code start with no folder) gets the rules file too.
     home = path(PathStart(surface="claude-code"))
-    assert ids(home)[0] == "note:_/agent/Common-rules.md" and not home.structure.skipped_imports
+    assert ids(home)[0] == "file:C:/Users/me/.claude/rules/mine.md" and not home.structure.skipped_imports
     # A backward question carries the skipped import too.
-    reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/Common-rules.md", None, None))
+    reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", None, None))
     assert reached.structure.skipped_imports and reached.structure.skipped_imports[0]["import"].endswith(
         "Coordinator.md")
 
@@ -340,13 +339,18 @@ def test_an_import_the_snapshot_warns_about_stays_on_the_path_and_its_warning_is
     home = path(PathStart(surface="claude-code"))
     assert home.error is None
     assert ids(home)[:2] == [user, "note:_/agent/Common-rules.md"] and "note:_/agent/roles/Worker.md" in ids(home)
+    # The piece itself says it may not load, not only the structure.
+    assert {p.id: p.arrives for p in home.pieces}["note:_/agent/Common-rules.md"] == (
+        f"imported by {user} (may not load: {warn})")
     assert home.structure.import_warnings == [
         {"from": user, "import": "@D:/vault/_/agent/Common-rules.md", "target": "note:_/agent/Common-rules.md",
          "warning": warn},
         {"from": user, "import": "@D:/vault/_/agent/roles/Worker.md", "target": "note:_/agent/roles/Worker.md",
          "warning": warn}]
     reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/Common-rules.md", None, None))
-    assert reached.structure.import_warnings and reached.structure.import_warnings[0]["warning"] == warn
+    # Each warned import once, however many of the paths reaching the place hold it.
+    assert [w["target"] for w in reached.structure.import_warnings] == [
+        "note:_/agent/Common-rules.md", "note:_/agent/roles/Worker.md"]
 
 
 def test_a_snapshot_in_an_unknown_format_is_left_out_with_a_note(vault):

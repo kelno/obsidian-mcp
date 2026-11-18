@@ -460,7 +460,8 @@ class PathBuilder:
             piece = self.file_piece(pc_norm(path), LOADED if p.stage == LOADED else p.stage, f"imported by {p.id}",
                                     parent=p.id, via=f"@{raw}", always=p.always)
             warning = warned.get((p.id.lower(), piece.id.lower()))
-            if warning:
+            if warning:  # on the path, as the snapshot lists it, but the piece itself says it may not load
+                piece.arrives += f" (may not load: {warning})"
                 found = {"from": p.id, "import": f"@{raw}", "target": piece.id, "warning": warning}
                 if found not in self.import_warnings:
                     self.import_warnings.append(found)
@@ -480,8 +481,8 @@ class PathBuilder:
 
     def warned_imports(self) -> dict[tuple[str, str], str]:
         """The snapshot's `warning` on an imported file, by (importing piece, imported piece): set when the import
-        line sits next to another import, which made both fail in tests (Q134). The file stays on the path, as the
-        snapshot lists it loaded; the warning goes in the structure."""
+        line sits next to another import, which made both fail in some tests (Q134). The file stays on the path, as
+        the snapshot lists it loaded; its `arrives` and the structure carry the warning."""
         found = self.snap.folder(self.start.folder or self.snap.home) if self.snap else None
         out = {}
         for e in (found[1].get("loads", []) if found else []):
@@ -610,8 +611,7 @@ class PathBuilder:
                 self.load_entry(entry)
 
     def load_user_rules(self) -> None:
-        """The files of `~/.claude/rules/`, which Claude Code loads at the start, after the user CLAUDE.md. An
-        entry the snapshot gives as a read-only copy of a vault note (`copy`) is read from the vault."""
+        """The files of `~/.claude/rules/`, which Claude Code loads at the start, after the user CLAUDE.md."""
         found = self.snap.folder(self.start.folder or self.snap.home) if self.snap else None
         for entry in (found[1].get("loads", []) if found else []):
             if entry.get("arrives", "").startswith("loaded at the start by Claude Code (user rules)"):
@@ -629,16 +629,8 @@ class PathBuilder:
                 self.load_entry(entry)
 
     def load_entry(self, entry: dict) -> None:
-        """One file the snapshot lists as loaded at the start. A file that isn't there loads nothing; a read-only
-        copy of a vault note (`copy`) is that note, read from the vault, found where Claude Code reads it."""
+        """One file the snapshot lists as loaded at the start. A file that isn't there loads nothing."""
         if entry.get("exists") is False:
-            return
-        if entry.get("copy") and entry["id"].startswith("note:"):
-            r = self.v.by_rel.get(entry["id"][5:].lower(), entry["id"][5:])
-            text = self.v.text(r)
-            if text is None:
-                self.broken.append({"from": entry["copy"], "target": r, "via": "a read-only copy of a vault note"})
-            self.push(Piece(f"note:{r}", LOADED, entry["arrives"], pc_norm(entry["copy"]), text or ""))
             return
         self.push(self.file_piece(self.entry_path(entry), LOADED, entry["arrives"]))
 
