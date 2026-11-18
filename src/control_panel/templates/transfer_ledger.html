@@ -1,0 +1,344 @@
+{#-
+  Ledger entry page (fork, owner's design 2026-11-18). Same shape and the same
+  guarantees as the download page: static for every token, nonce-guarded
+  inline CSS/JS, nothing loaded from another origin, the link's token read
+  from the fragment and sent only as a header to /transfer/ledger/info.
+
+  Everything the entry holds is agents' text, so it reaches the DOM only as
+  text nodes (`textContent`, `createTextNode`); the small Markdown reading
+  below builds elements, never parses HTML. A link is made only for an
+  http(s) URL, and for the refs the server signed a link for (`links`).
+  Following one changes only the fragment, so the page reloads its data on
+  `hashchange`.
+-#}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Ledger entry</title>
+<style nonce="{{ nonce }}">
+  :root {
+    color-scheme: light dark;
+    --t-bg: #f6f7f9;
+    --t-surface: #fff;
+    --t-text: #16191d;
+    --t-text-2: #666;
+    --t-line: #e3e6ea;
+    --t-code: #eef0f3;
+    --t-link: #2f6feb;
+    --t-danger: #b3261e;
+    --t-shadow: rgba(0,0,0,.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --t-bg: #16191d;
+      --t-surface: #21262d;
+      --t-text: #e6e6e6;
+      --t-text-2: #9aa4ae;
+      --t-line: #353c45;
+      --t-code: #2d333b;
+      --t-link: #7aa7ff;
+    }
+  }
+  body {
+    margin: 0; padding: 2rem 1rem;
+    font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--t-bg); color: var(--t-text);
+  }
+  main { max-width: 46rem; margin: 0 auto; background: var(--t-surface); border-radius: 12px;
+         padding: 1.5rem 1.5rem 1.75rem; box-shadow: 0 1px 3px var(--t-shadow); overflow-wrap: anywhere; }
+  h1 { font-size: 1.25rem; margin: 0 0 .25rem; line-height: 1.35; }
+  h2 { font-size: 1rem; margin: 1.5rem 0 .4rem; padding-top: .9rem; border-top: 1px solid var(--t-line); }
+  h3 { font-size: .95rem; margin: 1rem 0 .3rem; }
+  .ref { color: var(--t-text-2); font-weight: 600; margin-right: .4rem; }
+  .sub { color: var(--t-text-2); margin: 0 0 1rem; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: .25rem 1rem; margin: .5rem 0 0; }
+  dt { color: var(--t-text-2); }
+  dd { margin: 0; }
+  a { color: var(--t-link); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em;
+         background: var(--t-code); padding: .05rem .3rem; border-radius: 4px; }
+  pre { background: var(--t-code); padding: .6rem .8rem; border-radius: 6px; overflow-x: auto;
+        white-space: pre-wrap; font-size: .88em; }
+  blockquote { margin: .5rem 0; padding-left: .8rem; border-left: 3px solid var(--t-line); color: var(--t-text-2); }
+  ul, ol { padding-left: 1.4rem; margin: .4rem 0; }
+  p { margin: .5rem 0; }
+  details { margin: .4rem 0; }
+  summary { cursor: pointer; }
+  .version { border-top: 1px solid var(--t-line); padding: .5rem 0; }
+  .muted { color: var(--t-text-2); }
+  .err { color: var(--t-danger); }
+  @media (prefers-color-scheme: dark) { main { box-shadow: none; } }
+</style>
+</head>
+<body>
+<main id="main">
+  <p id="status" class="muted">Loading…</p>
+</main>
+<script nonce="{{ nonce }}">
+(function () {
+  "use strict";
+  var main = document.getElementById("main");
+  var links = {};
+
+  function el(tag, text, cls) {
+    var e = document.createElement(tag);
+    if (text !== undefined && text !== null) { e.textContent = String(text); }
+    if (cls) { e.className = cls; }
+    return e;
+  }
+  function httpUrl(u) { return typeof u === "string" && /^https?:\/\//i.test(u); }
+  function anchor(href, text) {
+    var a = el("a", text);
+    a.href = href;
+    if (!/^https?:\/\/[^\/]*\/transfer\/ledger#/i.test(href)) { a.rel = "noopener noreferrer"; a.target = "_blank"; }
+    return a;
+  }
+  function refNode(ref) {
+    return links[ref] ? anchor(links[ref], ref) : el("span", ref);
+  }
+
+  // Inline Markdown: `code`, **bold**, [text](http-url), and refs (Q14, [P35, P48]).
+  function inline(parent, text) {
+    var re = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\))|(\b[QFPC][0-9]{1,6}\b)/g;
+    var last = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) { parent.appendChild(document.createTextNode(text.slice(last, m.index))); }
+      if (m[1]) { parent.appendChild(el("code", m[1].slice(1, -1))); }
+      else if (m[2]) { parent.appendChild(el("strong", m[2].slice(2, -2))); }
+      else if (m[3]) { parent.appendChild(anchor(m[5], m[4])); }
+      else { parent.appendChild(refNode(m[6])); }
+      last = re.lastIndex;
+    }
+    if (last < text.length) { parent.appendChild(document.createTextNode(text.slice(last))); }
+  }
+
+  // Block Markdown: paragraphs, lists (one level of nesting), headings, quotes, fences.
+  function markdown(text) {
+    var box = el("div");
+    var lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+    var i = 0, para = [];
+    function flush() {
+      if (para.length) { var p = el("p"); inline(p, para.join(" ")); box.appendChild(p); para = []; }
+    }
+    while (i < lines.length) {
+      var line = lines[i];
+      if (/^\s*```/.test(line)) {
+        flush();
+        var code = [];
+        i += 1;
+        while (i < lines.length && !/^\s*```/.test(lines[i])) { code.push(lines[i]); i += 1; }
+        box.appendChild(el("pre", code.join("\n")));
+        i += 1;
+        continue;
+      }
+      var h = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (h) { flush(); var hd = el("h3"); inline(hd, h[2]); box.appendChild(hd); i += 1; continue; }
+      if (/^\s*>/.test(line)) {
+        flush();
+        var q = el("blockquote");
+        var quoted = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) { quoted.push(lines[i].replace(/^\s*>\s?/, "")); i += 1; }
+        inline(q, quoted.join(" "));
+        box.appendChild(q);
+        continue;
+      }
+      if (/^\s*([-*+]|\d+[.)])\s+/.test(line)) {
+        flush();
+        var ordered = /^\s*\d+[.)]\s+/.test(line);
+        var list = el(ordered ? "ol" : "ul"), item = null, sub = null;
+        while (i < lines.length && (/^\s*([-*+]|\d+[.)])\s+/.test(lines[i]) || (/^\s+\S/.test(lines[i]) && item))) {
+          var l = lines[i];
+          var marker = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(l);
+          if (marker && marker[1].length >= 2 && item) {
+            if (!sub) { sub = el("ul"); item.appendChild(sub); }
+            var si = el("li"); inline(si, marker[3]); sub.appendChild(si);
+          } else if (marker) {
+            item = el("li"); inline(item, marker[3]); list.appendChild(item); sub = null;
+          } else {
+            item.appendChild(document.createTextNode(" "));
+            inline(item, l.trim());
+          }
+          i += 1;
+        }
+        box.appendChild(list);
+        continue;
+      }
+      if (!line.trim()) { flush(); i += 1; continue; }
+      para.push(line.trim());
+      i += 1;
+    }
+    flush();
+    return box;
+  }
+
+  var LABELS = {
+    expected: "Expected", expected_by: "Expected by", owner_words: "The owner's words", agent_did: "What the agent did",
+    outcome: "Outcome", sources: "Sources", certainty: "Certainty", certainty_note: "Certainty note",
+    subtype: "Subtype", component: "Component", leads: "Leads", target: "Target",
+    proposed_text: "Proposed text", final_text: "Final text", changes: "Changes", owner_reason: "The owner's reason"
+  };
+  var SHORT = { expected_by: 1, outcome: 1, certainty: 1, subtype: 1, component: 1, target: 1 };
+
+  function row(dl, label, value) {
+    if (value === undefined || value === null || value === "") { return; }
+    dl.appendChild(el("dt", label));
+    var dd = el("dd");
+    if (value instanceof Node) { dd.appendChild(value); } else { dd.textContent = String(value); }
+    dl.appendChild(dd);
+  }
+  function refList(refs) {
+    var span = el("span");
+    refs.forEach(function (ref, n) {
+      if (n) { span.appendChild(document.createTextNode(", ")); }
+      span.appendChild(refNode(ref));
+    });
+    return span;
+  }
+  function day(iso) { return iso ? String(iso).slice(0, 10) : ""; }
+
+  function render(data) {
+    var e = data.entry;
+    links = data.links || {};
+    main.textContent = "";
+    document.title = e.ref + " " + e.title;
+
+    var h1 = el("h1");
+    h1.appendChild(el("span", e.ref, "ref"));
+    h1.appendChild(document.createTextNode(e.title));
+    main.appendChild(h1);
+    main.appendChild(el("p", e.kind + " · " + e.status + (e.area ? " · " + e.area : ""), "sub"));
+
+    var meta = el("dl");
+    row(meta, "Topics", (e.topics || []).join(", "));
+    row(meta, "Observed", e.observed_on);
+    row(meta, "Created", day(e.created_at) + (e.created_by ? " by " + e.created_by : "") + (e.author ? " (" + e.author + ")" : ""));
+    row(meta, "Last changed", day(e.updated_at) + " (revision " + e.revision + ")");
+    row(meta, "Origin", e.origin);
+    if (e.seen !== undefined) { row(meta, "Seen by the owner", e.seen ? "yes" : "no"); }
+    if (e.superseded_by) { row(meta, "Superseded by", refNode(e.superseded_by)); }
+    if (e.handled_account) { row(meta, "Handled", (e.handled_at ? day(e.handled_at) + ": " : "") + e.handled_account); }
+    if (e.related && e.related.length) { row(meta, "Related", refList(e.related)); }
+    main.appendChild(meta);
+
+    if (e.body) { main.appendChild(el("h2", "Text")); main.appendChild(markdown(e.body)); }
+
+    var details = e.details || {};
+    var shortDl = el("dl"), anyShort = false;
+    Object.keys(details).forEach(function (k) {
+      if (SHORT[k]) { row(shortDl, LABELS[k] || k, details[k]); anyShort = true; }
+    });
+    if (anyShort) { main.appendChild(el("h2", "Fields")); main.appendChild(shortDl); }
+    Object.keys(details).forEach(function (k) {
+      if (SHORT[k]) { return; }
+      main.appendChild(el("h2", LABELS[k] || k));
+      if (k === "owner_words" || k === "proposed_text" || k === "final_text") {
+        main.appendChild(el("pre", details[k]));
+      } else {
+        main.appendChild(markdown(details[k]));
+      }
+    });
+
+    function entryList(title, items, extra) {
+      if (!items || !items.length) { return; }
+      main.appendChild(el("h2", title));
+      var ul = el("ul");
+      items.forEach(function (it) {
+        var li = el("li");
+        li.appendChild(refNode(it.ref));
+        li.appendChild(document.createTextNode(" " + (it.title || "") + " (" + extra(it) + ")"));
+        ul.appendChild(li);
+      });
+      main.appendChild(ul);
+    }
+    entryList("Rules it tests", e.rules, function (r) { return r.status + (r.when ? ", " + r.when : ""); });
+    entryList("Cases of this rule" + (e.cases_total ? " (" + e.cases_total + " in all)" : ""), e.cases,
+              function (c) { return [c.outcome, c.status, c.when].filter(Boolean).join(", "); });
+
+    if (e.tasks && e.tasks.length) {
+      main.appendChild(el("h2", "Vault tasks citing it" + (e.tasks_state ? " (" + e.tasks_state + ")" : "")));
+      var ul = el("ul");
+      e.tasks.forEach(function (t) {
+        var li = el("li");
+        li.appendChild(el("span", (t.status || "") + " ", "muted"));
+        var text = t.text !== undefined ? t.text.replace(/^\s*[-*+]\s+\[.\]\s*/, "") : "(in a private folder)";
+        if (httpUrl(t.open_url)) { li.appendChild(anchor(t.open_url, text)); } else { li.appendChild(el("span", text)); }
+        ul.appendChild(li);
+      });
+      main.appendChild(ul);
+    }
+
+    if (e.cited_by && e.cited_by.length) {
+      main.appendChild(el("h2", "Summary-view lines citing it"));
+      var cl = el("ul");
+      e.cited_by.forEach(function (c) {
+        var li = el("li");
+        inline(li, String(c.text || ""));
+        if (c.view) { li.appendChild(el("span", " (" + c.view + ")", "muted")); }
+        cl.appendChild(li);
+      });
+      main.appendChild(cl);
+    }
+
+    var past = e.history || [];
+    if (past.length) {
+      main.appendChild(el("h2", "History"));
+      var fold = el("details");
+      fold.appendChild(el("summary", past.length + " earlier version" + (past.length === 1 ? "" : "s") + ", oldest first"));
+      past.forEach(function (v) {
+        var box = el("div", null, "version");
+        var head = [v.revision !== undefined ? "Revision " + v.revision : null, v.action, day(v.at),
+                    v.by, v.author].filter(Boolean).join(" · ");
+        box.appendChild(el("div", head, "muted"));
+        if (v.reason) { var r = el("p"); r.appendChild(el("strong", "Why: ")); inline(r, String(v.reason)); box.appendChild(r); }
+        var snap = v.before;
+        if (snap && typeof snap === "object") {
+          var inner = el("details");
+          inner.appendChild(el("summary", "The entry before this change"));
+          if (snap.title) { inner.appendChild(el("h3", snap.title)); }
+          if (snap.body) { inner.appendChild(markdown(snap.body)); }
+          var rest = el("dl");
+          Object.keys(snap).forEach(function (k) {
+            if (k === "title" || k === "body") { return; }
+            var val = snap[k];
+            row(rest, LABELS[k] || k, typeof val === "string" ? val : JSON.stringify(val));
+          });
+          inner.appendChild(rest);
+          box.appendChild(inner);
+        }
+        fold.appendChild(box);
+      });
+      main.appendChild(fold);
+    }
+
+    (data.notes || []).forEach(function (n) { main.appendChild(el("p", n, "muted")); });
+    main.appendChild(el("p", "This link works until " + new Date(data.expires_at).toLocaleString() + ".", "muted"));
+  }
+
+  function load() {
+    var token = location.hash.replace(/^#/, "");
+    main.textContent = "";
+    var status = el("p", "Loading…", "muted");
+    main.appendChild(status);
+    if (!token) {
+      status.textContent = "This page needs the full link, including the part after the # sign.";
+      status.className = "err";
+      return;
+    }
+    fetch("/transfer/ledger/info", { headers: { "Authorization": "Bearer " + token }, cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) { throw new Error("This link has expired or is no longer valid. Ask an agent for a fresh one."); }
+        return r.json();
+      })
+      .then(function (data) { render(data); window.scrollTo(0, 0); })
+      .catch(function (err) { status.textContent = err.message; status.className = "err"; });
+  }
+
+  window.addEventListener("hashchange", load);
+  load();
+})();
+</script>
+</body>
+</html>

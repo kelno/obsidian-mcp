@@ -93,6 +93,7 @@ from src import plugins as _plugins
 from src.services import ai_edit_stamp, page_text, private_folders, transfer, vault_fs
 from src.services import index_status as _index_status
 from src.services import open_note_url as _open_note_url
+from src.services import ledger_view as _ledger_view
 from src.services import note_description
 from src.services import change_feed, transfer, vault_fs
 from src.services import (
@@ -11463,7 +11464,14 @@ async def ledger_search_impl(
 
 @_tracked("ledger_get", ["refs", "history", "include_private"], refusal_result=_ledger_gate(LedgerGetResult))
 async def ledger_get_impl(refs: list[str], history: bool = False, include_private: bool = False) -> LedgerGetResult:
-    uid = current_user_id.get()
+    return await _ledger_get_body(current_user_id.get(), refs, history=history, include_private=include_private,
+                                  view=await _ledger_view_claims())
+
+
+async def _ledger_get_body(uid, refs: list[str], *, history: bool, include_private: bool,
+                           view: "_ledger_view.Claims | None") -> LedgerGetResult:
+    """`ledger_get`'s answer for owner `uid`, shared by the tool and the ledger page
+    (`ledger_view_payload`), which has no MCP request around it."""
     try:
         refs = _ledger.bounded_list(refs, "refs")
         if not refs:
@@ -11509,6 +11517,7 @@ async def ledger_get_impl(refs: list[str], history: bool = False, include_privat
             rules=[{k: v for k, v in r.items() if k != "id"} for r in rules.get(entry.id, ())] or None,
             cases=cases.get(entry.id, [])[:_ledger.GET_CASES_MAX] or None,
             cases_total=(len(cases[entry.id]) if len(cases.get(entry.id, ())) > _ledger.GET_CASES_MAX else None),
+            view_url=_ledger_view.link(view, entry.ref),
         )
         size = _ledger.json_size(item.model_dump())
         if out and used + size > cap:
@@ -11605,6 +11614,7 @@ async def ledger_add_impl(
         ref=entry.ref, revision=entry.revision, status=entry.status, similar=added.similar or None,
         flagged_lines=_ledger_flagged(added.flagged), view_hints=added.hints or None, notes=notes or None,
         areas_and_topics=added.names, cites=cites, rules=added.rules or None,
+        view_url=_ledger_view.link(await _ledger_view_claims(), entry.ref),
     )
 
 
@@ -11714,7 +11724,8 @@ async def ledger_update_impl(
         notes.extend(await _ledger_superseded_note(uid, entry.id))
     return LedgerWriteResult(ref=entry.ref, revision=entry.revision, status=entry.status,
                              changed=changed or None, flagged_lines=_ledger_flagged(updated.flagged),
-                             notes=notes or None, cites=cites, cited_by=dependants)
+                             notes=notes or None, cites=cites, cited_by=dependants,
+                             view_url=_ledger_view.link(await _ledger_view_claims(), entry.ref))
 
 
 #: Changes to what an entry says. A pure seen, topic, area, related, origin
@@ -11892,6 +11903,48 @@ async def _note_refs_report(uid, old: str | None, new: str | None, *, old_unread
                      "says matches what they say.\n" + "\n".join(map(_ledger_state_line, added_states))
                      + (f"\n- and {more['added']} more" if more["added"] else ""))
     return "\n\n" + "\n\n".join(parts) + unread
+
+
+async def _ledger_view_claims() -> "_ledger_view.Claims | None":
+    """The calling credential's half of a ledger page link (`view_url`), or None.
+
+    Never fails the call: an entry's link is a convenience, so a failure to
+    build one leaves it out (debug-logged)."""
+    try:
+        async with async_session() as session:
+            return await _ledger_view.principal_claims(
+                session, key_id=current_api_key_id.get(), oauth_token_id=current_oauth_token_id.get(),
+                user_id=current_user_id.get())
+    except Exception:  # noqa: BLE001 - the result stands without the link
+        logger.debug("ledger view link: could not be built", exc_info=True)
+        return None
+
+
+async def ledger_view_payload(claims: "_ledger_view.Claims") -> dict | None:
+    """What the ledger page shows for a redeemed link (`/transfer/ledger/info`), or None
+    when its entry is not the link owner's (any more).
+
+    `ledger_get`'s own answer for the link's owner, with history and without the
+    text of tasks in private folders, so the page shows exactly what an agent
+    reads. Each ref the entry points to gets its own link (`links`), with the
+    same credential and end as this one: following links never extends a link.
+    """
+    result = await _ledger_get_body(claims.user_id, [claims.ref], history=True, include_private=False,
+                                    view=None)
+    if not result.entries:
+        return None
+    entry = result.entries[0].model_dump(exclude_none=True)
+    refs = set(entry.get("related") or ())
+    refs.update(item["ref"] for key in ("rules", "cases") for item in entry.get(key) or () if item.get("ref"))
+    if entry.get("superseded_by"):
+        refs.add(entry["superseded_by"])
+    refs.discard(entry["ref"])
+    return {
+        "entry": entry,
+        "links": {ref: _ledger_view.for_ref(claims, ref) for ref in sorted(refs)},
+        "expires_at": claims.expires_at.isoformat(),
+        "notes": result.notes or [],
+    }
 
 
 def _ledger_task_dict(task, include_private: bool = False) -> dict:

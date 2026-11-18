@@ -116,6 +116,8 @@ class LedgerEntryFull(_OmitNone):
     history: list[dict] | None = None
     #: Whether its vector is current (else it is found by words only).
     embedded: bool | None = None
+    #: A link opening the entry as a web page, for the owner (`src/services/ledger_view.py`).
+    view_url: str | None = None
 
 
 class LedgerGetResult(_LedgerResult):
@@ -160,6 +162,8 @@ class LedgerWriteResult(_LedgerResult):
     #: at most 20, with `entries_total` / `tasks_total` / `notes_total` when
     #: there are more.
     cited_by: dict | None = None
+    #: A link opening the entry as a web page, for the owner (`src/services/ledger_view.py`).
+    view_url: str | None = None
 
 
 class LedgerDigestResult(_LedgerResult):

@@ -59,7 +59,7 @@ from src.config import MAX_NOTE_BYTES, settings
 from src.database import async_session
 from src.limiter import limiter
 from src.models.db import UsageLog
-from src.services import change_feed, rate_limits, refusals, security_events, transfer, vault_fs
+from src.services import change_feed, ledger_view, rate_limits, refusals, security_events, transfer, vault_fs
 from src.services.vault import classify_bytes, is_hidden_path
 
 logger = logging.getLogger(__name__)
@@ -502,6 +502,41 @@ async def download_info(request: Request, token: str | None = Depends(_bearer)) 
             "mime": mimetypes.guess_type(row.path)[0],
             "expires_at": _aware(row.expires_at).isoformat(),
         }
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+# ── ledger entry page (fork) ────────────────────────────────────────────────
+#
+# A link that opens one agent-ledger entry for the owner (`view_url` in the
+# ledger tools' results; `src/services/ledger_view.py`). Not a file transfer,
+# but the same kind of route: a capability in the fragment, redeemed from
+# `Authorization: Bearer`, the uniform 404 with its reason only in the
+# `transfer_refused` record, and the same page limit. Read-only.
+
+
+@router.api_route("/ledger", methods=["GET", "HEAD"])
+@limiter.limit(PAGE_LIMIT)
+async def ledger_page(request: Request) -> Response:
+    return _page(request, "transfer_ledger.html")
+
+
+@router.api_route("/ledger/info", methods=["GET", "HEAD"])
+@limiter.limit(PAGE_LIMIT)
+async def ledger_info(request: Request, token: str | None = Depends(_bearer)) -> Response:
+    if token is None:
+        return await _refuse(request, reason="missing_token")
+    claims = ledger_view.decode(token)
+    if claims is None:
+        return await _refuse(request, reason="ledger_link_invalid", token=token)
+    async with async_session() as session:
+        valid = await ledger_view.still_valid(session, claims)
+    if not valid:
+        return await _refuse(request, reason="ledger_link_credential", token=token)
+    from src.mcp_server.tools import ledger_view_payload  # the tools module imports this one's services
+
+    payload = await ledger_view_payload(claims)
+    if payload is None:
+        return await _refuse(request, reason="ledger_entry_missing", token=token)
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
