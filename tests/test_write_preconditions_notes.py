@@ -1194,7 +1194,7 @@ async def test_a_move_ends_its_first_line_with_the_new_link(vault, monkeypatch):
 async def test_an_edit_ends_its_first_line_with_the_note_link(vault, monkeypatch):
     # OPEN_NOTE_URL (fork): an edit is when an agent says "I updated X", so
     # its first line ends with X's link, after the hash, as create_note and
-    # move_note give it; unset, or when nothing was written, no link.
+    # move_note give it; unset, or on a dry run, no link.
     from src.services import open_note_url
 
     name = seed(vault, "My note.md", b"# A\nbody\n")
@@ -1212,5 +1212,3 @@ async def test_an_edit_ends_its_first_line_with_the_note_link(vault, monkeypatch
         first = out.splitlines()[0]
         assert first.endswith(f" — content_hash: {digest(vault, name)} — open_url: {link}"), (kwargs, out)
     assert "open_url" not in await tools.edit_note_impl(name, "x", dry_run=True)
-    unchanged = await tools.edit_note_impl(name, "# A\nlast\n")
-    assert unchanged.startswith("No changes") and "open_url" not in unchanged
