@@ -121,7 +121,7 @@ def calling_as(*, key_id=None, oauth_token_id=None):
 
 async def info(client, url):
     assert url and url.startswith(f"{BASE}/transfer/ledger#"), url
-    return await client.get("/transfer/ledger/info", headers={"Authorization": "Bearer " + url.split("#", 1)[1]})
+    return await client.get("/transfer/ledger/info", headers={"Authorization": "Bearer " + url.rsplit("/", 1)[1]})
 
 
 async def refused_body(client):
@@ -198,7 +198,7 @@ async def test_a_grant_past_its_absolute_deadline_ends_its_links(ctx, sessionmak
 
 async def test_a_link_to_an_entry_that_is_not_there_is_the_uniform_404(ctx, client):
     added = await tools.ledger_add_impl("quirk", "Real", details={"certainty": "tested"})
-    claims = ledger_view.decode(added.view_url.split("#", 1)[1])
+    claims = ledger_view.decode(added.view_url.rsplit("/", 1)[1])
     ghost = ledger_view.for_ref(claims, "Q999999")
     r = await info(client, ghost)
     assert r.status_code == 404 and r.content == await refused_body(client)

@@ -317,7 +317,8 @@
   }
 
   function load() {
-    var token = location.hash.replace(/^#/, "");
+    // "#C146/until-2026-12-18/<token>": the ref and the end are for reading; the token is the last part.
+    var token = location.hash.replace(/^#/, "").split("/").pop();
     main.textContent = "";
     var status = el("p", "Loading…", "muted");
     main.appendChild(status);

@@ -3,7 +3,8 @@
 The owner reads ledger entries an agent points them to; a ref alone means
 asking an agent to read it out. `ledger_get`, `ledger_add` and
 `ledger_update` give each entry a `view_url`: a link to `/transfer/ledger`
-whose fragment is a token signed by this server. The link is its own
+whose fragment is the ref, the end date and a token signed by this server
+(`#C146/until-2026-12-18/<token>`). The link is its own
 permission, like `request_download`'s (no login), and follows the same rules
 (`docs/architecture/file-transfer.md`):
 
@@ -32,6 +33,7 @@ import hashlib
 import hmac
 import json
 from dataclasses import dataclass, replace
+from urllib.parse import quote
 
 from sqlalchemy import func, select
 
@@ -41,7 +43,7 @@ from src.models.db import APIKey, OAuthToken, User
 #: How long a link opens its entry (owner, 2026-11-18), at most: never past
 #: the minting credential's own end.
 LINK_DAYS = 30
-#: The page every link opens; the token follows `#`.
+#: The page every link opens; the ref, the end date and the token follow `#`.
 PAGE_PATH = "/transfer/ledger"
 #: The first field of every token: a later format gets a new one.
 VERSION = "lv1"
@@ -132,8 +134,18 @@ def decode(token: str, *, now: datetime.datetime | None = None) -> Claims | None
 
 
 def url_for(claims: Claims) -> str | None:
+    """`<origin>/transfer/ledger#C146/until-2026-12-18/<token>`.
+
+    The ref and the end date (UTC) come first, readable, so whoever sees the
+    link, an agent included, sees it is temporary without a rule saying so
+    (owner, 2026-11-19). They are not checked: the page sends only the last
+    part, the token, which carries both signed.
+    """
     base = settings.public_base_url
-    return f"{base}{PAGE_PATH}#{encode(claims)}" if base else None
+    if not base:
+        return None
+    label = f"{quote(claims.ref, safe='')}/until-{claims.expires_at.date().isoformat()}"
+    return f"{base}{PAGE_PATH}#{label}/{encode(claims)}"
 
 
 def for_ref(claims: Claims, ref: str) -> str | None:

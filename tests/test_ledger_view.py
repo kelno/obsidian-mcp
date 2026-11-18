@@ -70,8 +70,17 @@ def test_a_link_to_another_entry_keeps_the_credential_and_the_end(monkeypatch):
     monkeypatch.setattr(settings, "_public_origin_explicit", True)
     monkeypatch.setattr(settings, "base_url", "https://mcp.example.org")
     url = ledger_view.for_ref(claims(), "P149")
-    assert url.startswith("https://mcp.example.org/transfer/ledger#")
-    assert ledger_view.decode(url.split("#", 1)[1], now=NOW) == claims(ref="P149")
+    assert url.startswith("https://mcp.example.org/transfer/ledger#P149/until-2026-12-18/")
+    assert ledger_view.decode(url.rsplit("/", 1)[1], now=NOW) == claims(ref="P149")
+
+
+def test_the_link_shows_its_end_date_the_last_day_it_opens(monkeypatch):
+    # Readable in the link itself, so an agent sees it is temporary (owner,
+    # 2026-11-19). A credential ending sooner shows its own, earlier date.
+    monkeypatch.setattr(settings, "_public_origin_explicit", True)
+    monkeypatch.setattr(settings, "base_url", "https://mcp.example.org")
+    early = int(datetime.datetime(2026, 11, 25, 23, 0, tzinfo=datetime.timezone.utc).timestamp())
+    assert "#C146/until-2026-11-25/" in ledger_view.url_for(claims(expires=early))
 
 
 def test_no_public_origin_no_link(monkeypatch):
