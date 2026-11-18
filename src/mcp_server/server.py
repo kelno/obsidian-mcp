@@ -3133,9 +3133,9 @@ if settings.mcp_reject_unknown_arguments:
 # ── Upstream tools switched off (fork) ──────────────────────────────────────
 #
 # Upstream tools switched off (CLAUDE.md, "Following upstream"): the five
-# task tools for good (owner's decision 2026-11-15, FORK.md), `get_changes`,
-# `hybrid_search` and upstream's `move_task` (#430, resync 2026-11-18) until
-# the owner decides on them. Their code is kept as upstream wrote it and registered like any
+# task tools and `move_task` (#430) for good (owner's decisions 2026-11-15 and
+# 2026-11-18, FORK.md), `get_changes` and `hybrid_search` until the owner
+# decides on them. Their code is kept as upstream wrote it and registered like any
 # other tool above, then taken off the list here, so no client is offered them.
 # Removing a name switches that tool on. `switch_on` puts them back for
 # upstream's tests of them. `upstream_list_tasks` is upstream's `list_tasks`,
