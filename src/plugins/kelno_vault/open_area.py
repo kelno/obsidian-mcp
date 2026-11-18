@@ -461,10 +461,6 @@ async def open_area(
     feedback whose citing tasks are all done (ticked in Obsidian, say). `instructions`
     then say what to do with it all. A folder no area lists comes back with
     `found: false`: ask the owner which area it belongs to.
-    With `OPEN_NOTE_URL` set, each task carries `open_url` too, opening
-    its own line when it ends with a block id (`^…`).
-    With `OPEN_NOTE_URL` set, `main_note_open_url`: give that link when
-    pointing the owner to the main note.
     """
     return await open_area_impl(area=area, folder=folder)
 

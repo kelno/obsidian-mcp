@@ -351,9 +351,6 @@ async def keyword_search(
     footer names the one-time rebuild). Call `read_note` on a result's path
     for the full note.
 
-    With `OPEN_NOTE_URL` set, each note's line ends with `— open_url: <link>`:
-    give that link when pointing the owner to the note.
-
     Args:
         query: Keywords or phrase to match (websearch tsquery syntax: "foo bar", "foo OR bar", "-bar").
         folder: Optional folder prefix (e.g. "Cards/", "Projects/").
@@ -396,8 +393,7 @@ async def read_note(
       truncated read returns the value a whole-note read would), and the token the write tools take as
       `expected_hash`. It is not a hash of `content`: never compute it yourself, hand it back verbatim.
     - `path`, `title`, `tags` — metadata as data.
-    - `open_url` — with `OPEN_NOTE_URL` set: give that link when pointing
-      the owner to the note.
+    - `open_url` — the note's link, with `OPEN_NOTE_URL` set.
     - `frontmatter_yaml` — the frontmatter block's YAML source, fence lines excluded, LF-normalized (a CRLF
       block comes back with LF terminators — the same declared residual `content` carries, because this tool
       normalises and the write tools work on raw bytes; `edit_note` still reattaches the original block
@@ -456,9 +452,6 @@ async def list_notes(
     picked up by the indexer will not appear (lag is bounded by the index interval,
     typically up to 2 minutes).
 
-    With `OPEN_NOTE_URL` set, each note's line ends with `— open_url: <link>`:
-    give that link when pointing the owner to the note.
-
     Notes whose content changed in a window: `order_by="content_changed"` with
     `since` (and optionally `until`). File mtime (the default order) also moves
     when a file is merely touched or re-synced; `content_changed` moves only when
@@ -511,9 +504,6 @@ async def get_recent(
     Each line shows the note's modification time in UTC, as
     "YYYY-MM-DD HH:MM UTC".
 
-    With `OPEN_NOTE_URL` set, each note's line ends with `— open_url: <link>`:
-    give that link when pointing the owner to the note.
-
     Notes whose content changed since a point in time:
     `order_by="content_changed"` with `since`. File mtime (the default order)
     also moves when a file is touched or re-synced without a content change;
@@ -559,9 +549,6 @@ async def semantic_search(
 
     Each result is one note (deduped) with its closest-matching chunk as a ~200-character preview.
     Call `read_note` on a result's path to get the full note content.
-
-    With `OPEN_NOTE_URL` set, each line ends with `— open_url: <link>`, the
-    link to give the owner.
 
     The header line carries a stale count and a truncated count, always —
     including when both are zero, so "nothing here is degraded" is
@@ -639,9 +626,6 @@ async def create_note(
     See `get_vault_guide` for Obsidian syntax and any vault-specific conventions
     (naming, folder placement, frontmatter, tags).
 
-    With `OPEN_NOTE_URL` set, the first line ends with `— open_url: <link>`:
-    give that link when pointing the owner to the note.
-
     {plugin_text}
 
     **Agent-ledger refs.** When the note cites agent-ledger entries in
@@ -710,9 +694,6 @@ async def edit_note(
     line; an undeclared or mistyped argument is rejected by protocol validation before the tool runs and
     carries no such line. See `get_vault_guide` for vault conventions.
 
-    With `OPEN_NOTE_URL` set, the first line ends with `— open_url: <link>`:
-    give that link when pointing the owner to the note.
-
     {plugin_text}
 
     **Ledger refs** (`[P54]`) on the lines this write changes come back under `changed_lines_cite:`, those
@@ -748,13 +729,13 @@ async def edit_note(
     `content` does not resend, a fenced code block under the heading included, is deleted — so a blank
     line you want after the heading belongs in `content`. `read_note(path, section=...)` is the matching read:
     its `heading` field carries the heading line and its `content` field the body, and this tool takes exactly
-    that `content`.
+    that `content`. A heading inside a fenced code block is not a heading.
     A write keeps the note's line endings (a CRLF note stays CRLF); `replace_frontmatter=True` writes bytes as sent.
 
     **Two shapes refuse a section write outright, naming the problem and writing nothing:** a malformed
     frontmatter block, whose refusal names the `replace_frontmatter=True` repair; and a fence opener indented by
     one to three spaces that nothing below it closes — close the fence or unindent it to column zero, then
-    reissue.
+    reissue. `read_note` still reads such notes.
     """
     return await edit_note_impl(
         path,
@@ -858,9 +839,6 @@ async def find_related(
     or when looking for thematic neighbors. For link-based exploration use
     `get_neighborhood`. For arbitrary topic queries use `semantic_search`.
 
-    With `OPEN_NOTE_URL` set, each note's line ends with `— open_url: <link>`:
-    give that link when pointing the owner to the note.
-
     Carries `semantic_search`'s per-row markers and its header counts:
     `stale: true` means that neighbour changed after it was embedded, so it was
     ranked against its previous content and its preview is **withheld** —
@@ -906,9 +884,6 @@ async def find_orphans(folder: str | None = None, limit: int = 50) -> str:
     """Notes with zero incoming AND zero outgoing resolved links — useful for
     vault hygiene ("what's disconnected?") and cleanup decisions.
 
-    With `OPEN_NOTE_URL` set, each note's line ends with `— open_url: <link>`:
-    give that link when pointing the owner to the note.
-
     Args:
         folder: Optional vault-relative folder prefix to scope the search
             (e.g. "Cards/").
@@ -927,9 +902,6 @@ async def move_note(
 ) -> str:
     """Move or rename a note inside the vault. Requires write permission — a `readwrite` API key, or an OAuth token
     carrying the `readwrite` scope.
-
-    With `OPEN_NOTE_URL` set, the first line ends with `— open_url: <link>`:
-    give that link when pointing the owner to the note.
 
     {plugin_text}
 
@@ -1633,10 +1605,6 @@ async def list_tasks(
     `expected_hash`). Tasks whose line changed since the index read it are
     listed under `stale`, not returned.
 
-    With `OPEN_NOTE_URL` set, each task carries `open_url`: give that link
-    when pointing the user to a task; it opens the note on the task's
-    own line when the line ends with a block id (`^…`).
-
     Args:
         path: `path includes …` — a case-insensitive substring of the note's
             vault path, `.md` included, anywhere in it (not only a prefix).
@@ -1701,9 +1669,6 @@ async def create_task(
     field order, adding the plugin's created date if its settings say so.
     Changes no other line. The line is read back before writing and the call
     is refused if the plugin would read it differently.
-    With `OPEN_NOTE_URL` set, the result carries `open_url`: give that link
-    when pointing the user to the task; it opens the note on the task's
-    own line when the line ends with a block id (`^…`).
 
     Args:
         description: the task's text, one line. Tags (`#next`) may be part of
@@ -1783,8 +1748,7 @@ async def edit_task(
     Only that line changes; it is written back in the plugin's field order, as the plugin itself does on
     any edit, a repeat rule (🔁) in the plugin's own wording. Status changes
     go through `set_task_status`. If the line cites agent-ledger entries
-    (`[F12]`), the result lists them as they stand now. `open_url` (with
-    `OPEN_NOTE_URL`) is the task's link to give the user.
+    (`[F12]`), the result lists them as they stand now.
 
     Name the task by `id`. Refused, writing nothing, when no task or several
     carry it (`task_id_not_found`, `task_id_ambiguous`), when a task named
@@ -1867,9 +1831,6 @@ async def set_task_status(
     cites agent-ledger entries (`[F12]`), the result lists them as they stand
     now, and when this closes the last open task citing feedback, its `notes`
     say whether to close that entry as handled.
-    With `OPEN_NOTE_URL` set, the result (and `next_occurrence_open_url`) carries `open_url`: give that link
-    when pointing the user to the task; it opens the note on the task's
-    own line when the line ends with a block id (`^…`).
 
     **A recurring task (🔁) ticked done also gets its next occurrence**, a new
     line above it (below, if the plugin is set so), with its dates moved on as
