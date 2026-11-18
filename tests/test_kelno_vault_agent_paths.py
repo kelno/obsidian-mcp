@@ -179,7 +179,7 @@ def test_agent_path_draws_a_path_with_texts_hashes_and_known(vault):
 
     known = {p.id: p.hash for p in first.pieces}
     again = path(PathStart(typical=3), known=known)
-    assert {p.status for p in again.pieces} == {"unchanged"} and all(p.text is None for p in again.pieces)
+    assert not again.pieces and again.waiting == 0  # held pieces aren't listed again
     assert again.left_path is None
     gone = path(PathStart(typical=3), known={**known, "note:_/agent/Old rule.md": "0123456789ab"})
     assert gone.left_path == ["note:_/agent/Old rule.md"]
@@ -210,10 +210,14 @@ def test_mentions_are_grouped_by_rule_file_and_held_pieces_come_short(vault):
     first = path(PathStart(typical=3))
     assert first.structure.rule_file_mentions == [
         {"target": "_/agent/Notes kept.md", "from": ["note:_/agent/Common-rules.md"]}]
+    # A call with known lists only what it brings: nothing here, every piece held.
     again = path(PathStart(typical=3), known={p.id: p.hash for p in first.pieces})
-    for p in again.pieces:
-        assert p.status == "unchanged" and p.arrives is None and p.where is None and p.via is None
-        assert p.stage and p.hash
+    assert not again.pieces and again.waiting == 0 and again.left_path is None
+    assert again.structure is None and any("first call" in n for n in again.notes)
+    reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", None, None))
+    held = {p.id: p.hash for p in reached.pieces}
+    again = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", held, None))
+    assert reached.reached_by and again.reached_by is None and again.structure is None and not again.pieces
 
 
 def test_a_result_whose_metadata_passes_the_budget_is_cut_down_and_every_text_arrives(vault, monkeypatch):
@@ -231,10 +235,11 @@ def test_a_result_whose_metadata_passes_the_budget_is_cut_down_and_every_text_ar
     while rounds < 30:
         r = path(PathStart(typical=3), known=held or None)
         assert len(r.model_dump_json()) <= 12_000
-        held |= {p.id: p.hash for p in r.pieces
-                 if p.text is not None or p.status == "unchanged" or p.text_in_parts}
+        held |= {p.id: p.hash for p in r.pieces if p.text is not None or p.text_in_parts}
         rounds += 1
-        if all(p.status == "unchanged" or p.private or p.text_in_parts for p in r.pieces) and not any(
+        if rounds > 1:  # a call with known lists only what it brings
+            assert all(p.text is not None or p.text_in_parts or p.private for p in r.pieces)
+        if not r.waiting and not any(p.text_withheld for p in r.pieces) and not any(
                 "left out" in n for n in r.notes or []):
             break
     assert rounds < 30

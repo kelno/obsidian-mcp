@@ -186,67 +186,105 @@ def _short_form(o: PathPiece) -> dict:
     return taken
 
 
-def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: list[str]) -> None:
+def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: list[str],
+                known: dict | None = None) -> None:
     """Fill in the texts of new or changed pieces, in path order, while the result stays within the budget.
 
-    Sets `result.notes`. A piece whose text waits for a later call comes in short form (id, stage, always,
-    moment, hash) and gets its details (how it arrives, where, its pointing line) with its text: a backward
-    question gathers a hundred and fifty pieces, whose details alone filled the budget on the owner's vault
-    (50,000 characters), leaving one text per call. In short form the whole path shows on the first call and
-    most of the budget goes to texts. Every call makes progress: the first text due either arrives or, longer
-    than the room left, is marked to come in parts (`read_from`, one call, which carries the piece alone).
+    Sets `result.notes`. A first call (no `known`) lists every piece: those whose text waits for a later call
+    in short form (id, stage, always, moment, hash), their details (how it arrives, where, its pointing line)
+    coming with their text, so the whole path shows at once. A call with `known` lists only what it brings:
+    the pieces with their text this time, those now marked in parts, and new private ones; the pieces held
+    and those still waiting were in the first call, so they are left out and counted (`waiting`), and a removal
+    shows in `left_path` (owner, 2026-11-18). Measured on the owner's vault, repeating them took most of each
+    call: a backward question's 150 pieces in short form left room for one text or two. Every call makes
+    progress: the first text due either arrives or, longer than the room left, is marked to come in parts
+    (`read_from`, one call, which carries the piece alone).
     """
     budget = settings.max_read_response_chars - _NOTES_RESERVE
+    listing = known is not None
+    order = {id(o): i for i, o in enumerate(out)}
     due = [(p, o) for p, o in zip(pieces, out) if o.status != "unchanged" and not o.private]
+    if listing:
+        result.pieces = [o for o in out if o.status != "unchanged" and o.private]
+        # The chains and the structure came with the first call too, unchanged by a later one (owner,
+        # 2026-11-18: 9,000 characters a call on a backward question); a call without known shows them again.
+        result.structure = None
+        if hasattr(result, "reached_by"):
+            result.reached_by = None
+        notes.append("The structure (and for a backward question, who reaches the place) came with your first "
+                     "call; call without known to see them again.")
     details = {id(o): _short_form(o) for _, o in due}
     used = len(result.model_dump_json())
     given: list[PathPiece] = []
-    in_parts = 0
-    for p, o in due:
-        taken = details[id(o)]
-        for k, v in taken.items():
+    count = {"in_parts": 0, "waiting": 0}
+
+    def restore(o: PathPiece) -> None:
+        for k, v in details[id(o)].items():
             setattr(o, k, v)
-        meta = len(o.model_dump_json())
+
+    for p, o in due:
+        restore(o)
+        full = len(o.model_dump_json())
         _short_form(o)
-        meta -= len(o.model_dump_json())
+        meta = full + 1 if listing else full - len(o.model_dump_json())  # what listing it whole adds
         cost = len(json.dumps(p.text, ensure_ascii=False)) + len(',"text":') + meta
-        whole = budget - len(o.model_dump_json()) - meta - _PART_SHELL  # a read_from call, this piece alone
+        whole = budget - full - _PART_SHELL  # a read_from call, this piece alone
         if cost > whole or (not given and used + cost > budget):
             # Too long for any one result, or for the room this one leaves when it is the first text due:
             # either way it comes in parts (`read_from`), so every call makes progress.
-            for k, v in taken.items():
-                setattr(o, k, v)
-            o.text_in_parts, in_parts = True, in_parts + 1
+            restore(o)
+            o.text_in_parts = True
+            count["in_parts"] += 1
+            if listing:
+                result.pieces.append(o)
             used = len(result.model_dump_json())
             continue
         if used + cost <= budget:
-            for k, v in taken.items():
-                setattr(o, k, v)
+            restore(o)
             o.text, used = p.text, used + cost
             given.append(o)
+            if listing:
+                result.pieces.append(o)
+        elif listing:
+            count["waiting"] += 1
         else:
             o.text_withheld, used = True, used + len(',"text_withheld":true')
+    if listing:
+        result.pieces.sort(key=lambda o: order[id(o)])
 
     def withheld_note() -> list[str]:
+        lines = []
+        if listing and count["waiting"]:
+            lines.append(f"{count['waiting']} texts are still to come (waiting): their pieces were in your first "
+                         "call. Call again with the same arguments, passing in known the hash of every piece whose "
+                         "text you now hold, and they come next with their details.")
         n = sum(1 for o in result.pieces or [] if o.text_withheld)
-        lines = [f"{n} texts did not fit in this result (text_withheld): those pieces come in short form. Call "
-                 "again with the same arguments, passing in known the hash of every piece whose text you now "
-                 "hold, and they come next with their details."] if n else []
-        if in_parts:
-            lines.append(f"{in_parts} texts are too long for the room in this result (text_in_parts): call again "
-                         "with the same arguments and read_from={id, offset: 0} for each; each part gives the next "
-                         "offset.")
+        if n:
+            lines.append(f"{n} texts did not fit in this result (text_withheld): those pieces come in short form. "
+                         "Call again with the same arguments, passing in known the hash of every piece whose text "
+                         "you now hold, and only what's new comes next, with these texts.")
+        if count["in_parts"]:
+            lines.append(f"{count['in_parts']} texts are too long for the room in this result (text_in_parts): call "
+                         "again with the same arguments and read_from={id, offset: 0} for each; each part gives the "
+                         "next offset.")
         return lines
 
     def take_back(cap: int) -> None:
         while len(given) > 1 and len(result.model_dump_json()) > cap:
             last = given.pop()  # the estimate fell short: the last texts given go back (never the first)
-            last.text, last.text_withheld = None, True
+            last.text = None
             _short_form(last)
+            if listing:
+                result.pieces.remove(last)
+                count["waiting"] += 1
+            else:
+                last.text_withheld = True
+            result.waiting = count["waiting"] if listing else None
             result.notes = (notes + withheld_note()) or None
 
     take_back(budget)
     _fit_metadata(result, notes, budget)
+    result.waiting = count["waiting"] if listing else None
     result.notes = (notes + withheld_note()) or None
     take_back(settings.max_read_response_chars)
 
@@ -483,7 +521,7 @@ async def agent_path_impl(start: PathStart | None, work: PathWork | None, known:
             structure=_structure(ap.structure_of(b)), notes=notes or None, **common)
         if read_from is not None:
             return _part_of(result, pieces, out, read_from)
-        _with_texts(result, pieces, out, notes)
+        _with_texts(result, pieces, out, notes, known)
         return result
 
     try:
@@ -512,7 +550,7 @@ async def agent_path_reached_by_impl(place: str, known: dict | None, machine: st
         if read_from is not None:
             result.reached_by = None
             return _part_of(result, pieces, out, read_from)
-        _with_texts(result, pieces, out, notes)
+        _with_texts(result, pieces, out, notes, known)
         return result
 
     try:

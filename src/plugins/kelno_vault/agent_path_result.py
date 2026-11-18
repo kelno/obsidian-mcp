@@ -132,7 +132,11 @@ class AgentPathResult(_OmitNone):
     #: The PC whose snapshot gave the PC side, and when that side last changed.
     machine: str | None = None
     snapshot_made: str | None = None
+    #: Without `known`, every piece on the path; with `known`, only what this call brings (texts, pieces in
+    #: parts, new private ones): the pieces you hold and those still waiting are left out.
     pieces: list[PathPiece] | None = None
+    #: With `known`: how many pieces' texts come in later calls (listed in your first call, not here).
+    waiting: int | None = None
     #: With `known`: the pieces you hold that are no longer on the path.
     left_path: list[str] | None = None
     structure: PathStructure | None = None
@@ -157,8 +161,10 @@ class ReachedByResult(_OmitNone):
     reached_by: list[dict] | None = None
     machine: str | None = None
     snapshot_made: str | None = None
-    #: Every piece on those paths.
+    #: Every piece on those paths; with `known`, only what this call brings, as in `agent_path`.
     pieces: list[PathPiece] | None = None
+    #: With `known`: how many pieces' texts come in later calls.
+    waiting: int | None = None
     #: With `known`: the pieces you hold that are on none of those paths any more.
     left_path: list[str] | None = None
     structure: PathStructure | None = None
