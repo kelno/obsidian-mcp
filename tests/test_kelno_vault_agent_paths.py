@@ -155,11 +155,13 @@ def test_agent_path_draws_a_path_with_texts_hashes_and_known(vault):
     assert work == ["section:Areas/Repo/Repo.md#For agents", "note:Areas/Repo/Repo.md",
                     "section:_/agent/Vault conventions.md#Working on an area",
                     "tool:obsidian-mcp:open_area/instructions", "note:Areas/Repo/Repo notes.md"]
-    # A pointer that says when comes later; one that doesn't is unplaced; a mention is counted, not followed.
+    # A pointer that says when comes later; a link that says neither when nor "read" is a mention, counted and
+    # not followed, a rule file's listed by name [P250].
     by_id = {p.id: p for p in first.pieces}
     assert by_id["note:_/agent/Vault conventions.md"].moment == "Before working on one of the owner's areas"
-    assert by_id["note:_/agent/Notes kept.md"].moment == "unplaced" and not by_id["note:_/agent/Notes kept.md"].always
-    assert "note:Notes/Some note.md" not in by_id and first.structure.mentions_not_followed == 1
+    assert "note:_/agent/Notes kept.md" not in by_id and "note:Notes/Some note.md" not in by_id
+    assert first.structure.mentions_not_followed == 2
+    assert [m["target"] for m in first.structure.rule_file_mentions] == ["_/agent/Notes kept.md"]
     # Already met through the guide index before the area opens, so code_project adds no second copy.
     assert by_id["note:_/agent/guides/coding-practices.md"].moment == "any code work"
     # This server's texts as served come last.
@@ -259,11 +261,13 @@ def test_agent_path_without_start_gives_the_overview(vault):
     worker = result.typical[1]
     assert worker.pieces[0].startswith("1. file:C:/Users/me/.claude/CLAUDE.md")
     assert worker.pieces[-1].startswith(f"{len(worker.pieces)}. tool:obsidian-mcp:*")
-    assert any("when: unplaced" in line for line in worker.pieces)
-    # Nothing points to these on this vault (memory is read through its mirror's lines, not the note).
+    assert any("when: Before working on one of the owner's areas" in line for line in worker.pieces)
+    # Nothing points to these on this vault (memory is read through its mirror's lines, not the note; Notes
+    # kept is only mentioned).
     assert result.rule_files_no_path_reaches == [
-        "note:CLAUDE.md", "note:_/agent/Memory reference.md", "note:_/agent/Where agent instructions go.md",
-        "note:_/agent/roles/Coordinator.md", "note:_/agent/roles/Relay.md"]
+        "note:CLAUDE.md", "note:_/agent/Memory reference.md", "note:_/agent/Notes kept.md",
+        "note:_/agent/Where agent instructions go.md", "note:_/agent/roles/Coordinator.md",
+        "note:_/agent/roles/Relay.md"]
     assert result.pieces is None
 
 

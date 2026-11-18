@@ -100,6 +100,9 @@ class PathStructure(_OmitNone):
     into_areas: list[dict] | None = None
     #: Links to notes that aren't rule files, with no reading verb: counted, not followed.
     mentions_not_followed: int | None = None
+    #: Of those, the links to rule files: a link that says neither when nor "read" is a mention, not a
+    #: pointer, so the rule file it names is not put on the path.
+    rule_file_mentions: list[dict] | None = None
     #: Pointers to nothing found.
     broken_pointers: list[dict] | None = None
     #: What the path leaves out because it cannot be followed yet.

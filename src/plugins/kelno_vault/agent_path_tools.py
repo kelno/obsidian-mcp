@@ -210,6 +210,7 @@ def _structure(st: dict) -> PathStructure:
         size=st.get("size"), unplaced_pointers=st.get("unplaced_pointers") or None,
         pointers_outside_rule_files=st.get("pointers_outside_rule_files") or None,
         into_areas=st.get("into_areas") or None, mentions_not_followed=st.get("mentions_not_followed"),
+        rule_file_mentions=st.get("rule_file_mentions") or None,
         broken_pointers=st.get("broken_pointers") or None, not_followed=st.get("not_followed") or None)
 
 

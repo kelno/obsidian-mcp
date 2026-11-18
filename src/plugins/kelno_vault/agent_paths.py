@@ -468,6 +468,10 @@ class PathBuilder:
             stage = p.stage
         arrives = f"pointed to by {p.id}"
         if self.v.is_rule_file(r):
+            if moment == "unplaced":
+                # A link that says neither when nor "read" is a mention, not a pointer [P250]: listed, not followed.
+                self.mentions.append({"from": p.id, "target": r, "via": via, "rule_file": True})
+                return
             self.push(self.note_piece(r, stage, arrives, p.id, via, moment, always))
             return
         text = self.v.text(r) or ""
@@ -755,6 +759,7 @@ def structure_of(b: PathBuilder) -> dict:
         "pointers_outside_rule_files": outside_rules(b),
         "into_areas": into_areas(b),
         "mentions_not_followed": len(b.mentions),
+        "rule_file_mentions": [m for m in b.mentions if m.get("rule_file")],
         "broken_pointers": b.broken,
         "not_followed": b.not_followed,
     }
