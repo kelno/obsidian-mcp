@@ -1389,6 +1389,8 @@ def test_move_task_is_registered_last_destructive_with_its_contract_first():
         assert needle in text, needle
 
 
+@pytest.mark.skip(reason="fork: upstream's task tools are switched off; the instructions and the primer "
+                         "describe the fork's task tools (tests/test_fork_task_tools.py)")
 def test_the_instructions_name_move_task_within_their_caps():
     """vault-guide Scenario: The instructions name the task tools within their
     caps (D17: the lead byte-identical, the total ≤ 2,000)."""
@@ -1400,6 +1402,8 @@ def test_the_instructions_name_move_task_within_their_caps():
     assert text.index("`move_task`") > 512
 
 
+@pytest.mark.skip(reason="fork: upstream's task tools are switched off; the instructions and the primer "
+                         "describe the fork's task tools (tests/test_fork_task_tools.py)")
 def test_the_primer_names_move_task_neutrally(world):
     """vault-guide Scenario: The primer names the task tools."""
     result = run(tools.get_vault_guide_impl())

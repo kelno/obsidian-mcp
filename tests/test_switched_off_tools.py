@@ -13,7 +13,7 @@ from src.mcp_server import server
 def test_the_switched_off_tools_are_not_listed_and_come_back_on():
     assert server.SWITCHED_OFF == {
         "upstream_list_tasks", "task_agenda", "complete_task", "update_task", "add_task",
-        "get_changes", "hybrid_search",
+        "get_changes", "hybrid_search", "move_task",
     }
     server.switch_off_again()
     try:

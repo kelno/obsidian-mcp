@@ -181,18 +181,18 @@ async def test_list_move_list(sessionmaker, vault):
     put(vault, "Inbox.md", INBOX)
     put(vault, "Projects/Money.md", MONEY)
     await index()
-    before = listed(await call("list_tasks"))
+    before = listed(await call("upstream_list_tasks"))
     path, tid = before["Call the bank 📅 2026-11-20"]
     assert path == "Inbox.md"
     out = await call("move_task", path="Inbox.md", id=tid, to_path="Projects/Money.md")
     assert code(out) is None, out
     assert "index (destination): refreshed" in out and "index (source): refreshed" in out
-    after = listed(await call("list_tasks"))
+    after = listed(await call("upstream_list_tasks"))
     assert after["Call the bank 📅 2026-11-20"] == ("Projects/Money.md", tid)
     assert after["find the account number"][0] == "Projects/Money.md"
     assert after["Other"][0] == "Inbox.md"
     await index()
-    assert listed(await call("list_tasks")) == after
+    assert listed(await call("upstream_list_tasks")) == after
     for rel in ("Inbox.md", "Projects/Money.md"):
         assert await scalar(
             sessionmaker,
@@ -206,7 +206,7 @@ async def test_two_events_attributed_destination_first(sessionmaker, vault):
     put(vault, "Inbox.md", "- [ ] a\n")
     put(vault, "B.md", "")
     await index()
-    (_, tid) = listed(await call("list_tasks"))["a"]
+    (_, tid) = listed(await call("upstream_list_tasks"))["a"]
     out = await call("move_task", path="Inbox.md", id=tid, to_path="B.md")
     assert code(out) is None, out
     async with sessionmaker() as session:
@@ -227,7 +227,7 @@ async def test_a_lagging_destination_refresh_is_reported_not_hidden(sessionmaker
     put(vault, "Inbox.md", "- [ ] lagging\n- [ ] stays\n")
     put(vault, "Dest.md", "- [ ] there\n")
     await index()
-    (_, tid) = listed(await call("list_tasks"))["lagging"]
+    (_, tid) = listed(await call("upstream_list_tasks"))["lagging"]
     async with sessionmaker() as holder:
         await holder.execute(text(
             "SELECT id FROM notes_metadata WHERE file_path = 'Dest.md' FOR UPDATE"))
@@ -237,9 +237,9 @@ async def test_a_lagging_destination_refresh_is_reported_not_hidden(sessionmaker
     assert "index (destination): may lag (lock_timeout)" in out
     assert "index (source): refreshed" in out
     assert disk(vault, "Dest.md") == "- [ ] there\n- [ ] lagging\n"
-    assert "lagging" not in listed(await call("list_tasks"))
+    assert "lagging" not in listed(await call("upstream_list_tasks"))
     await index()
-    assert listed(await call("list_tasks"))["lagging"] == ("Dest.md", tid)
+    assert listed(await call("upstream_list_tasks"))["lagging"] == ("Dest.md", tid)
 
 
 async def test_opposite_moves_do_not_deadlock(sessionmaker, vault):
@@ -250,7 +250,7 @@ async def test_opposite_moves_do_not_deadlock(sessionmaker, vault):
         put(vault, "A.md", f"- [ ] from a {n}\n")
         put(vault, "B.md", f"- [ ] from b {n}\n")
         await index()
-        ids = listed(await call("list_tasks"))
+        ids = listed(await call("upstream_list_tasks"))
         a_out, b_out = await asyncio.gather(
             call("move_task", path="A.md", id=ids[f"from a {n}"][1], to_path="B.md"),
             call("move_task", path="B.md", id=ids[f"from b {n}"][1], to_path="A.md"),
@@ -293,22 +293,22 @@ async def test_tenancy_another_users_same_path_notes_are_untouched(sessionmaker,
 
     tokens = as_user(8)
     try:
-        eight_before = await call("list_tasks", status="all")
+        eight_before = await call("upstream_list_tasks", status="all")
     finally:
         for var, token in reversed(tokens):
             var.reset(token)
     tokens = as_user(7)
     try:
-        (_, tid) = listed(await call("list_tasks"))["shared text"]
+        (_, tid) = listed(await call("upstream_list_tasks"))["shared text"]
         out = await call("move_task", path="Inbox.md", id=tid, to_path="Done.md")
         assert code(out) is None, out
-        assert listed(await call("list_tasks"))["shared text"] == ("Done.md", tid)
+        assert listed(await call("upstream_list_tasks"))["shared text"] == ("Done.md", tid)
     finally:
         for var, token in reversed(tokens):
             var.reset(token)
     tokens = as_user(8)
     try:
-        assert await call("list_tasks", status="all") == eight_before
+        assert await call("upstream_list_tasks", status="all") == eight_before
     finally:
         for var, token in reversed(tokens):
             var.reset(token)
@@ -321,7 +321,7 @@ async def test_a_move_records_one_usage_row_without_task_text(sessionmaker, vaul
     put(vault, "Inbox.md", "- [ ] Secret errand\n")
     put(vault, "B.md", "")
     await index()
-    (_, tid) = listed(await call("list_tasks"))["Secret errand"]
+    (_, tid) = listed(await call("upstream_list_tasks"))["Secret errand"]
     out = await call("move_task", path="Inbox.md", id=tid, to_path="B.md")
     assert code(out) is None, out
     async with sessionmaker() as session:
