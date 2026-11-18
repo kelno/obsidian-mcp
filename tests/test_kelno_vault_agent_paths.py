@@ -170,7 +170,7 @@ def test_agent_path_draws_a_path_with_texts_hashes_and_known(vault):
     assert "Read a note" in served["read_note"] and by_id["tool:obsidian-mcp:read_note"].hash == ap.digest(
         served["read_note"])
     # Every text on a first call, its hash the digest of it, until the budget: the tool texts don't all fit.
-    assert len(first.model_dump_json()) <= tools.settings.max_read_response_chars
+    assert len(first.model_dump_json()) <= apt.PAGE_CHARS
     for p in first.pieces:
         assert p.status is None and (p.text is None) == bool(p.text_withheld)
         assert p.text is None or (p.hash == ap.digest(p.text) and p.chars == len(p.text))
@@ -221,7 +221,7 @@ def test_mentions_are_grouped_by_rule_file_and_held_pieces_come_short(vault):
 
 
 def test_a_result_whose_metadata_passes_the_budget_is_cut_down_and_every_text_arrives(vault, monkeypatch):
-    monkeypatch.setattr(apt.settings, "max_read_response_chars", 12_000)
+    monkeypatch.setattr(apt, "PAGE_CHARS", 12_000)
     first = path(PathStart(typical=3))
     assert len(first.model_dump_json()) <= 12_000
     # Pieces whose text waits come in short form; those with a text carry their details.
@@ -243,13 +243,13 @@ def test_a_result_whose_metadata_passes_the_budget_is_cut_down_and_every_text_ar
                 "left out" in n for n in r.notes or []):
             break
     assert rounds < 30
-    monkeypatch.setattr(apt.settings, "max_read_response_chars", 400_000)
+    monkeypatch.setattr(apt, "PAGE_CHARS", 400_000)
     full = path(PathStart(typical=3))
     assert set(held) == {p.id for p in full.pieces if not p.private}
 
 
 def test_the_overview_stays_within_the_budget(vault, monkeypatch):
-    monkeypatch.setattr(apt.settings, "max_read_response_chars", 2_500)
+    monkeypatch.setattr(apt, "PAGE_CHARS", 2_500)
     over = path()
     assert len(over.model_dump_json()) <= 2_500
     assert any("cut short" in n for n in over.notes)
@@ -294,7 +294,7 @@ def test_a_folder_the_snapshot_does_not_hold_uses_the_one_above_and_says_so(vaul
 
 
 def test_texts_past_the_budget_are_withheld_and_come_with_the_next_call(vault, monkeypatch):
-    monkeypatch.setattr(apt.settings, "max_read_response_chars", 25_000)
+    monkeypatch.setattr(apt, "PAGE_CHARS", 25_000)
     first = path(PathStart(typical=3))
     assert len(first.model_dump_json()) <= 25_000
     withheld = [p for p in first.pieces if p.text_withheld]
@@ -306,7 +306,7 @@ def test_texts_past_the_budget_are_withheld_and_come_with_the_next_call(vault, m
 
 
 def test_a_text_no_result_can_carry_comes_in_parts_with_read_from(vault, monkeypatch):
-    monkeypatch.setattr(apt.settings, "max_read_response_chars", 25_000)
+    monkeypatch.setattr(apt, "PAGE_CHARS", 25_000)
     long_text = "Worker rules, é. " * 2_000
     (vault / "_/agent/roles/Worker.md").write_text(long_text, encoding="utf-8")
     first = path(PathStart(typical=3))

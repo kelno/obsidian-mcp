@@ -7,7 +7,7 @@ texts as it serves them (its tool descriptions with every plugin's lines, its in
 of `get_vault_guide`, `open_area`'s instruction lines), which no script on the PC could see.
 
 A first call returns every piece's text, which runs past a hundred thousand characters on most paths: the
-result is held to `MAX_READ_RESPONSE_CHARS`, and the texts that don't fit are marked, to come with the next
+result is held to `PAGE_CHARS`, and the texts that don't fit are marked, to come with the next
 call once the caller passes the hashes it now holds; a text too long for any one result comes in parts, asked
 for with `read_from`. See docs/architecture/agent-paths.md.
 """
@@ -23,7 +23,7 @@ from pydantic import Field
 
 from src import plugins
 from src.auth.session import current_user_id
-from src.config import MAX_NOTE_BYTES, settings
+from src.config import MAX_NOTE_BYTES
 from src.plugins.kelno_vault import agent_paths as ap
 from src.plugins.kelno_vault import areas_index as _areas_index
 from src.plugins.kelno_vault import rule_files as _rule_files
@@ -41,6 +41,11 @@ from src.services import private_folders
 from src.services.tool_outcomes import body_refusal as _body_refusal
 from src.services.vault import _vault_root, read_bytes
 
+#: One result's size, past the server's read cap (`MAX_READ_RESPONSE_CHARS`, 40,000) for these two tools
+#: alone: a full read of a path took 12 to 20 calls at 40,000 (owner, 2026-11-18, on trial). Claude Code
+#: shows a model at most `MAX_MCP_OUTPUT_TOKENS` (25,000 tokens by default, about 50,000 characters of this
+#: JSON) and saves a longer result to a file instead; the owner's PCs raise it.
+PAGE_CHARS = 80_000
 #: Characters kept free of texts for the notes added after them (the withheld, in-parts and cut lines).
 _NOTES_RESERVE = 1_000
 #: What a `read_from` call carries besides the piece itself (start, work, machine, notes): a text that
@@ -200,7 +205,7 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
     progress: the first text due either arrives or, longer than the room left, is marked to come in parts
     (`read_from`, one call, which carries the piece alone).
     """
-    budget = settings.max_read_response_chars - _NOTES_RESERVE
+    budget = PAGE_CHARS - _NOTES_RESERVE
     listing = known is not None
     order = {id(o): i for i, o in enumerate(out)}
     due = [(p, o) for p, o in zip(pieces, out) if o.status != "unchanged" and not o.private]
@@ -286,7 +291,7 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
     _fit_metadata(result, notes, budget)
     result.waiting = count["waiting"] if listing else None
     result.notes = (notes + withheld_note()) or None
-    take_back(settings.max_read_response_chars)
+    take_back(PAGE_CHARS)
 
 
 def _fit_metadata(result, notes: list[str], cap: int) -> None:
@@ -320,7 +325,7 @@ def _fit_metadata(result, notes: list[str], cap: int) -> None:
 def _fit_overview(result) -> None:
     """Keep the overview within the budget: the structure lists are cut short from the last typical agent
     back, then those across every area, each cut said in its `cut` and in the notes."""
-    cap = settings.max_read_response_chars - _NOTES_RESERVE
+    cap = PAGE_CHARS - _NOTES_RESERVE
     structures = [t.structure for t in reversed(result.typical or [])] + [result.across_every_area]
     names = ("rule_file_mentions", "unplaced_pointers", "pointers_outside_rule_files", "into_areas",
              "broken_pointers")
@@ -355,7 +360,7 @@ def _one_part(result, p: ap.Piece, o: PathPiece, offset: int) -> None:
         raise _SetupError(f"read_from.offset {offset} is past the end of {p.id} ({len(p.text)} characters).")
     result.pieces = [o]
     o.text_offset = offset
-    room = settings.max_read_response_chars - _NOTES_RESERVE - len(result.model_dump_json()) - len(
+    room = PAGE_CHARS - _NOTES_RESERVE - len(result.model_dump_json()) - len(
         ',"text":,"next_offset":0000000')
     n = max(1, min(len(p.text) - offset, room))
     while n > 1 and len(json.dumps(p.text[offset:offset + n], ensure_ascii=False)) > room:
