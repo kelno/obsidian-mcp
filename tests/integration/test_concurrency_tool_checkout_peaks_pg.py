@@ -245,6 +245,9 @@ CALLS = [
     # the line it wrote, whose bytes (and so whose hash) are known up front.
     ('list_tasks', 'fork_list_tasks_impl', lambda s: ((), {})),
     ('open_area', 'plugin:open_area', lambda s: ((), {'area': 'nowhere'})),
+    # No starting points in this vault: a refusal, which still holds its admission and writes its row.
+    ('agent_path', 'plugin:agent_path', lambda s: ((), {})),
+    ('agent_path_reached_by', 'plugin:agent_path_reached_by', lambda s: ((), {'place': 'nowhere.md'})),
     ('index_status', 'index_status_impl', lambda s: ((), {})),
     ('create_task', 'create_task_impl', lambda s: (('peaks task',), {})),
     ('edit_task', 'edit_task_impl',
