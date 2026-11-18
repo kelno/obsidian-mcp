@@ -106,9 +106,12 @@ class PathStructure(_OmitNone):
     rule_file_mentions: list[dict] | None = None
     #: Pointers to nothing found.
     broken_pointers: list[dict] | None = None
-    #: Imports Claude Code doesn't load (`{from, import, target, why}`): one outside the session's folder waits
-    #: for an approval the desktop app never asks for, so its file is not on the path.
+    #: Imports Claude Code doesn't load (`{from, import, target, why}`): one in a project's file resolving outside
+    #: the session's folder waits for an approval the desktop app never asks for, so its file is not on the path.
     skipped_imports: list[dict] | None = None
+    #: Imports the PC's snapshot warns about (`{from, import, target, warning}`), such as an import line right next
+    #: to another one, which failed to load in tests. Their files stay on the path, as the snapshot lists them.
+    import_warnings: list[dict] | None = None
     #: What the path leaves out because it cannot be followed yet.
     not_followed: list[str] | None = None
     #: The lists above cut short to keep the result within its size budget, if any.

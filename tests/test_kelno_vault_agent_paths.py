@@ -274,7 +274,7 @@ def test_a_hook_script_changed_since_the_snapshot_is_said(vault):
 
 
 def test_rule_copies_load_at_the_start_and_a_skipped_import_is_a_structural_fact(vault):
-    # Since P254: no user CLAUDE.md; the vault's rule notes come as read-only copies in ~/.claude/rules/, and an
+    # A missing user CLAUDE.md loads nothing; a read-only copy in ~/.claude/rules/ is the vault note it copies; an
     # import outside the session's folder is skipped by Claude Code, listed by the snapshot, not loaded.
     rules = "loaded at the start by Claude Code (user rules) (a read-only copy)"
     loads = [
@@ -320,6 +320,33 @@ def test_rule_copies_load_at_the_start_and_a_skipped_import_is_a_structural_fact
     reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/Common-rules.md", None, None))
     assert reached.structure.skipped_imports and reached.structure.skipped_imports[0]["import"].endswith(
         "Coordinator.md")
+
+
+def test_an_import_the_snapshot_warns_about_stays_on_the_path_and_its_warning_is_a_structural_fact(vault):
+    # Two imports on consecutive lines both failed to load in tests (Q134): the snapshot marks each with a
+    # `warning`, still listing it loaded; the tool keeps the file on the path and reports the warning.
+    warn = "on a line next to another import: put a blank line between (Q134)"
+    user = "file:C:/Users/me/.claude/CLAUDE.md"
+    loads = [
+        {"id": user, "exists": True, "arrives": "loaded at the start by Claude Code (user CLAUDE.md)"},
+        {"id": "note:_/agent/Common-rules.md", "exists": True, "arrives": f"imported by {user}", "warning": warn},
+        {"id": "note:_/agent/roles/Worker.md", "exists": True, "arrives": f"imported by {user}", "warning": warn}]
+    snap = {**SNAPSHOT, "format": 2, "folders": {
+        "C:/Users/me": {"loads": loads, "skipped_imports": [], "session_start": []},
+        "D:/work/repo": {**SNAPSHOT["folders"]["D:/work/repo"], "loads": loads, "skipped_imports": []}},
+        "files": {user: {"text": "@D:/vault/_/agent/Common-rules.md\n@D:/vault/_/agent/roles/Worker.md\n"}}}
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
+
+    home = path(PathStart(surface="claude-code"))
+    assert home.error is None
+    assert ids(home)[:2] == [user, "note:_/agent/Common-rules.md"] and "note:_/agent/roles/Worker.md" in ids(home)
+    assert home.structure.import_warnings == [
+        {"from": user, "import": "@D:/vault/_/agent/Common-rules.md", "target": "note:_/agent/Common-rules.md",
+         "warning": warn},
+        {"from": user, "import": "@D:/vault/_/agent/roles/Worker.md", "target": "note:_/agent/roles/Worker.md",
+         "warning": warn}]
+    reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/Common-rules.md", None, None))
+    assert reached.structure.import_warnings and reached.structure.import_warnings[0]["warning"] == warn
 
 
 def test_a_snapshot_in_an_unknown_format_is_left_out_with_a_note(vault):

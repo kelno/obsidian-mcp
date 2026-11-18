@@ -312,7 +312,7 @@ def _fit_metadata(result, notes: list[str], cap: int) -> None:
     st = result.structure
     if st is not None:
         for name in ("rule_file_mentions", "unplaced_pointers", "pointers_outside_rule_files", "into_areas",
-                     "broken_pointers", "skipped_imports"):
+                     "broken_pointers", "skipped_imports", "import_warnings"):
             items = getattr(st, name)
             while items and size() > cap:
                 items.pop()
@@ -331,7 +331,7 @@ def _fit_overview(result) -> None:
     cap = PAGE_CHARS - _NOTES_RESERVE
     structures = [t.structure for t in reversed(result.typical or [])] + [result.across_every_area]
     names = ("rule_file_mentions", "unplaced_pointers", "pointers_outside_rule_files", "into_areas",
-             "broken_pointers", "skipped_imports")
+             "broken_pointers", "skipped_imports", "import_warnings")
     cut = False
     for st in structures:
         for name in names:
@@ -440,7 +440,8 @@ def _structure(st: dict) -> PathStructure:
         into_areas=_clip_vias(st.get("into_areas")), mentions_not_followed=st.get("mentions_not_followed"),
         rule_file_mentions=_grouped_mentions(st.get("rule_file_mentions")),
         broken_pointers=_clip_vias(st.get("broken_pointers")),
-        skipped_imports=st.get("skipped_imports") or None, not_followed=st.get("not_followed") or None)
+        skipped_imports=st.get("skipped_imports") or None, import_warnings=st.get("import_warnings") or None,
+        not_followed=st.get("not_followed") or None)
 
 
 def _short(s: str | None, n: int) -> str:

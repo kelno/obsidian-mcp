@@ -384,8 +384,10 @@ class PathBuilder:
         self.seq = 0
         self.mentions: list[dict] = []  # links to non-rule notes with no reading verb: not followed
         self.broken: list[dict] = []
-        #: Imports Claude Code doesn't load, as the snapshot lists them (`skipped_imports`, P254).
+        #: Imports Claude Code doesn't load, as the snapshot lists them (`skipped_imports`).
         self.skipped: list[dict] = []
+        #: Imports the snapshot warns about (an import line next to another one, Q134), followed all the same.
+        self.import_warnings: list[dict] = []
         self.not_followed: list[str] = []
         self.role_picked = False  # whether a line naming several role notes was narrowed to the start's role
 
@@ -441,7 +443,7 @@ class PathBuilder:
 
     def follow_imports(self, p: Piece) -> None:
         base = posixpath.dirname(pc_norm(p.where))
-        skipped = self.skipped_imports()
+        skipped, warned = self.skipped_imports(), self.warned_imports()
         for m in IMPORT.finditer(p.text):
             raw = m.group(1)
             entry = skipped.get((p.id.lower(), f"@{raw}"))
@@ -455,18 +457,37 @@ class PathBuilder:
                 path = raw
             else:
                 path = posixpath.join(base, raw.replace("\\", "/"))
-            self.push(self.file_piece(pc_norm(path), LOADED if p.stage == LOADED else p.stage,
-                                      f"imported by {p.id}", parent=p.id, via=f"@{raw}", always=p.always))
+            piece = self.file_piece(pc_norm(path), LOADED if p.stage == LOADED else p.stage, f"imported by {p.id}",
+                                    parent=p.id, via=f"@{raw}", always=p.always)
+            warning = warned.get((p.id.lower(), piece.id.lower()))
+            if warning:
+                found = {"from": p.id, "import": f"@{raw}", "target": piece.id, "warning": warning}
+                if found not in self.import_warnings:
+                    self.import_warnings.append(found)
+            self.push(piece)
 
     def skipped_imports(self) -> dict[tuple[str, str], dict]:
         """The imports the snapshot says Claude Code skips in this start's folder, by (importing piece, `@` text):
-        one resolving outside the session's folder waits for an approval the desktop app never asks for (P254)."""
+        in a project's file, one resolving outside the session's folder waits for an approval the desktop app never
+        asks for (the user's own `~/.claude/CLAUDE.md` is exempt)."""
         found = self.snap.folder(self.start.folder or self.snap.home) if self.snap else None
         out = {}
         for e in (found[1].get("skipped_imports") or [] if found else []):
             if e.get("in") and e.get("import"):
                 out[(e["in"].lower(), e["import"])] = {"from": e["in"], "import": e["import"], "target": e.get("id"),
                                                       "why": e.get("why")}
+        return out
+
+    def warned_imports(self) -> dict[tuple[str, str], str]:
+        """The snapshot's `warning` on an imported file, by (importing piece, imported piece): set when the import
+        line sits next to another import, which made both fail in tests (Q134). The file stays on the path, as the
+        snapshot lists it loaded; the warning goes in the structure."""
+        found = self.snap.folder(self.start.folder or self.snap.home) if self.snap else None
+        out = {}
+        for e in (found[1].get("loads", []) if found else []):
+            how = e.get("arrives", "")
+            if e.get("warning") and how.startswith("imported by "):
+                out[(how.removeprefix("imported by ").lower(), e["id"].lower())] = e["warning"]
         return out
 
     def pointer(self, p: Piece, line: str, sentence: str, at: int, target: str, heading: str | None,
@@ -589,9 +610,8 @@ class PathBuilder:
                 self.load_entry(entry)
 
     def load_user_rules(self) -> None:
-        """The files of `~/.claude/rules/`, which Claude Code loads at the start, after the user CLAUDE.md. The
-        vault's own rule notes come there as read-only copies a session-start hook writes (P254): the snapshot
-        names each by the note it copies, read here from the vault."""
+        """The files of `~/.claude/rules/`, which Claude Code loads at the start, after the user CLAUDE.md. An
+        entry the snapshot gives as a read-only copy of a vault note (`copy`) is read from the vault."""
         found = self.snap.folder(self.start.folder or self.snap.home) if self.snap else None
         for entry in (found[1].get("loads", []) if found else []):
             if entry.get("arrives", "").startswith("loaded at the start by Claude Code (user rules)"):
@@ -814,6 +834,7 @@ def structure_of(b: PathBuilder) -> dict:
         "rule_file_mentions": [m for m in b.mentions if m.get("rule_file")],
         "broken_pointers": b.broken,
         "skipped_imports": b.skipped,
+        "import_warnings": b.import_warnings,
         "not_followed": b.not_followed,
     }
 
@@ -978,9 +999,10 @@ def reached_by(setup: Setup, place: str) -> dict:
     hit_runs = [(label, s, w, b) for label, s, w, b, _ in hits]
     structure = across_runs(hit_runs)
     structure["not_followed"] = list(dict.fromkeys(x for *_, b in hit_runs for x in b.not_followed))
-    structure["skipped_imports"] = []
-    for *_, b in hit_runs:
-        structure["skipped_imports"] += [e for e in b.skipped if e not in structure["skipped_imports"]]
+    for key, attr in (("skipped_imports", "skipped"), ("import_warnings", "import_warnings")):
+        structure[key] = []
+        for *_, b in hit_runs:
+            structure[key] += [e for e in getattr(b, attr) if e not in structure[key]]
     return {"place": place, "matched_by": how, "reached_by": reached, "pieces": union, "structure": structure}
 
 
