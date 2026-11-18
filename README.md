@@ -908,8 +908,24 @@ server (written against Nextcloud), beside the vault:
   event, one occurrence or the whole series, named explicitly.
 
 Best with a dedicated login that the calendars are shared with, so the app
-password reaches nothing else. One login serves the deployment, so the tools
-refuse in multi-user mode. A missing setting makes each call refuse with
+password reaches nothing else. With Nextcloud:
+
+1. In Nextcloud, as an admin: create a user for agents.
+2. In Nextcloud's Calendar app, as the calendars' owner: share each calendar
+   agents may use with that user, with edit rights (a read-only share is
+   listed, and its writes refused).
+3. In Nextcloud, logged in as that user: Settings → Security → Devices &
+   sessions, create an app password.
+4. In the server's settings: `CALDAV_URL`
+   (`https://<nextcloud host>/remote.php/dav`), `CALDAV_USERNAME`,
+   `CALDAV_PASSWORD` (the app password) and `CALDAV_CALENDARS` (the shared
+   calendars, by name; without it, the user's own calendar, which no one else
+   sees, would take new events), and `caldav` added to `PLUGINS`; then restart.
+5. In each MCP client: refresh the server's tool list.
+
+An event marked confidential reaches that user only as busy time, and the
+tools leave it alone; a private one does not reach it at all. One login
+serves the deployment, so the tools refuse in multi-user mode. A missing setting makes each call refuse with
 `calendar_not_configured`; the server still starts. See
 [docs/architecture/calendar.md](docs/architecture/calendar.md).
 
@@ -1204,6 +1220,17 @@ Per-tool-call audit log with a 14-day request histogram. Every MCP
 call is recorded with the calling key, tool name, duration, and
 response size — useful for noticing a misbehaving agent burning
 tokens on something it shouldn't.
+
+The rows are in the `usage_logs` table. Each names the credential that
+made the call (`actor_kind` `api_key` or `oauth`, `actor_label` the key's
+or OAuth client's name, `actor_ref` the key prefix or client id), copied at
+call time, so the history stays attributed after a key or client is
+deleted. `params` holds a fixed list of each tool's arguments: paths and
+flags, never the content written, so a row shows which notes changed and
+how, not what was written. Search queries and `edit_note`'s `find` text are
+kept cut at 200 characters, `import_from_url`'s URL as its host only. The
+server never purges the table: rows stay until deleted by hand, and are in
+the database's backups.
 
 ![Usage](https://raw.githubusercontent.com/maxkuminov/obsidian-mcp/main/screenshots/usage.png)
 
