@@ -11,9 +11,9 @@ claude.ai, ChatGPT, Claude Code and your phone.**
 A self-hosted [Model Context Protocol](https://modelcontextprotocol.io)
 server that turns an Obsidian vault into long-term memory for every
 agent you use. Agents search it by meaning or by exact words, follow
-its wikilinks, see what changed since their last session and who
-changed it, keep their to-dos in it, and write back through guarded,
-atomic edits. 33 tools over plain markdown files that you can open,
+its wikilinks, see what changed since their last session, keep their
+to-dos in it, and write back through guarded, atomic edits. 45 tools
+over plain markdown files that you can open,
 edit and grep.
 
 What sets it apart:
@@ -57,6 +57,8 @@ backend of your choice (Ollama, OpenAI or Hugging Face TEI; see
 - [A session at the keyboard](#a-session-at-the-keyboard)
 - [A session away from the keyboard](#a-session-away-from-the-keyboard)
 - [What's in the box](#whats-in-the-box)
+  - [Tasks (fork)](#tasks-fork)
+  - [Agent ledger (fork)](#agent-ledger-fork)
 - [vs. other Obsidian MCP servers](#vs-other-obsidian-mcp-servers)
   - [vs. hosted memory systems](#vs-hosted-memory-systems)
   - [vs. an agent with raw file access](#vs-an-agent-with-raw-file-access)
@@ -278,20 +280,25 @@ looks the way it does.
 
 ## What's in the box
 
-The server exposes 45 MCP tools (and registers eight more of upstream's, switched
-off until the owner decides), plus the auth
-and ops layer around them.
+The server exposes 45 MCP tools (42 in the core, and `open_area`, `agent_path`
+and `agent_path_reached_by` from the `kelno_vault` plugin), plus the auth and
+ops layer around them. It also registers eight of upstream's tools that this
+fork switches off ([FORK.md](FORK.md)): upstream's five task tools and
+`move_task`, for good, and `get_changes` and `hybrid_search` until the owner
+decides. They stay described below where upstream describes them, each marked
+as switched off.
 
 Every tool is published with a `title` and MCP `ToolAnnotations`, all
-four hints set explicitly: `readOnlyHint` on the nineteen tools that only
-read (search, read, list, graph, `list_tasks`, `task_agenda`, `get_changes`, `check_upload`), `destructiveHint` on
-the eleven that can replace or remove something (`edit_note`,
-`move_note`, `delete_note`, `set_frontmatter`, `write_file`,
-`delete_file`, `import_from_url`, `complete_task`, `update_task`,
-`move_task`, and `request_upload`, whose link can overwrite on
-redemption),
-`openWorldHint` on `import_from_url` only. `create_note`, `add_task`
-and `request_download` are additive. Clients that honour
+four hints set explicitly: `readOnlyHint` on the twenty-six tools that only
+read (search, read, list, graph, `list_tasks`, `index_status`, the four
+ledger readers, `check_upload`, `fetch_page`, `open_area` and the two path
+tools), `destructiveHint` on the twelve that can replace or remove something
+(`edit_note`, `move_note`, `delete_note`, `set_frontmatter`, `write_file`,
+`delete_file`, `move_file`, `delete_folder`, `import_from_url`,
+`edit_task`, `set_task_status`, and `request_upload`, whose link can
+overwrite on redemption), `openWorldHint` on `import_from_url` and
+`fetch_page`. `create_note`, `create_task`, `request_download` and the four
+ledger writers are additive. Clients that honour
 annotations run read-only tools without a per-call confirmation (Claude
 Code also runs them in parallel) and keep prompting on destructive ones.
 They are hints: the server enforces read-only credentials itself,
@@ -326,7 +333,8 @@ the wire, so none is cut off by a client's description limit.
   and rows not yet re-embedded since the upgrade to heading-aware chunks,
   carry no locator. While any of your notes is still on the old chunking,
   each response says so on an `index_transition:` line under its header
-- `hybrid_search(query, limit=10, folder?, tags?, frontmatter?, rerank=false)`, both
+- **Switched off in this fork** until the owner decides ([FORK.md](FORK.md)).
+  `hybrid_search(query, limit=10, folder?, tags?, frontmatter?, rerank=false)`, both
   of the above fused by reciprocal rank fusion over each arm's top 50, one
   line per note with its fused score, each arm's rank and the `1/(k+rank)`
   terms behind the score. The three are peers, and every description
@@ -366,7 +374,8 @@ the wire, so none is cut off by a client's description limit.
   datetime with an explicit offset. Any of the four switches to keyset
   paging with a `more: cursor=…` footer; a call with none of them is
   unchanged
-- `get_changes(since, folder?, kinds?, by="any", limit=50)`, the change
+- **Switched off in this fork** until the owner decides ([FORK.md](FORK.md)).
+  `get_changes(since, folder?, kinds?, by="any", limit=50)`, the change
   feed: one line per note created, modified, moved or deleted after a
   cursor, oldest first, each attributed to the API key or OAuth client
   that made it (`(you)` for your own credential) or `human/sync` for an
@@ -376,8 +385,8 @@ the wire, so none is cut off by a client's description limit.
   why (`removed`, `not_indexable`, `quarantined`); `gap` and `reset` lines
   say when the view is incomplete
 - `get_tags(limit=50)`, tag and count
-- `list_tasks` and `task_agenda` list checkbox tasks across the vault
-  from the index; see [Tasks (optional)](#tasks-optional)
+- `list_tasks` lists tasks across the vault from the index, as a Tasks
+  plugin query would; see [Tasks (fork)](#tasks-fork)
 - `get_vault_guide()`, the Obsidian primer plus this vault's
   `CLAUDE.md` (or the note `VAULT_GUIDE_NOTE` names), served live
 - `index_status(folder?)`, how far indexing and embedding have got for
@@ -426,6 +435,13 @@ the wire, so none is cut off by a client's description limit.
   mutation. Body is byte-identical when only frontmatter changes.
 
 ### Tasks (optional)
+
+> **Switched off in this fork, for good** (owner's decision, [FORK.md](FORK.md)):
+> the five tools this section describes, and `move_task`. The fork's own
+> task tools, which follow the Tasks plugin's settings file in the vault, are
+> in [Tasks (fork)](#tasks-fork). The panel's Tasks card and the
+> `TASKS_RULE*`, `TASKS_DEFAULT_TIMEZONE` and `TASKS_SET_*` settings serve
+> only the tools of this section.
 
 An agent that keeps notes usually also keeps commitments: a follow-up it
 promised, a next action, something to check again on Friday. These five
@@ -749,7 +765,8 @@ requires it on the supported destructive calls; enable this only after
 clients supply tokens. Creation is exempt and refuses a supplied token
 as `no_incumbent`. Files above their read cap cannot be guarded.
 
-The task write tools take the same optional `expected_hash`. In required
+Upstream's task write tools (switched off in this fork, see
+[Tasks (optional)](#tasks-optional)) take the same optional `expected_hash`. In required
 mode, `complete_task` and `update_task` with a plain task id need no
 hash: the id names exactly one line in the bytes the write replaces,
 and the rest of the note is spliced from the current file, so the write
@@ -790,7 +807,17 @@ redeemed over the public `/transfer/*` routes.
   may call it. Useful for random content (`Special:Random`, random.org)
   and for agents that cannot browse.
 
-**Tasks** (fork), in the [Obsidian Tasks](https://publish.obsidian.md/tasks/)
+The token travels in the URL *fragment*, which browsers never send, so
+no server-generated request target or access log contains it. Uploads
+are claimed before a body byte is read, published atomically with
+no-clobber semantics, and bound at mint time to the file state they
+were minted against — a link cannot silently undo an edit made while it
+was waiting. `MCP_HOSTNAME` or `BASE_URL` must be set; without a public
+origin the mint tools refuse rather than emit a localhost link.
+
+### Tasks (fork)
+
+In the [Obsidian Tasks](https://publish.obsidian.md/tasks/)
 plugin's emoji format, following the plugin's own settings file in the vault
 and needing no running Obsidian:
 
@@ -819,10 +846,13 @@ Every task write is refused when the line or the note changed since it was
 read, and changes only that one line. See
 [docs/architecture/tasks.md](docs/architecture/tasks.md).
 
-**Agent ledger** (fork): what agents log for each other — quirks (what an
+### Agent ledger (fork)
+
+What agents log for each other — quirks (what an
 assistant can or can't do on a surface), feedback (unclear instructions,
-friction, suggestions) and proposals (changes to agent instructions and their
-outcome) — kept in the server's database rather than the vault, with topics
+friction, suggestions), proposals (changes to agent instructions and their
+outcome) and rule cases (a real situation where an agent followed a rule or
+broke it, tied to the rules it tests) — kept in the server's database rather than the vault, with topics
 and short summary views:
 
 - `ledger_search(query=None, mode="both", kinds=None, area=None, topics=None,
@@ -848,13 +878,15 @@ sessions: a client lists a server's tools when it connects, so sessions that
 were already open keep the old list. See
 [docs/architecture/agent-ledger.md](docs/architecture/agent-ledger.md).
 
-The token travels in the URL *fragment*, which browsers never send, so
-no server-generated request target or access log contains it. Uploads
-are claimed before a body byte is read, published atomically with
-no-clobber semantics, and bound at mint time to the file state they
-were minted against — a link cannot silently undo an edit made while it
-was waiting. `MCP_HOSTNAME` or `BASE_URL` must be set; without a public
-origin the mint tools refuse rather than emit a localhost link.
+### One vault's agent setup (`kelno_vault` plugin)
+
+With the `kelno_vault` plugin loaded (`PLUGINS`), three more read-only tools
+serve the agent setup that plugin's vault follows: `open_area`, an area's
+rules, main note, folder map, ledger entries and open tasks in one call, and
+`agent_path` / `agent_path_reached_by`, what each kind of agent in that setup
+reads, in order. See [plugins](docs/architecture/plugins.md),
+[open_area](docs/architecture/open-area.md) and
+[agent paths](docs/architecture/agent-paths.md).
 
 ### Wikilink graph
 - `get_backlinks(path, limit=50)`, notes linking TO `path`
@@ -1215,8 +1247,10 @@ old while the indexer is perfectly healthy.
 
 ### Tasks settings
 
-A **Tasks** card holds the settings of the
-[task tools](#tasks-optional). In multi-user mode it is on each user's
+A **Tasks** card holds the settings of upstream's
+[task tools](#tasks-optional), which this fork switches off; the fork's own
+[task tools](#tasks-fork) follow the Tasks plugin's settings file in the
+vault instead. In multi-user mode it is on each user's
 **Account** page and applies to that user's own calls only. In
 single-user mode it is on the **Settings** page and applies to every MCP
 caller of the server. Nothing is stored until the card is saved, and an
@@ -1489,6 +1523,10 @@ the tools' names (28 at 1.0, 32 since the task tools, 33 since
 `move_task`), their argument
 schemas, the shape of their result lines, and the `MCP-REFUSAL` codes.
 An agent written against 1.0 keeps working against every 1.x.
+That promise is upstream's: this fork serves its own surface (45 tools,
+upstream's eight switched off), and its `tools_list_full_v3.json` holds
+that surface, with the switched-off tools turned on for the tests
+([FORK.md](FORK.md)).
 
 - **The wire form is pinned.** `tests/fixtures/tools_list_full_v3.json`
   is the complete `tools/list` result an API key or a `readwrite` OAuth
@@ -2826,11 +2864,15 @@ Every tool belongs to one of five classes (`src/services/concurrency.py`,
 
 | Class | Tools | Default ceiling |
 | --- | --- | --- |
-| `embedding` | `semantic_search`, `hybrid_search` | 1 |
+| `embedding` | `semantic_search`, `ledger_search` | 1 |
 | `vector` | `find_related` | 1 |
-| `write` | the twelve vault-mutating tools, including `complete_task`, `update_task`, `add_task` and `move_task` | 1 |
-| `scan` | `keyword_search`, `list_notes`, `get_tags`, `get_neighborhood`, `find_orphans`, `list_files`, `list_tasks`, `get_changes`, `task_agenda` | 2 |
-| `light` | `read_note`, `read_notes`, `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download` | 4 |
+| `write` | the seventeen writers: the ten that change vault files (`create_note`, `edit_note`, `move_note`, `delete_note`, `set_frontmatter`, `write_file`, `delete_file`, `move_file`, `delete_folder`, `import_from_url`), the three task writers (`create_task`, `edit_task`, `set_task_status`) and the four ledger writers | 1 |
+| `scan` | `keyword_search`, `list_notes`, `get_tags`, `get_neighborhood`, `find_orphans`, `list_files`, `list_tasks`, `index_status`, `open_area`, `agent_path`, `agent_path_reached_by` | 2 |
+| `light` | `read_note`, `read_notes`, `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download`, `fetch_page`, `ledger_get`, `ledger_digest`, `ledger_topics` | 4 |
+
+Upstream's switched-off tools keep their classes: `hybrid_search` is
+`embedding`, its task writers and `move_task` `write`, and `get_changes`,
+`task_agenda` and its `list_tasks` `scan`.
 
 Global, tenant and principal ceilings default to 6, 4 and 3. OAuth refresh
 keeps the same principal. Full request and per-bearer ceilings default to 64
@@ -2857,7 +2899,7 @@ adds a writer wait or drops a usage row because of its observed pressure.
 │ MCP clients  │   HTTP + Bearer key   │   FastAPI app        │
 │  Claude Desk │ ────────────────────▶ │  ┌────────────────┐  │
 │  Claude Code │                       │  │  MCP server    │  │
-│  n8n agents  │                       │  │  (33 tools)    │  │
+│  n8n agents  │                       │  │  (45 tools)    │  │
 │  OpenWebUI   │                       │  └─────┬──────────┘  │
 └──────────────┘                       │        ▼             │
                                        │  ┌────────────────┐  │
