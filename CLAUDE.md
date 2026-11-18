@@ -804,7 +804,7 @@ update it in the same change.** What stays here is the short list:
 
 ## MCP tools
 
-43 tools offered (42 in the core, `open_area` from the `kelno_vault` plugin), plus
+45 tools offered (42 in the core; `open_area`, `agent_path` and `agent_path_reached_by` from the `kelno_vault` plugin), plus
 seven upstream tools registered and switched off (`SWITCHED_OFF` at the end of
 `server.py`; see "Following upstream"). All are registered in
 `src/mcp_server/server.py` and all wrapped by
@@ -904,6 +904,8 @@ unblock of open tasks). Read
 
 **`open_area`** (fork; a tool of the `kelno_vault` plugin, served only with it loaded): the one call an agent makes when it opens an area (by name or by a folder outside the vault, through the vault's list of areas, `open_area.AREAS_INDEX_PATH`): whether it is worked as a code project (`code_project`, its main note's frontmatter flag), the area's rules for agents (`for_agents`, its main note's `## For agents` section), the main note without that section and its Tasks section, related folders, a map of the area's folder from the index (each note's `description`, each subfolder's note count and folder-note description, capped at 30 lines), active ledger entries and open tasks, then three instruction lines. Class `scan`. Read [open_area](docs/architecture/open-area.md) first.
 
+**`agent_path`** and **`agent_path_reached_by`** (fork; tools of the `kelno_vault` plugin): what each kind of agent in the owner's setup meets, in the order it arrives (forward), and which agents reach a rule's place, by which chain (backward). Each piece (a note, a section, a file Claude Code loads, a hook's message, this server's own texts as served) comes with a 12-digit hash, so a caller passing the hashes it holds (`known`) gets only new or changed texts; results are held to `MAX_READ_RESPONSE_CHARS`. They read the vault through the caller's root, the PC side from the snapshots each PC writes to `_/agent-paths/<machine>.json`, and the starting points from `_/agent-paths/starting-points.toml`; the engine (`agent_paths.py`) imports nothing from the server. Class `scan`. Read [agent paths](docs/architecture/agent-paths.md) first.
+
 **Agent ledger** (fork) — `ledger_search`, `ledger_get`, `ledger_add`,
 `ledger_update`, `ledger_digest`, `ledger_digest_edit`, `ledger_topics`,
 `ledger_topic_edit`: what agents log for each other, in the `ledger_*`
@@ -932,6 +934,7 @@ summaries.
 | [oauth-and-grants.md](docs/architecture/oauth-and-grants.md) | `src/oauth/`, the consent page, anything minting/rotating/revoking a token |
 | [vault-roots-and-tenancy.md](docs/architecture/vault-roots-and-tenancy.md) | `APIKeyMiddleware`, `_vault_root`, owner predicates, publication confirmation, the vault-root overlap guard (`src/services/vault_overlap.py`, the snapshot, the five pass entry points) |
 | [open-area.md](docs/architecture/open-area.md) | `open_area`, `src/plugins/kelno_vault/open_area.py` and `areas_index.py` (fork) |
+| [agent-paths.md](docs/architecture/agent-paths.md) | `agent_path`, `agent_path_reached_by`, `src/plugins/kelno_vault/agent_paths.py`, `agent_path_tools.py` and `agent_path_result.py` (fork) |
 | [vault-tools.md](docs/architecture/vault-tools.md) | any note or file tool: frontmatter, symlinks, anchored writes, section addressing, size caps; the task tools (`src/services/task_line.py`, `task_write.py`, `task_recurrence.py`, `task_dates.py`, `task_query.py`, `task_settings.py`, `src/mcp_server/task_render.py`) |
 | [file-transfer.md](docs/architecture/file-transfer.md) | `src/transfer/`, `src/services/vault_fs.py`, the publish gate, SSRF policy, the write-bucket charge at redemption |
 | [search.md](docs/architecture/search.md) | `semantic_search` / `keyword_search` / `find_related` and every `SET LOCAL` they issue; `scripts/search_eval/` (the search evaluation harness) |

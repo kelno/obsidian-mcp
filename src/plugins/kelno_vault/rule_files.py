@@ -24,9 +24,6 @@ import fnmatch
 import re
 from dataclasses import dataclass
 
-from src.config import MAX_NOTE_BYTES
-from src.services.vault import read_bytes
-
 #: The note holding the definition.
 RULE_FILES_PATH = "_/Rule files.md"
 #: The info string of the code block holding it.
@@ -91,6 +88,11 @@ def read(user_id) -> RuleFiles:
     Raises FileNotFoundError, ValueError or OSError (the note can't be read)
     and RuleFilesError (it holds no usable block).
     """
+    # Imported here so the definition's parsing loads on its own, without the server (the agent path
+    # engine's comparison with its prototype runs it on the PC).
+    from src.config import MAX_NOTE_BYTES
+    from src.services.vault import read_bytes
+
     return parse(read_bytes(RULE_FILES_PATH, user_id, MAX_NOTE_BYTES).decode("utf-8", errors="replace"))
 
 

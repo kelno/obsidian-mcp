@@ -486,12 +486,12 @@ def test_a_plugin_tool_is_wrapped_like_a_core_tool():
     assert got is spec and tracked.__tracked_tool__ == "open_area" and tracked.__doc__ == "A plugin's tool."
 
 
-def test_this_vaults_plugin_adds_open_area_with_its_typed_result():
+def test_this_vaults_plugin_adds_its_tools_with_their_typed_results():
     (loaded,) = plugins.load(("kelno_vault",))
-    (spec,) = loaded.tools
-    assert spec.name == "open_area" and spec.result_type is not None
+    assert [spec.name for spec in loaded.tools] == ["open_area", "agent_path", "agent_path_reached_by"]
     tools.plugin_tool_impls((loaded,))
-    assert spec.result_type in tools._TYPED_OUTCOME_RESULTS
+    for spec in loaded.tools:
+        assert spec.result_type is not None and spec.result_type in tools._TYPED_OUTCOME_RESULTS
 
 
 def test_a_plugin_tool_needs_an_admission_class(monkeypatch):
@@ -516,8 +516,8 @@ def test_open_area_registered_as_the_server_does_keeps_its_schema():
     server = FastMCP("t")
     for spec, tracked in tools.plugin_tool_impls(plugins.load(("kelno_vault",))):
         server.tool(name=spec.name, annotations=spec.annotations)(tracked)
-    (tool,) = asyncio.run(server.list_tools())
-    assert tool.name == "open_area" and tool.inputSchema["title"] == "open_areaArguments"
+    tool = next(t for t in asyncio.run(server.list_tools()) if t.name == "open_area")
+    assert tool.inputSchema["title"] == "open_areaArguments"
     assert set(tool.inputSchema["properties"]) == {"area", "folder"}
     assert "slug" in tool.inputSchema["properties"]["area"]["description"]
     assert tool.outputSchema is not None and tool.annotations.readOnlyHint is True

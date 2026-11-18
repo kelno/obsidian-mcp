@@ -4142,9 +4142,18 @@ async def get_vault_guide_impl() -> str:
         vault_section = _no_guide_note_message(guide_note)
     except ValueError as e:
         vault_section = f"# Vault-Specific Conventions\n\n{e}"
+    return f"{await vault_guide_server_part(uid)}\n\n---\n\n{vault_section}"
+
+
+async def vault_guide_server_part(uid) -> str:
+    """`get_vault_guide`'s own part, ahead of the vault's conventions note: the primer and this server's sections.
+
+    Its own function so the kelno_vault plugin's path tools hash and serve the
+    guide exactly as `get_vault_guide` returns it, without a second, tracked call.
+    """
     ledger_section = await _ledger_guide(uid)
-    return (f"{_primer_for(guide_note)}{_plugins.guide_text()}{_agent_edit_stamp_guide()}{_private_folders_guide()}{ledger_section}"
-            f"\n\n---\n\n{vault_section}")
+    return (f"{_primer_for(settings.vault_guide_note)}{_plugins.guide_text()}{_agent_edit_stamp_guide()}"
+            f"{_private_folders_guide()}{ledger_section}")
 
 
 async def _ledger_guide(uid) -> str:

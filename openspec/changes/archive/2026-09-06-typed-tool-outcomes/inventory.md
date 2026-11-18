@@ -358,6 +358,14 @@ Each entry identifies every direct return branch. PROPAGATE means classify at th
 ### index_status_impl — src/mcp_server/tools.py (index_status, fork)
 - **SUCCESS — no outcome marker** only: counts, progress, health and notes. A folder with no indexed note is a note, not a refusal.
 
+### agent_path_impl — src/plugins/kelno_vault/agent_path_tools.py (agent_path, fork)
+- **REFUSE invalid_argument**: no surface and no typical agent, a typical agent given with other fields, an unknown typical agent or machine, the vault's list of rule files or its starting points unreadable.
+- **SUCCESS — no outcome marker**: the path's pieces and structure, or the overview without `start`. A snapshot or list of areas that cannot be read is a note, never a refusal.
+
+### agent_path_reached_by_impl — src/plugins/kelno_vault/agent_path_tools.py (agent_path_reached_by, fork)
+- **REFUSE invalid_argument**: an unknown machine, the vault's list of rule files or its starting points unreadable.
+- **SUCCESS — no outcome marker**: `reached_by`, pieces and structure; a place no path reaches is `matched_by: nothing…`, not a refusal.
+
 ## Shared/nested helper inventory
 
 ### _confirmed_publication — tools.py:706

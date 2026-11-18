@@ -66,7 +66,10 @@ TOOL_CLASSES = {
                      # Upstream's `list_tasks`, registered under this name
                      # (switched off) because the fork's task tools keep theirs.
                      "upstream_list_tasks",
-                     "open_area", "index_status"), "scan"),
+                     "open_area", "index_status",
+                     # kelno_vault's path tools read the vault's rule notes on each call. New names
+                     # reclassify no existing tool, so the mapping version stays (as for index_status).
+                     "agent_path", "agent_path_reached_by"), "scan"),
     **dict.fromkeys(("read_note", "read_notes", "read_file", "get_recent", "get_vault_guide",
                      "get_backlinks", "get_links", "request_upload",
                      "check_upload", "request_download", "fetch_page", "ledger_get",
