@@ -5799,6 +5799,18 @@
        "updated_at": {
         "title": "Updated At",
         "type": "string"
+       },
+       "view_url": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "title": "View Url"
        }
       },
       "required": [
@@ -6504,6 +6516,18 @@
       ],
       "default": null,
       "title": "View Hints"
+     },
+     "view_url": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "View Url"
      }
     },
     "title": "LedgerWriteResult",
@@ -7260,6 +7284,18 @@
       ],
       "default": null,
       "title": "View Hints"
+     },
+     "view_url": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "View Url"
      }
     },
     "title": "LedgerWriteResult",
