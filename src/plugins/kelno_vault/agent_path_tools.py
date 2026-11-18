@@ -8,7 +8,8 @@ of `get_vault_guide`, `open_area`'s instruction lines), which no script on the P
 
 A first call returns every piece's text, which runs past a hundred thousand characters on most paths: the
 result is held to `MAX_READ_RESPONSE_CHARS`, and the texts that don't fit are marked, to come with the next
-call once the caller passes the hashes it now holds. See docs/architecture/agent-paths.md.
+call once the caller passes the hashes it now holds; a text too long for any one result comes in parts, asked
+for with `read_from`. See docs/architecture/agent-paths.md.
 """
 
 import asyncio
@@ -33,6 +34,7 @@ from src.plugins.kelno_vault.agent_path_result import (
     PathStructure,
     PathWork,
     ReachedByResult,
+    ReadFrom,
     TypicalPath,
 )
 from src.services import private_folders
@@ -167,14 +169,15 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
     used = len(result.model_dump_json())
     room = budget - used  # what a call holding every other text would have for this one
     given: list[PathPiece] = []
-    wanted = too_large = 0
+    wanted = in_parts = 0
     for p, o in zip(pieces, out):
         if o.status == "unchanged" or o.private:
             continue
         cost = len(json.dumps(p.text, ensure_ascii=False)) + len(',"text":')
         if cost > room:
-            # No later call could carry it either: saying it comes next would send the caller round forever.
-            o.text_too_large, used, too_large = True, used + len(',"text_too_large":true'), too_large + 1
+            # No later call could carry it whole either: saying it comes next would send the caller round
+            # forever. It comes in parts instead, one call each (`read_from`).
+            o.text_in_parts, used, in_parts = True, used + len(',"text_in_parts":true'), in_parts + 1
             continue
         wanted += 1
         if used + cost <= budget:
@@ -187,9 +190,9 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
         n = wanted - len(given)
         lines = [f"{n} texts did not fit in this result (text_withheld): call again with the same arguments, "
                  "passing in known the hash of every piece whose text you now hold, and they come next."] if n else []
-        if too_large:
-            lines.append(f"{too_large} texts are too large for any one result (text_too_large): read them where "
-                         "they live (`where`), a vault note with read_note, a file on the PC with your own tools.")
+        if in_parts:
+            lines.append(f"{in_parts} texts are too long for one result (text_in_parts): call again with the same "
+                         "arguments and read_from={id, offset: 0} for each; each part gives the next offset.")
         return lines
 
     result.notes = (notes + withheld_note()) or None
@@ -197,6 +200,38 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
         last = given.pop()
         last.text, last.text_withheld = None, True
         result.notes = (notes + withheld_note()) or None
+
+
+def _one_part(result, p: ap.Piece, o: PathPiece, offset: int) -> None:
+    """Make `result` carry one part of `p`'s text, from `offset`, as much as fits; `o` alone in its pieces."""
+    if o.private:
+        raise _SetupError(f"{p.id} is in a private folder: its text is not shown.")
+    if offset > len(p.text):
+        raise _SetupError(f"read_from.offset {offset} is past the end of {p.id} ({len(p.text)} characters).")
+    result.pieces = [o]
+    o.text_offset = offset
+    room = settings.max_read_response_chars - _NOTES_RESERVE - len(result.model_dump_json()) - len(
+        ',"text":,"next_offset":0000000')
+    n = max(1, min(len(p.text) - offset, room))
+    while n > 1 and len(json.dumps(p.text[offset:offset + n], ensure_ascii=False)) > room:
+        n = max(1, n * 9 // 10)
+    o.text = p.text[offset:offset + n]
+    end = offset + len(o.text)
+    o.next_offset = end if end < len(p.text) else None
+    result.notes = (result.notes or []) + [
+        f"Part of {p.id}: characters {offset} to {end} of {len(p.text)}. "
+        + (f"Next: read_from={{id: {json.dumps(p.id, ensure_ascii=False)}, offset: {end}}}." if o.next_offset
+           else "That was the last part; its hash is the whole text's.")]
+
+
+def _part_of(result, pieces: list[ap.Piece], out: list[PathPiece], read_from: ReadFrom):
+    """The call asked for one part of one text: that piece alone, without the rest of the result."""
+    hit = next(((p, o) for p, o in zip(pieces, out) if p.id == read_from.id), None)
+    if hit is None:
+        raise _SetupError(f"read_from.id {read_from.id!r} is not on this path.")
+    result.structure = result.left_path = None
+    _one_part(result, hit[0], hit[1], read_from.offset)
+    return result
 
 
 def _left_path(known: dict | None, on_path) -> list[str] | None:
@@ -262,7 +297,8 @@ def _failed(result_type, prose: str, code: str = "invalid_argument"):
 # ── The tools ────────────────────────────────────────────────────────
 
 
-async def agent_path_impl(start: PathStart | None, work: PathWork | None, known: dict | None) -> AgentPathResult:
+async def agent_path_impl(start: PathStart | None, work: PathWork | None, known: dict | None,
+                          read_from: ReadFrom | None = None) -> AgentPathResult:
     uid = current_user_id.get()
     served = await _served(uid)
     machine = start.machine if start else None
@@ -274,6 +310,8 @@ async def agent_path_impl(start: PathStart | None, work: PathWork | None, known:
         snap = setup.snapshot
         common = {"machine": snap.machine if snap else None, "snapshot_made": snap.made if snap else None}
         if start is None:
+            if read_from is not None:
+                raise _SetupError("read_from needs the start (and work) of the call that gave text_in_parts.")
             runs = ap.all_runs(setup)
             typical = [TypicalPath(number=s.handwritten, name=label, handwritten=hand.get(s.handwritten),
                                    pieces=_overview_lines(b, known), structure=_structure(ap.structure_of(b)))
@@ -291,6 +329,8 @@ async def agent_path_impl(start: PathStart | None, work: PathWork | None, known:
             start={k: v for k, v in vars(s).items() if v}, work={k: v for k, v in vars(w).items() if v} or None,
             handwritten=hand.get(s.handwritten), pieces=out, left_path=_left_path(known, b.order),
             structure=_structure(ap.structure_of(b)), notes=notes or None, **common)
+        if read_from is not None:
+            return _part_of(result, pieces, out, read_from)
         _with_texts(result, pieces, out, notes)
         return result
 
@@ -300,7 +340,8 @@ async def agent_path_impl(start: PathStart | None, work: PathWork | None, known:
         return _failed(AgentPathResult, str(exc))
 
 
-async def agent_path_reached_by_impl(place: str, known: dict | None, machine: str | None) -> ReachedByResult:
+async def agent_path_reached_by_impl(place: str, known: dict | None, machine: str | None,
+                                     read_from: ReadFrom | None = None) -> ReachedByResult:
     uid = current_user_id.get()
     served = await _served(uid)
 
@@ -315,6 +356,9 @@ async def agent_path_reached_by_impl(place: str, known: dict | None, machine: st
             place=r["place"], matched_by=r["matched_by"], reached_by=r["reached_by"],
             machine=snap.machine if snap else None, snapshot_made=snap.made if snap else None, pieces=out,
             left_path=_left_path(known, r["pieces"]), structure=_structure(r["structure"]), notes=notes or None)
+        if read_from is not None:
+            result.reached_by = None
+            return _part_of(result, pieces, out, read_from)
         _with_texts(result, pieces, out, notes)
         return result
 
@@ -324,59 +368,42 @@ async def agent_path_reached_by_impl(place: str, known: dict | None, machine: st
         return _failed(ReachedByResult, str(exc))
 
 
-_A_START = Field(description="Who the agent is (see its fields). Omit it for the overview: the five typical "
-                             "agents side by side, one line per piece, then facts over every area.")
-_A_WORK = Field(description="What the agent was given to do; optional.")
-_A_KNOWN = Field(description="The pieces whose text you already hold, as {piece id: hash}: only new or changed "
-                             "pieces come back with their text. Omit it on a first call.")
-_A_PLACE = Field(description="Where the rule lives, or would: a vault path (`_/agent/guides/coding-practices.md`), "
-                             "a section (`Areas/Voice bridge/Voice bridge.md#For agents`), "
-                             "`tool:obsidian-mcp:<tool>` or `hook:SessionStart/<script>`. A place that doesn't "
-                             "exist yet is matched by its note, then by its area.")
-_A_MACHINE = Field(description="The PC whose snapshot gives what only a PC sees; without it, the only one, or "
-                               "the most recent.")
+_A_START = Field(description="Who the agent is; omit it for the five typical agents side by side.")
+_A_WORK = Field(description="What it was given to do.")
+_A_KNOWN = Field(description="{piece id: hash} of the texts you hold: only new or changed ones come back.")
+_A_READ_FROM = Field(description="{id, offset}: the next part of a text in parts, with the same other arguments.")
+_A_PLACE = Field(description="A vault path, `note.md#Heading`, `tool:obsidian-mcp:<tool>` or "
+                             "`hook:<event>/<script>`; it may not exist yet.")
+_A_MACHINE = Field(description="The PC whose snapshot to use; default the latest.")
 
 
 async def agent_path(
     start: Annotated[PathStart | None, _A_START] = None,
     work: Annotated[PathWork | None, _A_WORK] = None,
     known: Annotated[dict[str, str] | None, _A_KNOWN] = None,
+    read_from: Annotated[ReadFrom | None, _A_READ_FROM] = None,
 ) -> AgentPathResult:
-    """What an agent of this setup meets, in the order it arrives: every rule text on its path, with a hash.
+    """What an agent of this setup meets, in order: every rule text on its path, with a hash.
 
-    "I'm this agent, doing this work: what do I meet?" `start` says who (a typical agent's number, or a
-    surface, folder and who started it), `work` the area it works in. Each piece is a note, a note's
-    section, a file Claude Code loads on the PC, a hook's message or one of this server's texts as served,
-    with how and when it arrives (`stage`, `arrives`, the pointing line `via` and its `moment`; `always:
-    false` when it arrives only if that moment comes), its length and a 12-digit `hash`. Pass the hashes
-    you hold as `known`: only new or changed pieces come back with their text, and `left_path` lists those
-    you hold that are gone. Texts that don't fit in one result are marked `text_withheld` and come with the
-    next call; one larger than any result is `text_too_large`, to read where it lives. Then `structure`:
-    pointers that don't say when, links into areas, pointers to nothing, what the tool can't follow yet.
-    What only a PC sees comes from the snapshot each PC writes at a session's start (`machine`,
-    `snapshot_made`). Without `start`: the five typical agents side by side, one line per piece, and the
-    rule files no path reaches.
+    Without `start`: the five typical agents side by side. Pass the hashes you hold as `known` and only new
+    or changed texts come back. A text withheld for size comes with the next call; a long one comes in parts,
+    with `read_from`. How to read a result: `_/agent/Where agent instructions go.md`.
     """
-    return await agent_path_impl(start, work, known)
+    return await agent_path_impl(start, work, known, read_from)
 
 
 async def agent_path_reached_by(
     place: Annotated[str, _A_PLACE],
     known: Annotated[dict[str, str] | None, _A_KNOWN] = None,
     machine: Annotated[str | None, _A_MACHINE] = None,
+    read_from: Annotated[ReadFrom | None, _A_READ_FROM] = None,
 ) -> ReachedByResult:
     """Which agents of this setup meet a rule's place, by which chain, and every piece on their paths.
 
-    `agent_path` backward: "this rule lives here, or would: who meets it, and what's around it?" Use it
-    before adding or changing a rule, to check it against what those agents already read. Returns
-    `reached_by` (each kind of agent with the chain of pieces that brings it there; "any area" or "any
-    related folder" where every one reaches it the same way), `pieces` (every piece on those paths, as
-    `agent_path` gives them, with the same `known`, `left_path` and size limits) and `structure`. The
-    paths drawn are the typical agents', a claude.ai chat on each area and a Claude Code worker in each
-    folder an area lists. A place that doesn't exist yet is matched by its note, then by its area
-    (`matched_by`).
+    `agent_path` backward: use it before adding or changing a rule. `known` and `read_from` work as in
+    `agent_path`. How to read a result: `_/agent/Where agent instructions go.md`.
     """
-    return await agent_path_reached_by_impl(place, known, machine)
+    return await agent_path_reached_by_impl(place, known, machine, read_from)
 
 
 def _path_refusal(message: str) -> AgentPathResult:

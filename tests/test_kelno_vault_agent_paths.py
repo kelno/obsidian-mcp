@@ -16,7 +16,7 @@ from src.auth.session import current_user_id
 from src.mcp_server import tools
 from src.plugins.kelno_vault import agent_path_tools as apt
 from src.plugins.kelno_vault import agent_paths as ap
-from src.plugins.kelno_vault.agent_path_result import PathStart, PathWork
+from src.plugins.kelno_vault.agent_path_result import PathStart, PathWork, ReadFrom
 from src.services import vault as vault_service
 
 RULES = "_/" + "Rule files.md"
@@ -224,18 +224,38 @@ def test_texts_past_the_budget_are_withheld_and_come_with_the_next_call(vault, m
     assert got and got <= {p.id for p in withheld}
 
 
-def test_a_text_no_result_can_carry_is_marked_too_large_not_withheld(vault, monkeypatch):
+def test_a_text_no_result_can_carry_comes_in_parts_with_read_from(vault, monkeypatch):
     monkeypatch.setattr(apt.settings, "max_read_response_chars", 25_000)
-    (vault / "_/agent/roles/Worker.md").write_text("Worker rules. " * 2_000, encoding="utf-8")
+    long_text = "Worker rules, é. " * 2_000
+    (vault / "_/agent/roles/Worker.md").write_text(long_text, encoding="utf-8")
     first = path(PathStart(typical=3))
     worker = next(p for p in first.pieces if p.id == "note:_/agent/roles/Worker.md")
-    assert worker.text_too_large is True and worker.text is None and not worker.text_withheld
-    assert any("too large for any one result" in n for n in first.notes)
+    assert worker.text_in_parts is True and worker.text is None and not worker.text_withheld
+    assert any("text_in_parts" in n and "read_from" in n for n in first.notes)
     # Holding every other text, the next call still doesn't promise it.
     held = {p.id: p.hash for p in first.pieces if p.id != worker.id}
     again = path(PathStart(typical=3), known=held)
     assert [p.id for p in again.pieces if p.status == "new"] == [worker.id]
     assert not any("did not fit" in n for n in again.notes)
+    # Part by part, each within the budget, until the whole text, whose hash is the piece's.
+    got, offset, calls = "", 0, 0
+    while offset is not None:
+        part = asyncio.run(apt.agent_path_impl(PathStart(typical=3), None, None,
+                                               ReadFrom(id=worker.id, offset=offset)))
+        assert part.error is None and len(part.model_dump_json()) <= 25_000
+        assert [p.id for p in part.pieces] == [worker.id] and part.structure is None
+        (p,) = part.pieces
+        assert p.text_offset == offset == len(got)
+        got += p.text
+        offset, calls = p.next_offset, calls + 1
+    assert got == long_text and ap.digest(got) == worker.hash and calls > 1
+    assert "last part" in part.notes[-1]
+    # A piece not on the path, or an offset past the end, is refused.
+    off = asyncio.run(apt.agent_path_impl(PathStart(typical=3), None, None, ReadFrom(id="note:Nope.md")))
+    assert "not on this path" in off.error
+    past = asyncio.run(apt.agent_path_impl(PathStart(typical=3), None, None,
+                                           ReadFrom(id=worker.id, offset=len(long_text) + 1)))
+    assert "past the end" in past.error
 
 
 def test_a_note_in_a_private_folder_keeps_its_text(vault, monkeypatch):

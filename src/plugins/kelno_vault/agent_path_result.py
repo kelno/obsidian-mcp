@@ -15,40 +15,35 @@ from src.mcp_server.read_result import _OmitNone
 from src.services.tool_outcomes import BodyOutcome
 
 
+# Who the agent is: a surface, a folder and who started it, or a typical agent by number. (Comments, not
+# docstrings, on these models: a docstring is sent with the tool's schema, and the tool texts are kept short.)
 class PathStart(BaseModel):
-    """Who the agent is: a surface, a folder and who started it, or one of the typical agents by number."""
-
     model_config = ConfigDict(extra="forbid")
 
-    typical: int | None = Field(default=None, description=(
-        "One of the typical agents, by its number in the vault's starting points (1 a claude.ai chat, 2 the "
-        "voice relay, 3 a Claude Code worker in a repo, 4 a session changing the rules, 5 the Coordinator). "
-        "Give it without the other start fields (machine aside)."))
+    typical: int | None = Field(default=None, description="A typical agent by number (1-5); give it alone.")
     surface: Literal["claude-code", "claude-ai"] | None = Field(default=None, description=(
-        "Where the agent runs: claude-code (a Claude Code session on a PC) or claude-ai (a claude.ai chat, "
-        "the voice relay included)."))
-    folder: str | None = Field(default=None, description=(
-        "Claude Code: the folder the session starts in, as an absolute path on the PC (D:\\work\\repo); "
-        "without it, the home folder."))
-    started_by: Literal["owner", "relay", "coordinator"] | None = Field(default=None, description=(
-        "Who started the session."))
+        "claude-ai includes the voice relay."))
+    folder: str | None = Field(default=None, description="Claude Code's start folder on the PC; default home.")
+    started_by: Literal["owner", "relay", "coordinator"] | None = None
     role: Literal["worker", "coordinator", "relay"] | None = Field(default=None, description=(
-        "The role it plays in the owner's Coordinator setup; picks its role note, and relay adds the relay's "
-        "notes."))
-    machine: str | None = Field(default=None, description=(
-        "The PC whose snapshot gives what only a PC sees; without it, the only one, or the most recent."))
+        "Picks its role note."))
+    machine: str | None = Field(default=None, description="The PC whose snapshot to use; default the latest.")
 
 
+# What the agent was given to do.
 class PathWork(BaseModel):
-    """What the agent was given to do."""
-
     model_config = ConfigDict(extra="forbid")
 
-    area: str | None = Field(default=None, description=(
-        "The area the work is in (its name, slug or main note's name): what open_area serves on it joins the "
-        "path. A Claude Code session in a folder an area lists gets that area without it."))
-    kind: str | None = Field(default=None, description="The kind of task (coding, filing, rules, …); recorded, "
-                                                        "not yet matched against the pointers' moments.")
+    area: str | None = Field(default=None, description="Its area: what open_area serves joins the path.")
+    kind: str | None = Field(default=None, description="Recorded, not yet used.")
+
+
+# Where to go on in a text too long for one result.
+class ReadFrom(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    offset: int = Field(default=0, ge=0)
 
 
 class PathPiece(_OmitNone):
@@ -81,15 +76,17 @@ class PathPiece(_OmitNone):
     #: True when the text did not fit in this result: call again, passing as `known` the hashes of the
     #: pieces whose text you received, and the rest comes next.
     text_withheld: bool | None = None
-    #: True when the text is larger than any one result can carry: read it where it lives (`where`).
-    text_too_large: bool | None = None
+    #: True when the text is too long for any one result: it comes in parts, asked for with `read_from`.
+    text_in_parts: bool | None = None
+    #: With `read_from`: where this part of the text starts, and where the next one does (none after the last).
+    text_offset: int | None = None
+    next_offset: int | None = None
     #: True for a note in a private folder: its text is not shown.
     private: bool | None = None
 
 
+# Facts about the structure itself, found on the way; judging them is left to the caller.
 class PathStructure(_OmitNone):
-    """Facts about the structure itself, found on the way; judging them is left to the caller."""
-
     #: Characters and pieces: always on the path, arriving only when their moment comes, and tool texts.
     size: dict[str, int] | None = None
     #: Pointers whose line doesn't say when to read the note.
@@ -109,9 +106,8 @@ class PathStructure(_OmitNone):
     not_followed: list[str] | None = None
 
 
+# One typical agent in the overview: one line per piece, tool texts as one line.
 class TypicalPath(_OmitNone):
-    """One typical agent in the overview: one line per piece, tool texts as one line."""
-
     number: int | None = None
     name: str
     #: That agent's path as written by hand in the vault, to compare with the drawn one.
