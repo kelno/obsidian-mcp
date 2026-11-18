@@ -273,6 +273,55 @@ def test_a_hook_script_changed_since_the_snapshot_is_said(vault):
     assert any("changed since the snapshot" in n for n in reached.notes)
 
 
+def test_rule_copies_load_at_the_start_and_a_skipped_import_is_a_structural_fact(vault):
+    # Since P254: no user CLAUDE.md; the vault's rule notes come as read-only copies in ~/.claude/rules/, and an
+    # import outside the session's folder is skipped by Claude Code, listed by the snapshot, not loaded.
+    rules = "loaded at the start by Claude Code (user rules) (a read-only copy)"
+    loads = [
+        {"id": "file:C:/Users/me/.claude/CLAUDE.md", "exists": False,
+         "arrives": "loaded at the start by Claude Code (user CLAUDE.md)"},
+        {"id": "note:_/agent/Common-rules.md", "exists": True, "arrives": rules,
+         "copy": "C:/Users/me/.claude/rules/Common-rules.md"},
+        {"id": "file:D:/work/repo/CLAUDE.md", "exists": True,
+         "arrives": "loaded at the start by Claude Code (D:/work/repo)"},
+        {"id": "file:D:/work/repo/CLAUDE.fork.md", "exists": True, "arrives": "imported by file:D:/work/repo/CLAUDE.md"}]
+    skipped = [{"id": "note:_/agent/roles/Coordinator.md", "import": "@D:/vault/_/agent/roles/Coordinator.md",
+                "in": "file:D:/work/repo/CLAUDE.md", "why": "outside the session's folder"}]
+    snap = {**SNAPSHOT, "format": 2, "folders": {
+        "C:/Users/me": {"loads": loads[:2], "skipped_imports": [], "session_start": []},
+        "D:/work/repo": {**SNAPSHOT["folders"]["D:/work/repo"], "loads": loads, "skipped_imports": skipped}},
+        "files": {"file:D:/work/repo/CLAUDE.md": {"text": (
+            "Repo rules.\n@CLAUDE.fork.md\n@D:/vault/_/agent/roles/Coordinator.md\n")},
+            "file:D:/work/repo/CLAUDE.fork.md": {"text": "Fork rules.\n"}}}
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
+    (vault / ap.STARTING_POINTS_PATH).write_text(STARTING_POINTS.replace(
+        '"user_claude_md", "folder_claude_md"', '"user_claude_md", "user_rules", "folder_claude_md"'), encoding="utf-8")
+
+    first = path(PathStart(typical=3))
+    assert first.error is None
+    by_id = {p.id: p for p in first.pieces}
+    # The copy is the vault note, found where Claude Code reads it, first; the missing user CLAUDE.md is nothing.
+    assert ids(first)[:3] == ["note:_/agent/Common-rules.md", "file:D:/work/repo/CLAUDE.md",
+                              "file:D:/work/repo/CLAUDE.fork.md"]
+    common = by_id["note:_/agent/Common-rules.md"]
+    assert common.where == "C:/Users/me/.claude/rules/Common-rules.md" and common.arrives == rules
+    assert common.text == NOTES["_/agent/Common-rules.md"] and "file:C:/Users/me/.claude/CLAUDE.md" not in by_id
+    assert not first.structure.broken_pointers
+    # The import in the folder loads; the one outside it is a fact, and the role note it names isn't loaded by it.
+    assert by_id["file:D:/work/repo/CLAUDE.fork.md"].arrives == "imported by file:D:/work/repo/CLAUDE.md"
+    assert first.structure.skipped_imports == [{
+        "from": "file:D:/work/repo/CLAUDE.md", "import": "@D:/vault/_/agent/roles/Coordinator.md",
+        "target": "note:_/agent/roles/Coordinator.md", "why": "outside the session's folder"}]
+    assert "note:_/agent/roles/Coordinator.md" not in by_id
+    # The home folder (a claude.ai-free Claude Code start with no folder) gets the copy too.
+    home = path(PathStart(surface="claude-code"))
+    assert ids(home)[0] == "note:_/agent/Common-rules.md" and not home.structure.skipped_imports
+    # A backward question carries the skipped import too.
+    reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/Common-rules.md", None, None))
+    assert reached.structure.skipped_imports and reached.structure.skipped_imports[0]["import"].endswith(
+        "Coordinator.md")
+
+
 def test_a_snapshot_in_an_unknown_format_is_left_out_with_a_note(vault):
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps({**SNAPSHOT, "format": 3}), encoding="utf-8")
     result = path(PathStart(typical=3))

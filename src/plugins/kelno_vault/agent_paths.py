@@ -384,6 +384,8 @@ class PathBuilder:
         self.seq = 0
         self.mentions: list[dict] = []  # links to non-rule notes with no reading verb: not followed
         self.broken: list[dict] = []
+        #: Imports Claude Code doesn't load, as the snapshot lists them (`skipped_imports`, P254).
+        self.skipped: list[dict] = []
         self.not_followed: list[str] = []
         self.role_picked = False  # whether a line naming several role notes was narrowed to the start's role
 
@@ -439,8 +441,14 @@ class PathBuilder:
 
     def follow_imports(self, p: Piece) -> None:
         base = posixpath.dirname(pc_norm(p.where))
+        skipped = self.skipped_imports()
         for m in IMPORT.finditer(p.text):
             raw = m.group(1)
+            entry = skipped.get((p.id.lower(), f"@{raw}"))
+            if entry is not None:  # Claude Code holds it back: a structural fact, not a piece
+                if entry not in self.skipped:
+                    self.skipped.append(entry)
+                continue
             if raw.startswith("~"):
                 path = (self.snap.home if self.snap else "~") + raw[1:]
             elif pc_absolute(raw):
@@ -449,6 +457,17 @@ class PathBuilder:
                 path = posixpath.join(base, raw.replace("\\", "/"))
             self.push(self.file_piece(pc_norm(path), LOADED if p.stage == LOADED else p.stage,
                                       f"imported by {p.id}", parent=p.id, via=f"@{raw}", always=p.always))
+
+    def skipped_imports(self) -> dict[tuple[str, str], dict]:
+        """The imports the snapshot says Claude Code skips in this start's folder, by (importing piece, `@` text):
+        one resolving outside the session's folder waits for an approval the desktop app never asks for (P254)."""
+        found = self.snap.folder(self.start.folder or self.snap.home) if self.snap else None
+        out = {}
+        for e in (found[1].get("skipped_imports") or [] if found else []):
+            if e.get("in") and e.get("import"):
+                out[(e["in"].lower(), e["import"])] = {"from": e["in"], "import": e["import"], "target": e.get("id"),
+                                                      "why": e.get("why")}
+        return out
 
     def pointer(self, p: Piece, line: str, sentence: str, at: int, target: str, heading: str | None,
                 by_name: bool) -> None:
@@ -567,7 +586,16 @@ class PathBuilder:
             return
         for entry in found[1].get("loads", []):
             if entry.get("arrives", "").startswith("loaded at the start by Claude Code (user CLAUDE.md)"):
-                self.push(self.file_piece(self.entry_path(entry), LOADED, entry["arrives"]))
+                self.load_entry(entry)
+
+    def load_user_rules(self) -> None:
+        """The files of `~/.claude/rules/`, which Claude Code loads at the start, after the user CLAUDE.md. The
+        vault's own rule notes come there as read-only copies a session-start hook writes (P254): the snapshot
+        names each by the note it copies, read here from the vault."""
+        found = self.snap.folder(self.start.folder or self.snap.home) if self.snap else None
+        for entry in (found[1].get("loads", []) if found else []):
+            if entry.get("arrives", "").startswith("loaded at the start by Claude Code (user rules)"):
+                self.load_entry(entry)
 
     def load_folder_claude_md(self) -> None:
         if not self.start.folder or self.snap is None:
@@ -575,8 +603,24 @@ class PathBuilder:
         found = self.snap.folder(self.start.folder)
         for entry in (found[1].get("loads", []) if found else []):
             how = entry.get("arrives", "")
-            if how.startswith("loaded at the start by Claude Code (") and "(user CLAUDE.md)" not in how:
-                self.push(self.file_piece(self.entry_path(entry), LOADED, how))
+            if how.startswith("loaded at the start by Claude Code (") and not how.startswith(
+                    ("loaded at the start by Claude Code (user CLAUDE.md)",
+                     "loaded at the start by Claude Code (user rules)")):
+                self.load_entry(entry)
+
+    def load_entry(self, entry: dict) -> None:
+        """One file the snapshot lists as loaded at the start. A file that isn't there loads nothing; a read-only
+        copy of a vault note (`copy`) is that note, read from the vault, found where Claude Code reads it."""
+        if entry.get("exists") is False:
+            return
+        if entry.get("copy") and entry["id"].startswith("note:"):
+            r = self.v.by_rel.get(entry["id"][5:].lower(), entry["id"][5:])
+            text = self.v.text(r)
+            if text is None:
+                self.broken.append({"from": entry["copy"], "target": r, "via": "a read-only copy of a vault note"})
+            self.push(Piece(f"note:{r}", LOADED, entry["arrives"], pc_norm(entry["copy"]), text or ""))
+            return
+        self.push(self.file_piece(self.entry_path(entry), LOADED, entry["arrives"]))
 
     def entry_path(self, entry: dict) -> str:
         pid = entry["id"]
@@ -769,6 +813,7 @@ def structure_of(b: PathBuilder) -> dict:
         "mentions_not_followed": len(b.mentions),
         "rule_file_mentions": [m for m in b.mentions if m.get("rule_file")],
         "broken_pointers": b.broken,
+        "skipped_imports": b.skipped,
         "not_followed": b.not_followed,
     }
 
@@ -933,6 +978,9 @@ def reached_by(setup: Setup, place: str) -> dict:
     hit_runs = [(label, s, w, b) for label, s, w, b, _ in hits]
     structure = across_runs(hit_runs)
     structure["not_followed"] = list(dict.fromkeys(x for *_, b in hit_runs for x in b.not_followed))
+    structure["skipped_imports"] = []
+    for *_, b in hit_runs:
+        structure["skipped_imports"] += [e for e in b.skipped if e not in structure["skipped_imports"]]
     return {"place": place, "matched_by": how, "reached_by": reached, "pieces": union, "structure": structure}
 
 
