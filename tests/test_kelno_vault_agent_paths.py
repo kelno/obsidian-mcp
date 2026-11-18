@@ -218,7 +218,7 @@ def test_a_hook_script_changed_since_the_snapshot_is_said(vault):
     (vault / script).write_text("print('changed')\n", encoding="utf-8")
     changed = path(PathStart(typical=3))
     assert any(n.startswith(f"{script} changed since the snapshot") and "hook:SessionStart/area-start.py" in n
-               for n in changed.notes)
+               and "agent-paths-snapshot.py run" in n and "ask the owner" in n for n in changed.notes)
     reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", None, None))
     assert any("changed since the snapshot" in n for n in reached.notes)
 

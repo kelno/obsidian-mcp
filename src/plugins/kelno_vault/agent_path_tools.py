@@ -43,6 +43,8 @@ from src.services.vault import _vault_root, read_bytes
 
 #: Characters kept free of texts for the notes added after them (the withheld line among them).
 _NOTES_RESERVE = 500
+#: The PC hook that writes the snapshots; `run` refreshes one at once (named in the stale-snapshot notice).
+_SNAPSHOT_SCRIPT = "_/claude-code-hooks/agent-paths-snapshot.py"
 #: Roles whose start adds more than a role note: the relay is handed its notes by the bridge.
 _ROLE_EXTRAS = {"relay": ["relay_notes"]}
 
@@ -250,9 +252,11 @@ def _changed_hook_scripts(setup: ap.Setup, piece_ids) -> list[str]:
                 continue
             now = setup.vault.text(sid[len("note:"):])
             if then and now is not None and ap.digest(now) != then:
+                # The remedy comes with the notice, so no rule has to teach it (owner, 2026-11-18).
                 out.append(f"{sid[len('note:'):]} changed since the snapshot ({snap.made}): the message of {pid} "
-                           f"here may be out of date. A Claude Code session start on {snap.machine}, or an edit "
-                           f"made there, refreshes it.")
+                           f"here may be out of date. Refresh it from a Claude Code session on {snap.machine}: "
+                           f"`python {_SNAPSHOT_SCRIPT} run` in the vault (any new session there refreshes it "
+                           f"too); from claude.ai, ask the owner or a desk session to.")
     return out
 
 
