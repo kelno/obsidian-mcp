@@ -16,7 +16,10 @@ wikilinks get the note's full path (`link_paths`), in that order so the link
 report's line numbers are the written note's; last, a change to a rule note
 whose lines gain no proposal ref is pointed out (`rule_notes`, on the text
 as written; what a rule file is, the notes and the `## For agents` sections,
-comes from a note in the vault, `rule_files`). The vault-specific behaviours
+comes from a note in the vault, `rule_files`). A note write, or a move's
+destination, inside an area's folder when the caller hasn't called
+`open_area` for that area in the last hour is pointed out too
+(`area_opened`, `area_not_opened:`, ledger F89). The vault-specific behaviours
 still in the core, and the order they move here in, are in
 docs/architecture/plugins.md.
 """
@@ -30,6 +33,7 @@ from src import database, plugins
 from src.models.db import NoteMetadata
 from src.plugins.kelno_vault import (
     agent_path_tools,
+    area_opened,
     conventions,
     link_paths,
     note_names,
@@ -51,7 +55,8 @@ _WRITER_TEXT = (
     "is refused (`task_line_by_hand`): use the task tools. A first heading repeating the note's name is dropped "
     "(`title_heading_removed:`). A bare-name wikilink one note has gets its full path (`links_rewritten:`; an "
     "ambiguous or unknown one `links_flagged:`), so `content_hash` is of what was written. A rule-note change none "
-    "of whose lines gains a new proposal ref is flagged (`rule_change_unlogged:`)."
+    "of whose lines gains a new proposal ref is flagged (`rule_change_unlogged:`). A write in an area's folder "
+    "with no `open_area` call for it in the last hour is flagged (`area_not_opened:`)."
 )
 
 _CREATE_NOTE_NAME_TEXT = (
@@ -63,7 +68,7 @@ _CREATE_NOTE_NAME_TEXT = (
 _WRITE_FILE_TEXT = (
     "On a `.md`, this vault's checks run as in `create_note` (`task_line_by_hand`, `note_name_date` and "
     "`note_name:` for a new note, `title_heading_removed:`, `links_rewritten:`, `links_flagged:`, "
-    "`rule_change_unlogged:`)."
+    "`rule_change_unlogged:`, `area_not_opened:`)."
 )
 
 _MOVE_NOTE_TEXT = "The name is checked as in `create_note`."
@@ -132,7 +137,8 @@ _OPEN_AREA_GUIDE = (
     f"\"{open_area.OPEN_AREA_CONVENTIONS_HEADING}\" section of the vault's conventions note, below. Its result "
     "carries the area's own rules for agents (`for_agents`, its main note's `## For agents` section) and the "
     f"\"{open_area.OPEN_AREA_CONVENTIONS_HEADING}\" section (`area_conventions`, read at each call, so it is "
-    "current): follow both while you work in the area. Its description says what else it returns."
+    "current): follow both while you work in the area. Its description says what else it returns.\n\n"
+    + area_opened.GUIDE
 )
 
 
@@ -144,21 +150,37 @@ async def _rewrite(write: plugins.NoteWrite) -> plugins.Rewrite:
     text, removed = title_heading.strip(write.old, write.new, write.path)
     text, links_report, links_failure = await _full_path_links(write, text)
     rule_lines, rules_failure = await rule_notes.unlogged_lines(write.path, write.old, text, write.user_id)
+    unopened = await area_opened.unopened_area(write.path, write.user_id)
 
     def report(shift: int, dry_run: bool) -> str:
         links = links_failure or (
             link_paths.render(link_paths.shifted(links_report, shift), dry_run=dry_run) if links_report else "")
         rules = rules_failure or rule_notes.render(rule_lines, shift)
-        return rules + title_heading.render(removed, dry_run=dry_run) + links
+        return (rules + title_heading.render(removed, dry_run=dry_run) + links
+                + area_opened.render(unopened, dry_run=dry_run))
 
     return plugins.Rewrite(text, report)
+
+
+async def _check_name(note: plugins.NoteName) -> plugins.NameCheck | None:
+    """The folder's `note_names` setting; for `move_note`, also the area the note moves into (`area_opened`).
+
+    A new note gets the area nudge from its write's report instead, so it is not given twice.
+    """
+    result = await note_names.check_name(note)
+    if note.tool != "move_note" or (result is not None and result.refusal is not None):
+        return result
+    nudge = area_opened.render(await area_opened.unopened_area(note.path, note.user_id))
+    if not nudge:
+        return result
+    return plugins.NameCheck(note=(result.note if result is not None else "") + nudge)
 
 
 plugin = plugins.Plugin(
     name="kelno_vault",
     check=task_lines.check,
     rewrite=_rewrite,
-    check_name=note_names.check_name,
+    check_name=_check_name,
     tools=(open_area.TOOL, *agent_path_tools.TOOLS),
     tool_text={
         "create_note": f"{_WRITER_TEXT} {_CREATE_NOTE_NAME_TEXT}",

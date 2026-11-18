@@ -33,6 +33,7 @@ from src.mcp_server.tools import (
     _tq,
 )
 from src.plugins.kelno_vault import area_map as _area_map
+from src.plugins.kelno_vault import area_opened as _area_opened
 from src.plugins.kelno_vault import areas_index as _areas_index
 from src.plugins.kelno_vault import rule_files as _rule_files
 from src.plugins.kelno_vault.area_result import AreaTask, OpenAreaResult
@@ -462,7 +463,10 @@ async def open_area(
     then say what to do with it all. A folder no area lists comes back with
     `found: false`: ask the owner which area it belongs to.
     """
-    return await open_area_impl(area=area, folder=folder)
+    result = await open_area_impl(area=area, folder=folder)
+    if result.found and result.area:
+        _area_opened.record(result.area, current_user_id.get())
+    return result
 
 
 TOOL = plugins.PluginTool(

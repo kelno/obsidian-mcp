@@ -33,6 +33,12 @@ Exactly one of the two. A folder no row lists: `found: false` and a note to ask 
 
 The tag match is exact (`#area/x` or `#area/x/…`), unlike `list_tasks(area=…)`, which follows the plugin's substring match and says when it overlaps another area.
 
+## Writes in an area not opened
+
+Ledger F89 (2026-11-14): a `keyword_search` led an agent straight to two notes inside an area's folder, and it edited them without ever calling `open_area`, so it missed the area's rules (its main note's `agent_managed: true`). The rule to start with `open_area` was in its instructions; nothing in the flow brought it back. So the plugin's write hooks point it out (`area_opened.py`): a note write (`create_note`, `edit_note`, `write_file` on a `.md`, through the `rewrite` report; `move_note`'s destination, through `check_name`) inside an area's folder (`AreaIndex.area_for_path`, the deepest area folder holding the path, as `create_task` infers its area), when the caller hasn't called `open_area` for that area in the last hour (`WINDOW_SECONDS`), gets `area_not_opened:` naming the area and the `open_area` call to make. Every such write gets it until the area is opened: repeating costs a few lines, and the agent ends it by doing what it says. Never a refusal (owner's direction: little effort; scripts and quick edits the owner asked for must go through). Any failure (an index that can't be read, a folder claimed by two areas) says nothing.
+
+"The caller" is `(current_principal, user id)`: the API key or the OAuth grant. The MCP transport is stateless (`stateless_http=True`), so there is no session to key on. `open_area` records the area it found (tool function, after `open_area_impl`); the map is in-process, bounded by `MAX_ENTRIES`, oldest dropped first.
+
 ## Later parts
 
 The function is one helper per part (`_open_area_main_note`, `_open_area_map`, `_open_area_entries`, `_open_area_tasks`), so later parts go beside them: notes changed since an agent last looked, hints for tasks that look stale, and matching a "When …" task's trigger against the work being started.
@@ -45,3 +51,7 @@ The function is one helper per part (`_open_area_main_note`, `_open_area_map`, `
 | A2 | The list of areas is read as written: a folder outside a code span, or a row in a second table, is not seen. | The note is kept by agents under the vault's rules; a missing match says to ask the owner. |
 | A3 | The map comes from the index, minutes behind a hand edit: a note created or described since the last pass is missing or shows its old description. An area whose main note is not its folder's folder note gets no map. | Same lag as `list_notes`; the vault keeps every area as `Areas/<Name>/<Name>.md`, and a main note elsewhere has no folder that is the area's alone. |
 | A4 | `for_agents` keeps a CRLF note's line endings; a lone-CR note's section is not found, so its rules stay in `main_note_text`; with two `## For agents` sections the cut note names the heading, which `read_note(section=…)` resolves to the first. | Cosmetic, and nothing is lost (adversarial review, 2026-11-17). |
+| A5 | `area_not_opened:` keys on the credential, not the conversation: one OAuth grant (claude.ai's connector, probably shared by the owner's conversations; not verified) that opened an area in one conversation silences the nudge in another for an hour. | The transport has no session; the window keeps it short. |
+| A6 | The memory of opened areas is lost on a restart (the nudge then shows once more) and is per worker (`--workers 1` is the contract anyway). | A wrong nudge costs one `open_area` call. |
+| A7 | `set_frontmatter` and the task writers get no nudge: the plugin has no hook there. | Writes reached from a search hit are note edits; adding hooks for this is more than the owner wanted spent. |
+| A8 | Nested areas count apart: the nudge names the deepest area holding the note, and opening its parent area doesn't silence it (nor the reverse). An edit that changes nothing, and a move within an area not opened, also get it (adversarial review, 2026-11-14). | The text stays true in each case; the cost is one `open_area` call. |
