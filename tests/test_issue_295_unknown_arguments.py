@@ -51,9 +51,9 @@ def test_setting_defaults_on():
 
 def test_every_tool_is_covered():
     # The registry the rest of this module iterates is the real one, not empty.
-    # The core's 42 and upstream's seven the fork switches off, which the suite
+    # The core's 42 and upstream's eight the fork switches off, which the suite
     # runs switched on; PLUGINS is empty (open_area is kelno_vault's).
-    assert len(TOOLS) == 49
+    assert len(TOOLS) == 50
 
 
 class _Sentinel:

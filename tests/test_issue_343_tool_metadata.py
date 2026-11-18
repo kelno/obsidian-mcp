@@ -118,8 +118,9 @@ FORK_WRITERS = frozenset({
 })
 FORK_ADDITIVE = frozenset({"create_task", "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit"})
 #: The task write tools (#428 D15): in the write bucket; `add_task` is
-#: additive (it removes no byte), the other two destructive.
-TASK_WRITE_TOOLS = ("complete_task", "update_task", "add_task")
+#: additive (it removes no byte), the others destructive (`move_task`, #430,
+#: removes lines from its source note).
+TASK_WRITE_TOOLS = ("complete_task", "update_task", "add_task", "move_task")
 RESTRUCTURED_WRITE_TOOLS = ("edit_note", "move_note", "set_frontmatter")
 # The refusal statement is qualified in every description that makes one: the
 # three restructured tools plus `create_note` and `delete_note`, whose
@@ -214,12 +215,12 @@ def tool_shaped_references(text: str, words: frozenset[str]) -> set[str]:
 # ── 1. completeness ──────────────────────────────────────────────────────────
 
 
-def test_exactly_32_tools():
+def test_exactly_33_tools():
     # 25 → 26: `list_tasks` (#350); 26 → 27: `get_changes` (#351);
     # 27 → 28: `hybrid_search` (#354); 28 → 32: `task_agenda`,
-    # `complete_task`, `update_task`, `add_task` (#428).
-    # Fork: its 42 core tools and upstream's seven it switches off (on in tests).
-    assert len(listed()) == 49
+    # `complete_task`, `update_task`, `add_task` (#428); 32 → 33: `move_task` (#430).
+    # Fork: its 42 core tools and upstream's eight it switches off (on in tests).
+    assert len(listed()) == 50
 
 
 @pytest.mark.parametrize("tool", listed(), ids=lambda t: t.name)
@@ -257,7 +258,7 @@ def test_the_write_bucket_set_is_the_production_one():
     w = tools.production_write_bucket_tools()
     assert w == frozenset(t for t, c in concurrency.TOOL_CLASSES.items() if c == "write")
     assert w <= registered_names()
-    assert len(w) == 11 + len(FORK_WRITERS)
+    assert len(w) == 12 + len(FORK_WRITERS)
 
 
 def test_destructive_is_the_write_bucket_minus_the_additive_writers_plus_request_upload():
@@ -267,7 +268,8 @@ def test_destructive_is_the_write_bucket_minus_the_additive_writers_plus_request
     assert _set(lambda a: a.destructiveHint) == (w - {"create_note", "add_task"} - FORK_ADDITIVE) | {"request_upload"}
     assert _set(lambda a: a.destructiveHint) == {
         "edit_note", "move_note", "delete_note", "set_frontmatter", "write_file",
-        "delete_file", "import_from_url", "complete_task", "update_task", "request_upload",
+        "delete_file", "import_from_url", "complete_task", "update_task", "move_task",
+        "request_upload",
         "move_file", "delete_folder", "edit_task", "set_task_status",  # fork
     }
     assert _set(lambda a: not a.readOnlyHint) == w | {"request_upload", "request_download"}
@@ -294,6 +296,7 @@ def test_a_test_probe_cannot_pollute_the_write_bucket_set():
         "create_note", "edit_note", "move_note", "delete_note", "set_frontmatter",
         "write_file", "delete_file", "import_from_url",
         "complete_task", "update_task", "add_task",  # #428
+        "move_task",  # #430
     }) | FORK_WRITERS
 
 
@@ -583,7 +586,7 @@ def test_read_note_leads_with_its_fields():
 
 @pytest.mark.asyncio
 @pytest.mark.skip(reason="fork: its own tools sit among upstream's first 25 (fetch_page, move_file, ...), "
-                         "so upstream's frozen order cannot hold; tools_list_full_v2.json pins the fork's surface")
+                         "so upstream's frozen order cannot hold; tools_list_full_v3.json pins the fork's surface")
 async def test_names_order_and_schemas_match_the_5a391ca_fixture():
     frozen = json.loads(FIXTURE.read_text(encoding="utf-8"))
     additions = json.loads(ADDITIONS.read_text(encoding="utf-8"))
@@ -592,6 +595,7 @@ async def test_names_order_and_schemas_match_the_5a391ca_fixture():
     assert [row["name"] for row in additions] == [
         "list_tasks", "get_changes", "hybrid_search",
         "task_agenda", "complete_task", "update_task", "add_task",  # #428
+        "move_task",  # #430
     ]
     fixture = [amendments.get(row["name"], row) for row in frozen] + additions
     live = await mcp.list_tools()
@@ -738,7 +742,7 @@ def test_the_list_tasks_amendment_is_additive():
 
 def test_every_new_task_tool_returns_str_with_the_sdk_wrapper():
     additions = {row["name"]: row for row in json.loads(ADDITIONS.read_text(encoding="utf-8"))}
-    for name in ("task_agenda", "complete_task", "update_task", "add_task"):
+    for name in ("task_agenda", "complete_task", "update_task", "add_task", "move_task"):
         out = additions[name]["outputSchema"]
         assert out["properties"] == {"result": {"title": "Result", "type": "string"}}, name
 

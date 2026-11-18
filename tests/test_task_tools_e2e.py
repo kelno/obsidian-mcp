@@ -595,9 +595,10 @@ def test_descriptions_and_instructions_are_within_their_bounds():
 
 def test_registration_order_titles_and_annotations():
     names = [t.name for t in server.mcp._tool_manager.list_tools()]
-    # Fork: upstream's seven keep their relative order among the fork's tools.
+    # Fork: upstream's eight keep their relative order among the fork's tools;
+    # #430 registers `move_task` after `add_task`.
     upstream = ["upstream_list_tasks", "get_changes", "hybrid_search", "task_agenda",
-                "complete_task", "update_task", "add_task"]
+                "complete_task", "update_task", "add_task", "move_task"]
     assert [n for n in names if n in upstream] == upstream
     listed = {t.name: t for t in server.mcp._tool_manager.list_tools()}
     assert listed["task_agenda"].title == "Task agenda"

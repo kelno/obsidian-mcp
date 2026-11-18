@@ -61,6 +61,7 @@ COVERAGE = {
     'complete_task': [('refused', 'test_task_tools_e2e.py::test_a_suffixed_id_without_a_hash_is_refused_before_any_read'), ('success', 'test_task_tools_e2e.py::test_complete_task_writes_refreshes_then_records_the_event')],
     'update_task': [('refused', 'test_task_tools_e2e.py::test_update_task_status_done_names_complete_task'), ('success', 'test_task_tools_e2e.py::test_update_task_sets_a_relative_due_date_and_echoes_it')],
     'add_task': [('refused', 'test_task_tools_e2e.py::test_add_task_refuses_a_missing_note_and_creates_nothing'), ('success', 'test_task_tools_e2e.py::test_add_task_inserts_after_the_task_list_and_lists_similar_tasks')],
+    'move_task': [('refused', 'test_task_move_e2e.py::test_a_missing_destination_is_never_created'), ('success', 'test_task_move_e2e.py::test_a_task_moves_with_its_context_and_sub_task'), ('partial', 'test_task_move_e2e.py::test_the_source_removal_conflicts_with_a_hash')],
 }
 
 # Tools registered after the typed-tool-outcomes inventory was archived. Their
@@ -69,7 +70,8 @@ COVERAGE = {
 ADDED_AFTER_INVENTORY = {'list_tasks', 'get_changes', 'hybrid_search',  # #350, #351, #354
                          'task_agenda', 'complete_task', 'update_task', 'add_task',  # #428
                          'upstream_list_tasks',  # upstream's list_tasks, renamed in the fork
-                         'read_notes'}  # fork
+                         'read_notes',  # fork
+                         'move_task'}  # #430
 #: Tools whose body is not `<tool>_impl` (fork: two `list_tasks`).
 IMPLEMENTATION = {'keyword_search': 'search_notes_impl', 'list_tasks': 'fork_list_tasks_impl',
                   'upstream_list_tasks': 'list_tasks_impl'}
@@ -88,8 +90,8 @@ def test_every_registered_tool_has_inventory_and_live_behavioral_references():
     registered |= SWITCHED_OFF
     assert set(COVERAGE) == registered
     # 42 core tools, `open_area`, `agent_path` and `agent_path_reached_by` (kelno_vault) and upstream's
-    # seven switched off.
-    assert len(registered) == 52
+    # eight switched off.
+    assert len(registered) == 53
     root = Path(__file__).resolve().parents[1]
     inventory = (root / 'openspec/changes/archive/2026-09-06-typed-tool-outcomes/inventory.md').read_text()
     for tool, references in COVERAGE.items():

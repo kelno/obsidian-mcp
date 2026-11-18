@@ -211,8 +211,8 @@ async def test_shutdown_wakes_queued_without_grants_and_off_exemption():
     assert (await make().tool("internal", None, None, resource_class="light")).admitted
     with pytest.raises(ValueError): await make().tool("unregistered", 1, 1)
     with pytest.raises(ValueError): await make().tool("internal", 1, 1, resource_class="other")
-    # Upstream's 32 (with `list_tasks` registered as `upstream_list_tasks`) and the fork's 20.
-    assert len(TOOL_CLASSES) == 52
+    # Upstream's 33 (with `list_tasks` registered as `upstream_list_tasks`) and the fork's 20.
+    assert len(TOOL_CLASSES) == 53
     assert set(TOOL_CLASSES.values()) == CLASSES == {"embedding", "vector", "write", "scan", "light"}
     assert shadow_metadata(()) is None
 
@@ -226,7 +226,7 @@ def test_class_mapping_is_the_design_table():
         "vector": {"find_related"},
         "write": {"create_note", "edit_note", "move_note", "delete_note", "set_frontmatter",
                   "write_file", "delete_file", "move_file", "delete_folder",
-                  "import_from_url", "complete_task", "update_task", "add_task",
+                  "import_from_url", "complete_task", "update_task", "add_task", "move_task",
                   "create_task", "edit_task", "set_task_status",
                   "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit"},
         "scan": {"keyword_search", "list_notes", "get_tags", "get_neighborhood",

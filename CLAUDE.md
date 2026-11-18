@@ -155,6 +155,26 @@ update it in the same change.** What stays here is the short list:
 - API keys use `omcp_` prefix, stored as SHA-256 hashes
 - Panel/OAuth passwords: direct `bcrypt` (`$2b$`, cost 12); both hash and verify truncate the UTF-8 encoding at 72 bytes and reject NUL bytes — passlib's historical semantics — so existing hashes stay valid; don't "fix" the truncation.
 - Vault mounted read-write at /obsidian in container
+- **A published file's permissions come from a rule, never a fixed mode**
+  (#447; owner, in his words: "keep a note's existing permissions on edit").
+  Every write publishes a new inode staged at 0600, so `vault_fs.apply_plan`
+  writes the plan onto it before the one payload `fsync`. **Edit** (a
+  regular file is replaced): its bits (`0o777`), POSIX access ACL and gid.
+  **Create**: what `open(O_CREAT, 0o666)` gets in the destination folder
+  (its default ACL, umask not applied; else `0o666 & ~umask`), computed for
+  uploads although they stage in `.transfer-tmp`. A gid the server cannot
+  set (`EPERM`/`EINVAL`) moves the owning group's permissions to a named
+  group entry, never broader; any other failure is `PermissionsNotApplied`
+  → `io_failure` / pre-publication 500, nothing published; no fallback to
+  the other rule, no uid `fchown`. A named staged copy carries those
+  permissions from then on, so its bytes are compared with the payload
+  after the `fsync` (`_require_staged_bytes`; a difference is
+  `concurrent_write`; a refused read-back skips that comparison only for a copy whose applied mode gives the owner no read, else refuses the write). The overwrite branch re-captures before
+  the `expected=` comparison (a difference is `concurrent_write`), so the
+  compare-to-rename window is unchanged. New folders get `mkdirat` 0o777
+  only under a default ACL, else 0o755; `.transfer-tmp` stays 0700. See
+  [vault tools](docs/architecture/vault-tools.md), "Published file
+  permissions (#447)".
 - Read responses are capped in characters (`MAX_READ_RESPONSE_CHARS`, default
   40,000) independently of the byte caps on disk I/O — see "Three kinds of size cap"
   in [vault tools](docs/architecture/vault-tools.md). Tool output is model
@@ -632,12 +652,13 @@ update it in the same change.** What stays here is the short list:
   [vault tools](docs/architecture/vault-tools.md), "Tool metadata".
   **`tools/list` is scoped by the presented credential** (#358): an OAuth
   grant without `readwrite` lists 20 — the full list minus
-  `tool_permissions.WRITE_REQUIRED_TOOLS` (twelve names), the one literal that also drives
+  `tool_permissions.WRITE_REQUIRED_TOOLS` (thirteen names), the one literal that also drives
   `_tracked`'s body-boundary write gate (after quota, so spend is unchanged);
   API keys of either permission, `readwrite` grants, sandbox and in-process
-  callers list 32, byte-identical to `tests/fixtures/tools_list_full_v2.json`
-  (the oracle since #428 — regenerate only deliberately; `tools_list_full_v1.json`
-  stays the 1.0 freeze record, derived from v2 by a test). The seam is the
+  callers list 33, byte-identical to `tests/fixtures/tools_list_full_v3.json`
+  (the oracle since #430 — regenerate only deliberately; `tools_list_full_v2.json`
+  stays the 1.3 record, derived from v3 by a test, and `tools_list_full_v1.json`
+  the 1.0 freeze record, derived from v2). The seam is the
   public `list_tools()` override (survives SDK 2.x); no setting, no
   `list_changed`, instructions unfiltered.
 - **`hybrid_search` is a third search peer, not a primary** (#354). All three
@@ -746,6 +767,31 @@ update it in the same change.** What stays here is the short list:
   when one applies. 039 skips exactly 040's marked units (its own
   allow-list). See [vault tools](docs/architecture/vault-tools.md),
   "The task rule (#434)".
+- **`move_task` writes the destination first and the source only after
+  re-checking it** (#430, no migration). It moves one **top-level, unquoted**
+  task with its whole continuation block, byte for byte (only line endings
+  follow the destination); a nested or callout task, a block holding a
+  quote, fence or heading line, or a quoted destination anchor is
+  `task_malformed` (the smaller first version, Q0; re-framing is the
+  documented next step in the change's design). The destination insert is
+  published first; the source removal is one confirmed publication whose
+  synchronous callback re-reads the destination and requires the moved
+  lines at their position (`destination_still_holds`) with no `await`
+  before the source write. Every stop after the destination publication is
+  `task_move_incomplete` (partial, never `nothing_written`; sentinel
+  `destination_path` / `source_id` / `destination_id` / `reason`) whose
+  `destination:` / `source:` lines state **only what was verified** and whose
+  `complete with:` names the exact call. An identical destination copy is
+  `duplicate_task`, never proof of an earlier move; only an explicit
+  `resume=true` (exactly one byte-identical copy, else `resume_unmatched`)
+  removes the source copy — never automatic. Each note keeps its own
+  permissions (#447 edit rule; `PermissionsNotApplied` is a nothing-written
+  `io_failure` at the destination, `permissions_not_applied` at the source).
+  Two refreshes per move, never two row locks at once; one write token.
+  **L17**: an outside save of an older destination between the re-check and
+  the source rename (or after the move) can still lose the task — stated,
+  not solved. See [vault tools](docs/architecture/vault-tools.md), "Moving a
+  task (#430)".
 - **The change feed is `note_events`, written at the moment the server
   knows** (#351, migration 033). Tools write attributed events (actor label,
   exact principal, tool) after their confirmed publication; the index pass
@@ -805,7 +851,7 @@ update it in the same change.** What stays here is the short list:
 ## MCP tools
 
 45 tools offered (42 in the core; `open_area`, `agent_path` and `agent_path_reached_by` from the `kelno_vault` plugin), plus
-seven upstream tools registered and switched off (`SWITCHED_OFF` at the end of
+eight upstream tools registered and switched off (`SWITCHED_OFF` at the end of
 `server.py`; see "Following upstream"). All are registered in
 `src/mcp_server/server.py` and all wrapped by
 `_tracked`, which resolves the caller's vault root *before* the tool body runs
@@ -817,12 +863,12 @@ registration without them, on a description over 4,000 characters (also with
 `kelno_vault` loaded), and on a
 destructive set that drifts from the write bucket.
 
-A read-only OAuth grant **sees 20 of the 32** (#358): `tools/list` omits the
-twelve names in `src/mcp_server/tool_permissions.py`'s `WRITE_REQUIRED_TOOLS`
-(the eleven-tool write bucket plus `request_upload`). That same literal drives the write
+A read-only OAuth grant **sees 20 of the 33** (#358): `tools/list` omits the
+thirteen names in `src/mcp_server/tool_permissions.py`'s `WRITE_REQUIRED_TOOLS`
+(the twelve-tool write bucket plus `request_upload`). That same literal drives the write
 gate `_tracked` runs at the body boundary, so the list and enforcement cannot
 drift; a hidden tool called by name is refused `permission_denied` as before.
-API keys and `readwrite` grants see all 32. See
+API keys and `readwrite` grants see all 33. See
 [vault tools](docs/architecture/vault-tools.md), "Who sees which tools (#358)".
 
 **Search and read** — `keyword_search`, `semantic_search`, `hybrid_search`
@@ -860,14 +906,17 @@ indexing.
 **Tasks** (optional; plain `- [ ]` checkboxes work, Tasks-plugin emoji
 fields optional) — `list_tasks` and `task_agenda` read `note_tasks`, never a
 file; `complete_task`, `update_task` (both `path` + task id) and `add_task`
-write one line (write bucket, `write` class, `WRITE_REQUIRED_TOOLS`).
+write one line, and `move_task` (`path` + task id + `to_path`, #430) moves
+one top-level task with its block to another note or section, destination
+first (all four: write bucket, `write` class, `WRITE_REQUIRED_TOOLS`).
 Default listings and `add_task`'s index-side duplicate check apply the
 caller's task rule (#434: `all` | `fields` | `filter`, panel Tasks card or
 `TASKS_RULE*` / `TASKS_GLOBAL_FILTER`); `scope="all"` lists every checkbox.
 `list_tasks` is registered after the first 25 (then `get_changes`, then
 `hybrid_search`), so those keep the 5a391ca fixture's order; the four #428
 tools follow `hybrid_search` in the order `task_agenda`, `complete_task`,
-`update_task`, `add_task`, so the first 28 keep theirs (the rest are in
+`update_task`, `add_task`, so the first 28 keep theirs, and `move_task`
+follows `add_task` (the rest are in
 `tools_list_schema_additions.json`; the deliberately amended filter-tool
 schemas are in `tools_list_schema_amendments.json`).
 

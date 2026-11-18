@@ -38,7 +38,7 @@ worst case (not read-only, destructive, open-world), which is how a
 | --- | --- | --- | --- | --- | --- |
 | `_READ_ONLY` | true | false | true | false | `keyword_search`, `semantic_search`, `read_note`, `list_notes`, `get_tags`, `get_recent`, `get_vault_guide`, `read_file`, `list_files`, `get_backlinks`, `get_links`, `get_neighborhood`, `find_related`, `find_orphans`, `check_upload`, `list_tasks` (#350), `get_changes` (#351), `hybrid_search` (#354), `task_agenda` (#428) |
 | `_ADDITIVE` | false | false | false | false | `create_note` (no-clobber), `request_download` (mints a capability, destroys nothing), `add_task` (#428: inserts one line, removes no byte) |
-| `_DESTRUCTIVE` | false | true | false | false | `edit_note`, `move_note`, `delete_note`, `set_frontmatter`, `write_file`, `delete_file`, `request_upload`, `complete_task` and `update_task` (#428) |
+| `_DESTRUCTIVE` | false | true | false | false | `edit_note`, `move_note`, `delete_note`, `set_frontmatter`, `write_file`, `delete_file`, `request_upload`, `complete_task` and `update_task` (#428), `move_task` (#430: removes lines from its source note) |
 | `_DESTRUCTIVE_OPEN_WORLD` | false | true | false | true | `import_from_url` |
 
 **Annotations are hints; `_tracked` enforces.** Nothing server-side reads them.
@@ -50,7 +50,7 @@ destructive ones prompting) and nothing else. The MCP spec tells clients to
 treat annotations as untrusted unless the server is trusted.
 
 **The classification is derived, not listed.** With `W` the write-bucket set
-(`_tracked(write_class=True)`, eleven tools since #428, equal to the `write`
+(`_tracked(write_class=True)`, twelve tools since #430, equal to the `write`
 class of `concurrency.TOOL_CLASSES`):
 
 - destructive = `(W − {create_note, add_task}) ∪ {request_upload}` —
@@ -151,9 +151,9 @@ returning only the tools the caller's granted scopes permit".
 
 | Request | `tools/list` |
 | --- | --- |
-| OAuth grant whose scope lacks `readwrite` | **20** — the full list minus the twelve write-required tools (19 before #428) |
-| OAuth grant with `readwrite`, API key (`read` or `readwrite`) | 32 (28 before #428), byte-identical to `tools_list_full_v2.json` |
-| `MCP_SANDBOX_MODE`, stdio, in-process (no principal) | 32 |
+| OAuth grant whose scope lacks `readwrite` | **20** — the full list minus the thirteen write-required tools (19 before #428) |
+| OAuth grant with `readwrite`, API key (`read` or `readwrite`) | 33 (28 before #428, 32 before #430), byte-identical to `tools_list_full_v3.json` |
+| `MCP_SANDBOX_MODE`, stdio, in-process (no principal) | 33 |
 | No credential | never reaches the handler: the middleware answers 401 |
 
 Read-only **API keys** keep the full list by owner decision (2026-10-31): a
@@ -161,10 +161,10 @@ key's permission is set and shown by its owner in the panel, and keeping it
 full leaves every script and registry byte-identical (L1).
 
 **One registry, two consumers.** `WRITE_REQUIRED_TOOLS` in
-`src/mcp_server/tool_permissions.py` is a `frozenset` literal of twelve names:
+`src/mcp_server/tool_permissions.py` is a `frozenset` literal of thirteen names:
 `create_note`, `edit_note`, `move_note`, `delete_note`, `set_frontmatter`,
-`write_file`, `delete_file`, `import_from_url`, `request_upload`, and since
-#428 `complete_task`, `update_task`, `add_task`. It drives
+`write_file`, `delete_file`, `import_from_url`, `request_upload`, since
+#428 `complete_task`, `update_task`, `add_task`, and since #430 `move_task`. It drives
 
 - **the gate**: `_tracked` calls `_require_write()` for a member at the *body
   boundary* — after every admission gate (rate buckets, vault root, argument
@@ -223,12 +223,14 @@ No setting.
 **Fixtures.** `tests/fixtures/tools_list_full_v1.json` is the complete
 pre-change `tools/list` result for an API key — every field of all 28 tools —
 captured over HTTP before the code changed. It is the 1.0 freeze fixture and is
-kept as that record. Since #428 the byte-identity oracle is
-`tests/fixtures/tools_list_full_v2.json` (32 tools): the full list is asserted
+kept as that record. Since #430 the byte-identity oracle is
+`tests/fixtures/tools_list_full_v3.json` (33 tools): the full list is asserted
 byte-identical to it (canonical JSON) for a `read` key, a `readwrite` key and a
-`readwrite` grant, and a test derives v1 from v2 — v2 minus the four task
-tools equals v1 except for `list_tasks`'s description and its added optional
-properties. A change that alters the published surface regenerates the oracle
+`readwrite` grant. `tools_list_full_v2.json` (32 tools, the #428 oracle) is
+kept unedited as the 1.3 record, and a test derives it from v3 — v3 minus
+`move_task` equals v2 byte for byte (owner decision Q9). A second test derives
+v1 from v2 — v2 minus the four task tools equals v1 except for `list_tasks`'s
+description and its added optional properties. A change that alters the published surface regenerates the oracle
 deliberately and says so in its spec.
 `tests/fixtures/tools_list_readonly_oauth.json` pins the 20 names in order.
 `tests/test_issue_358_scoped_tools_list.py` also races, through one barrier,
@@ -466,12 +468,69 @@ So `open_mutable(rel, user_id)` is now the entry point for every mutation. It ru
 - **creating a missing directory has no beneath-root form** (#87, D22). The *lookup* window is gone: `vault_fs.open_dir_beneath` is one `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)`, so there is no interval between components for an ancestor rename to exploit. But `mkdirat` has no such form, and no syscall creates a directory *and* proves the path it created it under stayed beneath a root. So creation is still one component at a time — carrying **no** descriptor across a creation: each `mkdirat` goes through a fresh beneath-root lookup of the prefix that already exists, dropped at once, and the descriptor the caller finally gets comes from a fresh lookup of the whole path performed *after* the creation. What a race can still cost is at most one **empty** directory per component, **per creation descent**, in a place the winner already controls — never a file, never file content, never something a tool reports success about. The bound is per descent and one call can have more than one: an upload walks its destination twice with creation enabled (a cheap up-front walk so a bad path costs one syscall rather than a whole body, and the authoritative walk inside the publish gate), a note write once. **Do not try to clean it up** — an `rmdir` by a name the caller chose is the same delete-the-substitute hazard `_discard_temp` and `soft_delete` refuse.
 - **a lookup proves containment when it resolves, not afterwards** (#87, D26). `RESOLVE_BENEATH` proves the path stayed beneath the root *during that resolution* and says nothing about the future — it cannot: the descriptor it returns keeps naming the same directory however that directory's pathname is later renamed, which is the entire reason #59 anchors to a descriptor rather than a name. So between the final lookup and the publish — the transfer gate's destination walk to its `linkat`/`renameat`, a note tool's `open_mutable` to its publish — a process that can rename a vault ancestor can move the resolved directory out of the vault, and the call publishes into it, wherever it now is, and reports success. Nothing was *redirected*: the bytes went to the directory the caller named, which somebody else moved. Excluding it would need an operation the kernel does not offer, and re-verifying by walking `..` upward from the descriptor is check-then-act one level up — the class of bug #59 exists to remove. **Retained, not introduced**: the per-component walk had this interval too, underneath the larger window it did not close.
 - a **read-modify-write overwrite** (`edit_note`, `set_frontmatter`, `move_note`'s link rewrites, and since #428 `complete_task`, `update_task` and `add_task`, which publish through the same `write_file_at(expected=…)`) is optimistic, not linearizable: `expected=` compares the current bytes immediately before the rename and a writer landing inside that window is still overwritten — the same guarantee level as the transfer fingerprint check, declared rather than implied. **`expected=` is server-internal and its window is the tool's own read→rename interval, not the caller's.** The bytes it compares are the ones this call read, so it structurally cannot see a change that landed between the *caller's* `read_note` and its write. That second window is what the caller-visible **`expected_hash` precondition** closes (#205) — see "Write preconditions" below. The two are a **pair**: neither subsumes the other, neither is removed, and a matching `expected_hash` does **not** exempt a call from the `expected=` compare. Any wording that lets an agent read `File changed while editing` as covering its own read→edit round trip is still a bug in the docstring; so is any wording that lets it read `expected_hash` as covering the publish.
-- **An unguarded `write_file(overwrite=True)` remains an unconditional replace** when required mode is off. Supplying `expected_hash` adds the caller-to-call check and passes the observed bytes to the same final comparison the note tools use. `request_upload(overwrite=True)` separately binds the incumbent's fingerprint at mint time.
+- **An unguarded `write_file(overwrite=True)` remains an unconditional replace** when required mode is off. Supplying `expected_hash` adds the caller-to-call check and passes the observed bytes to the same final comparison the note tools use. `request_upload(overwrite=True)` separately binds the incumbent's fingerprint at mint time. Since #447 it does refuse `concurrent_write` when the target's identity, group, mode bits or ACL change during the call (see "Published file permissions" below); a content-only change is still overwritten.
 - The **no-clobber** publish (`create_note`, `write_file` by default) has no window at all (`link()` is kernel-atomic), and neither does the soft delete or `move_note`'s own publication (one `renameat2(RENAME_NOREPLACE)`).
 
 All of these are properties of concurrent editing, of an attacker who already holds the destination directory, or of what the kernel offers — not of path resolution: the write always lands on the path the caller named, in the directory that was validated.
 
 An in-vault `..` (`Folder/../note.md`) is also refused by `validate_mutable_path` — a mutating tool never resolves a component away — but with a message naming the normalised path rather than "Path traversal denied", which would be a lie the caller cannot act on. Reads still resolve `..`.
+
+## Published file permissions (#447)
+
+Every publication puts a **new inode** at the name: an overwrite renames a staged file over the old one, a no-clobber write links an `O_TMPFILE` inode in. Staged inodes are created 0600 so nobody else can read the bytes while they are written, and the staged inode *is* the published one, so whatever permissions the file should have must be written onto it before it is published. #95 did that with one `fchmod(fd, vault_fs.default_file_mode())` — `0o666 & ~umask` — on every write. That assumed the umask alone decides a new file's mode, and it is wrong twice. Under a directory **default ACL** the kernel ignores the umask, and a `chmod` on an inode carrying an ACL rewrites the ACL mask from the group bits: a group granted `rwx` by the folder got `mask::r--`, so every file the server created or edited was read-only to that group. And because each edit is a new inode, a 0600 note came back 0644 after any edit. #447 replaces the fixed mode with two rules, in `vault_fs` (`edit_plan`, `create_plan`, `translate`, `apply_plan`), shared by this path and the transfer path ([file transfer](file-transfer.md#publication-permissions-447)).
+
+**The two rules.** The owner's decision, in his words: "keep a note's existing permissions on edit". Everything else in this section is the change's design.
+
+- **Edit** — the publication replaces an existing regular file: the published file gets that file's permission bits (`st_mode & 0o777`; setuid, setgid and sticky are never carried), its POSIX access ACL (`system.posix_acl_access`, or none if it had none — an ACL the staged inode inherited from the folder is *removed*) and its gid. All three are read from the replaced file through a descriptor. This covers `edit_note`, `set_frontmatter`, the three task write tools, both publications of `move_task` (#430: the destination insert and the source removal each keep their own note's bits, ACL and group; `to_path` must exist, so neither is ever a create), `move_note`'s link rewrites in other notes and `write_file(overwrite=True)` over an existing file.
+- **Create** — the name did not exist (or held something other than a regular file): exactly what `open(O_CREAT, 0o666)` gets in the destination directory. Where the directory has a default ACL, its `USER_OBJ`, `MASK` (or `GROUP_OBJ` without one) and `OTHER` are ANDed with `rw-`, named entries are copied, and the umask is not applied — the kernel's own create rule. Without one, `0o666 & ~umask` (`default_file_mode()`, whose only caller this now is). The gid is the directory's when it is setgid, otherwise the gid observed on the staged inode this call just created — never `os.getegid()`, which is not what an ordinary create gets. This covers `create_note`, `write_file` by default and `write_file(overwrite=True)` at an absent name. Because the rule follows the folder exactly, a folder whose default ACL grants write to "other" gives a world-writable note, as it does any other program's file.
+
+Every publication computes one plan, `(wanted_gid, mode, acl | None)`, and **no plan falls back to the other**. `apply_plan` writes it onto the staged inode in a fixed order: the gid (`fchown(fd, -1, gid)`, only when it differs), then the ACL (written explicitly, or removed — never left to inheritance), then the mode (`fchmod`, consistent with the ACL). The ACL is encoded and decoded in-process (`parse_acl`, `pack_acl`: little-endian version 2, then `<HHI` entries) and written with `os.setxattr`, so there is no `setfacl` or ACL library dependency. `parse_acl` refuses a wrong version, a bad length, an unknown tag, permission bits outside `rwx`, a missing base entry, named entries without a mask, and out-of-order or repeated entries; the kernel never returns those, and one that arrives anyway is not something to guess about.
+
+**Group translation, when the wanted gid cannot be set.** The server can give the new inode a group only if it is a member of it (or holds `CAP_CHOWN`, which no documented deployment has). When `fchown` fails with `EPERM` or `EINVAL` (unmapped in a user namespace), the publication proceeds under `translate`, never refuses and never switches rules. With POSIX ACLs: the rule's ACL — or the minimal ACL of its mode — with `GROUP_OBJ` set to `---` and a named `GROUP` entry for the wanted gid carrying what `GROUP_OBJ` had; the rule's mask, or the OR of the group-class entries when it had none; kernel sort order. When the rule already names the wanted gid, that entry is left **exactly** as it is: the kernel grants a request only when one matching group entry holds all of it, so a union could grant what neither entry did. Without ACLs (**mode-only**), the group bits are cleared and the other bits ANDed with them — permitted only when the rule has no ACL, because a mode cannot express a denying named entry (`g:<g2>:---` with `o::rw-` would hand `<g2>` write through "other"). When the rule has an ACL and writing the translated one fails for any reason, the write is refused. The design proves the property this buys (design D3, walking `acl(5)`'s evaluation order): **for every unprivileged principal other than the server and the replaced file's previous owner, the published file grants a subset of what the rule grants**. On an edit the named entry is the visible trace: a note whose group the server is not in comes back with `group::---` and `group:<g>:…`.
+
+**Where the steps sit in `_atomic_write_at`, and why there.**
+
+1. stage at 0600, write the payload;
+2. **P1** — capture the leaf (overwrite branch only) and the directory through `target.dir_fd`, plan, `apply_plan`;
+3. the existing single `fsync` of the staged file;
+4. **P2**, overwrite branch only — capture the leaf again, through the descriptor the `expected=` comparison is about to read from, **before** it reads and compares the bytes; with no `expected=`, through a fresh `O_PATH | O_NOFOLLOW` descriptor at the place the comparison would be, immediately before `_require_staged_name`;
+5. compare, rename, flush the directory, as before.
+
+A capture is `fstat`, the ACL read, `fstat` again. The read uses the comparison's descriptor when there is one, otherwise `/proc/self/fd/<n>` of an `O_PATH` descriptor (an `O_PATH` descriptor cannot be read directly); on a host without `/proc` it opens the name `O_RDONLY | O_NONBLOCK` and requires the same inode, so only a file the server cannot read is refused there. A changed `(st_dev, st_ino, st_ctime_ns)` between the two `fstat`s means the read may belong to neither state, and is the in-call conflict. Any P1/P2 difference — identity, gid, mode bits, ACL bytes, a regular file appearing or vanishing — publishes nothing and raises `File changed while editing: <name>`, which the tools answer `concurrent_write` with their existing retries, with or without `expected=`. The reasons for this shape, which are the ones a later change is likely to re-litigate:
+
+- **Apply before the flush, so the one `fsync` covers it.** `fsync` flushes the inode's metadata and xattrs with its data, so a crash shows the old file or the new file with its final permissions, and no write pays a second flush.
+- **A P2 difference is a conflict, not a re-apply.** Re-applying would need a second `fsync` inside the compare-to-rename window, lengthening the very window `expected=` exists to keep short. A refusal costs one retry and publishes nothing.
+- **P2 precedes the byte comparison.** Nothing is added between the comparison and the rename: **the compare-to-rename window is exactly what it was before #447**. Do not move the capture after the comparison "so it is fresher".
+
+**The named staged copy is verified before P2.** A note or raw-file overwrite (and the named no-clobber fallback) stages under a `.tmp-*` name beside the note, and from `apply_plan` on that file carries the note's own permissions — so whoever may write the note may write the staged copy, and `_require_staged_name` proves only that the name is still our inode, not that its bytes are ours. `_require_staged_bytes` therefore checks, after the single `fsync`, that the name is our regular inode of the payload's size and holds exactly the payload (bounded chunks against a `memoryview`, read back through the staging descriptor, which is opened read-write, so on a local filesystem a kept mode without owner read does not fail it; on a network filesystem whose server re-checks every read without an owner override it can, and there the comparison is skipped and the write proceeds, identity and size still checked, but only when the applied permissions give the owner no read; otherwise the refused read refuses the write (L15)); any difference is `File changed while editing`. It runs **before** P2 and the comparison so nothing is added between the comparison and the rename. The interval after it is accepted limitation L14: the principal who could alter the copy there could write the note itself at any moment, and closing it needs nameless or private-directory staging for overwrites (#451). Uploads are not affected: their named staging lives in `.transfer-tmp` (0700) and their unnamed staging has no name.
+
+**Refusal, never a silent fallback.** `ENODATA` from an ACL read means "no ACL on this inode"; `EOPNOTSUPP`/`ENOTSUP` from a read or a removal means "no ACLs on this filesystem", and such a filesystem keeps the mode-only behaviour: an edit keeps the bits, a create gets `0o666 & ~umask`. Any other failure to capture or apply the rule — an ACL read or write, `fchown` with anything but `EPERM`/`EINVAL`, `fchmod`, an unparsable ACL, a required ACL write refused as unsupported — raises `vault_fs.PermissionsNotApplied` before anything is published. It is an `OSError` and deliberately **not** a `VaultFSError`, which the tools map to `validation_failed` (telling an agent its arguments were wrong); through their `except OSError` it is an `io_failure` whose text names the step and errno and says nothing was written, and one ERROR line, `file permissions not applied; nothing was written: step=… errno=… path=…`, gives an operator the rest. No fallback is provably never broader: the staging 0600 strips a group's access silently, which is the bug, and `0o000` locks the server out of its own note. What remains to fail on an inode the server owns is `EIO`, `ENOSPC`/`EDQUOT`, `EROFS` or an LSM denial, under which the write is in doubt anyway, and a refusal with nothing published is harmless to retry.
+
+**Directories.** `_create_descent` reads the parent's default ACL before each `mkdirat`. Where there is one, the mode argument is 0o777, so the kernel applies the default ACL exactly as `mkdir(1)` does; 0o755 had given a group-`rwx` folder `mask::r-x`, so the group could not create files in a folder the server made. Where there is none, or the read fails for any reason, it stays 0o755, byte for byte what it was, and the directory path never refuses. (0o755 versus `mkdir(1)`'s `0o777 & ~umask` outside a default ACL is deliberately left alone here.) `.transfer-tmp` is the exception: `open_staging_dir` passes `follow_default_acl=False`, so it is made 0o755 under any ACL and tightened to 0700 straight after, never briefly group-writable.
+
+**Do not undo these:**
+
+- **Do not reintroduce a fixed mode for edits, or `fchmod` to the umask default.** Under a default ACL it is #447's narrowing, and on an edit it replaces whatever mode the file had.
+- **Do not fall back to the create rule when an edit's group cannot be kept.** That was the first design, and Codex's spec review showed it publishes a private note with its folder's grants (the server's own 0600 note in a folder whose default ACL grants other `rw-`). Translation gives that note `group::---`, `group:<g>:---`, `mask::---`, `other::---`: nothing to anyone but the owner.
+- **Do not add a uid `fchown`, a named entry for the previous owner, or a refusal when the owner differs.** The new inode is the server's. Bits do not bound an inode's owner (the owner can always `chmod`), the bytes are new, a uid `fchown` needs `CAP_CHOWN`, which no documented deployment has, and refusing would break edits that work today on notes created on disk by another account.
+- **Do not take the P2 capture after the byte comparison**, or re-apply on a difference (above).
+
+**Accepted limitations.**
+
+- **L1.** Files earlier releases narrowed or widened are not repaired; the README's upgrade note says how an operator can.
+- **L2.** The owner uid is not kept: the previous owner becomes an ordinary principal and can lose owner-class access, or gain where its owner class was lower than its group or other class.
+- **L3.** Under group translation, members of the server's group who match no other entry lose access they had through "other"; where the rule already named the wanted group, its members lose what only the owning-group entry granted. Both narrower.
+- **L4.** NFSv4 and richacl ACLs are not preserved; only `system.posix_acl_access` is.
+- **L5.** Other xattrs (`user.*`, `security.*`, `trusted.*`) are lost on edit, as before.
+- **L6.** Hard links are broken by the rename, as before.
+- **L7.** A permission change after the P2 capture and before the rename is lost with the replaced inode.
+- **L8.** `move_note` keeps a moved file's mode and ACL across folders with different default ACLs, as `mv` does (a rename keeps the inode).
+- **L9.** In a user-namespaced container, ACL entries naming ids outside the map read back as the overflow id and are written back as it, or refused `EINVAL` (`io_failure`). No documented deployment uses one.
+- **L10.** A directory's default ACL changed during a call is not seen by that call's create plan.
+- **L11.** A default ACL removed between the directory read and the `mkdirat` gives a folder of `0o777 & ~umask`.
+- **L12.** An upload's refusal for a permission failure is a generic HTTP 500 with the claim released.
+
+L13, which concerns uploads only, is in [file transfer](file-transfer.md#publication-permissions-447).
 
 ## Write preconditions: `expected_hash` and `content_hash` (#205)
 
@@ -1719,9 +1778,10 @@ first seen at this path (L3); edits outside MCP are `human/sync` (L2).
 
 ## Task tools (#428)
 
-Five tools work on markdown checkbox tasks: `list_tasks` (extended) and
+Six tools work on markdown checkbox tasks: `list_tasks` (extended) and
 `task_agenda` read the `note_tasks` index; `complete_task`, `update_task` and
-`add_task` change one task line. Plain `- [ ]` checkboxes are complete tasks;
+`add_task` change one task line; `move_task` (#430) moves one task with the
+lines under it (see "Moving a task (#430)"). Plain `- [ ]` checkboxes are complete tasks;
 the Tasks-plugin emoji fields are optional and are read and written in the
 plugin's format. The modules: `src/services/task_line.py` (the line anatomy
 and the minimal editor, pure), `task_recurrence.py` (the closed grammar,
@@ -2055,6 +2115,18 @@ published, and there is no event and no refresh. A success states the new
 line and id, a next occurrence's line, position and id, `content_hash`, the
 timezone and resolved dates when a relative date or "today" was used, and
 `index: refreshed` or `index: may lag (<code>)`.
+
+Since #430 (`move_task`): `resume_unmatched` and `block_id_conflict` join
+`refusals.TASK_CODES` (nothing written), and `task_move_incomplete` is a
+**body** code rendered `disposition="partial"`, never with
+`nothing_written` — the destination was published. Its sentinel carries four
+optional fields that no other code may carry (a `Refusal` construction
+check): `destination_path`, `source_id`, `destination_id` (absent for
+`destination_changed`, `destination_not_a_task` and `destination_unverified`) and `reason`, one of
+`concurrent_write`, `source_missing`, `source_changed`, `source_ambiguous`,
+`destination_changed`, `destination_not_a_task`, `destination_unverified`, `vault_assignment_changed`,
+`vault_anchor_lost_at_publish`, `vault_confirmation_unavailable`,
+`permissions_not_applied`, `io_failure`. See "Moving a task (#430)".
 
 ### `list_tasks`: the new arguments, scope and cursor version 2
 
@@ -2410,15 +2482,231 @@ are almost always the same intent (`update_task` can date that line;
 - **L11** A `scope="all"` response does not mention the caller's rule; its
   query line says `scope: all`.
 
+### Moving a task (#430)
+
+`move_task(path, id, to_path, to_section=None, allow_duplicate=False,
+resume=False, dry_run=False, expected_hash=None, to_expected_hash=None)` moves
+one task line with its whole uncapped continuation block from one note to
+another, or to another place (`to_section`) in the same note. A move is a
+two-note write; the bar, from the issue, is **a duplicate is acceptable, a
+loss is not**. The record is the `task-move` change under `openspec/`
+(design D1–D19, the D10 outcome table, the D11 partial outcome). The pure
+half is `task_write.plan_move`, `plan_move_within`, `plan_relocated_removal`,
+`destination_still_holds`, `verify_move_insert` and `verify_removal`; the
+wiring is `move_task_impl` / `_move_between` in `src/mcp_server/tools.py`.
+
+**This is the smaller first version (owner decision Q0).** The moved task is
+a top-level, unquoted task (indentation width 0, no blockquote prefix), and
+its block may hold only plain indented lines, blank lines and indented
+sub-tasks. A nested task, a callout task, a block holding a blockquote line
+(after its indentation, `>`), a fence line (after its indentation, three or
+more backticks or tildes, whether the fence closes inside the block or not)
+or a heading line, and a destination region whose last top-level task is
+quoted are all refused `task_malformed`, nothing written in either note, the
+refusal naming the line and pointing at `edit_note`. So the moved lines'
+contents arrive **byte for byte**: no prefix is added or removed, every list
+marker is kept (an ordered `3.` stays `3.`, nothing is renumbered), and no
+field, tag, status, rule text, block link or trailing whitespace changes. The
+heading refusal matches the masked line *after its indentation*: the vault's
+heading scan recognises only unindented `#`, and every line of a block is
+indented, so the plain scan could never fire there (`  # Notes` under a task
+is a heading inside the list item in Obsidian). The wider design — nested and
+callout tasks through prefix re-framing — is kept at the end of the change's
+`design.md` as the documented next step, not built.
+
+**Resolution and the block.** Exactly `complete_task`'s resolution from the
+source's bytes read through its anchored descriptor (#428 D2): any checkbox
+of any status, whatever the task rule; a suffixed id needs `expected_hash`
+in every mode. The block is `continuation_block`'s, uncapped (the index's
+8-line / 600-character context cap never applies to a write). A task moves
+with its subtree; the line alone is never moved, because its children would
+silently change owner. Every moved task keeps its key (its text is
+unchanged); `.<i>of<n>` suffixes renumber in document order in either note,
+and the response says so.
+
+**Placement and terminators.** `add_task`'s placement on the destination (on
+the note with the block removed, for the same note): after the full block of
+the region's last top-level task (never a task of the moved block), else
+after the region's last non-blank line, else after the heading or at body
+start. Unlike `add_task`, the moved task keeps its own marker and gets no
+prefix. Every moved line takes the destination's terminator `T` (the line it
+follows, else the note's first terminator, else LF), so a CRLF note never
+receives LF lines (Q8). Exactly two pre-existing terminators can change: an
+insertion at the end of a destination without a final terminator gives the
+old last line `T` and leaves the last moved line unterminated; a removal of a
+block that ends a source without a final terminator takes the terminator of
+the line before it (D7), so both files keep their final-terminator state.
+
+**Verification.** A removal is the one span kind `verify` refuses, so the move
+has its own verifiers and the #428 planners and `verify` are unchanged.
+`verify_move_insert` re-derives from the two texts: exactly one whole-line
+insertion with the moved contents and `T`; every pre-existing line, task,
+owner, code mask and heading unchanged; the frontmatter unchanged; every moved
+task re-extracting with the same text, key, status, dates, priority, tags,
+recurrence and cuts as at the source, owned as in the block, with its source
+code mask. `verify_removal` checks the D7 span, the remaining lines and their
+terminators (but for the end-of-file case), the task set losing exactly the
+moved tasks, owners, masks, headings and frontmatter. A same-note plan is
+verified as that removal followed by that insertion on the intermediate text.
+A `^block` id carried by a moved line that already ends a destination line
+(case-insensitive) is refused `block_id_conflict` (Q6); a moved block id is
+named in the response, with the warning that links to it in the source no
+longer resolve (L4).
+
+**Duplicates and `resume` (Q4, Q5).** Decided from the destination's current
+bytes, never the index. A destination task with the moved key, whatever its
+block, or (for an open moved task) an open task with the same normalised
+description, is `duplicate_task` unless `allow_duplicate=true`; when the match
+is byte-identical, the refusal names both `allow_duplicate=true` and
+`resume=true`. **An identical block is never taken as proof of an earlier
+move**: two notes can hold independent identical tasks. `resume=true` means
+only "the destination already holds this exact block; insert nothing and
+remove the source copy", and needs exactly one byte-identical copy
+(`resume_unmatched` otherwise); it cannot be combined with `allow_duplicate`,
+`to_section` or a same-note move.
+
+**Publication order (D10): destination first, and the source written only
+after a re-check in the same synchronous step.** Phase 1 reads both notes,
+runs both precondition ladders (`expected_hash` binds the source, a bare id
+satisfies required mode there; `to_expected_hash` binds the destination,
+which is exempt like `add_task`), plans and verifies both off the loop, and
+publishes the destination with `write_file_at(…, expected=)`; an in-call
+conflict without `to_expected_hash` repeats from reading both notes, at most
+3 attempts. The destination is refreshed, then its `modified` event recorded.
+Phase 2 publishes the source removal through **one** confirmed publication
+whose synchronous callback first re-reads the destination through its
+anchored target and requires the moved lines at their position
+(`destination_still_holds_task`: the bytes at their position and, under the
+pass's own extraction with code masking, still the moved task, its sub-tasks,
+its block and its code masks) — with no `await` between that check and the
+source write. *Holds* lets the write run; *changed* (the lines absent or
+different, or no file) stops with `destination_changed`; the bytes in place but
+no longer read as the task (an unclosed fence above them) stops with
+`destination_not_a_task`, completed by repairing the note and `resume=true`
+(or, after reading the source, removing the destination copy by hand); *unverified* (the read
+itself failed, or the bytes are not valid UTF-8) stops with `destination_unverified`, which claims nothing about
+the contents. An in-call conflict at the source without `expected_hash`
+re-reads the source and re-plans the removal only when the moved key
+resolves to exactly one task whose block is byte-identical to what was moved
+(`plan_relocated_removal`), else stops `source_missing`, `source_changed` or
+`source_ambiguous`. A destination refresh that reports `superseded` can never
+be followed by a source write unless the later check passes. Rejected: source
+first (a failure between leaves a loss), one atomic two-file publication (no
+primitive), a journal, rolling back the destination (itself a racing,
+byte-removing publication), and automatic convergence on an identical copy
+(Codex spec r1 #2).
+
+**File permissions (#447).** Both publications replace an existing regular
+file, so each applies the edit rule to its own note (bits, access ACL, group,
+with #447's group translation and mode-only behaviour), never the create
+rule. A P1/P2 or staged-bytes difference is that note's in-call conflict
+(row 4 at the destination, rows 9–12 at the source). `PermissionsNotApplied`,
+told apart from other `OSError`s by type, is a nothing-written `io_failure`
+at the destination (row 6a) and the partial reason `permissions_not_applied`
+at the source (row 14a, not retried, completed by `resume=true`).
+
+**Partial outcomes (D11).** Every stop after the destination publication is
+`task_move_incomplete`: `disposition="partial"`, never `nothing_written`, its
+prose a fixed shape — `destination:` and `source:` lines stating only what
+this call verified (it never says the source holds the task unless a re-read
+found it there; a source it did not write is "this call did not change it";
+a destination line says when it was re-checked; review r4), a `complete with:` line naming the exact call that finishes
+the move (string arguments as ASCII-only JSON), the destination's
+`content_hash` and `index (destination): …`. Every completing call omits
+`to_expected_hash` or passes a fresh one, and the line says so when the call
+supplied one. No completing call repeats the original `expected_hash` (a
+concurrent source edit makes it stale); one helper (`_completing_call`)
+renders every call: none for a bare id, the source's fresh `content_hash`
+for a suffixed id, and, for an id taken from a listing, an instruction to
+add it if the id carries a suffix. An OS
+error from the destination publication other than
+`PermissionsNotApplied` is `publication_uncertain` (partial) naming both
+completing calls. A plain retry of a partial move is refused `duplicate_task`
+and writes nothing; only `allow_duplicate` adds a copy and only `resume`
+removes the source copy.
+
+**Same note (D13).** Detected after both `open_mutable`s by `rel` equality;
+two different `rel` paths to one inode (a hard link) are refused
+`invalid_argument`. A same-note move is the ordinary single-note envelope
+(`_run_task_write`) around `plan_move_within`: one read, one ladder
+(`to_expected_hash` absent or equal to `expected_hash`), one plan of
+non-overlapping spans over the original text, one publication, one refresh,
+one event; a task already last among the region's top-level tasks (whatever blank or paragraph lines precede it) is left in place, and that or any unchanged result answers `No changes`. No duplicate check
+against the moved block itself, no block-id check, no partial outcome.
+
+**Refresh, events, usage, rate.** Each published note is refreshed after its
+publication and before its event, in the task tools' order (not the generic
+writers'), with no `may_hold_tasks` gate: `index (destination): …` and
+`index (source): …` (`unchanged` for a `resume`, which publishes no
+destination bytes). A destination refresh that does not report `refreshed`
+does not stop the source removal (Q10). Each refresh is its own transaction
+holding at most one `notes_metadata` row lock, ended before the next begins,
+so two opposite moves cannot deadlock. One write-bucket token per call (Q7),
+one `write` concurrency slot held through both publications
+(`CLASS_MAPPING_VERSION` 7). The usage row logs `path`, `id`, `to_path`,
+`to_section`, `dry_run`, `allow_duplicate`, `resume` and the presence of each
+hash, plus `move_outcome`, `task_refresh` (source), `task_refresh_to`
+(destination) and `task_write_attempts` as `<phase 1>/<phase 2>`; never task
+text. The task rule never blocks or alters a move; the response states its
+verdict (`task_rule.not_task_note`) like the other task writes, and says when
+the destination is in a folder the default scope excludes and the source is
+not.
+
+**Accepted limitations** (the change's L1–L20, in short):
+
+- **L1** The shared publish path's residual window (#431) is inherited, once
+  per note.
+- **L2** A process killed between the two publications leaves the task in
+  both notes and returns nothing; the agent completes with `resume=true`.
+- **L3** `resume=true` trusts the caller that the identical copy is the one
+  an earlier move wrote.
+- **L4** Links and block references to the moved lines are not rewritten.
+- **L5** Only the two end-of-file terminators described above change.
+- **L6** Nested and callout tasks, blocks with a quote, fence or heading line,
+  and a quoted destination anchor are refused in this version.
+- **L8** The default-scope note covers excluded folders, not excluded note
+  tags.
+- **L9** Ordered markers are kept as written; nothing is renumbered.
+- **L10** Suffixed ids sharing a moved key renumber in both notes.
+- **L11** A block holding a heading is refused.
+- **L12** A partial outcome, or concurrent moves of one task to different
+  destinations, can leave it in two notes (N concurrent moves: N, or N + 1
+  when every source removal stops partial); never in none.
+- **L13** When the destination refresh lags and the source's succeeds,
+  `list_tasks` shows the task in neither note until the next pass.
+- **L14** The change feed shows two `modified` events, not a task-level move.
+- **L15** Two paths to one inode are refused.
+- **L16** Verification proves task identity, ownership, code status and
+  headings, not identical Markdown rendering.
+- **L17** **The one window that can still lose the task**: an outside writer
+  replacing the destination with a version lacking the moved lines after the
+  presence check and before the source rename (or at any time after the
+  move) leaves the task in neither note while the move reports success. It is
+  the #431 residual across two files; the moved lines are in the response.
+  #447's captures sit between the check and the rename, so the window is
+  longer by those steps.
+- **L18** A harmless edit above the inserted lines fails the presence check:
+  a stop and a duplicate, never a loss.
+- **L19** A move into an excluded sync-conflict copy (#443) completes with
+  `index (destination): may lag (not_indexed)`; no exclusion notice is
+  printed.
+- **L20** A permission-only change to either note during the call is an
+  in-call conflict.
+- **L21** The source write's own compare-to-rename window (#431): an outside
+  save of the source between the byte comparison and the rename is
+  overwritten, as with `edit_note`; inherited, not introduced.
+
 ### Metadata and visibility
 
-The four new tools are registered after `hybrid_search`, in the order
+The four #428 tools are registered after `hybrid_search`, in the order
 `task_agenda`, `complete_task`, `update_task`, `add_task`, so the first 28
-entries keep their order. The counts: 32 tools; 19 read-only (`task_agenda`
-added); 12 names in `WRITE_REQUIRED_TOOLS`; 11 in the write bucket; a
-read-only grant lists 20; `CLASS_MAPPING_VERSION` 6. `complete_task` and
-`update_task` are `_DESTRUCTIVE`, `add_task` is `_ADDITIVE`, and the
-destructive rule is `(W − {create_note, add_task}) ∪ {request_upload}`. Each
-description is at most 4,000 characters and leads with its contract.
-`SERVER_INSTRUCTIONS` keeps its 512-character lead byte-identical and names
-the five tools in one sentence, within the 2,000-character cap.
+entries keep their order; `move_task` (#430) is appended after `add_task`, so
+the first 32 keep theirs. The counts: 33 tools; 19 read-only (`task_agenda`
+added by #428); 13 names in `WRITE_REQUIRED_TOOLS`; 12 in the write bucket; a
+read-only grant lists 20; `CLASS_MAPPING_VERSION` 7. `complete_task`,
+`update_task` and `move_task` are `_DESTRUCTIVE`, `add_task` is `_ADDITIVE`,
+and the destructive rule is `(W − {create_note, add_task}) ∪
+{request_upload}`. Each description is at most 4,000 characters and leads
+with its contract. `SERVER_INSTRUCTIONS` keeps its 512-character lead
+byte-identical and names the six task tools in one sentence, within the
+2,000-character cap.

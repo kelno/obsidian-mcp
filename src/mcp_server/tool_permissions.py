@@ -44,11 +44,12 @@ WRITE_REQUIRED_TOOLS: frozenset[str] = frozenset(
         "delete_file",
         "import_from_url",
         "request_upload",
-        # #428: the three task write tools (12 names; a read-only grant
-        # lists 20 of 32).
+        # #428: the three task write tools; #430: `move_task` (13 names; a
+        # read-only grant lists 20 of 33).
         "complete_task",
         "update_task",
         "add_task",
+        "move_task",
         # Fork: its write-bucket tools. The vault writers `move_file`,
         # `delete_folder` and the task tools change vault bytes; the four
         # agent-ledger writers change no vault byte but write the ledger,

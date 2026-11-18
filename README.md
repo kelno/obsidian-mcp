@@ -13,7 +13,7 @@ server that turns an Obsidian vault into long-term memory for every
 agent you use. Agents search it by meaning or by exact words, follow
 its wikilinks, see what changed since their last session and who
 changed it, keep their to-dos in it, and write back through guarded,
-atomic edits. 32 tools over plain markdown files that you can open,
+atomic edits. 33 tools over plain markdown files that you can open,
 edit and grep.
 
 What sets it apart:
@@ -278,17 +278,18 @@ looks the way it does.
 
 ## What's in the box
 
-The server exposes 42 MCP tools (and registers seven more of upstream's, switched
+The server exposes 45 MCP tools (and registers eight more of upstream's, switched
 off until the owner decides), plus the auth
 and ops layer around them.
 
 Every tool is published with a `title` and MCP `ToolAnnotations`, all
 four hints set explicitly: `readOnlyHint` on the nineteen tools that only
 read (search, read, list, graph, `list_tasks`, `task_agenda`, `get_changes`, `check_upload`), `destructiveHint` on
-the ten that can replace or remove something (`edit_note`,
+the eleven that can replace or remove something (`edit_note`,
 `move_note`, `delete_note`, `set_frontmatter`, `write_file`,
-`delete_file`, `import_from_url`, `complete_task`, `update_task`, and
-`request_upload`, whose link can overwrite on redemption),
+`delete_file`, `import_from_url`, `complete_task`, `update_task`,
+`move_task`, and `request_upload`, whose link can overwrite on
+redemption),
 `openWorldHint` on `import_from_url` only. `create_note`, `add_task`
 and `request_download` are additive. Clients that honour
 annotations run read-only tools without a per-call confirmation (Claude
@@ -458,7 +459,8 @@ that plugin:
 and `[-]` is cancelled. A checkbox inside a code block is not a task, and
 a Tasks-plugin query block (```` ```tasks ````) is text the server does
 not evaluate. The server supplies the mechanics (listing, one-line
-edits, and recurrence for the rules listed below) and no policy: where
+edits, moving a task between notes, and recurrence for the rules listed
+below) and no policy: where
 tasks live, what a tag means and what is due when are up to you, your
 agents and your vault guide.
 
@@ -571,8 +573,9 @@ under `fields`, another filter text under `filter`); list again.
 | `complete_task` | Marks one task done (`[x]`, plus `✅ <date>` by default) and, for a recurring task, writes its next occurrence in the same edit. |
 | `update_task` | Changes one task's dates, priority, tags, recurrence, status (open, in progress, cancelled) or description, or adds one context line under it. |
 | `add_task` | Inserts one new `- [ ]` line into an existing note, after the last top-level task of the note or of a named section and everything indented under it. |
+| `move_task` | Moves one top-level task, with every line indented under it, to another note or section, byte for byte. The destination is written before the source, so an interrupted move leaves the task in both notes, and `resume=true` completes it; an outside save of an older destination during the move can still lose the task. |
 
-The three write tools need write permission, like every other write.
+The four write tools need write permission, like every other write.
 `list_tasks` and `task_agenda` read the same index as the search tools,
 and the header of every response counts what the index could not show
 (notes not yet scanned, tasks that could not be indexed, notes over the
@@ -752,7 +755,9 @@ hash: the id names exactly one line in the bytes the write replaces,
 and the rest of the note is spliced from the current file, so the write
 cannot carry a stale copy of the note back. `add_task` removes nothing
 and is exempt. An id with an occurrence suffix (`<key>.2of3`) needs
-`expected_hash` in every mode.
+`expected_hash` in every mode. `move_task` binds each note separately:
+`expected_hash` the source (a plain id satisfies required mode there) and
+`to_expected_hash` the destination, which is exempt like `add_task`.
 
 ### File transfer
 No MCP client can hand a tool the bytes of a file the user is looking
@@ -870,8 +875,8 @@ origin the mint tools refuse rather than emit a localhost link.
   including ChatGPT, Claude Desktop, and claude.ai. Dynamic registration
   defaults to both vault permission levels; the user chooses the actual
   grant on the consent screen. A read-only grant lists 20 tools — the
-  twelve write tools are left out of `tools/list` (and still refused if
-  called by name); choose read + write at consent for all 32, and
+  thirteen write tools are left out of `tools/list` (and still refused if
+  called by name); choose read + write at consent for all 33, and
   reconnect the client after changing a grant's scope.
 - Control panel (Jinja2, hand-written CSS, vendored Chart.js, nonce-based
   CSP) for keys, usage logs,
@@ -1480,18 +1485,21 @@ naming conventions, and YAML schema before it writes anything.
 ## Versioning and compatibility
 
 From 1.0 the version number is a promise about the MCP tool contract:
-the tools' names (28 at 1.0, 32 since the task tools), their argument
+the tools' names (28 at 1.0, 32 since the task tools, 33 since
+`move_task`), their argument
 schemas, the shape of their result lines, and the `MCP-REFUSAL` codes.
 An agent written against 1.0 keeps working against every 1.x.
 
-- **The wire form is pinned.** `tests/fixtures/tools_list_full_v2.json`
+- **The wire form is pinned.** `tests/fixtures/tools_list_full_v3.json`
   is the complete `tools/list` result an API key or a `readwrite` OAuth
-  grant sees (every field of all 32 tools), and
+  grant sees (every field of all 33 tools), and
   `tests/fixtures/tools_list_readonly_oauth.json` pins the 20 names a
-  read-only OAuth grant lists. `tools_list_full_v1.json` keeps the 1.0
-  surface, and a test derives it from v2: the four task tools removed,
-  and `list_tasks` differing only by its description and its added
-  optional arguments. CI fails on any drift; a deliberate change
+  read-only OAuth grant lists. `tools_list_full_v2.json` keeps the 1.3
+  surface, and a test derives it from v3 (`move_task` removed, every other
+  entry byte for byte); `tools_list_full_v1.json` keeps the 1.0 surface,
+  and a test derives it from v2: the four task tools removed, and
+  `list_tasks` differing only by its description and its added optional
+  arguments. CI fails on any drift; a deliberate change
   regenerates the fixture and says so in its spec. Result line shapes
   are specified in `openspec/specs/` and pinned by each tool's tests,
   not by one fixture.
@@ -1529,6 +1537,77 @@ too.
 
 Pull, then `make deploy` (or rebuild your compose stack); migrations
 run on start.
+
+Across the task-move release (#430):
+
+- **One new tool, `move_task`**, moves a top-level task with the lines
+  indented under it to another note or section (see [Tasks](#tasks-optional)). The
+  tool list grows to 33; a read-only OAuth grant still lists 20 (the new
+  tool needs write permission and is hidden from it). Connectors pick it up
+  when they next list. No existing tool's name, schema or description
+  changes; the server instructions gain one clause after their lead.
+- **The write bucket covers twelve tools.** `move_task` takes one write
+  token per call, though it publishes two notes.
+- **A new concurrency-readiness epoch.** `move_task` joins the `write`
+  class, so `CLASS_MAPPING_VERSION` moves to 7 and `make
+  concurrency-report` evidence gathered before the upgrade does not carry
+  over.
+- **New refusal codes:** `task_move_incomplete` (a partial outcome: the
+  destination was written and the source was not, with the exact call that
+  completes the move), `resume_unmatched` and `block_id_conflict`.
+- **No migration, no new setting**, nothing re-derived or re-embedded.
+
+Across the file-permissions release (1.5.1, #447):
+
+- **Files the server writes keep their permissions on edit and follow
+  their folder on create.** Before 1.5.1 every file the server wrote,
+  through any tool, upload or import, got mode `0o666 & ~umask`. Under a
+  folder default ACL that cut a group's access to read-only (`mask::r--`),
+  and every edit turned a 0600 file into 0644. Now an edit keeps the file's
+  permission bits, POSIX access ACL and group, and a new file gets exactly
+  what any other program creating it in that folder would get: the folder's
+  default ACL where it has one, otherwise `0o666 & ~umask` (one exception:
+  on a filesystem without POSIX ACLs, an upload into a setgid folder whose
+  group the server is not in keeps the server's group, so that group gets
+  only the "other" access, as before 1.5.1). A new note
+  follows its folder's default ACL exactly, so in a folder whose default
+  ACL grants write to "other" the note is world-writable, like any other
+  file created there; tighten that folder's default ACL if you do not want
+  that.
+- **New folders under a default ACL follow it too** (they were created
+  with `mask::r-x`, so the group could not create files in them). Folders
+  outside a default ACL are unchanged (0755).
+- **With umask 022 and no ACLs (the published image), new files and
+  folders look exactly as before**; only an edit of a file whose mode or
+  group differs from what a new file would get behaves differently.
+- **When the server cannot give a file its group** (a group it is not a
+  member of), the file keeps the server's group and the original group's
+  permissions move to a named entry: `getfacl` shows `group::---` and
+  `group:<group>:rw-`. On a filesystem without ACLs the group bits are
+  cleared instead and the "other" bits capped by them. Nobody gains access
+  by this.
+- **A permission step that fails for any reason other than "no ACLs on
+  this filesystem" now refuses the write** (`io_failure`, "nothing was
+  written"; an upload answers 500 and the link can be retried) and logs
+  one ERROR line, `file permissions not applied; nothing was written`,
+  naming the step and the error. An unguarded
+  `write_file(overwrite=True)` whose target's permissions change during
+  the call now answers `concurrent_write`.
+- **Files earlier versions already narrowed or widened are not repaired.**
+  To find files and folders whose ACL mask lost write, and review the list
+  before changing anything:
+
+  ```sh
+  find <vault> \( -type f -o -type d \) -exec sh -c \
+    'getfacl -cp "$1" 2>/dev/null | grep -Eqx "mask::r-[-x]" && echo "$1"' _ {} \;
+  ```
+
+  Restore write on one you confirm (`rw` for a file, `rwx` for a folder):
+  `setfacl -m m::rw <file>`, `setfacl -m m::rwx <folder>`. A file that was
+  private before an edit cannot be told apart from one created readable;
+  `find <vault> -type f -perm -o=r` lists the world-readable ones, and
+  `chmod 600 <file>` (or `chmod 640`) restores one you know should be
+  private. No setting, no migration.
 
 Across the task-rule release (migration 040, #434):
 
@@ -2250,7 +2329,7 @@ reason.
 | `MCP_AUTH_FAILURE_TABLE_SIZE` | `4096` | Counter slots in the fixed-size, per-process-salted address table. Memory is O(size); collisions only make the control stricter. |
 | `MCP_RATE_LIMIT_PER_MINUTE` | `600` | Sustained tool calls per minute per principal (an API key, or an OAuth *grant*). Null — with the burst — disables the general bucket. |
 | `MCP_RATE_LIMIT_BURST` | `120` | Capacity of the general bucket. Must be set together with its rate or nulled together with it. |
-| `MCP_WRITE_RATE_LIMIT_PER_MINUTE` | `120` | Sustained vault-mutating calls per minute per principal — the eleven write tools, plus `PUT /transfer/upload` charged to the principal that minted the capability. |
+| `MCP_WRITE_RATE_LIMIT_PER_MINUTE` | `120` | Sustained vault-mutating calls per minute per principal — the twelve write tools, plus `PUT /transfer/upload` charged to the principal that minted the capability. |
 | `MCP_WRITE_RATE_LIMIT_BURST` | `30` | Capacity of the write bucket. |
 | `MCP_LIMITER_MAX_TRACKED_PRINCIPALS` | `10000` | Principals holding their own limiter entry before further ones share one overflow entry. |
 | `MCP_REFUSAL_LOG_INTERVAL_SECONDS` | `10` | How long one rate/slot-refusal coalescing window stays open. Inside it a refusal writes nothing; the row that lands stands for `1 + suppressed` refusals. |
@@ -2657,7 +2736,7 @@ fast one credential can create work.
 
 - **A general bucket** — `MCP_RATE_LIMIT_PER_MINUTE` (600) sustained,
   `MCP_RATE_LIMIT_BURST` (120) capacity — on every tool call.
-- **A write bucket** — 120/min, burst 30 — that the eleven vault-mutating
+- **A write bucket** — 120/min, burst 30 — that the twelve vault-mutating
   tools must pass in addition, and that `PUT /transfer/upload` consumes
   too, charged to the principal that **minted** the capability so the
   write rate cannot be escaped by minting links and redeeming them.
@@ -2743,13 +2822,13 @@ wait uses a bounded queue and one deadline. A retry hint is not a promise that
 a running call will finish by that time.
 
 Every tool belongs to one of five classes (`src/services/concurrency.py`,
-`CLASS_MAPPING_VERSION` 8), each with its own ceiling:
+`CLASS_MAPPING_VERSION` 10), each with its own ceiling:
 
 | Class | Tools | Default ceiling |
 | --- | --- | --- |
 | `embedding` | `semantic_search`, `hybrid_search` | 1 |
 | `vector` | `find_related` | 1 |
-| `write` | the eleven vault-mutating tools, including `complete_task`, `update_task` and `add_task` | 1 |
+| `write` | the twelve vault-mutating tools, including `complete_task`, `update_task`, `add_task` and `move_task` | 1 |
 | `scan` | `keyword_search`, `list_notes`, `get_tags`, `get_neighborhood`, `find_orphans`, `list_files`, `list_tasks`, `get_changes`, `task_agenda` | 2 |
 | `light` | `read_note`, `read_notes`, `read_file`, `get_recent`, `get_vault_guide`, `get_backlinks`, `get_links`, `request_upload`, `check_upload`, `request_download` | 4 |
 
@@ -2778,7 +2857,7 @@ adds a writer wait or drops a usage row because of its observed pressure.
 │ MCP clients  │   HTTP + Bearer key   │   FastAPI app        │
 │  Claude Desk │ ────────────────────▶ │  ┌────────────────┐  │
 │  Claude Code │                       │  │  MCP server    │  │
-│  n8n agents  │                       │  │  (32 tools)    │  │
+│  n8n agents  │                       │  │  (33 tools)    │  │
 │  OpenWebUI   │                       │  └─────┬──────────┘  │
 └──────────────┘                       │        ▼             │
                                        │  ┌────────────────┐  │

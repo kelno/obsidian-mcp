@@ -42,7 +42,8 @@ from src.services.pool_budget import CLASS_CONNECTIONS, budget_terms
 # 7: the fork's tools and upstream's 6 in one mapping (resync, 2026-11-13).
 # 8: `read_notes` added to `light` (fork, 2026-11-18).
 # 9: `agent_path`, `agent_path_reached_by` added to `scan` (fork, kelno_vault, 2026-11-18).
-CLASS_MAPPING_VERSION = 9
+# 10: upstream's `move_task` added to `write` (#430, resync 2026-11-18).
+CLASS_MAPPING_VERSION = 10
 
 TOOL_CLASSES = {
     # `hybrid_search` makes the same provider round trip as `semantic_search`,
@@ -56,6 +57,9 @@ TOOL_CLASSES = {
                      # #428: the three task write tools publish a note through
                      # the same envelope as `edit_note` (mapping version 6).
                      "complete_task", "update_task", "add_task",
+                     # #430: two publications, one write slot held through
+                     # both (mapping version 10 in the fork).
+                     "move_task",
                      # The fork's task and ledger writers.
                      "create_task", "edit_task", "set_task_status", "ledger_add",
                      "ledger_update", "ledger_digest_edit", "ledger_topic_edit"), "write"),
