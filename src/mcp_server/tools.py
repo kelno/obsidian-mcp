@@ -6258,9 +6258,12 @@ async def edit_note_impl(
                 uid, target, replaced=existing_bytes,
                 published=new_content.encode("utf-8"),
             )
+        # The link ends the first line, after the hash, as in create_note and
+        # move_note: "I updated X" is when an agent points the owner to X.
         return success_message + _published_hash_clause(
             new_content.encode("utf-8")
-        ) + plugin_run.render(shift=stamp_shift) + \
+        ) + _open_note_url.text_suffix(target.rel) + \
+            plugin_run.render(shift=stamp_shift) + \
             await _note_refs_report(uid, existing, new_content)
 
 

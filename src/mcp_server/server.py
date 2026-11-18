@@ -710,6 +710,9 @@ async def edit_note(
     line; an undeclared or mistyped argument is rejected by protocol validation before the tool runs and
     carries no such line. See `get_vault_guide` for vault conventions.
 
+    With `OPEN_NOTE_URL` set, the first line ends with `— open_url: <link>`:
+    give that link when pointing the owner to the note.
+
     {plugin_text}
 
     **Ledger refs** (`[P54]`) on the lines this write changes come back under `changed_lines_cite:`, those
@@ -745,13 +748,13 @@ async def edit_note(
     `content` does not resend, a fenced code block under the heading included, is deleted — so a blank
     line you want after the heading belongs in `content`. `read_note(path, section=...)` is the matching read:
     its `heading` field carries the heading line and its `content` field the body, and this tool takes exactly
-    that `content`. A heading inside a fenced code block is not a heading.
+    that `content`.
     A write keeps the note's line endings (a CRLF note stays CRLF); `replace_frontmatter=True` writes bytes as sent.
 
     **Two shapes refuse a section write outright, naming the problem and writing nothing:** a malformed
     frontmatter block, whose refusal names the `replace_frontmatter=True` repair; and a fence opener indented by
     one to three spaces that nothing below it closes — close the fence or unindent it to column zero, then
-    reissue. `read_note` still reads such notes.
+    reissue.
     """
     return await edit_note_impl(
         path,
