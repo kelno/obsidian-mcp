@@ -227,4 +227,8 @@ async def still_valid(session, claims: Claims) -> bool:
         )).scalar_one_or_none()
         if user is None or not user.is_active:
             return False
+        # A user with no vault assigned is refused by every MCP tool (#66) and
+        # every transfer redemption; a link they hold is refused too.
+        if settings.multi_user_mode and not user.vault_path:
+            return False
     return True

@@ -106,7 +106,9 @@ async def test_info_refuses_without_or_with_a_bad_token_with_the_uniform_404(cli
     bad = await client.get("/transfer/ledger/info", headers={"Authorization": "Bearer nope.nope"})
     expired = await client.get("/transfer/ledger/info", headers={
         "Authorization": "Bearer " + ledger_view.encode(claims(expires=int(NOW.timestamp())))})
-    download = await client.get("/transfer/download/info", headers={"Authorization": "Bearer nope"})
+    from src.transfer import routes as transfer_routes
+
+    uniform = transfer_routes._not_found().body  # the transfer routes' one refusal
     for r in (missing, bad, expired):
         assert r.status_code == 404
-        assert r.content == download.content
+        assert r.content == uniform
