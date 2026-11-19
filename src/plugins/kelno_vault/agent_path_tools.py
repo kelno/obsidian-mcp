@@ -706,9 +706,8 @@ async def agent_path(
 ) -> AgentPathResult:
     """What an agent of this setup meets, in order: every rule text on its path, with a hash.
 
-    Without `start`: the five typical agents side by side. Pass the hashes you hold as `known` and only new
-    or changed texts come back. A text withheld for size comes with the next call; a long one comes in parts,
-    with `read_from`. How to read a result: `_/agent/Where agent instructions go.md`.
+    Without `start`: the five typical agents side by side. `structure` lists facts to judge, not faults. Field
+    reference, for maintaining this tool: https://github.com/kelno/obsidian-mcp/blob/main/docs/architecture/agent-paths.md
     """
     return await agent_path_impl(start, work, known, read_from)
 
@@ -721,8 +720,8 @@ async def agent_path_reached_by(
 ) -> ReachedByResult:
     """Which agents of this setup meet a rule's place, by which chain, and every piece on their paths.
 
-    `agent_path` backward: use it before adding or changing a rule. `known` and `read_from` work as in
-    `agent_path`. How to read a result: `_/agent/Where agent instructions go.md`.
+    `agent_path` backward: use it before adding or changing a rule. Its pieces, `structure`, `known` and
+    `read_from` work as in `agent_path`.
     """
     return await agent_path_reached_by_impl(place, known, machine, read_from)
 
