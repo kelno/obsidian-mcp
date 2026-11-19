@@ -631,7 +631,10 @@ async def agent_path_impl(start: PathStart | None, work: PathWork | None, known:
                        for label, s, _w, b in runs[: len(setup.points.typical)]]
             notes.append("Pass start (a typical agent's number, or a surface and folder) for one path with its "
                          "texts.")
-            result = AgentPathResult(typical=typical, rule_files_no_path_reaches=ap.unreached_rule_files(setup, runs),
+            unreached = ap.unreached_rule_files(setup, runs)
+            if unreached:
+                notes.append(_NO_PATH_NOTE)
+            result = AgentPathResult(typical=typical, rule_files_no_path_reaches=unreached,
                                      across_every_area=_structure(ap.across_runs(runs)), notes=notes, **common)
             _fit_overview(result)
             return result
@@ -670,6 +673,8 @@ async def agent_path_reached_by_impl(place: str, known: dict | None, machine: st
         notes = list(setup.notes)
         r = ap.reached_by(setup, place.strip())
         notes += _changed_hook_scripts(setup, r["pieces"])
+        if r["matched_by"].startswith("nothing"):
+            notes.append(_NO_PATH_NOTE)
         pieces = list(r["pieces"].values())
         out = [_piece(p, known) for p in pieces]
         snap = setup.snapshot
@@ -687,6 +692,15 @@ async def agent_path_reached_by_impl(place: str, known: dict | None, machine: st
         return await asyncio.to_thread(draw)
     except (_SetupError, ap.StartingPointsError) as exc:
         return _failed(ReachedByResult, str(exc))
+
+
+#: Said in a result that reports a place no path reaches: a cold reader took it for `not_followed` (2026-11-19).
+_NO_PATH_NOTE = (
+    "No path reaches (`rule_files_no_path_reaches`, or `matched_by` \"nothing\") means the path tools followed every "
+    "way they know that rules reach agents, and none leads there: either nothing sends an agent there, or something "
+    "does by a way they don't follow, which they must then be taught. `not_followed` is different: sources the tools "
+    "know of and can't read, such as claude.ai's own system prompt; a rule reached only through one of them also "
+    "shows as reached by no path.")
 
 
 _A_START = Field(description="Who the agent is; omit it for the five typical agents side by side.")

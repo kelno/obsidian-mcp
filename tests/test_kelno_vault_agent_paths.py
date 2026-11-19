@@ -451,6 +451,12 @@ def test_agent_path_without_start_gives_the_overview(vault):
         "note:_/agent/Where agent instructions go.md", "note:_/agent/roles/Coordinator.md",
         "note:_/agent/roles/Relay.md"]
     assert result.pieces is None
+    # What "no path reaches" means, against not_followed, is said in the result itself.
+    assert any(n.startswith("No path reaches") and "`not_followed` is different" in n for n in result.notes)
+    nowhere = asyncio.run(apt.agent_path_reached_by_impl("Notes/Nowhere.md", None, None))
+    assert nowhere.matched_by.startswith("nothing") and any(n.startswith("No path reaches") for n in nowhere.notes)
+    reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", None, None))
+    assert not any(n.startswith("No path reaches") for n in reached.notes or [])
 
 
 def test_reached_by_names_the_agents_and_chains_reaching_a_place(vault):
