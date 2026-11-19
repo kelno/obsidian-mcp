@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import contextlib
 import ctypes
 import dataclasses
@@ -2011,9 +2012,10 @@ def discover_markdown_files_at(
     `prestat`, when supplied, is handed each **run** of notes — `.md` entries
     of one directory that follow each other in discovery order with no
     subdirectory between them — as `(parent_fd, [(rel, name), ...])`, just
-    before the run's first note is yielded, and returns the futures of the
-    work it started through `parent_fd` (the scan's parallel stats). Before
-    the walk leaves a directory, and so before its descriptor is closed, it
+    before the run's first note is yielded, and returns the list of futures
+    of the work it starts through `parent_fd` (the scan's parallel stats); it
+    may add to that list while the run's notes are being yielded. Before the
+    walk leaves a directory, and so before its descriptor is closed, it
     cancels that directory's futures that have not started and waits for the
     rest. `prestat` changes nothing the walk yields, in content or in order.
     """
@@ -2023,18 +2025,20 @@ def discover_markdown_files_at(
             failed_prefixes.append(prefix)
 
     def walk(parent_fd: int, prefix: str) -> Iterator[DiscoveredFile]:
-        # `prestat`'s futures for this directory. Settled in the `finally`,
-        # which runs before the caller closes `parent_fd`, whether the walk
-        # was drained or closed early (a cancelled scan).
-        pending: list[Future] = []
+        # `prestat`'s lists of futures for this directory, one per run, each
+        # read again here: `prestat` may add to a run's list after handing it
+        # over. Settled in the `finally`, which runs before the caller closes
+        # `parent_fd`, whether the walk was drained or closed early (a
+        # cancelled scan).
+        pending: list[list[Future]] = []
         try:
             yield from walk_listing(parent_fd, prefix, pending)
         finally:
             if pending:
-                _settle(pending)
+                _settle([future for run in pending for future in run])
 
     def walk_listing(
-        parent_fd: int, prefix: str, pending: list[Future]
+        parent_fd: int, prefix: str, pending: list[list[Future]]
     ) -> Iterator[DiscoveredFile]:
         run_end = 0
         try:
@@ -2087,7 +2091,7 @@ def discover_markdown_files_at(
                 continue
             if prestat is not None and i >= run_end:
                 run, run_end = _note_run(ordered, i, prefix)
-                pending.extend(prestat(parent_fd, run))
+                pending.append(prestat(parent_fd, run))
             yield DiscoveredFile(rel=rel, parent_fd=parent_fd, name=name)
 
     yield from walk(root_fd, "")
@@ -2573,13 +2577,18 @@ def _scan_vault(
     between two subdirectories, see `discover_markdown_files_at`), the stats
     of those the loop below would stat — the same decisions, made by the same
     function, before the stat — start together on `SCAN_STAT_THREADS`
-    threads, and the loop takes each one's result where it would have taken
-    the stat itself: the same call, the same `OSError` handling. A run of one
-    is left to the loop. The walk waits for a directory's stats before closing
-    its descriptor. A stat is taken earlier than before by at most the time
-    the loop spends on the run's earlier notes — the race the stat-then-
-    compare always had (a write landing after the stat is seen next pass),
-    a few milliseconds wider; every stat is still taken after the pass began.
+    threads, at most `SCAN_STAT_THREADS` ahead of the loop, and the loop
+    takes each one's result where it would have taken the stat itself: the
+    same call, the same `OSError` handling; taking one starts the next. A run
+    of one is left to the loop. The walk waits for a directory's stats before
+    closing its descriptor. A stat is taken earlier than before by at most
+    the time the loop spends on the `SCAN_STAT_THREADS` notes before it
+    (milliseconds when their stats decide them, more when some are read): the
+    race the stat-then-compare always had (a write landing after the stat is
+    seen next pass), that much wider. Bounded on purpose: with every stat of
+    a long run started at once, a note late in a big folder was statted
+    seconds before the loop reached it (adversarial review, 2026-11-19).
+    Every stat is still taken after the pass began.
     """
     result = ScanResult()
     started = time.perf_counter()
@@ -2615,12 +2624,37 @@ def _scan_vault(
         if SCAN_STAT_THREADS > 1
         else None
     )
-    # The parallel stats not yet taken by the loop, by path. At any moment
-    # only the current run's can be here: the loop takes each one it starts.
+    # The parallel stats started and not yet taken by the loop, by path, and
+    # the rest of the current run's, not started yet. Only the current run's
+    # can be in either: the loop takes, in order, each note `prestat` wanted.
     prestats: dict[str, Future] = {}
+    queued: collections.deque[tuple[str, str]] = collections.deque()
+    run_fd = -1
+    run_futures: list[Future] = []
+
+    def start_stats() -> None:
+        """Start the queued stats while fewer than `SCAN_STAT_THREADS` are
+        ahead of the loop. Only ever called while the run's directory is
+        open: from `prestat`, and from the loop as it takes a run's note."""
+        nonlocal pool
+        try:
+            while pool is not None and queued and len(prestats) < SCAN_STAT_THREADS:
+                rel, name = queued.popleft()
+                future = pool.submit(_stat_follow, run_fd, name)
+                prestats[rel] = future
+                run_futures.append(future)
+        except RuntimeError as e:
+            # No thread could be started. The pool is shut down — what it
+            # queued is cancelled, what it runs is waited for, untracked
+            # work included — and every stat from here on is the loop's own.
+            logger.warning(f"Scan stats in parallel stopped: {e}")
+            pool.shutdown(wait=True, cancel_futures=True)
+            pool = None
+            prestats.clear()
+            queued.clear()
 
     def prestat(parent_fd: int, run: list[tuple[str, str]]) -> list[Future]:
-        nonlocal pool
+        nonlocal run_fd, run_futures
         if pool is None:
             return []
         wanted = [
@@ -2633,22 +2667,15 @@ def _scan_vault(
         ]
         if len(wanted) < 2:
             return []
-        futures: list[Future] = []
-        try:
-            for rel, name in wanted:
-                future = pool.submit(_stat_follow, parent_fd, name)
-                prestats[rel] = future
-                futures.append(future)
-        except RuntimeError as e:
-            # No thread could be started. The pool is shut down — what it
-            # queued is cancelled, what it runs is waited for, untracked
-            # work included — and every stat from here on is the loop's own.
-            logger.warning(f"Scan stats in parallel stopped: {e}")
-            pool.shutdown(wait=True, cancel_futures=True)
-            pool = None
-            prestats.clear()
-            return []
-        return futures
+        # Left over from an earlier run only if the loop skipped one of its
+        # notes, which the shared decisions rule out; never started, so the
+        # loop stats such a note itself.
+        queued.clear()
+        queued.extend(wanted)
+        run_fd = parent_fd
+        run_futures = []
+        start_stats()
+        return run_futures
 
     walk = discover_markdown_files_at(
         root_fd,
@@ -2696,6 +2723,9 @@ def _scan_vault(
                     )
                 except OSError:
                     current = None
+                if taken is not None:
+                    # This one taken: the next of the run may start.
+                    start_stats()
                 result.stats += 1
                 result.stat_wait_seconds += time.perf_counter() - started_stat
                 if current is not None and current == row.stat:

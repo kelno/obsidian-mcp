@@ -279,3 +279,36 @@ def test_a_cancelled_scan_leaves_no_stat_running(monkeypatch, tmp_path):
     assert state["active"] == 0
     assert state["calls"] < len(names)
     assert state["wrong_dir"] == 0
+
+
+def test_stats_run_at_most_the_pool_size_ahead_of_the_loop(monkeypatch, tmp_path):
+    """A long run's stats are not all taken when it starts: a note late in
+    a big folder would be statted long before the loop reaches it (the
+    adversarial review's finding, 2026-11-19)."""
+    names = [f"n{i:02d}.md" for i in range(40)]
+    for name in names:
+        _note(tmp_path, f"sub/{name}")
+    snapshot = {f"sub/{n}": _row(tmp_path, f"sub/{n}") for n in names}
+    lock = threading.Lock()
+    state = {"started": 0, "taken": 0, "ahead": 0}
+    real_stat, real_tuple = indexer._stat_follow, indexer._stat_tuple
+
+    def counted_stat(parent_fd, name):
+        with lock:
+            state["started"] += 1
+            state["ahead"] = max(state["ahead"], state["started"] - state["taken"])
+        return real_stat(parent_fd, name)
+
+    def counted_tuple(st):
+        with lock:
+            state["taken"] += 1
+        return real_tuple(st)
+
+    monkeypatch.setattr(indexer, "SCAN_STAT_THREADS", 3)
+    monkeypatch.setattr(indexer, "_stat_follow", counted_stat)
+    monkeypatch.setattr(indexer, "_stat_tuple", counted_tuple)
+
+    result = _scan(tmp_path, snapshot)
+
+    assert result.shortcut == len(names) and state["started"] == len(names)
+    assert state["ahead"] <= 3

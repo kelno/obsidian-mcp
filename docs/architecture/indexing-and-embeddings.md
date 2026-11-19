@@ -974,9 +974,11 @@ and nothing else changes.
   (not-indexable path, excluded conflict copy, `read_before_stat`: forced,
   new, no stored stat, parser version, re-derive, task dirty), the same
   function the loop calls — and, when at least two remain, starts their
-  `_stat_follow` on a pool of `SCAN_STAT_THREADS` (8) threads. The loop takes
-  each result where it took the stat: the same call, the same `OSError` →
-  "stat failed" → read. A run of one is statted by the loop, as before.
+  `_stat_follow` on a pool of `SCAN_STAT_THREADS` (8) threads, **at most that
+  many ahead of the loop**: each stat the loop takes starts the next of the
+  run. The loop takes each result where it took the stat: the same call, the
+  same `OSError` → "stat failed" → read. A run of one is statted by the loop,
+  as before.
 - **Descriptors.** The stats go through the run's parent descriptor, so they
   must end before it closes. Each directory's frame of the walk keeps its
   futures and, in a `finally` that runs before its caller closes the
@@ -985,9 +987,12 @@ and nothing else changes.
 - **Why runs, not whole directories or the whole walk.** Starting a
   directory's stats when it is listed would also overlap them with the walk
   of its subdirectories, but a note listed after a large subtree would be
-  statted seconds before the loop reaches it. Within a run, a stat is taken
-  earlier than before only by the time the loop spends on the run's earlier
-  notes (a few reads at most). That widens, by milliseconds, the race the
+  statted seconds before the loop reaches it. The same holds within a long
+  run, which is why at most `SCAN_STAT_THREADS` stats run ahead of the loop
+  (the adversarial review found the first version starting a whole run at
+  once, 2026-11-19): a stat is taken earlier than before only by the time the
+  loop spends on the eight notes before it, milliseconds when their stats
+  decide them, longer when some of them are read. That widens the race the
   stat-then-compare always had: a write landing after the stat — or a file
   replaced or deleted after it — is not seen until the next pass, which sees
   a changed stat (and, deleted, the file absent). Every stat is still taken
@@ -1006,8 +1011,9 @@ and nothing else changes.
 
 `tests/test_scan_parallel_stats.py` holds it: the same scan result and the
 same stats with and without the pool, a failed stat on the pool, a pool that
-cannot start a thread, the runs the walk hands over, and a cancelled scan
-leaving no stat running through a closed descriptor.
+cannot start a thread, the runs the walk hands over, a cancelled scan
+leaving no stat running through a closed descriptor, and no more stats ahead
+of the loop than the pool's size.
 
 ### The walk moves ahead of the generation lock (D9)
 
