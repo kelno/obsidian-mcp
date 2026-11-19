@@ -492,7 +492,7 @@ def _piece(p: ap.Piece, known: dict | None) -> PathPiece:
         id=p.id, stage=ap.STAGE_NAMES[p.stage], arrives=p.arrives, always=p.always, where=p.where, chars=p.chars,
         hash=p.hash, via=_short(p.via, _VIA_MAX) if p.via else None, moment=moment,
         also_pointed_by=p.also or None, status=status,
-        private=True if path and private_folders.is_private(path) else None, text_on_pc=True if p.on_pc else None)
+        private=True if path and private_folders.is_private(path) else None)
 
 
 _DETAILS = ("arrives", "where", "chars", "via", "also_pointed_by")
@@ -524,13 +524,9 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
     budget = PAGE_CHARS - _NOTES_RESERVE
     listing = known is not None
     order = {id(o): i for i, o in enumerate(out)}
-    due = [(p, o) for p, o in zip(pieces, out) if o.status != "unchanged" and not (o.private or o.text_on_pc)]
-    on_pc = sum(1 for o in out if o.text_on_pc and o.status != "unchanged")
-    if on_pc:  # one-time guidance in the result rather than in the description (owner, ledger C145)
-        notes.append(f"{on_pc} piece{' is' if on_pc == 1 else 's are'} marked text_on_pc: a repo's docs, whose hash "
-                     "and size the PC's snapshot holds but not their text. Read them on that PC, at their `where`.")
+    due = [(p, o) for p, o in zip(pieces, out) if o.status != "unchanged" and not o.private]
     if listing:
-        result.pieces = [o for o in out if o.status != "unchanged" and (o.private or o.text_on_pc)]
+        result.pieces = [o for o in out if o.status != "unchanged" and o.private]
         # The chains and the structure came with the first call too, unchanged by a later one (owner,
         # 2026-11-18: 9,000 characters a call on a backward question); a call without known shows them again.
         result.structure = None
@@ -676,8 +672,6 @@ def _one_part(result, p: ap.Piece, o: PathPiece, offset: int) -> None:
     """Make `result` carry one part of `p`'s text, from `offset`, as much as fits; `o` alone in its pieces."""
     if o.private:
         raise _SetupError(f"{p.id} is in a private folder: its text is not shown.")
-    if o.text_on_pc:
-        raise _SetupError(f"{p.id} is a repo's doc: the snapshot holds its hash and size only; read it on the PC.")
     if offset > len(p.text):
         raise _SetupError(f"read_from.offset {offset} is past the end of {p.id} ({len(p.text)} characters).")
     result.pieces = [o]
@@ -838,8 +832,14 @@ async def agent_path_impl(start: PathStart | None, work: PathWork | None, known:
             unreached = ap.unreached_rule_files(setup, runs)
             if unreached:
                 notes.append(_NO_PATH_NOTE)
+            # What every path leaves out by design is said once, across every area, rather than on each path.
+            by_design = ap.by_design(setup.vault)
+            for t in typical:
+                t.structure.not_followed = [x for x in t.structure.not_followed or [] if x != by_design] or None
+            across = _structure(ap.across_runs(runs))
+            across.not_followed = [by_design]
             result = AgentPathResult(typical=typical, rule_files_no_path_reaches=unreached,
-                                     across_every_area=_structure(ap.across_runs(runs)), notes=notes, **common)
+                                     across_every_area=across, notes=notes, **common)
             _fit_overview(result)
             return result
         s = _start_of(start, setup.points)
@@ -902,9 +902,9 @@ async def agent_path_reached_by_impl(place: str, known: dict | None, machine: st
 _NO_PATH_NOTE = (
     "No path reaches (`rule_files_no_path_reaches`, or `matched_by` \"nothing\") means the path tools followed every "
     "way they know that rules reach agents, and none leads there: either nothing sends an agent there, or something "
-    "does by a way they don't follow, which they must then be taught. `not_followed` is different: sources the tools "
-    "know of and can't read, such as claude.ai's own system prompt; a rule reached only through one of them also "
-    "shows as reached by no path.")
+    "does by a way they don't follow, which they must then be taught. `not_followed` is different: what the tools "
+    "know of and leave out, because they can't read it (such as claude.ai's own system prompt) or by design (such as "
+    "a repo's docs); a rule reached only through one of them also shows as reached by no path.")
 
 
 _A_START = Field(description="Who the agent is; omit it for the five typical agents side by side.")

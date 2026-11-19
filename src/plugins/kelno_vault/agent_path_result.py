@@ -87,8 +87,6 @@ class PathPiece(_OmitNone):
     next_offset: int | None = None
     #: True for a note in a private folder: its text is not shown.
     private: bool | None = None
-    #: True for a repo's doc the PC's snapshot gives by hash and size only: its text is read on that PC.
-    text_on_pc: bool | None = None
 
 
 # Facts about the structure itself, found on the way; judging them is left to the caller.
@@ -99,7 +97,7 @@ class PathStructure(_OmitNone):
     unplaced_pointers: list[dict] | None = None
     #: Rule files reached through a pointer outside every rule file.
     pointers_outside_rule_files: list[dict] | None = None
-    #: Pointers into an area's notes from the trunk, or from one area into another.
+    #: Pointers into an area's local pieces from a shared one, or from one area's local pieces into another's.
     into_areas: list[dict] | None = None
     #: Links that are mentions, not pointers: counted, not followed.
     mentions_not_followed: int | None = None
@@ -115,7 +113,7 @@ class PathStructure(_OmitNone):
     #: Imports the PC's snapshot warns about (`{from, import, target, warning}`), such as an import line right next
     #: to another one, which failed to load in tests. Their files stay on the path, as the snapshot lists them.
     import_warnings: list[dict] | None = None
-    #: What the path leaves out because it cannot be followed yet.
+    #: What the path leaves out: what cannot be followed yet, and what isn't followed by design.
     not_followed: list[str] | None = None
     #: The lists above cut short to keep the result within its size budget, if any.
     cut: list[str] | None = None

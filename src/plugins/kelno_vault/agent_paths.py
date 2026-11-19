@@ -19,14 +19,15 @@ Where each part of a path comes from:
 - `SNAPSHOT_FOLDER/<machine>.json`, written by a session-start hook on each PC (the vault's
   `_/claude-code-hooks/agent-paths-snapshot.py`), for what only the PC sees: the files Claude Code loads
   at the start in each folder, with the text of those outside the vault, the session-start hooks' messages,
-  the hooks registered at every event and what they say at events other than a session's start, the docs a
-  repo's files point to (by hash and size), the voice relay's notes;
+  the hooks registered at every event and what they say at events other than a session's start, the voice
+  relay's notes;
 - `STARTING_POINTS_PATH`, the only hand-written input: what each surface loads first (a fact of the product
   no file states) and the five typical agents;
 - the server's own texts as served (tool descriptions, the server instructions, `get_vault_guide`'s own
   part, `open_area`'s instruction lines), handed in by the tool wrapper.
 
-What cannot be followed is reported under `not_followed` on each path, never guessed.
+What cannot be followed is reported under `not_followed` on each path, never guessed, with what isn't followed
+by design, as `WHERE_NOTE` lists it (`BY_DESIGN_OPENING`): in a repo, nothing beyond what Claude Code loads there.
 
 Standard library only, and no import from the server: the tool wrapper does the reading, so this module can
 also be loaded on its own (the comparison with the prototype does).
@@ -58,6 +59,8 @@ CODING_GUIDE = "_/agent/guides/coding-practices.md"
 ROLES_DIR = "_/agent/roles/"
 #: The section of `WHERE_NOTE` holding the hand-written paths of the typical agents, numbered.
 HANDWRITTEN_HEADING = "Checking a rule against agent paths"
+#: The paragraph of that section listing what the tools leave out by design opens with these words [P277].
+BY_DESIGN_OPENING = "The tools don't follow, by design:"
 #: The server these tools run in, in tool piece ids (`tool:<server>:<tool>`).
 SERVER = "obsidian-mcp"
 #: The voice bridge, in its pieces' ids, its texts read from the PC's snapshot (`bridge`).
@@ -79,8 +82,8 @@ STAGE_NAMES = {
 # instruction" in WHERE_NOTE [P259]: its bullet or sentence opens with one of these words (anything before the first
 # word that isn't a letter is ignored, so a bold label in front doesn't pass), or it takes the guide index's shape,
 # `[[note]]: when to read it`. The moment is that opening, up to the first : ; , full stop or table cell.
-# The same shapes hold for a repo's `CLAUDE.md` or `AGENTS.md` pointing to its own docs, where the index's link is
-# a Markdown link or a backticked path (`[x.md](docs/x.md): when to read it`).
+# The same shapes hold for a repo's `CLAUDE.md` or `AGENTS.md` pointing into the vault, where the index's link is
+# a Markdown link or a backticked path (`[x.md](D:/vault/x.md): when to read it`).
 POINTER_LEAD = re.compile(r"^((?:at the start|while|when|before)\b(?:[^:;,.|]|\|(?!\s))*)", re.I)
 NOT_LETTERS = re.compile(r"^[\W\d_]+")
 INDEX_SHAPE = re.compile(r"^(\[\[[^\]]+\]\]|\[[^\]\n]*\]\([^)\s]+\)|`[^`\n]+`):\s*(.+)")
@@ -88,7 +91,7 @@ INLINE_CODE = re.compile(r"`[^`\n]*`")
 WIKILINK = re.compile(r"\[\[([^\]|#]+?)\\?(#[^\]|]*?)?\\?(?:\|[^\]]*)?\]\]")
 BACKTICK_MD = re.compile(r"`([^`\n]+?\.md)`")
 ABS_MD = re.compile(r"[A-Za-z]:[\\/][^\n\"'`]*?\.md")
-#: A Markdown link to a `.md` file (`[text](docs/x.md)`, an anchor allowed), as a repo's files point to their docs.
+#: A Markdown link to a `.md` file (`[text](docs/x.md)`, an anchor allowed), as a repo's files may point into the vault.
 MD_LINK = re.compile(r"\[[^\]\n]*\]\(<?([^)\s<>]+?\.md)>?(?:#[^)\s]*)?\)")
 #: A placeholder segment in a backticked vault path (`Reference/Servers/<name>/<name>.md`): the path names a kind of
 #: note, every note matching it.
@@ -194,9 +197,6 @@ class Snapshot:
     #: `{event, matcher, messages: [{when, text, hash}]}`, `messages` null and `why` when the script can't say them.
     #: None when the snapshot predates the key.
     hook_messages: dict[str, dict] | None = None
-    #: Optional: the `.md` docs inside a folder that a loaded file outside the vault points to, by `file:<path>`
-    #: (lower case): `{path, hash, chars}`, without their text.
-    docs: dict[str, dict] = field(default_factory=dict)
     #: Optional: the voice bridge's own texts, from its `claude-voice texts` command: `{command, instructions,
     #: guide, tools, notes}`, or `{command, error}` when the command failed; None when the bridge isn't on that PC.
     bridge: dict | None = None
@@ -215,7 +215,6 @@ class Snapshot:
                    {k.lower(): v for k, v in data.get("files", {}).items()}, data.get("hooks", []),
                    data.get("relay_notes", []), data.get("relay_config", ""), data.get("hook_scripts") or {},
                    hook_messages if isinstance(hook_messages, dict) else None,
-                   {k.lower(): v for k, v in (data.get("docs") or {}).items() if isinstance(v, dict)},
                    data["bridge"] if isinstance(data.get("bridge"), dict) else None, "bridge" in data)
 
     def folder(self, folder: str) -> tuple[str, dict] | None:
@@ -228,9 +227,6 @@ class Snapshot:
     def file_text(self, path: str) -> str | None:
         entry = self.files.get(f"file:{pc_norm(path)}".lower())
         return entry.get("text") if entry else None
-
-    def doc(self, path: str) -> dict | None:
-        return self.docs.get(f"file:{pc_norm(path)}".lower())
 
     def holds(self, folder: str) -> bool:
         return pc_norm(folder).lower() in self.folders
@@ -429,18 +425,14 @@ class Piece:
     rule: bool = True  # whether its own pointers are followed
     rules_only: bool = False  # follow only its pointers to rule files (text the agent reads that isn't a rule file)
     also: list[str] = field(default_factory=list)  # other pieces pointing to it
-    #: A doc outside the vault the snapshot gives by hash and size only (`docs`): its text stays on the PC.
-    on_pc: bool = False
-    pc_hash: str | None = None
-    pc_chars: int | None = None
 
     @property
     def hash(self) -> str:
-        return (self.pc_hash or "") if self.on_pc else digest(self.text)
+        return digest(self.text)
 
     @property
     def chars(self) -> int:
-        return (self.pc_chars or 0) if self.on_pc else len(self.text)
+        return len(self.text)
 
 
 @dataclass
@@ -498,7 +490,7 @@ class PathBuilder:
         if p.stage == LOADED and p.where.lower().endswith(".md"):
             self.follow_imports(p)  # Claude Code expands imports only in what it loads itself
         for line in unfenced(p.text):
-            if p.id.startswith("file:"):  # outside the vault (a repo's CLAUDE.md): the docs it points to
+            if p.id.startswith("file:"):  # outside the vault (a repo's CLAUDE.md): its links into the vault
                 for target, pos in file_targets(line):
                     self.file_pointer(p, line, *sentence_at(line, pos), target)
                 continue
@@ -518,11 +510,9 @@ class PathBuilder:
                 self.pointer(p, line, *sentence_at(line, pos), target, heading, by_name)
 
     def file_pointer(self, p: Piece, line: str, sentence: str, at: int, target: str) -> None:
-        """A pointer in a file outside the vault (a repo's `CLAUDE.md`) to a doc, by a backticked path or a
-        Markdown link: resolved against the pointing file's folder, then the session folder's root, as the PC's
-        snapshot resolves it, its text taken from the snapshot's `files`. A path into the vault is a vault pointer.
-        A link to a doc follows the vault's pointer convention [P259, P270]: only its shapes make a pointer, the index's
-        link being a Markdown link or a backticked path; any other link is a mention."""
+        """A link in a file outside the vault (a repo's `CLAUDE.md`), by a backticked path or a Markdown link,
+        resolved against the pointing file's folder, then the session folder's root: a path into the vault is a
+        vault pointer. Any other is left, by design: in a repo, the tools stop at what Claude Code loads [P277]."""
         t = target.strip().replace("\\", "/")
         if t.startswith(("~", "@")) or PLACEHOLDER.search(t) or "*" in t or (":" in t and not re.fullmatch(r"[A-Za-z]:/[^:]*", t)):
             return  # a home-folder path, an import, a kind of file or a command (`git show main:CLAUDE.md`)
@@ -536,32 +526,6 @@ class PathBuilder:
             if self.v.rel(c):
                 self.pointer(p, line, sentence, at, c, None, False)
                 return
-        own = pc_norm(p.where).lower()
-        if any(c.lower() == own for c in candidates):
-            return
-        via = line.strip()
-        moment = pointer_moment(via, sentence, t) or "unplaced"
-        snap = self.snap
-        path = next((c for c in candidates if snap and (snap.file_text(c) is not None or snap.doc(c))), None)
-        if moment == "unplaced":
-            self.mentions.append({"from": p.id, "target": path or t, "via": via})
-            return
-        if path is None:
-            machine = snap.machine if snap else "no PC"
-            nf = f"`{t}`, pointed to by {p.id}: {machine}'s snapshot doesn't hold it"
-            if nf not in self.not_followed:
-                self.not_followed.append(nf)
-            return
-        stage, always = self.placed(p, moment)
-        arrives = f"pointed to by {p.id}"
-        # One level only, as the snapshot gives them: a doc is met, not loaded, and what it points to isn't followed.
-        text = snap.file_text(path)
-        if text is not None:
-            self.push(Piece(f"file:{path}", stage, arrives, path, text, via, moment, p.id, always, rule=False))
-            return
-        doc = snap.doc(path)  # its hash and size only: a repo's docs run to megabytes, read on the PC
-        self.push(Piece(f"file:{path}", stage, arrives, path, "", via, moment, p.id, always, rule=False,
-                        on_pc=True, pc_hash=doc.get("hash"), pc_chars=doc.get("chars")))
 
     def pick_role(self, line: str, targets: list) -> list:
         """A line naming several role notes lets the session pick by its role (the session-start hook's line does):
@@ -1014,6 +978,7 @@ class PathBuilder:
 
     def note_not_followed(self) -> None:
         nf = self.not_followed
+        nf.append(by_design(self.v))
         if self.start.surface == "claude-code":
             if self.snap is None or self.snap.hook_messages is None:  # a snapshot from before `hook_messages`
                 events = sorted({h.get("event", "") for h in (self.snap.hooks if self.snap else [])} - {"SessionStart"})
@@ -1155,6 +1120,17 @@ def handwritten_paths(v: Vault) -> dict[int, str]:
     return out
 
 
+def by_design(v: Vault) -> str:
+    """What the tools leave out by design, for `not_followed`: `WHERE_NOTE`'s paragraph saying it, read at each call
+    so the list has one home, without its ledger refs."""
+    text = section(v.text(WHERE_NOTE) or "", HANDWRITTEN_HEADING) or ""
+    para = next((line.strip() for line in text.splitlines() if line.startswith(BY_DESIGN_OPENING)), None)
+    if para is None:
+        return (f"what the tools leave out by design: \"{HANDWRITTEN_HEADING}\" in {WHERE_NOTE} holds no paragraph "
+                f"opening \"{BY_DESIGN_OPENING}\"")
+    return re.sub(r"\s*\[[PQFC]\d+(?:,\s*[PQFC]\d+)*\]", "", para)
+
+
 def run(setup: Setup, start: Start, work: Work) -> PathBuilder:
     return PathBuilder(setup, start, work).build()
 
@@ -1195,8 +1171,9 @@ def outside_rules(b: PathBuilder) -> list[dict]:
 
 
 def into_areas(b: PathBuilder) -> list[dict]:
-    """Pointers into an area's notes: from the trunk (any rule file outside Areas/), or from one area into another
-    (a leaf into another leaf, which brings the combinations back)."""
+    """Pointers into an area's local pieces: from a shared piece (any rule file outside Areas/), or from one area's
+    local pieces into another's (which brings the combinations back). A shared piece is met by every agent of a
+    kind; a local one only by agents working in that area, folder, machine or repo [P276]."""
     out = []
     for p in b.pieces.values():
         for parent in [p.parent, *p.also]:
@@ -1210,7 +1187,8 @@ def into_areas(b: PathBuilder) -> list[dict]:
             from_area = b.v.area_of_note(src) if src else None
             if from_area and from_area["name"] == to_area["name"]:
                 continue
-            out.append({"from": parent, "to": p.id, "kind": "leaf into another leaf" if from_area else "trunk into a leaf"})
+            out.append({"from": parent, "to": p.id,
+                        "kind": "local into another local" if from_area else "shared into local"})
     return out
 
 

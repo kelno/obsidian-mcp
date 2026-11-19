@@ -97,7 +97,9 @@ NOTES = {
     "_/agent/guides/coding-practices.md": "Code rules.\n",
     "_/agent/Where agent instructions go.md": (
         "## Checking a rule against agent paths\n\n1. A chat: memory, then Common-rules.\n"
-        "3. A worker: Common-rules, the hook, Worker.\n"),
+        "3. A worker: Common-rules, the hook, Worker.\n\n"
+        "The tools don't follow, by design: in a repo, anything beyond what Claude Code loads there. When one of "
+        "these matters, point to it from a rule file the tools follow. [P277]\n"),
     "Notes/Some note.md": "Just a note.\n",
     "Areas/Areas.md": ("| Area | Related folders | Vault folder |\n| --- | --- | --- |\n"
                        "| Repo | `D:\\work\\repo` | [[Areas/Repo/Repo\\|Repo]] |\n"),
@@ -672,45 +674,51 @@ def test_the_voice_bridges_texts_reach_the_relay_and_the_sessions_on_the_bridge(
         assert any(said in line for line in result.structure.not_followed)
 
 
-def test_docs_a_repos_claude_md_points_to_are_on_the_path_by_hash(vault):
+def test_in_a_repo_the_tools_stop_at_what_claude_code_loads(vault):
+    """P277: a repo's links to its own docs put nothing on the path, in a pointer shape or not, and count as no
+    mention; a link into the vault is still a vault pointer. Every path says what is left out by design, in the
+    words of the vault's paragraph, its ledger refs dropped."""
     claude_md = ("Repo rules.\n"
+                 "- [parser.md](docs/parser.md): any change to the parser\n"
                  "- Before changing the build, read [the build notes](docs/build.md#steps).\n"
-                 "- When releasing, follow `RELEASE.md`.\n"
                  "- When unsure, read `AGENTS.md`.\n"
-                 "- Background: [design](docs/design.md), [upstream](https://example.org/x.md).\n"
-                 "- Before deploying, read `docs/missing.md`.\n"
-                 "- When contributing, read `git show main:CLAUDE.md`.\n"
-                 "```\nBefore anything, read [fenced](docs/fenced.md).\n```\n")
-    doc = {"hash": "aaaaaaaaaaaa", "chars": 120_000}
+                 "- Read [design](docs/design.md) first.\n"
+                 "- Before writing Python, read `D:/vault/_/agent/guides/coding-practices.md`.\n")
     snap = {**SNAPSHOT, "format": 2,
             "files": {**SNAPSHOT["files"], "file:D:/work/repo/CLAUDE.md": {"text": claude_md},
-                      "file:D:/work/repo/AGENTS.md": {"text": "Agents. Before testing, read [deep](docs/deep.md).\n"}},
-            "docs": {f"file:D:/work/repo/{d}": {**doc, "path": f"D:/work/repo/{d}"}
-                     for d in ("docs/build.md", "RELEASE.md", "docs/design.md", "docs/deep.md", "docs/fenced.md")}}
+                      "file:D:/work/repo/AGENTS.md": {"text": "Agents.\n"}},
+            # A snapshot from before P277 still carrying `docs`: ignored.
+            "docs": {"file:D:/work/repo/docs/parser.md": {"path": "D:/work/repo/docs/parser.md", "hash": "a" * 12,
+                                                          "chars": 10}}}
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
+    plain = path(PathStart(typical=3))
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps({**snap, "files": SNAPSHOT["files"]}),
+                                                         encoding="utf-8")
+    before = path(PathStart(typical=3)).structure.mentions_not_followed
 
-    result = path(PathStart(typical=3))
-    by_id = {p.id: p for p in result.pieces}
-    build = by_id["file:D:/work/repo/docs/build.md"]
-    assert build.moment == "Before changing the build" and not build.always
-    # Its hash and size from the snapshot; its text stays on the PC.
-    assert build.hash == "aaaaaaaaaaaa" and build.chars == 120_000 and build.text is None and build.text_on_pc
-    assert any(n.startswith("2 pieces are marked text_on_pc") and "Read them on that PC" in n for n in result.notes)
-    assert by_id["file:D:/work/repo/RELEASE.md"].moment == "When releasing"
-    agents = by_id["file:D:/work/repo/AGENTS.md"]
-    assert agents.text.startswith("Agents.") and agents.moment == "When unsure"
-    # One level only; a mention, a URL, a command and a fenced line aren't pointers.
-    for gone in ("docs/deep.md", "docs/design.md", "docs/fenced.md"):
-        assert f"file:D:/work/repo/{gone}" not in by_id
-    assert not any("example.org" in i or "git show" in i for i in by_id)
-    nf = result.structure.not_followed
-    assert "`docs/missing.md`, pointed to by file:D:/work/repo/CLAUDE.md: PC's snapshot doesn't hold it" in nf
-    assert not any("docs a repo's CLAUDE.md points to" in line for line in nf)
-    # Held by hash like any piece; its text can't be asked for in parts.
-    again = path(PathStart(typical=3), known={p.id: p.hash for p in result.pieces})
-    assert not again.pieces
-    refused = asyncio.run(apt.agent_path_impl(PathStart(typical=3), None, None, ReadFrom(id=build.id)))
-    assert "read it on the PC" in refused.error
+    result = plain
+    repo = [i for i in ids(result) if i.startswith("file:D:/work/repo/")]
+    assert repo == ["file:D:/work/repo/CLAUDE.md"]
+    assert result.structure.mentions_not_followed == before
+    coding = next(p for p in result.pieces if p.id == "note:_/agent/guides/coding-practices.md")
+    assert "file:D:/work/repo/CLAUDE.md" in [coding.arrives.removeprefix("pointed to by "), *(coding.also_pointed_by or [])]
+    by_design = [line for line in result.structure.not_followed if line.startswith("The tools don't follow, by design:")]
+    assert by_design == ["The tools don't follow, by design: in a repo, anything beyond what Claude Code loads "
+                         "there. When one of these matters, point to it from a rule file the tools follow."]
+
+
+def test_the_overview_says_what_is_left_out_by_design_once(vault):
+    over = path()
+    assert not any(line.startswith(ap.BY_DESIGN_OPENING) for t in over.typical
+                   for line in t.structure.not_followed or [])
+    assert [line for line in over.across_every_area.not_followed if line.startswith(ap.BY_DESIGN_OPENING)]
+
+
+def test_without_the_vaults_by_design_paragraph_not_followed_says_it_is_missing(vault):
+    (vault / ap.WHERE_NOTE).write_text("## Checking a rule against agent paths\n\n1. A chat.\n", encoding="utf-8")
+    nf = path(PathStart(typical=3)).structure.not_followed
+    assert any(line.startswith("what the tools leave out by design:") and ap.BY_DESIGN_OPENING in line
+               for line in nf)
 
 
 # ── reached_by_no_path: a rule write no path reaches ─────────────────
@@ -934,30 +942,13 @@ def test_a_rule_write_says_in_one_line_when_reach_cannot_be_checked(writing):
     assert line.endswith("`agent_path_reached_by` on each changed place tells whether an agent path reaches it.")
 
 
-def test_a_repos_links_to_its_docs_follow_the_pointer_shapes(vault):
-    """P259 extended to a repo's CLAUDE.md: the index's shape takes a Markdown link or a backticked path, and a
-    link in none of the shapes (a reading verb, a table row) is a mention."""
-    claude_md = ("Repo rules.\n"
-                 "- [parser.md](docs/parser.md): any change to the parser, its grammar or its errors\n"
-                 "- [search.md, Private folders](docs/search.md#private-folders): `PRIVATE`, `include_private`\n"
-                 "- `NOTES.md`: when a decision is made. Keep it short.\n"
-                 "- [index.md](docs/index.md): when touching [other.md](docs/other.md)\n"
-                 "Read [verb.md](docs/verb.md) first.\n"
-                 "| Note | Read it before you touch |\n| --- | --- |\n"
-                 "| [table.md](docs/table.md) | the tables |\n")
-    doc = {"hash": "bbbbbbbbbbbb", "chars": 10}
-    names = ("docs/parser.md", "docs/search.md", "NOTES.md", "docs/index.md", "docs/other.md", "docs/verb.md",
-             "docs/table.md")
-    snap = {**SNAPSHOT, "format": 2,
-            "files": {**SNAPSHOT["files"], "file:D:/work/repo/CLAUDE.md": {"text": claude_md}},
-            "docs": {f"file:D:/work/repo/{d}": {**doc, "path": f"D:/work/repo/{d}"} for d in names}}
-    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
-
-    result = path(PathStart(typical=3))
-    moments = {p.id.removeprefix("file:D:/work/repo/"): p.moment for p in result.pieces
-               if p.id.startswith("file:D:/work/repo/") and p.id != "file:D:/work/repo/CLAUDE.md"}
-    # The other link on an index line, a reading verb and a table row are mentions, not on the path.
-    assert moments == {"docs/parser.md": "any change to the parser, its grammar or its errors",
-                       "docs/search.md": "`PRIVATE`, `include_private`",
-                       "NOTES.md": "when a decision is made",
-                       "docs/index.md": "when touching [other.md](docs/other.md)"}
+def test_into_areas_names_shared_and_local_pieces(vault):
+    """`into_areas` speaks of shared and local pieces, keeping "trunk" for its sense in Common-rules (P276)."""
+    common = vault / "_/agent/Common-rules.md"
+    common.write_text(common.read_text(encoding="utf-8") + "- When the build breaks, read [[Areas/Repo/Repo notes]].\n",
+                      encoding="utf-8")
+    st = path(PathStart(typical=1)).structure
+    assert {"from": "note:_/agent/Common-rules.md", "to": "note:Areas/Repo/Repo notes.md",
+            "kind": "shared into local"} in st.into_areas
+    source = open(ap.__file__, encoding="utf-8").read()
+    assert "local into another local" in source and "leaf into another leaf" not in source
