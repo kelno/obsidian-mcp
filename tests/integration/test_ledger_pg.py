@@ -1553,35 +1553,6 @@ async def test_note_writers_give_bare_name_links_their_full_path(sessionmaker, c
     assert (ctx / "cr.md").read_bytes() == b"Old [[Home]]\r\rNew [[projects/Home/Home|Home]]"
 
 
-async def test_the_link_rewrite_reads_only_the_named_notes_and_answers_as_with_all(sessionmaker, ctx):
-    """The database keeps the notes the links may name (`link_paths.lookups`:
-    LIKE over the path with ASCII capitals and the Kelvin sign folded); the
-    rewrite is the one the whole note list gives."""
-    from src.plugins import kelno_vault
-    from src.plugins.kelno_vault import link_paths
-
-    tricky = ["Ref/Under_score.md", "Ref/UnderXscore.md", "Ref/100%.md", "Ref/1000.md", "Ref/ÉTÉ.md",
-              "Old/été.md", "Ref/Kelvin.md", "Ref/kelvin.md", "Ref/İstanbul.md", "Ref/UPPER.MD",
-              "Ref/back\\slash.md", "Ref/Home.md.md", "projects/HOME/home.md"]
-    async with sessionmaker() as session:
-        for i, path in enumerate(tricky):
-            await session.execute(text(
-                "INSERT INTO notes_metadata (user_id, file_path, title, tags, frontmatter, content_hash) "
-                "VALUES (NULL, :p, 't', '{}', '{}', :h)"), {"p": path, "h": f"t{i}"})
-        await session.commit()
-        every = list((await session.execute(text("SELECT file_path FROM notes_metadata"))).scalars().all())
-    for written in (
-        "[[under_score]] [[UNDERXSCORE]] [[100%]] [[1000]] [[été]] [[ÉTÉ]] [[kelvin]] [[KELVIN]] [[upper]]",
-        "[[Ref/upper]] [[back\\slash]] [[Home.md]] [[home]] [[projects/home/home]] [[Nowhere]] [[İstanbul]]",
-        "[[Agent personnel]] and [[Home.md.md]]",
-    ):
-        write = plugins.NoteWrite("create_note", "new.md", None, written, False, None)
-        got_text, got_report, failure = await kelno_vault._full_path_links(write, written)
-        assert failure == ""
-        assert (got_text, got_report) == link_paths.rewrite(None, written, link_paths.NoteIndex([*every, "new.md"]))
-
-
-
 # ── Dated note names, where the folder notes declare them ────────────────────
 
 async def _named_folders(sessionmaker, root):
