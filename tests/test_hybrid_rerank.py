@@ -283,7 +283,10 @@ async def test_the_hybrid_worst_case_with_rerank(monkeypatch, captured, fake, mo
     session = _ExcerptSession(
         excerpts={path: "e" * 3000},
         ranked=[keyword],
-        snippet=[[snip(1, hl="a \x02b\x03", title=False, body=not split)]
+        # Since 2026-11-19 the split row's head comes in the first snippet
+        # statement; the head statement still runs for the other rows.
+        snippet=[[snip(1, hl="a \x02b\x03", title=False, body=not split,
+                       head="opening words" if split else None)]
                  + [snip(10 + i) for i in range(19)]]
         + ([[SimpleNamespace(_mapping={"id": 1, "head": "opening words"})]] if split else []))
     _serve(monkeypatch, session)

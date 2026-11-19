@@ -303,9 +303,10 @@ async def _snippets(session, ids: list[int], tsquery, plan: FallbackPlan | None)
             _headline(f"hl_cfg_{i}", configs[i], tsquery, f"hl_opts_{i}", HEADLINE_OPTIONS).label("hl"),
         ).where(NoteMetadata.id.in_(unhighlighted))
         for row in (await session.execute(hl_stmt)).all():
-            snippet = _rendered_snippet(row.hl)
-            if snippet is not None and row.id in out:
-                out[row.id]["snippet"] = snippet
+            m = row._mapping
+            snippet = _rendered_snippet(m["hl"])
+            if snippet is not None and m["id"] in out:
+                out[m["id"]]["snippet"] = snippet
         unhighlighted = [i_ for i_ in unhighlighted if out[i_]["snippet"] is None]
 
     need_head = [i_ for i_ in unhighlighted if out[i_]["has_excerpt"]]
@@ -315,8 +316,9 @@ async def _snippets(session, ids: list[int], tsquery, plan: FallbackPlan | None)
             _headline("head_cfg", configs[0], tsquery, "head_opts", HEAD_OPTIONS).label("head"),
         ).where(NoteMetadata.id.in_(need_head))
         for row in (await session.execute(head_stmt)).all():
-            if row.id in out:
-                out[row.id]["head"] = "" if row.head is None else strip_sentinels(row.head)
+            m = row._mapping
+            if m["id"] in out:
+                out[m["id"]]["head"] = "" if m["head"] is None else strip_sentinels(m["head"])
     return out
 
 
