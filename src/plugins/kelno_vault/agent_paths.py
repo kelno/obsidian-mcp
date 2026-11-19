@@ -35,6 +35,7 @@ also be loaded on its own (the comparison with the prototype does).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import heapq
 import json
@@ -115,8 +116,12 @@ def as_text(data: bytes) -> str:
     return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
+@functools.lru_cache(maxsize=8192)
 def section(text: str, heading: str) -> str | None:
-    """A level-2 section's text, heading included, up to the next heading of level 1 or 2 (Rule files' definition)."""
+    """A level-2 section's text, heading included, up to the next heading of level 1 or 2 (Rule files' definition).
+
+    Kept per (text, heading): every path reads the same notes' sections, the folder notes' above all, and this
+    took most of a path's time."""
     lines, inside, fence = [], False, False
     for line in text.splitlines():
         if line.lstrip().startswith("```"):
@@ -247,13 +252,30 @@ class Trace:
     stems: set[str] = field(default_factory=set)
     #: Path patterns it matched against every note (`Vault.matching`), as their regex source.
     patterns: set[str] = field(default_factory=set)
+    #: Notes it read only for one section (`Vault.section_of`): `(path, heading)` to that section's digest, None
+    #: when the note had none. A change elsewhere in such a note cannot change this path.
+    sections: dict[tuple[str, str], str | None] = field(default_factory=dict)
+
+    def reads(self, path: str) -> bool:
+        """Whether this path read the note at `path`, whole or for a section."""
+        low = path.lower()
+        return low in self.texts or any(p == low for p, _h in self.sections)
 
     def new_file_counts(self, path: str) -> bool:
         """Whether a note created at `path` could change this path: it looked for that path or name, or matched it."""
         low = path.lower()
         stem = posixpath.basename(low).removesuffix(".md")
-        return (low in self.texts or low in self.paths or stem in self.stems
+        return (self.reads(path) or low in self.paths or stem in self.stems
                 or any(re.fullmatch(p, path, re.I) for p in self.patterns))
+
+    def changed_by(self, path: str, text: str | None) -> bool:
+        """Whether `path`'s new text (None: gone) can change this path: it read the note whole, or a section it read
+        is not what it was."""
+        low = path.lower()
+        if low in self.texts:
+            return True
+        return any(p == low and (digest(body) if (body := section(text or "", h)) else None) != was
+                   for (p, h), was in self.sections.items())
 
 
 class Vault:
@@ -267,9 +289,19 @@ class Vault:
     def __init__(self, paths: list[str], read: Callable[[str], str | None], rule_files, areas: list,
                  pc_vault: str | None, trace: "Trace | None" = None):
         self._read, self._texts = read, {}
-        self._matches: dict[re.Pattern, list[str]] = {}
         #: Set by a caller drawing one path at a time (`Trace`), from the start for what the setup looks up.
         self.trace: Trace | None = trace
+        self.set_paths(paths)
+        self.rule_files = rule_files
+        self.rule_headings = list(rule_files.sections)
+        self.pc_vault = pc_vault
+        self.areas = [{"name": a.name, "folders": [f.replace("\\", "/") for f in a.folders],
+                       "main": self.resolve(a.main_note) if a.main_note else None} for a in areas]
+
+    def set_paths(self, paths: list[str]) -> None:
+        """The vault's files, as they are now: the lookups by path and by name follow, and the pattern matches are
+        found again (a kept drawing calls it when files came or went)."""
+        self._matches: dict[re.Pattern, list[str]] = {}
         self.by_rel: dict[str, str] = {}
         self.by_stem: dict[str, list[str]] = {}
         for r in sorted(paths):
@@ -277,11 +309,12 @@ class Vault:
             name = posixpath.basename(r)
             if name.endswith(".md"):
                 self.by_stem.setdefault(name[:-3].lower(), []).append(r)
-        self.rule_files = rule_files
-        self.rule_headings = list(rule_files.sections)
-        self.pc_vault = pc_vault
-        self.areas = [{"name": a.name, "folders": [f.replace("\\", "/") for f in a.folders],
-                       "main": self.resolve(a.main_note) if a.main_note else None} for a in areas]
+
+    def forget(self, r: str) -> None:
+        """Drop the text kept for `r`: it is read again when next asked for (a kept drawing, after it changed)."""
+        low = r.lower()
+        for key in [k for k in self._texts if k.lower() == low]:
+            del self._texts[key]
 
     def rel(self, pc_path: str) -> str | None:
         """The vault path of a PC path, or None outside the vault (or with no snapshot to say where it is)."""
@@ -336,6 +369,16 @@ class Vault:
         if r not in self._texts:
             self._texts[r] = self._read(r)
         return self._texts[r]
+
+    def section_of(self, r: str, heading: str) -> str | None:
+        """One rule section of note `r` (`section`), the note read for that section only: the trace keeps the
+        section, not the note's whole text."""
+        if r not in self._texts:
+            self._texts[r] = self._read(r)
+        body = section(self._texts[r] or "", heading)
+        if self.trace is not None:
+            self.trace.sections[(r.lower(), heading)] = digest(body) if body else None
+        return body
 
     def area(self, name_or_folder: str) -> dict | None:
         key = name_or_folder.replace("\\", "/").rstrip("/").lower()
@@ -677,9 +720,8 @@ class PathBuilder:
         for r in self.v.matching(pattern):
             if r.lower() == own:
                 continue
-            text = self.v.text(r) or ""
             if heading:
-                body = section(text, heading)
+                body = self.v.section_of(r, heading)
                 if body and to_rules:
                     self.push(Piece(f"section:{r}#{heading}", stage, arrives, self.v.where(r), body, via, moment,
                                     p.id, always))
@@ -689,6 +731,7 @@ class PathBuilder:
                     self.push(self.note_piece(r, stage, arrives, p.id, via, moment, always))
                     brought = True
             elif reads:
+                text = self.v.text(r) or ""
                 self.push(Piece(f"note:{r}", stage, arrives, self.v.where(r), text, via, moment, p.id, always,
                                 rule=False))
                 for h in self.v.rule_headings:
@@ -991,15 +1034,17 @@ class PathBuilder:
             nf.append("claude.ai's own system prompt and memory instructions (not the owner's)")
 
 
-def unfenced(text: str):
-    """The lines of `text` outside fenced code blocks: code, not links."""
-    fenced = False
+@functools.lru_cache(maxsize=4096)
+def unfenced(text: str) -> tuple[str, ...]:
+    """The lines of `text` outside fenced code blocks: code, not links. Kept per text, as `section`."""
+    out, fenced = [], False
     for line in text.splitlines():
         if line.lstrip().startswith(("```", "~~~")):
             fenced = not fenced
             continue
         if not fenced:
-            yield line
+            out.append(line)
+    return tuple(out)
 
 
 def file_targets(line: str) -> list[tuple[str, int]]:
@@ -1192,16 +1237,22 @@ def into_areas(b: PathBuilder) -> list[dict]:
     return out
 
 
-def every_rule_file(v: Vault) -> list[str]:
+def rule_sections_in(text: str, headings: list[str]) -> tuple[str, ...]:
+    """The rule sections `text` holds, by heading, in `headings`' order."""
+    return tuple(h for h in headings if section(text, h))
+
+
+def every_rule_file(v: Vault, sections_of: Callable[[str], tuple[str, ...]] | None = None) -> list[str]:
+    """Every rule note, and every rule section of another note. `sections_of(r)` gives a note's rule sections
+    (`rule_sections_in`) when the caller keeps them (a kept drawing, by each note's stat); otherwise each note is
+    read here."""
     out = []
     for r in v.by_rel.values():
         if v.is_rule_file(r):
             out.append(f"note:{r}")
         elif r.endswith(".md"):
-            text = v.text(r) or ""
-            for h in v.rule_headings:
-                if section(text, h):
-                    out.append(f"section:{r}#{h}")
+            held = sections_of(r) if sections_of else rule_sections_in(v.text(r) or "", v.rule_headings)
+            out += [f"section:{r}#{h}" for h in held]
     return sorted(out)
 
 
@@ -1254,9 +1305,9 @@ def reached_places(setup: Setup, places, runs) -> set[str]:
     return found
 
 
-def unreached_rule_files(setup: Setup, runs) -> list[str]:
-    """Rule files no run reaches (`reached_places`)."""
-    every = every_rule_file(setup.vault)
+def unreached_rule_files(setup: Setup, runs, every: list[str] | None = None) -> list[str]:
+    """Rule files no run reaches (`reached_places`); `every` is `every_rule_file`, when the caller has it."""
+    every = every_rule_file(setup.vault) if every is None else every
     reached = reached_places(setup, every, runs)
     return [r for r in every if r not in reached]
 
@@ -1295,9 +1346,10 @@ def matches(place: str, pid: str) -> bool:
     return body.lower() == place.lower() or (("#" not in place) and body.lower().split("#")[0] == place.lower())
 
 
-def reached_by(setup: Setup, place: str) -> dict:
+def reached_by(setup: Setup, place: str, runs: list | None = None) -> dict:
+    """Who reaches `place`, over `runs` (`all_runs`, drawn here when not given)."""
     v = setup.vault
-    runs = all_runs(setup)
+    runs = all_runs(setup) if runs is None else runs
     hits, how = [], "the place itself"
     for label, s, w, b in runs:
         ids = [i for i in b.order if matches(place, i)]

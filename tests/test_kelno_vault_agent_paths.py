@@ -9,6 +9,7 @@ first, the session-start hook and its role note, what opening the area brings, t
 import asyncio
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -123,6 +124,11 @@ def vault(tmp_path, monkeypatch):
         return ""
 
     monkeypatch.setattr(tools, "_ledger_guide", no_ledger)
+    # The kept drawing lives in this process, fresh for each test (production keeps it in the helper process).
+    monkeypatch.setattr(apt, "DRAW_IN_HELPER", False)
+    monkeypatch.setattr(apt, "_KEPT", {})
+    monkeypatch.setattr(apt, "_SECTIONS", {})
+    monkeypatch.setattr(apt, "_DRAWERS", {})
     for path, text in NOTES.items():
         (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / path).write_text(text, encoding="utf-8")
@@ -860,14 +866,14 @@ async def test_the_map_is_drawn_first_then_again_after_a_write_to_a_note_on_a_pa
     assert d.map is not second
     # Requests while a draw waits or runs make one more draw, not one each.
     drawn = []
-    real = apt.draw_reach_map
-    apt.draw_reach_map, restore = (lambda *a: drawn.append(1) or real(*a)), real
+    real = apt.update_reach_map
+    apt.update_reach_map, restore = (lambda *a: drawn.append(1) or real(*a)), real
     try:
         for _ in range(3):
             d.request(None)
         await d._task
     finally:
-        apt.draw_reach_map = restore
+        apt.update_reach_map = restore
     assert drawn == [1]
 
 
@@ -889,7 +895,7 @@ def test_the_helper_process_draws_the_same_map(vault, monkeypatch):
         monkeypatch.setenv(key, value)
     served = asyncio.run(apt._served(None))
     here = apt.draw_reach_map(None, served)
-    there = apt._helper().submit(apt._draw_in_helper, str(vault), served).result(timeout=300)
+    there = apt._helper().submit(apt._update_in_helper, str(vault), served).result(timeout=300)
     assert [r.reached for r in there.runs] == [r.reached for r in here.runs]
     assert there.inputs == here.inputs and there.registered == here.registered
 
@@ -952,3 +958,88 @@ def test_into_areas_names_shared_and_local_pieces(vault):
             "kind": "shared into local"} in st.into_areas
     source = open(ap.__file__, encoding="utf-8").read()
     assert "local into another local" in source and "leaf into another leaf" not in source
+
+
+# ── The kept drawing: brought up to date, the same as drawn afresh ───
+
+
+def _all_answers():
+    """Every kind of call, as JSON: the overview, each typical agent, a work path, two backward questions."""
+    calls = [path(), path(PathStart(typical=1)), path(PathStart(typical=3)),
+             path(PathStart(surface="claude-ai"), PathWork(area="Repo")),
+             asyncio.run(apt.agent_path_reached_by_impl("_/agent/Common-rules.md", None, None)),
+             asyncio.run(apt.agent_path_reached_by_impl("Areas/Repo/Repo.md#For agents", None, None))]
+    return [c.model_dump_json() for c in calls]
+
+
+def _same_as_fresh():
+    kept = _all_answers()
+    again = _all_answers()  # a second call on the kept drawing changes nothing
+    apt._KEPT.clear()
+    apt._SECTIONS.clear()
+    fresh = _all_answers()
+    assert kept == again
+    assert kept == fresh
+
+
+def _write_like_syncthing(p, text):
+    """Syncthing's write: a temp file renamed into place, the source's mtime set on it."""
+    st = p.stat()
+    tmp = p.with_name(".syncthing." + p.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.replace(tmp, p)
+
+
+def test_the_kept_drawing_follows_each_change_as_a_fresh_drawing_would(vault, monkeypatch):
+    drawn = counting_draws(monkeypatch)
+    _same_as_fresh()
+    # A note no path reads: nothing is drawn again.
+    _all_answers()
+    before = len(drawn)
+    (vault / "Notes/Unrelated.md").write_text("Nothing here.\n", encoding="utf-8")
+    _all_answers()
+    assert len(drawn) == before
+    # A rule note on every path gains a pointer to a note that doesn't exist yet, then does.
+    common = vault / "_/agent/Common-rules.md"
+    common.write_text(common.read_text(encoding="utf-8") + "- When stuck, read [[_/agent/Stuck]].\n", encoding="utf-8")
+    _same_as_fresh()
+    (vault / "_/agent/Stuck.md").write_text("Stuck rules.\n", encoding="utf-8")
+    _same_as_fresh()
+    # A note some path reads, rewritten as Syncthing does, with its old mtime and the same size.
+    _write_like_syncthing(vault / "Notes/Some note.md", "Just a nope.\n")
+    _same_as_fresh()
+    # The area's main note gains a pointer; a rule section added to a note only the overview's list reads.
+    area = vault / "Areas/Repo/Repo.md"
+    area.write_text(area.read_text(encoding="utf-8").replace(
+        "## Current position", "- When building, read [[_/agent/Stuck]].\n\n## Current position"), encoding="utf-8")
+    _same_as_fresh()
+    (vault / "Notes/Unrelated.md").write_text("Text.\n\n## For agents\n\n- Be kind.\n", encoding="utf-8")
+    _same_as_fresh()
+    # A note removed, a folder renamed.
+    (vault / "_/agent/Stuck.md").unlink()
+    _same_as_fresh()
+    (vault / "Notes").rename(vault / "Notes moved")
+    _same_as_fresh()
+    # The snapshot: its date alone, then its content.
+    snap = vault / f"{ap.SNAPSHOT_FOLDER}/PC.json"
+    snap.write_text(json.dumps({**SNAPSHOT, "made": "2026-11-20T10:00:00+01:00"}), encoding="utf-8")
+    assert json.loads(_all_answers()[1])["snapshot_made"] == "2026-11-20T10:00:00+01:00"
+    _same_as_fresh()
+    snap.write_text(json.dumps({**SNAPSHOT, "relay_notes": []}), encoding="utf-8")
+    _same_as_fresh()
+    # The list of areas.
+    areas = vault / ap.AREAS_NOTE
+    areas.write_text(areas.read_text(encoding="utf-8") + "| New | | [[Areas/New/New\\|New]] |\n", encoding="utf-8")
+    _same_as_fresh()
+
+
+def test_an_update_draws_again_only_the_paths_a_change_touches(drawing):
+    served = asyncio.run(apt._served(None))
+    first = apt.update_reach_map(None, served)
+    assert first.redrawn == len(first.runs)
+    assert apt.update_reach_map(None, served).redrawn == 0
+    area = drawing / "Areas/Repo/Repo.md"
+    area.write_text(area.read_text(encoding="utf-8") + "\nMore.\n", encoding="utf-8")
+    m = apt.update_reach_map(None, served)
+    assert 0 < m.redrawn < len(m.runs)

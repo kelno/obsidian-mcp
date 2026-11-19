@@ -20,6 +20,7 @@ import logging
 import multiprocessing
 import os
 import posixpath
+import threading
 import time
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
@@ -143,9 +144,10 @@ async def _served(uid) -> ap.ServedTexts:
                           open_area_instructions="\n".join(OPEN_AREA_INSTRUCTIONS))
 
 
-def _setup(uid, machine: str | None, served: ap.ServedTexts, read=None, trace: ap.Trace | None = None) -> ap.Setup:
+def _setup(uid, machine: str | None, served: ap.ServedTexts, read=None, trace: ap.Trace | None = None,
+           paths: list[str] | None = None) -> ap.Setup:
     notes: list[str] = []
-    paths = _vault_files(uid)
+    paths = _vault_files(uid) if paths is None else paths
     read = read or _reader(uid)
     try:
         rule_files = _rule_files.read(uid)
@@ -173,8 +175,8 @@ def _setup(uid, machine: str | None, served: ap.ServedTexts, read=None, trace: a
 # ── Whether a rule's place is reached, after a write ─────────────────
 #
 # Drawing every path took about a minute on the owner's server (an Atom C2750, 2026-11-19), so a write never
-# draws. Every path is drawn in a helper process, after the vault changes (`_Drawer`), into a reach map; a write
-# answers from the map with a few file stats, or says it can't tell. See docs/architecture/agent-paths.md,
+# draws. The kept drawing below is brought up to date in a helper process after the vault changes (`_Drawer`), and
+# gives a reach map; a write answers from the map with a few file stats, or says it can't tell. See docs/architecture/agent-paths.md,
 # "Reached, after a rule write".
 
 
@@ -219,14 +221,42 @@ class ReachMap:
     setup_trace: ap.Trace = field(default_factory=ap.Trace)
     #: The snapshots whose `made` counts: with several, it chooses the one the paths are drawn from.
     keep_made: frozenset[str] = frozenset()
+    #: How many paths this update drew again (all of them on a whole drawing).
+    redrawn: int = 0
 
 
-def _stat(uid, path: str) -> tuple[int, int] | None:
+def _signature(full: str) -> tuple[int, int, int, int] | None:
+    """What changes when a file or folder is written: its mtime and size, and its ctime and inode, since Syncthing
+    writes a temp file, renames it into place and sets the source device's mtime, so a file can come back with an
+    older mtime and the same size."""
     try:
-        st = os.stat(os.path.join(_vault_root(uid), path))
+        st = os.stat(full)
     except OSError:
         return None
-    return st.st_mtime_ns, st.st_size
+    return st.st_mtime_ns, st.st_size, st.st_ctime_ns, st.st_ino
+
+
+def _stat(uid, path: str) -> tuple[int, int, int, int] | None:
+    return _signature(os.path.join(_vault_root(uid), path))
+
+
+#: Threads taking a batch of signatures: each stat through gocryptfs is a FUSE round trip, which several threads
+#: overlap. Below `_PARALLEL_FROM` paths, one thread.
+_STAT_THREADS = 8
+_PARALLEL_FROM = 64
+
+
+def _signatures(fulls: list[str]) -> list[tuple | None]:
+    """`_signature` of each path, in order, taken by several threads for a large batch."""
+    global _STAT_POOL
+    if len(fulls) < _PARALLEL_FROM:
+        return [_signature(f) for f in fulls]
+    if _STAT_POOL is None:
+        _STAT_POOL = concurrent.futures.ThreadPoolExecutor(_STAT_THREADS, thread_name_prefix="agent-paths-stat")
+    return list(_STAT_POOL.map(_signature, fulls, chunksize=64))
+
+
+_STAT_POOL: concurrent.futures.ThreadPoolExecutor | None = None
 
 
 def _content(path: str, text: str | None, keep_made: bool = False) -> str | None:
@@ -270,50 +300,308 @@ def _chain_files(b: ap.PathBuilder, pid: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(files))
 
 
-def draw_reach_map(uid, served: ap.ServedTexts) -> ReachMap | str:
-    """Every path, drawn on the vault as it is now: the reach map, or why it can't be drawn."""
-    began = time.monotonic()
-    signed: dict[str, tuple | None] = {}
-    read = _signed_reader(uid, signed)
-    setup_trace = ap.Trace()
-    try:
-        setup = _setup(uid, None, served, read, setup_trace)
-    except (_SetupError, ap.StartingPointsError) as exc:
-        return str(exc)
-    if setup.snapshot is None:
-        return f"no PC has written a snapshot to {ap.SNAPSHOT_FOLDER}/, so what Claude Code loads is unknown"
-    read(_rule_files.RULE_FILES_PATH)  # read by `_setup` outside `read`: its signature joins the setup's
-    snapshots = [p for p in signed if _is_snapshot(p) and signed[p] is not None]
-    keep_made = frozenset(snapshots) if len(snapshots) > 1 else frozenset()
-    for p in keep_made:
-        signed[p] = (signed[p][0], _content(p, _reader(uid)(p), True))
-    setup_inputs = frozenset(signed)
-    v, runs = setup.vault, []
-    for _label, s, w in ap.run_starts(setup):
-        v.trace = ap.Trace()
-        b = ap.run(setup, s, w)
-        runs.append(_Run({pid: _chain_files(b, pid) for pid in b.order if pid.startswith(("note:", "section:"))},
-                         v.trace))
-        v.trace = None
+def _peak_kib() -> int:
+    """The drawing process's peak memory, KiB (0 where it can't be read)."""
     try:
         import resource
 
-        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # KiB on Linux
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # KiB on Linux
     except (ImportError, OSError):
-        peak = 0
-    return ReachMap(dict(v.by_rel), signed, setup_inputs, frozenset(ap.registered_hook_scripts(setup)), tuple(runs),
-                    round(time.monotonic() - began, 1), peak, setup_trace, keep_made)
+        return 0
 
 
-def _draw_in_helper(root: str, served: ap.ServedTexts) -> ReachMap | str:
-    """Run in the helper process: the vault at `root` read as a single-user server reads it."""
+# ── The kept drawing ─────────────────────────────────────────────────
+#
+# Every path is drawn once and kept (`_Kept`), in the helper process: a call to the path tools, and the reach map a
+# write answers from, both come from it. Before each use it is brought up to date from file stats: only the paths
+# whose reads a change touches are drawn again, all of them when what the setup reads changed. See
+# docs/architecture/agent-paths.md, "The kept drawing".
+
+
+class _Files:
+    """The vault's visible files (as `_vault_files` finds them), kept with each folder's signature: a file added,
+    removed or renamed changes its folder's mtime, so only those folders are listed again."""
+
+    def __init__(self, root: str):
+        self.root = root
+        #: Each visible folder, vault-relative ("" for the root): its signature, files and subfolders.
+        self.folders: dict[str, tuple[tuple | None, list[str], list[str]]] = {}
+        self._list("")
+
+    def _list(self, rel: str) -> None:
+        full = os.path.join(self.root, rel) if rel else self.root
+        sig = _signature(full)  # before listing: a change while listing shows at the next look
+        files, dirs = [], []
+        try:
+            with os.scandir(full) as it:
+                for e in it:
+                    if e.name.startswith("."):
+                        continue
+                    try:
+                        is_dir = e.is_dir()
+                    except OSError:
+                        is_dir = False
+                    if not is_dir:
+                        files.append(e.name)
+                    elif not e.is_symlink():  # os.walk lists a linked folder but doesn't go in
+                        dirs.append(e.name)
+        except OSError:
+            pass  # os.walk skips a folder it can't list
+        self.folders[rel] = (sig, files, dirs)
+        for d in dirs:
+            self._list(f"{rel}/{d}" if rel else d)
+
+    def _drop(self, rel: str) -> None:
+        _sig, _files, dirs = self.folders.pop(rel, (None, [], []))
+        for d in dirs:
+            self._drop(f"{rel}/{d}" if rel else d)
+
+    def paths(self) -> list[str]:
+        return [f"{rel}/{n}" if rel else n for rel, (_s, files, _d) in self.folders.items() for n in files]
+
+    def refresh(self) -> set[str]:
+        """List again the folders whose signature changed; the vault paths added or removed since."""
+        before = set(self.paths())
+        rels = list(self.folders)
+        now = _signatures([os.path.join(self.root, rel) if rel else self.root for rel in rels])
+        changed = [rel for rel, sig in zip(rels, now) if sig != self.folders[rel][0]]
+        if not changed:
+            return set()
+        for rel in changed:
+            if rel in self.folders:
+                self._drop(rel)
+                self._list(rel)
+        return before ^ set(self.paths())
+
+
+#: Rule sections held by each note, kept by its signature for the overview's list of every rule file: per vault
+#: root and rule headings, `{path: (signature, headings held)}`.
+_SECTIONS: dict[tuple[str, tuple[str, ...]], dict[str, tuple]] = {}
+
+
+def _run_key(s: ap.Start, w: ap.Work) -> tuple:
+    return (s.surface, s.folder, s.started_by, s.role, tuple(s.extras), s.name, s.handwritten, w.area, w.kind)
+
+
+@dataclass
+class _KeptRun:
+    label: str
+    start: ap.Start
+    work: ap.Work
+    b: ap.PathBuilder
+    trace: ap.Trace
+
+
+#: Paths drawn for calls with a start of their own (a work, a custom start), kept the same way, at most this many.
+_EXTRA_RUNS = 32
+
+
+class _Kept:
+    """Every path of one vault root and snapshot choice, drawn once, then kept up to date (`refresh`)."""
+
+    def __init__(self, uid, machine: str | None, served: ap.ServedTexts, files: _Files | None = None):
+        began = time.monotonic()
+        self.uid, self.machine, self.served = uid, machine, served
+        self.root = str(_vault_root(uid))
+        if files is not None:
+            files.refresh()
+        self.files = files or _Files(self.root)
+        #: Every file read, vault path to `(its signature, its text's digest)`, None for a missing file.
+        self.signed: dict[str, tuple | None] = {}
+        read = _signed_reader(uid, self.signed)
+        self.setup_trace = ap.Trace()
+        self.setup = _setup(uid, machine, served, read, self.setup_trace, self.files.paths())
+        read(_rule_files.RULE_FILES_PATH)  # read by `_setup` outside `read`: its signature joins the setup's
+        snapshots = [p for p in self.signed if _is_snapshot(p) and self.signed[p] is not None]
+        self.keep_made = frozenset(snapshots) if len(snapshots) > 1 else frozenset()
+        for p in self.keep_made:
+            self.signed[p] = (self.signed[p][0], _content(p, _reader(uid)(p), True))
+        self.setup_inputs = frozenset(self.signed)
+        self.setup.vault.trace = None
+        self.runs = [self._draw(label, s, w) for label, s, w in ap.run_starts(self.setup)]
+        self.extra: dict[tuple, _KeptRun] = {}
+        self.redrawn, self.seconds = len(self.runs), round(time.monotonic() - began, 1)
+        #: Whether the reach map sent out was drawn before the last change (`reach_map`).
+        self.map_due = True
+
+    def _draw(self, label: str, s: ap.Start, w: ap.Work) -> _KeptRun:
+        v = self.setup.vault
+        v.trace = ap.Trace()
+        try:
+            return _KeptRun(label, s, w, ap.run(self.setup, s, w), v.trace)
+        finally:
+            v.trace = None
+
+    def refresh(self, served: ap.ServedTexts) -> bool:
+        """Bring the drawing up to date with the vault; False when it must be drawn whole again (what the setup reads
+        changed, or the served texts)."""
+        began = time.monotonic()
+        if served != self.served:
+            return False
+        moved = self.files.refresh()
+        read = _reader(self.uid)
+        #: Each changed file's new text (None: gone).
+        changed: dict[str, str | None] = {}
+        signed = list(self.signed.items())
+        now = _signatures([os.path.join(self.root, p) for p, _b in signed])
+        for (p, before), st in zip(signed, now):
+            if before is None or st is None:
+                if (before is None) != (st is None):
+                    changed[p] = read(p)
+                continue
+            if st == before[0]:
+                continue
+            text = read(p)
+            digest = _content(p, text, p in self.keep_made)
+            if digest != before[1]:
+                changed[p] = text
+            elif text is not None:
+                self.signed[p] = (st, digest)
+                if _is_snapshot(p) and self.setup.snapshot is not None:
+                    # Only `made` changed (it is left out of the digest): the paths stand, the date follows.
+                    made = json.loads(text).get("made")
+                    if json.loads(text).get("machine") == self.setup.snapshot.machine:
+                        self.setup.snapshot.made = made
+        touched = {p.lower() for p in set(changed) | moved}
+        if (touched & {p.lower() for p in self.setup_inputs}
+                or any(self.setup_trace.changed_by(p, t) for p, t in changed.items())
+                or any(self.setup_trace.new_file_counts(p) or _is_snapshot(p) for p in moved)):
+            return False
+        if not touched:
+            self.redrawn = 0
+            return True
+        v = self.setup.vault
+        for p in changed:
+            v.forget(p)
+            self.signed.pop(p, None)
+        if moved:
+            v.set_paths(self.files.paths())
+
+        def stale(r: _KeptRun) -> bool:
+            return (any(r.trace.changed_by(p, t) for p, t in changed.items())
+                    or any(r.trace.new_file_counts(p) for p in moved))
+
+        self.redrawn = 0
+        for i, r in enumerate(self.runs):
+            if stale(r):
+                self.runs[i] = self._draw(r.label, r.start, r.work)
+                self.redrawn += 1
+        self.extra = {k: r for k, r in self.extra.items() if not stale(r)}
+        self.seconds = round(time.monotonic() - began, 1)
+        self.map_due = True
+        return True
+
+    def run_for(self, s: ap.Start, w: ap.Work) -> ap.PathBuilder:
+        """The path of `s` doing `w`: one of the kept runs, or drawn now and kept with them."""
+        key = _run_key(s, w)
+        for r in self.runs:
+            if _run_key(r.start, r.work) == key:
+                return r.b
+        if key not in self.extra:
+            if len(self.extra) >= _EXTRA_RUNS:
+                del self.extra[next(iter(self.extra))]
+            self.extra[key] = self._draw("", s, w)
+        return self.extra[key].b
+
+    def all_runs(self) -> list[tuple[str, ap.Start, ap.Work, ap.PathBuilder]]:
+        return [(r.label, r.start, r.work, r.b) for r in self.runs]
+
+    def every_rule_file(self) -> list[str]:
+        """`agent_paths.every_rule_file`, each note's rule sections kept by its signature (`_SECTIONS`): only a note
+        that changed since is read again."""
+        v = self.setup.vault
+        headings = tuple(v.rule_headings)
+        kept = _SECTIONS.setdefault((self.root, headings), {})
+        notes = [r for r in v.by_rel.values() if r.endswith(".md") and not v.is_rule_file(r)]
+        now = dict(zip(notes, _signatures([os.path.join(self.root, r) for r in notes])))
+        for gone in set(kept) - set(notes):
+            del kept[gone]
+        read = _reader(self.uid)
+
+        def sections_of(r: str) -> tuple[str, ...]:
+            st, hit = now.get(r), kept.get(r)
+            if hit is None or st is None or hit[0] != st:
+                hit = kept[r] = (st, ap.rule_sections_in(read(r) or "", list(headings)))
+            return hit[1]
+        return ap.every_rule_file(v, sections_of)
+
+    def reach_map(self) -> ReachMap | str:
+        """The reach map a write answers from: this drawing's paths, what they reached by which files, and every
+        file they and the setup read."""
+        self.map_due = False
+        if self.setup.snapshot is None:
+            return f"no PC has written a snapshot to {ap.SNAPSHOT_FOLDER}/, so what Claude Code loads is unknown"
+        inputs = {p: s for p, s in self.signed.items()
+                  if p in self.setup_inputs or any(r.trace.reads(p) for r in self.runs)}
+        runs = tuple(_Run({pid: _chain_files(r.b, pid) for pid in r.b.order if pid.startswith(("note:", "section:"))},
+                          r.trace) for r in self.runs)
+        return ReachMap(dict(self.setup.vault.by_rel), inputs, self.setup_inputs,
+                        frozenset(ap.registered_hook_scripts(self.setup)), runs, self.seconds, _peak_kib(),
+                        self.setup_trace, self.keep_made, self.redrawn)
+
+
+#: The kept drawings of this process, by vault root and snapshot choice (`machine`, None for the default).
+_KEPT: dict[tuple[str, str | None], _Kept] = {}
+_KEPT_LOCK = threading.Lock()
+
+
+def _kept(uid, machine: str | None, served: ap.ServedTexts) -> _Kept:
+    """The kept drawing for this root and machine, brought up to date, or drawn whole when it must be. Call with
+    `_KEPT_LOCK` held. Raises _SetupError (or StartingPointsError) when a path can't be drawn."""
+    key = (str(_vault_root(uid)), machine.casefold() if machine else None)
+    k = _KEPT.get(key)
+    if k is not None:
+        try:
+            if k.refresh(served):
+                return k
+        except Exception:
+            _KEPT.pop(key, None)
+            raise
+        files = k.files
+    else:
+        files = None
+    _KEPT.pop(key, None)
+    k = _Kept(uid, machine, served, files)
+    _KEPT[key] = k
+    return k
+
+
+def draw_reach_map(uid, served: ap.ServedTexts) -> ReachMap | str:
+    """Every path, drawn now on the vault as it is, not kept: the reach map, or why it can't be drawn."""
+    try:
+        return _Kept(uid, None, served).reach_map()
+    except (_SetupError, ap.StartingPointsError) as exc:
+        return str(exc)
+
+
+def update_reach_map(uid, served: ap.ServedTexts) -> ReachMap | str:
+    """The kept drawing brought up to date: the reach map, or why it can't be drawn."""
+    with _KEPT_LOCK:
+        try:
+            return _kept(uid, None, served).reach_map()
+        except (_SetupError, ap.StartingPointsError) as exc:
+            return str(exc)
+
+
+def _as_single_user(root: str) -> None:
+    """In the helper process: the vault at `root` read as a single-user server reads it."""
     from src.config import settings
     from src.services import vault as vault_service
 
-    settings.multi_user_mode = False
-    settings.vault_path = root
-    vault_service.clear_user_vault_cache()
-    return draw_reach_map(None, served)
+    if settings.multi_user_mode or settings.vault_path != root:
+        settings.multi_user_mode = False
+        settings.vault_path = root
+        vault_service.clear_user_vault_cache()
+
+
+def _update_in_helper(root: str, served: ap.ServedTexts) -> ReachMap | str:
+    _as_single_user(root)
+    return update_reach_map(None, served)
+
+
+def _call_in_helper(root: str, kind: str, args: tuple, served: ap.ServedTexts):
+    _as_single_user(root)
+    return _answer_call(None, kind, args, served)
 
 
 def _lower_priority() -> None:
@@ -360,6 +648,15 @@ class _Drawer:
         if self._task is None or self._task.done():
             self._task = asyncio.get_running_loop().create_task(self._draw(uid))
 
+    def took(self, result: "ReachMap | str") -> None:
+        """A drawing's reach map, or why it failed: kept for the writes' answers, and logged."""
+        if isinstance(result, str):
+            self.failure = result
+            return
+        self.map, self.failure = result, ""
+        logger.info("agent paths: reach map drawn in %.1f s (redrew %d of %d paths), drawing process peak memory "
+                    "%d MiB", result.seconds, result.redrawn, len(result.runs), result.peak_kib // 1024)
+
     async def _draw(self, uid) -> None:
         while True:
             while (wait := self._due - time.monotonic()) > 0:
@@ -369,20 +666,15 @@ class _Drawer:
                 served = await _served(uid)
                 if DRAW_IN_HELPER:
                     result = await asyncio.get_running_loop().run_in_executor(
-                        _helper(), _draw_in_helper, self.root, served)
+                        _helper(), _update_in_helper, self.root, served)
                 else:
-                    result = await asyncio.to_thread(draw_reach_map, uid, served)
+                    result = await asyncio.to_thread(update_reach_map, uid, served)
             except Exception as exc:  # noqa: BLE001 — a failed draw is said on the next write, never raised
                 logger.warning("agent paths: drawing the reach map failed", exc_info=True)
                 result = f"drawing the agent paths failed ({type(exc).__name__})"
                 if isinstance(exc, BrokenProcessPool):
                     _drop_helper()
-            if isinstance(result, str):
-                self.failure = result
-            else:
-                self.map, self.failure = result, ""
-                logger.info("agent paths: reach map drawn in %.1f s, %d paths, drawing process peak memory %d MiB",
-                            result.seconds, len(result.runs), result.peak_kib // 1024)
+            self.took(result)
             if self._due == due:  # no request came while drawing
                 return
 
@@ -428,7 +720,7 @@ def _answer(uid, m: ReachMap, path: str, created: bool, places: list[str]) -> tu
         raise ReachUnknown(_REDRAWING)
     # A note the map didn't have counts as new, whether or not this write creates it.
     new = created or not known
-    touched = (any(written.lower() in r.trace.texts or (new and r.trace.new_file_counts(written)) for r in m.runs)
+    touched = (any(r.trace.reads(written) or (new and r.trace.new_file_counts(written)) for r in m.runs)
                or (new and m.setup_trace.new_file_counts(written)))
     stale = bool(moved) or touched
     found = set()
@@ -810,92 +1102,116 @@ def _failed(result_type, prose: str, code: str = "invalid_argument"):
 # ── The tools ────────────────────────────────────────────────────────
 
 
+def _answer_call(uid, kind: str, args: tuple, served: ap.ServedTexts):
+    """A path tool's call, answered from the kept drawing (brought up to date first): `("ok", result, reach map or
+    None)` or `("error", why, None)`. The reach map comes back when the drawing changed since the last one sent, so
+    the writes answer from the same drawing."""
+    machine = (args[0].machine if args[0] else None) if kind == "path" else args[2]
+    with _KEPT_LOCK:
+        try:
+            k = _kept(uid, machine, served)
+            result = _path_result(k, *args) if kind == "path" else _reached_by_result(k, *args)
+        except (_SetupError, ap.StartingPointsError) as exc:
+            return "error", str(exc), None
+        return "ok", result, (k.reach_map() if machine is None and k.map_due else None)
+
+
+async def _in_drawing(uid, kind: str, args: tuple):
+    """Run a path tool's call where the kept drawing lives: the helper process, or a thread of this one (tests)."""
+    served = await _served(uid)
+    if DRAW_IN_HELPER:
+        try:
+            status, out, reach = await asyncio.get_running_loop().run_in_executor(
+                _helper(), _call_in_helper, str(_vault_root(uid)), kind, args, served)
+        except BrokenProcessPool:
+            _drop_helper()
+            raise
+    else:
+        status, out, reach = await asyncio.to_thread(_answer_call, uid, kind, args, served)
+    if reach is not None:
+        _drawer(uid).took(reach)
+    return status, out
+
+
+def _path_result(kept: _Kept, start: PathStart | None, work: PathWork | None, known: dict | None,
+                 read_from: ReadFrom | None) -> AgentPathResult:
+    setup = kept.setup
+    notes = list(setup.notes)
+    snap = setup.snapshot
+    common = {"machine": snap.machine if snap else None, "snapshot_made": snap.made if snap else None}
+    if start is None:
+        if read_from is not None:
+            raise _SetupError("read_from needs the start (and work) of the call that gave text_in_parts.")
+        runs = kept.all_runs()
+        typical = [TypicalPath(number=s.handwritten, name=label, pieces=_overview_lines(b, known), structure=_structure(ap.structure_of(b)))
+                   for label, s, _w, b in runs[: len(setup.points.typical)]]
+        notes.append("Pass start (a typical agent's number, or a surface and folder) for one path with its "
+                     "texts.")
+        unreached = ap.unreached_rule_files(setup, runs, kept.every_rule_file())
+        if unreached:
+            notes.append(_NO_PATH_NOTE)
+        # What every path leaves out by design is said once, across every area, rather than on each path.
+        by_design = ap.by_design(setup.vault)
+        for t in typical:
+            t.structure.not_followed = [x for x in t.structure.not_followed or [] if x != by_design] or None
+        across = _structure(ap.across_runs(runs))
+        across.not_followed = [by_design]
+        result = AgentPathResult(typical=typical, rule_files_no_path_reaches=unreached,
+                                 across_every_area=across, notes=notes, **common)
+        _fit_overview(result)
+        return result
+    s = _start_of(start, setup.points)
+    w = ap.Work(work.area, work.kind) if work else ap.Work()
+    b = kept.run_for(s, w)
+    if s.role and not b.role_picked and not _ROLE_EXTRAS.get(s.role):
+        # Nothing on this path offers a choice of role note (on claude.ai, no session-start hook does):
+        # said, so a path drawn for a start that isn't a real case isn't taken for its answer (owner).
+        notes.append(f"role: {s.role} changed nothing: no line on this path picks a role note.")
+    notes += _changed_hook_scripts(setup, b.order)
+    pieces = [b.pieces[i] for i in b.order]
+    out = [_piece(p, known) for p in pieces]
+    result = AgentPathResult(
+        start={k: v for k, v in vars(s).items() if v}, work={k: v for k, v in vars(w).items() if v} or None,
+        pieces=out, left_path=_left_path(known, b.order),
+        structure=_structure(ap.structure_of(b)), notes=notes or None, **common)
+    if read_from is not None:
+        return _part_of(result, pieces, out, read_from)
+    _with_texts(result, pieces, out, notes, known)
+    return result
+
+
+def _reached_by_result(kept: _Kept, place: str, known: dict | None, machine: str | None,
+                       read_from: ReadFrom | None) -> ReachedByResult:
+    setup = kept.setup
+    notes = list(setup.notes)
+    r = ap.reached_by(setup, place.strip(), kept.all_runs())
+    notes += _changed_hook_scripts(setup, r["pieces"])
+    if r["matched_by"].startswith("nothing"):
+        notes.append(_NO_PATH_NOTE)
+    pieces = list(r["pieces"].values())
+    out = [_piece(p, known) for p in pieces]
+    snap = setup.snapshot
+    result = ReachedByResult(
+        place=r["place"], matched_by=r["matched_by"], reached_by=r["reached_by"],
+        machine=snap.machine if snap else None, snapshot_made=snap.made if snap else None, pieces=out,
+        left_path=_left_path(known, r["pieces"]), structure=_structure(r["structure"]), notes=notes or None)
+    if read_from is not None:
+        result.reached_by = None
+        return _part_of(result, pieces, out, read_from)
+    _with_texts(result, pieces, out, notes, known)
+    return result
+
+
 async def agent_path_impl(start: PathStart | None, work: PathWork | None, known: dict | None,
                           read_from: ReadFrom | None = None) -> AgentPathResult:
-    uid = current_user_id.get()
-    served = await _served(uid)
-    machine = start.machine if start else None
-
-    def draw() -> AgentPathResult:
-        setup = _setup(uid, machine, served)
-        notes = list(setup.notes)
-        snap = setup.snapshot
-        common = {"machine": snap.machine if snap else None, "snapshot_made": snap.made if snap else None}
-        if start is None:
-            if read_from is not None:
-                raise _SetupError("read_from needs the start (and work) of the call that gave text_in_parts.")
-            runs = ap.all_runs(setup)
-            typical = [TypicalPath(number=s.handwritten, name=label, pieces=_overview_lines(b, known), structure=_structure(ap.structure_of(b)))
-                       for label, s, _w, b in runs[: len(setup.points.typical)]]
-            notes.append("Pass start (a typical agent's number, or a surface and folder) for one path with its "
-                         "texts.")
-            unreached = ap.unreached_rule_files(setup, runs)
-            if unreached:
-                notes.append(_NO_PATH_NOTE)
-            # What every path leaves out by design is said once, across every area, rather than on each path.
-            by_design = ap.by_design(setup.vault)
-            for t in typical:
-                t.structure.not_followed = [x for x in t.structure.not_followed or [] if x != by_design] or None
-            across = _structure(ap.across_runs(runs))
-            across.not_followed = [by_design]
-            result = AgentPathResult(typical=typical, rule_files_no_path_reaches=unreached,
-                                     across_every_area=across, notes=notes, **common)
-            _fit_overview(result)
-            return result
-        s = _start_of(start, setup.points)
-        w = ap.Work(work.area, work.kind) if work else ap.Work()
-        b = ap.run(setup, s, w)
-        if s.role and not b.role_picked and not _ROLE_EXTRAS.get(s.role):
-            # Nothing on this path offers a choice of role note (on claude.ai, no session-start hook does):
-            # said, so a path drawn for a start that isn't a real case isn't taken for its answer (owner).
-            notes.append(f"role: {s.role} changed nothing: no line on this path picks a role note.")
-        notes += _changed_hook_scripts(setup, b.order)
-        pieces = [b.pieces[i] for i in b.order]
-        out = [_piece(p, known) for p in pieces]
-        result = AgentPathResult(
-            start={k: v for k, v in vars(s).items() if v}, work={k: v for k, v in vars(w).items() if v} or None,
-            pieces=out, left_path=_left_path(known, b.order),
-            structure=_structure(ap.structure_of(b)), notes=notes or None, **common)
-        if read_from is not None:
-            return _part_of(result, pieces, out, read_from)
-        _with_texts(result, pieces, out, notes, known)
-        return result
-
-    try:
-        return await asyncio.to_thread(draw)
-    except (_SetupError, ap.StartingPointsError) as exc:
-        return _failed(AgentPathResult, str(exc))
+    status, out = await _in_drawing(current_user_id.get(), "path", (start, work, known, read_from))
+    return out if status == "ok" else _failed(AgentPathResult, out)
 
 
 async def agent_path_reached_by_impl(place: str, known: dict | None, machine: str | None,
                                      read_from: ReadFrom | None = None) -> ReachedByResult:
-    uid = current_user_id.get()
-    served = await _served(uid)
-
-    def draw() -> ReachedByResult:
-        setup = _setup(uid, machine, served)
-        notes = list(setup.notes)
-        r = ap.reached_by(setup, place.strip())
-        notes += _changed_hook_scripts(setup, r["pieces"])
-        if r["matched_by"].startswith("nothing"):
-            notes.append(_NO_PATH_NOTE)
-        pieces = list(r["pieces"].values())
-        out = [_piece(p, known) for p in pieces]
-        snap = setup.snapshot
-        result = ReachedByResult(
-            place=r["place"], matched_by=r["matched_by"], reached_by=r["reached_by"],
-            machine=snap.machine if snap else None, snapshot_made=snap.made if snap else None, pieces=out,
-            left_path=_left_path(known, r["pieces"]), structure=_structure(r["structure"]), notes=notes or None)
-        if read_from is not None:
-            result.reached_by = None
-            return _part_of(result, pieces, out, read_from)
-        _with_texts(result, pieces, out, notes, known)
-        return result
-
-    try:
-        return await asyncio.to_thread(draw)
-    except (_SetupError, ap.StartingPointsError) as exc:
-        return _failed(ReachedByResult, str(exc))
+    status, out = await _in_drawing(current_user_id.get(), "reached_by", (place, known, machine, read_from))
+    return out if status == "ok" else _failed(ReachedByResult, out)
 
 
 #: Said in a result that reports a place no path reaches: a cold reader took it for `not_followed` (2026-11-19).
