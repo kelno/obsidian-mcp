@@ -973,11 +973,18 @@ def _all_answers():
 
 
 def _same_as_fresh():
+    """The kept drawing's answers equal a fresh drawing's; the kept drawing then goes on, so a change seen only
+    over two steps shows too."""
     kept = _all_answers()
     again = _all_answers()  # a second call on the kept drawing changes nothing
+    saved, sections = dict(apt._KEPT), {k: dict(v) for k, v in apt._SECTIONS.items()}
     apt._KEPT.clear()
     apt._SECTIONS.clear()
     fresh = _all_answers()
+    apt._KEPT.clear()
+    apt._KEPT.update(saved)
+    apt._SECTIONS.clear()
+    apt._SECTIONS.update(sections)
     assert kept == again
     assert kept == fresh
 
@@ -1031,6 +1038,37 @@ def test_the_kept_drawing_follows_each_change_as_a_fresh_drawing_would(vault, mo
     # The list of areas.
     areas = vault / ap.AREAS_NOTE
     areas.write_text(areas.read_text(encoding="utf-8") + "| New | | [[Areas/New/New\\|New]] |\n", encoding="utf-8")
+    _same_as_fresh()
+
+
+def test_a_note_read_for_one_section_stays_watched_after_an_edit_elsewhere(vault):
+    """Adversarial review, 2026-11-19: an edit outside the section kept the note unwatched, so a later edit of the
+    section was missed, by the tools and by the write check."""
+    common = vault / "_/agent/Common-rules.md"
+    common.write_text(common.read_text(encoding="utf-8") + "- Before reaching a machine, read the `## For agents` "
+                      "section of `Reference/Servers/<name>/<name>.md`.\n", encoding="utf-8")
+    (vault / "_/agent/Deploy.md").write_text("Deploy rules.\n", encoding="utf-8")
+    m1 = vault / "Reference/Servers/M1/M1.md"
+    m1.parent.mkdir(parents=True)
+    m1.write_text("Machine.\n\n## For agents\n\n- When deploying, read [[_/agent/Deploy]].\n", encoding="utf-8")
+    _same_as_fresh()
+    m1.write_text("Machine, edited.\n\n## For agents\n\n- When deploying, read [[_/agent/Deploy]].\n", encoding="utf-8")
+    _same_as_fresh()
+    m = apt.update_reach_map(None, asyncio.run(apt._served(None)))
+    assert "Reference/Servers/M1/M1.md" in m.inputs
+    m1.write_text("Machine, edited.\n\n## For agents\n\n- Be careful.\n", encoding="utf-8")
+    with pytest.raises(apt.ReachUnknown):
+        apt._answer(None, m, "_/agent/Deploy.md", False, ["note:_/agent/Deploy.md"])
+    _same_as_fresh()
+    assert "note:_/agent/Deploy.md" not in _all_answers()[1]
+
+
+def test_a_touched_malformed_snapshot_beside_a_good_one_is_no_error(vault):
+    bad = vault / f"{ap.SNAPSHOT_FOLDER}/Bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert path().error is None
+    st = bad.stat()
+    os.utime(bad, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
     _same_as_fresh()
 
 

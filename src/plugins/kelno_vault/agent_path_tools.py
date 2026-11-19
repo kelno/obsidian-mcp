@@ -445,23 +445,24 @@ class _Kept:
         signed = list(self.signed.items())
         now = _signatures([os.path.join(self.root, p) for p, _b in signed])
         for (p, before), st in zip(signed, now):
-            if before is None or st is None:
-                if (before is None) != (st is None):
-                    changed[p] = read(p)
+            if before is not None and st == before[0]:
                 continue
-            if st == before[0]:
-                continue
-            text = read(p)
-            digest = _content(p, text, p in self.keep_made)
-            if digest != before[1]:
+            # Read again (a file that couldn't be read before, missing or too large, is tried each time): its new
+            # signature, taken before the read, is kept whatever comes of it, so the file stays watched, a note read
+            # only for a section that didn't change included (adversarial review, 2026-11-19).
+            text = None if st is None else read(p)
+            now_signed = None if text is None else (st, _content(p, text, p in self.keep_made))
+            if (before is None) != (now_signed is None) or (before and now_signed and before[1] != now_signed[1]):
                 changed[p] = text
-            elif text is not None:
-                self.signed[p] = (st, digest)
-                if _is_snapshot(p) and self.setup.snapshot is not None:
-                    # Only `made` changed (it is left out of the digest): the paths stand, the date follows.
-                    made = json.loads(text).get("made")
-                    if json.loads(text).get("machine") == self.setup.snapshot.machine:
-                        self.setup.snapshot.made = made
+            elif text is not None and _is_snapshot(p) and self.setup.snapshot is not None:
+                # Only `made` changed (it is left out of the digest): the paths stand, the date follows.
+                try:
+                    data = json.loads(text)
+                except ValueError:
+                    data = {}
+                if isinstance(data, dict) and data.get("machine") == self.setup.snapshot.machine:
+                    self.setup.snapshot.made = data.get("made")
+            self.signed[p] = now_signed
         touched = {p.lower() for p in set(changed) | moved}
         if (touched & {p.lower() for p in self.setup_inputs}
                 or any(self.setup_trace.changed_by(p, t) for p, t in changed.items())
@@ -473,7 +474,6 @@ class _Kept:
         v = self.setup.vault
         for p in changed:
             v.forget(p)
-            self.signed.pop(p, None)
         if moved:
             v.set_paths(self.files.paths())
 
