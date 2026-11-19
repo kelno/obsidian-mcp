@@ -757,10 +757,13 @@ def _offline_change_feed(request):
 
 
 @pytest.fixture(autouse=True)
-def _reach_map_in_a_thread(monkeypatch):
+def _reach_map_in_a_thread():
     """The kelno_vault plugin draws its reach map in a helper process it starts; a test that loads the plugin
     draws it in a thread instead, so no test leaves a process behind. The test of the helper itself calls it
-    directly."""
+    directly. Not through `monkeypatch`: requesting it here moved its undo after `_reset_provider_cache`'s
+    teardown, which then met a test's stand-in `get_provider`."""
     from src.plugins.kelno_vault import agent_path_tools
 
-    monkeypatch.setattr(agent_path_tools, "DRAW_IN_HELPER", False)
+    agent_path_tools.DRAW_IN_HELPER = False
+    yield
+    agent_path_tools.DRAW_IN_HELPER = True
