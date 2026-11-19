@@ -86,11 +86,15 @@ STAGE_NAMES = {
     TOOLS: "when the connector's tools load",
     LATER: "when its moment comes",
 }
+#: How a tool's text arrives in Claude Code, which defers the connector's tools (test bench, 2026-11-20: one
+#: wording with the stage's).
+DEFERRED_TOOLS = "when the connector's tools load (in Claude Code, deferred: when a tool search loads the tool)"
 
 # A pointer to a rule note says when to read it in one of a closed list of shapes, set out in "How to write an
 # instruction" in WHERE_NOTE [P259]: its bullet or sentence opens with one of these words (anything before the first
 # word that isn't a letter is ignored, so a bold label in front doesn't pass), or it takes the guide index's shape,
-# `[[note]]: when to read it`. The moment is that opening, up to the first : ; , full stop or table cell.
+# `[[note]]: when to read it`. The moment is the pointer's whole condition, up to where its instruction starts
+# (`whole_condition`), else that opening up to the first : ; , full stop or table cell.
 # The same shapes hold for a repo's `CLAUDE.md` or `AGENTS.md` pointing into the vault, where the index's link is
 # a Markdown link or a backticked path (`[x.md](D:/vault/x.md): when to read it`).
 POINTER_LEAD = re.compile(r"^((?:at the start|while|when|before)\b(?:[^:;,.|]|\|(?!\s))*)", re.I)
@@ -922,6 +926,10 @@ class PathBuilder:
         done: dict[str, list[dict]] = {}
         for pid in self.order:
             self.pieces[pid].moments = self.moments_of(pid, done, frozenset())
+        for pid in self.order:
+            self.pieces[pid].moments = self.placing_first(self.pieces[pid])
+        for pid in self.order:
+            self.pieces[pid].moments = self.with_after(self.pieces[pid])
         # The order shown is the stages' (stable within a stage: the start's pieces, then the area's, then what the
         # hooks say at other events, then the tools).
         self.order.sort(key=lambda i: self.pieces[i].stage)
@@ -964,6 +972,37 @@ class PathBuilder:
         if not visiting:  # one cut short by a loop is not kept
             done[pid] = unique
         return unique
+
+    def placing_first(self, p: Piece) -> list[dict]:
+        """The piece's moments, the arrival that places it first, marked `placed`: what gives its stage and
+        `always`; the others are other routes to it (cold read, 2026-11-20: listed flat, other agents' routes
+        hid this agent's own). What open_area serves gets an entry of its own, "when the area is opened", from
+        the tool (test bench, 2026-11-20: an area's `## For agents` showed only another route)."""
+        ms = list(p.moments)
+        if p.parent is None:
+            if p.stage == WORK and p.arrives.startswith("served by open_area"):
+                return [{"moment": "when the area is opened", "piece": f"tool:{SERVER}:open_area", "line": None,
+                         "through": [], "placed": True}, *ms]
+            if ms and ms[0]["piece"] is None and ms[0]["moment"] == p.moment:  # a hook's message, a nested CLAUDE.md
+                return [{**ms[0], "placed": True}, *ms[1:]]
+            return ms
+        for n, e in enumerate(ms):
+            own = e["piece"] == p.parent and e["moment"] == p.moment and not e["through"]
+            if own or (e["through"] and e["through"][-1] == p.parent):
+                return [{**e, "placed": True}, *ms[:n], *ms[n + 1:]]
+        return ms
+
+    def with_after(self, p: Piece) -> list[dict]:
+        """A line in a piece that itself waits on a moment is met only once that piece is read: its entry says
+        after which moment (`after`, the waiting piece's placing one) (test bench, 2026-11-20: Agent
+        personnel's "When working in this area" read as a route on every area's path)."""
+        out = []
+        for e in p.moments:
+            src = self.pieces.get(e["piece"]) if e["piece"] else None
+            if src is not None and not src.always and not e["through"] and src.moments:
+                e = {**e, "after": src.moments[0]["moment"]}
+            out.append(e)
+        return out
 
     def pc_folder(self) -> tuple[str, dict] | None:
         """The snapshot's entry for this start's folder (the home folder when none is given)."""
@@ -1164,7 +1203,7 @@ class PathBuilder:
             return entry.get("text") or "" if isinstance(entry, dict) else ""
 
         claude_code = self.start.surface == "claude-code"
-        tools_arrive = "when the tool is loaded (deferred in Claude Code)" if claude_code else STAGE_NAMES[TOOLS]
+        tools_arrive = DEFERRED_TOOLS if claude_code else STAGE_NAMES[TOOLS]
         if text(b.get("instructions")):
             self.push(Piece(f"instructions:{BRIDGE_SERVER}", TOOLS, "handed to the client when it connects to the "
                             "bridge", where, text(b["instructions"]), rule=False))
@@ -1254,7 +1293,7 @@ class PathBuilder:
             return
         served = self.setup.served
         deferred = self.start.surface == "claude-code"
-        how = "when the tool is loaded (deferred in Claude Code)" if deferred else STAGE_NAMES[TOOLS]
+        how = DEFERRED_TOOLS if deferred else STAGE_NAMES[TOOLS]
         self.push(Piece(f"instructions:{SERVER}", TOOLS, "handed to the client when it connects (claude.ai is "
                         "reported to drop them)", f"{SERVER}: the server instructions", served.instructions,
                         rule=False))
@@ -1386,7 +1425,8 @@ def pointer_moment(line: str, sentence: str, target: str | None = None) -> str |
             m = lead.group(1).replace("**", "").strip()  # a bold opening is still the opening
             if m.count("(") > m.count(")"):  # cut by a comma inside a parenthesis: keep what comes before it
                 m = m[: m.rfind("(")].strip()
-            return m
+            whole = whole_condition(NOT_LETTERS.sub("", cand))
+            return whole if whole and len(whole) > len(m) else m
     return None
 
 
@@ -1418,6 +1458,25 @@ def stands_alone(moment: str | None) -> bool:
     go on: "…: it starts with an upstream check"), is left out."""
     own = re.sub(r"\([^()]*\)|\"[^\"]*\"|“[^”]*”", "", moment or "")
     return not BACK_REFERENCE.search(re.split(r"[:;]", own)[0])
+
+
+#: Where a pointer's condition ends and its instruction starts: ", read [[X]]", ": read …", ", follow …".
+INSTRUCTION = re.compile(r"[,:;]\s+(?:\*\*)?(?:read|reread|follow|open|see|look up|call|check|use|start with)\b",
+                         re.I)
+SENTENCE_END = re.compile(r"(?<=[a-z0-9)\]`\"”])\.(?:\s|$)|\s\|\s")
+
+
+def whole_condition(text: str) -> str | None:
+    """A pointer's whole condition: from its opening up to where its instruction starts, within its first
+    sentence ("Before working on one of the owner's areas, or writing or changing anything in the vault", not
+    only its first phrase: the cold read of 2026-11-20 missed the half that applied). None when no instruction
+    follows in that sentence, or the cut falls inside a parenthesis."""
+    first = SENTENCE_END.split(text, maxsplit=1)[0]
+    m = INSTRUCTION.search(first)
+    if m is None:
+        return None
+    cond = re.sub(r"\s*\[[PQFC]\d+(?:,\s*[PQFC]\d+)*\]", "", first[:m.start()]).replace("**", "").strip()
+    return cond if cond.count("(") == cond.count(")") else None
 
 
 def moment_of(line: str, sentence: str, at: int = 0) -> str:

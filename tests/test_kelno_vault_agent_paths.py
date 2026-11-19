@@ -179,7 +179,7 @@ def test_agent_path_draws_a_path_with_texts_hashes_and_known(vault):
     assert first.structure.mentions_not_followed == 2
     assert [m["target"] for m in first.structure.rule_file_mentions] == ["_/agent/Notes kept.md"]
     # One copy, with the guide index's moment (code_project brings it with no line).
-    assert moments(by_id["note:_/agent/guides/coding-practices.md"]) == ["any code work"]
+    assert moments(by_id["note:_/agent/guides/coding-practices.md"]) == ["when the area is opened", "any code work"]
     assert by_id["note:_/agent/guides/coding-practices.md"].always
     # This server's texts as served come last.
     assert {"instructions:obsidian-mcp", "guide:obsidian-mcp", "tool:obsidian-mcp:read_note"} <= set(order)
@@ -582,7 +582,8 @@ def test_a_backticked_path_naming_a_kind_of_note_reaches_every_match(vault):
     assert not any(i.startswith(("note:Log/", "section:Log/", "note:Inbox/")) for i in by_id)
     # The machine notes: each read whole, with its rule sections, and nothing below a machine's own folder.
     for machine in ("box", "pi"):
-        assert moments(by_id[f"note:Reference/Servers/{machine}/{machine}.md"]) == ["Before reaching another machine"]
+        assert moments(by_id[f"note:Reference/Servers/{machine}/{machine}.md"]) == [
+            "Before reaching another machine (SSH, a deploy)"]  # its whole condition, up to "read"
     assert "note:Reference/Servers/pi/old/old.md" not in by_id
     # The line that only says what a folder note is points to nothing: one mention, not one per match.
     assert result.structure.mentions_not_followed == before + 1
@@ -1385,7 +1386,8 @@ def test_an_areas_for_agents_arrives_at_the_areas_opening_beside_the_folder_fili
     # Met first behind the filing rule (waiting), then at the area's opening: it arrives there, whatever comes.
     assert section.always and section.stage == ap.STAGE_NAMES[ap.WORK]
     assert section.arrives == "served by open_area on Repo (for_agents)"
-    assert moments(section) == ["Before filing a note into a folder"]
+    assert moments(section) == ["when the area is opened", "Before filing a note into a folder"]
+    assert section.moments[0].placed and not section.moments[1].placed
     # What it points to is placed the same way: read as soon as it's met.
     assert {p.id: p for p in result.pieces}["note:Areas/Repo/Repo notes.md"].always
     # The backward question shows the area's own chain: the section, served by open_area.
@@ -1401,8 +1403,9 @@ def test_the_guide_brings_the_vaults_conventions_note_with_it(vault, monkeypatch
     # On the path as the guide is: every agent on the connector calls get_vault_guide first.
     assert conv.always and guide.always and conv.stage == guide.stage == ap.STAGE_NAMES[ap.TOOLS]
     assert conv.arrives.startswith("returned by get_vault_guide after the connector's own guide")
-    assert moments(conv) == ["Before working on one of the owner's areas", "when get_vault_guide is called"]
-    assert conv.moments[-1].piece == "tool:obsidian-mcp:get_vault_guide"
+    # The arrival placing it first; the other route after.
+    assert moments(conv) == ["when get_vault_guide is called", "Before working on one of the owner's areas"]
+    assert conv.moments[0].piece == "tool:obsidian-mcp:get_vault_guide" and conv.moments[0].placed
     # It counts as the vault note it is, not as a tool text.
     over = path().typical[1]
     assert any(line.split(". ", 1)[1].startswith("note:_/agent/Vault conventions.md") for line in over.pieces)
@@ -1564,3 +1567,48 @@ def test_an_area_without_for_agents_says_so(vault):
     assert "section:Areas/Repo/Repo.md#For agents" not in ids(result)
     assert any(x.startswith("Repo's `## For agents`: its main note, Areas/Repo/Repo.md, has none")
                for x in result.structure.not_followed)
+
+
+# --- Moments after the cold read (Agent paths, 2026-11-20) -------------------------------------------------------
+
+
+def test_a_moment_is_the_pointers_whole_condition():
+    line = "- Before working on one of the owner's areas, or writing anything in the vault, read [[X]]. Then go on."
+    assert ap.pointer_moment(line, line[2:]) == "Before working on one of the owner's areas, or writing anything in the vault"
+    # With no instruction in its first sentence, the moment stays its opening.
+    plain = "- When the build breaks, the logs are in [[X]]."
+    assert ap.pointer_moment(plain, plain[2:]) == "When the build breaks"
+    # The guide index's shape is unchanged.
+    assert ap.pointer_moment("- [[g|g]]: any code work, in any repository.", "x", "[[g|g]]") == "any code work, in any repository"
+
+
+def test_a_long_line_is_cut_around_its_pointer():
+    line = ("Background on many things. " * 12 + "When relaying through the voice bridge, it also follows "
+            "[[_/agent/roles/Relay|Relay]], which the bridge hands it. " + "More words. " * 30)
+    out = apt._window(line, "When relaying through the voice bridge", "note:_/agent/roles/Relay.md")
+    assert out.startswith("…When relaying through the voice bridge") and "[[_/agent/roles/Relay|Relay]]" in out
+    assert len(out) <= apt._VIA_MAX + 130
+    far = "When it rains, " + "words " * 80 + "read [[Far note]] then."
+    out = apt._window(far, "When it rains", "note:Far note.md")
+    assert out.startswith("When it rains") and " … " in out and "[[Far note]]" in out
+
+
+def test_the_arrival_that_places_a_piece_comes_first(vault):
+    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    rules = by_id["section:Areas/Repo/Repo.md#For agents"]
+    first = rules.moments[0]
+    assert (first.moment, first.piece, first.placed) == ("when the area is opened", "tool:obsidian-mcp:open_area", True)
+    assert all(not m.placed for m in rules.moments[1:])
+    worker = by_id["note:_/agent/roles/Worker.md"]
+    assert worker.moments[0].piece == "hook:SessionStart/area-start.py" and worker.moments[0].placed
+
+
+def test_a_line_in_a_waiting_piece_says_after_which_moment(vault):
+    _write(vault, "_/agent/guides/coding-practices.md", "Code rules.\n\n- When the tests fail, read [[_/agent/Notes kept]].\n")
+    _write(vault, "Areas/Repo/Repo.md", NOTES["Areas/Repo/Repo.md"].replace("code_project: true", "code_project: false"))
+    by_id = {p.id: p for p in path(PathStart(typical=1)).pieces}
+    guide = by_id["note:_/agent/guides/coding-practices.md"]
+    assert not guide.always
+    kept = by_id["note:_/agent/Notes kept.md"]
+    (m,) = [m for m in kept.moments if m.piece == "note:_/agent/guides/coding-practices.md"]
+    assert m.moment == "When the tests fail" and m.after == guide.moments[0].moment == "any code work"

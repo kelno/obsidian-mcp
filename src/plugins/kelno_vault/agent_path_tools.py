@@ -817,14 +817,43 @@ def _piece(p: ap.Piece, known: dict | None) -> PathPiece:
 
 
 def _moments(p: ap.Piece) -> list[PieceMoment] | None:
-    """The piece's moments, each line whole when its moment doesn't stand alone (`ap.stands_alone`), else cut."""
+    """The piece's moments, each line whole when its moment doesn't stand alone (`ap.stands_alone`), else the part
+    holding the moment and the link (`_window`)."""
     out = []
     for e in p.moments:
         line = e["line"]
         if line:
-            line = " ".join(line.split()) if not ap.stands_alone(e["moment"]) else _short(line.strip(), _VIA_MAX)
-        out.append(PieceMoment(moment=e["moment"], piece=e["piece"], line=line, through=e["through"] or None))
+            line = " ".join(line.split()) if not ap.stands_alone(e["moment"]) else _window(line, e["moment"], p.id)
+        out.append(PieceMoment(moment=e["moment"], piece=e["piece"], line=line, through=e["through"] or None,
+                               placed=e.get("placed"), after=e.get("after")))
     return out or None
+
+
+def _window(line: str, moment: str | None, pid: str) -> str:
+    """A long line cut around its pointer: from the start of the sentence holding the moment, past the link to the
+    piece, about `_VIA_MAX` characters; a link far beyond comes after " … " with a little around it (test bench,
+    2026-11-20: cut from the line's start, 7 of 45 lines lost the moment or the link)."""
+    flat = " ".join(line.split())
+    if len(flat) <= _VIA_MAX:
+        return flat
+    low = flat.lower()
+    at = low.find((moment or "")[:40].lower()) if moment else -1
+    start = 0
+    if at > 0:
+        start = max(low.rfind(". ", 0, at), low.rfind("? ", 0, at), low.rfind("! ", 0, at)) + 2
+        start = 0 if start < 2 else start
+    end = min(len(flat), start + _VIA_MAX)
+    name = posixpath.basename(pid.split(":", 1)[1].split("#")[0]).removesuffix(".md").lower() if pid.startswith(
+        ap.VAULT_IDS) else ""
+    link = low.find(name, start) if name else -1
+    head = ("…" if start else "") + flat[start:end]
+    if link < 0 or link + len(name) <= end:
+        return head + ("…" if end < len(flat) else "")
+    if link + len(name) + 2 - start <= _VIA_MAX + 120:  # a little longer, to hold the link
+        end = min(len(flat), link + len(name) + 2)
+        return ("…" if start else "") + flat[start:end] + ("…" if end < len(flat) else "")
+    a, b = max(end, link - 60), min(len(flat), link + len(name) + 20)
+    return head + " … " + flat[a:b] + ("…" if b < len(flat) else "")
 
 
 def _no_lines(moments: list[PieceMoment] | None) -> list[PieceMoment] | None:
@@ -939,7 +968,8 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
             lines.append(f"{texts(n)} not in this result (text_withheld, counted in waiting): those pieces come in "
                          "short form, their moments without the lines they come from (a moment that doesn't read "
                          "right alone keeps its line). Call again with the same arguments, passing in known the hash of every piece "
-                         "whose text you now hold, and only what's new comes next, with these texts.")
+                         "whose text you now hold, and only what's new comes next, with these texts (read_from is "
+                         "only for a text marked text_in_parts).")
         if count["in_parts"]:
             lines.append(f"{texts(count['in_parts'])} too long for the room in this result (text_in_parts): call "
                          "again with the same arguments and read_from={id, offset: 0} for each; each part gives the "

@@ -56,12 +56,17 @@ class PieceMoment(_OmitNone):
     moment: str
     #: The piece holding the line.
     piece: str | None = None
-    #: The line, word for word: whole when the moment doesn't read right without it ("When choosing it"), else cut
-    #: at 240 characters with "…". In short form, only for a moment that doesn't read right without it.
+    #: The line, word for word: whole when the moment doesn't read right without it ("When choosing it"), else the
+    #: part holding the moment and the link, about 240 characters, cut with "…". In short form, only for a moment
+    #: that doesn't read right without it.
     line: str | None = None
     #: The pieces between `piece` and this one: a line that says to read it as soon as it is met (or "At the
     #: start"), in a piece that itself waits on a moment, leads here when that piece's moment comes.
     through: list[str] | None = None
+    #: The arrival that places the piece (its stage and `always`), first in the list; the others are other routes.
+    placed: bool | None = None
+    #: For a line in a piece that itself waits on a moment: that piece's moment, which comes first.
+    after: str | None = None
 
 
 class PathPiece(_OmitNone):
