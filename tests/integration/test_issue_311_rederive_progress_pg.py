@@ -569,9 +569,9 @@ async def test_an_unlisted_directory_withholds_only_over_an_unresolved_row(
 
         real_walk = indexer.discover_markdown_files_at
 
-        def failing_walk(root_fd, *, skips, failed_prefixes):
+        def failing_walk(root_fd, *, skips, failed_prefixes, **kw):
             for found in real_walk(
-                root_fd, skips=skips, failed_prefixes=failed_prefixes
+                root_fd, skips=skips, failed_prefixes=failed_prefixes, **kw
             ):
                 if found.rel.startswith("sub/"):
                     continue
@@ -602,9 +602,9 @@ async def test_an_unlisted_directory_over_a_foreign_row_withholds(
         await foreign_row(sessionmaker, uid, "sub/b.md")
         real_walk = indexer.discover_markdown_files_at
 
-        def failing_walk(root_fd, *, skips, failed_prefixes):
+        def failing_walk(root_fd, *, skips, failed_prefixes, **kw):
             for found in real_walk(
-                root_fd, skips=skips, failed_prefixes=failed_prefixes
+                root_fd, skips=skips, failed_prefixes=failed_prefixes, **kw
             ):
                 if found.rel.startswith("sub/"):
                     continue
@@ -672,9 +672,9 @@ async def test_completion_re_resolves_a_link_to_a_pruned_protected_row(
         real_walk = indexer.discover_markdown_files_at
         state = {"fail": True}
 
-        def walk(root_fd, *, skips, failed_prefixes):
+        def walk(root_fd, *, skips, failed_prefixes, **kw):
             yield from real_walk(
-                root_fd, skips=skips, failed_prefixes=failed_prefixes
+                root_fd, skips=skips, failed_prefixes=failed_prefixes, **kw
             )
             if state["fail"]:
                 skips.append("old (Permission denied)")

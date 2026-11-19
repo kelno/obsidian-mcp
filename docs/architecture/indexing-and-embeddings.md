@@ -942,7 +942,8 @@ exclusion sweep probe's read, hash, parse, `clean_for_embedding` and
 **Cancellation.** A thread cannot be cancelled, so the scan checks a
 `threading.Event` between files. `_run_scan` awaits the thread under
 `asyncio.shield`; on `CancelledError` it sets the event, **waits for the
-thread to stop** (at most one file) and only then re-raises — so lifespan
+thread to stop** (at most one file, plus the parallel stats already running,
+below) and only then re-raises — so lifespan
 shutdown waits for one file, not a 177 s walk, and the pinned root descriptor
 is never closed (and its number reused) under a live walk. The honest bound
 from the extraction note applies: SHA-256 and `read()` release the GIL, so the
@@ -952,6 +953,61 @@ still one step.
 The acceptance criterion — `/health` answers and a concurrent coroutine makes
 progress while a pass is reading — is `tests/test_perf_scan_offload.py`, as a
 binary progress assertion, not a timing bound.
+
+### The shortcut's stats, a run of notes at a time (2026-11-19)
+
+On the reference deployment (an Intel Atom, the vault on gocryptfs over FUSE)
+each stat is a round trip to the filesystem daemon, about 1 ms, and an idle
+scan of 6,471 notes in 2,257 folders took them one after another:
+`move_note`'s pre-move refresh (`refresh_index_for_move`) had a p50 of 9 s,
+and the background pass pays the same walk every tick. The stats now overlap,
+and nothing else changes.
+
+- **Runs.** `discover_markdown_files_at` takes an optional `prestat`. When the
+  walk reaches a note, it reads ahead in the directory's sorted listing for
+  the **run** of notes that follow with no subdirectory between them (the
+  walk's own filters; the dirent type is cached, so no system call where the
+  filesystem reports it) and hands it to `prestat` before yielding the first.
+  What the walk yields, and in which order, does not change.
+- **Only the stats the loop would take.** `_scan_vault`'s `prestat` keeps the
+  notes whose stat decides them — the loop's own checks before the stat
+  (not-indexable path, excluded conflict copy, `read_before_stat`: forced,
+  new, no stored stat, parser version, re-derive, task dirty), the same
+  function the loop calls — and, when at least two remain, starts their
+  `_stat_follow` on a pool of `SCAN_STAT_THREADS` (8) threads. The loop takes
+  each result where it took the stat: the same call, the same `OSError` →
+  "stat failed" → read. A run of one is statted by the loop, as before.
+- **Descriptors.** The stats go through the run's parent descriptor, so they
+  must end before it closes. Each directory's frame of the walk keeps its
+  futures and, in a `finally` that runs before its caller closes the
+  descriptor (drained or closed early), cancels those not started and waits
+  for the rest. Stats are never buffered across directories.
+- **Why runs, not whole directories or the whole walk.** Starting a
+  directory's stats when it is listed would also overlap them with the walk
+  of its subdirectories, but a note listed after a large subtree would be
+  statted seconds before the loop reaches it. Within a run, a stat is taken
+  earlier than before only by the time the loop spends on the run's earlier
+  notes (a few reads at most). That widens, by milliseconds, the race the
+  stat-then-compare always had: a write landing after the stat — or a file
+  replaced or deleted after it — is not seen until the next pass, which sees
+  a changed stat (and, deleted, the file absent). Every stat is still taken
+  after the pass began, so `refresh_index_for_move`'s promise holds: a write
+  completed before the move began is seen.
+- **Failure.** A pool that cannot start a thread is shut down (queued stats
+  cancelled, running ones waited for) and the loop takes every stat from
+  then on, with a warning.
+- **Expected gain.** With about three notes per folder, a pass waits for
+  about one round trip per run instead of one per note: roughly 6.5 s of
+  stats down to 2 s, if FUSE answers the overlapping requests in parallel
+  (gocryptfs does). The walk's own opens and listings are unchanged.
+- **Seeing it.** The pass's `Found …` line ends with `scan N s, of it M s
+  waiting on K stat(s)`: the scan's wall time, the time the loop spent
+  waiting for shortcut stats (its own or the pool's), and how many it took.
+
+`tests/test_scan_parallel_stats.py` holds it: the same scan result and the
+same stats with and without the pool, a failed stat on the pool, a pool that
+cannot start a thread, the runs the walk hands over, and a cancelled scan
+leaving no stat running through a closed descriptor.
 
 ### The walk moves ahead of the generation lock (D9)
 

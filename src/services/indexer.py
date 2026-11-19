@@ -11,7 +11,8 @@ import os
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor, wait as wait_futures
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1982,6 +1983,7 @@ def discover_markdown_files_at(
     *,
     skips: list[str] | None = None,
     failed_prefixes: list[str] | None = None,
+    prestat: Callable[[int, list[tuple[str, str]]], list[Future]] | None = None,
 ) -> Iterator[DiscoveredFile]:
     """Walk the pinned root depth-first, yielding every indexable note.
 
@@ -2005,6 +2007,15 @@ def discover_markdown_files_at(
     type could not be determined (it may be a directory). The pass protects
     every row at or beneath one of them from its prune (#309, D1/D2): a
     directory the walk could not see into says nothing about what is in it.
+
+    `prestat`, when supplied, is handed each **run** of notes — `.md` entries
+    of one directory that follow each other in discovery order with no
+    subdirectory between them — as `(parent_fd, [(rel, name), ...])`, just
+    before the run's first note is yielded, and returns the futures of the
+    work it started through `parent_fd` (the scan's parallel stats). Before
+    the walk leaves a directory, and so before its descriptor is closed, it
+    cancels that directory's futures that have not started and waits for the
+    rest. `prestat` changes nothing the walk yields, in content or in order.
     """
 
     def failed(prefix: str) -> None:
@@ -2012,6 +2023,20 @@ def discover_markdown_files_at(
             failed_prefixes.append(prefix)
 
     def walk(parent_fd: int, prefix: str) -> Iterator[DiscoveredFile]:
+        # `prestat`'s futures for this directory. Settled in the `finally`,
+        # which runs before the caller closes `parent_fd`, whether the walk
+        # was drained or closed early (a cancelled scan).
+        pending: list[Future] = []
+        try:
+            yield from walk_listing(parent_fd, prefix, pending)
+        finally:
+            if pending:
+                _settle(pending)
+
+    def walk_listing(
+        parent_fd: int, prefix: str, pending: list[Future]
+    ) -> Iterator[DiscoveredFile]:
+        run_end = 0
         try:
             with os.scandir(parent_fd) as entries:
                 children = list(entries)
@@ -2022,7 +2047,8 @@ def discover_markdown_files_at(
             return
         # Sorted so a pass's discovery order is stable, which keeps the
         # offender report and the move-detection pairing reproducible.
-        for entry in sorted(children, key=lambda e: e.name):
+        ordered = sorted(children, key=lambda e: e.name)
+        for i, entry in enumerate(ordered):
             name = entry.name
             if name.startswith("."):
                 continue
@@ -2059,9 +2085,49 @@ def discover_markdown_files_at(
                 continue
             if not name.endswith(".md"):
                 continue
+            if prestat is not None and i >= run_end:
+                run, run_end = _note_run(ordered, i, prefix)
+                pending.extend(prestat(parent_fd, run))
             yield DiscoveredFile(rel=rel, parent_fd=parent_fd, name=name)
 
     yield from walk(root_fd, "")
+
+
+def _note_run(
+    ordered: list[os.DirEntry], start: int, prefix: str
+) -> tuple[list[tuple[str, str]], int]:
+    """The run of notes that begins at `ordered[start]` (a note the walk is
+    about to yield), as `(rel, name)` pairs, and the index just past it.
+
+    The walk's own filters, read ahead: dot-entries and non-`.md` files are
+    passed over, and the run ends at the first entry that is a directory or
+    whose type cannot be read. That entry is left to the walk, which decides
+    it exactly as before: a run only says which notes come next, it never
+    decides one. The type is the dirent's, cached on the entry, so reading it
+    ahead costs no system call where the filesystem reports it.
+    """
+    run: list[tuple[str, str]] = []
+    end = start
+    while end < len(ordered):
+        entry = ordered[end]
+        name = entry.name
+        if not name.startswith("."):
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    break
+            except OSError:
+                break
+            if name.endswith(".md"):
+                run.append((f"{prefix}/{name}" if prefix else name, name))
+        end += 1
+    return run, end
+
+
+def _settle(futures: list[Future]) -> None:
+    """Cancel the futures that have not started and wait for the others."""
+    for future in futures:
+        future.cancel()
+    wait_futures(futures)
 
 
 def discover_markdown_files(vault: Path) -> dict[str, Path]:
@@ -2225,6 +2291,14 @@ def _stat_follow(parent_fd: int, name: str) -> os.stat_result:
     """The shortcut's comparison stat: **following** a leaf symlink, as the
     read does, so a retargeted `.md` symlink presents its new target's inode."""
     return os.stat(name, dir_fd=parent_fd)
+
+
+#: Threads the scan takes its shortcut stats on, a run of notes at a time
+#: (see `_scan_vault`). On a FUSE mount each stat is a round trip to the
+#: filesystem daemon (about 1 ms on the reference deployment), so a run's
+#: stats overlap rather than queue. 1 or less: every stat on the scan thread,
+#: one at a time.
+SCAN_STAT_THREADS = 8
 
 
 def _signed_ino(ino: int) -> int:
@@ -2420,6 +2494,13 @@ class ScanResult:
     #: forced it.
     read_reasons: dict[str, int] = field(default_factory=dict)
     stat_not_recorded: int = 0
+    #: The scan's wall time, the shortcut stats it took, and how long it
+    #: waited for them (taking them itself, or for the parallel stats), for
+    #: the same log line. Added 2026-11-19 with the parallel stats: a mount
+    #: where a stat is a 1 ms round trip spent most of a pass here.
+    seconds: float = 0.0
+    stats: int = 0
+    stat_wait_seconds: float = 0.0
 
 
 class ScanCancelled(RuntimeError):
@@ -2485,18 +2566,102 @@ def _scan_vault(
     equals it in all four fields, and — under a re-derive — the row is
     derived under the root that presented `facts` (#311, D4). A re-derive
     with no `facts` treats every row as not derived.
+
+    **Parallel stats.** The shortcut's stat is a filesystem round trip per
+    note, and on a FUSE mount the round trips of a pass add up to seconds. So
+    when the walk reaches a run of notes (the `.md` files of one directory
+    between two subdirectories, see `discover_markdown_files_at`), the stats
+    of those the loop below would stat — the same decisions, made by the same
+    function, before the stat — start together on `SCAN_STAT_THREADS`
+    threads, and the loop takes each one's result where it would have taken
+    the stat itself: the same call, the same `OSError` handling. A run of one
+    is left to the loop. The walk waits for a directory's stats before closing
+    its descriptor. A stat is taken earlier than before by at most the time
+    the loop spends on the run's earlier notes — the race the stat-then-
+    compare always had (a write landing after the stat is seen next pass),
+    a few milliseconds wider; every stat is still taken after the pass began.
     """
     result = ScanResult()
+    started = time.perf_counter()
     # Walk failures (a directory that could not be listed or opened) are
     # **unverified**: the files beneath it were never read. Collected apart
     # and appended to both lists once the walk is drained (a scan that raises
     # instead is discarded whole).
     walk_failures: list[str] = []
     walk_failed_prefixes: list[str] = []
-    walk = discover_markdown_files_at(
-        root_fd, skips=walk_failures, failed_prefixes=walk_failed_prefixes
+
+    def read_before_stat(rel: str, row: SnapshotRow | None) -> str | None:
+        """Why the file is read whatever its stat says, or None when its
+        stat decides. Both the loop and `prestat` ask this one function."""
+        if force_read:
+            return "forced"
+        if row is None:
+            return "new"
+        if row.stat is None:
+            return "no stored stat"
+        if row.extraction_version != CURRENT_EXTRACTION_VERSION:
+            return "parser version"
+        if re_derive and not _row_is_current(facts, rel, row):
+            return "re-derive"
+        if row.task_dirty:
+            # #428 R3: a task-dirty row is read whatever its stat says.
+            return "task dirty"
+        return None
+
+    pool = (
+        ThreadPoolExecutor(
+            max_workers=SCAN_STAT_THREADS, thread_name_prefix="scan-stat"
+        )
+        if SCAN_STAT_THREADS > 1
+        else None
     )
-    with contextlib.closing(walk):
+    # The parallel stats not yet taken by the loop, by path. At any moment
+    # only the current run's can be here: the loop takes each one it starts.
+    prestats: dict[str, Future] = {}
+
+    def prestat(parent_fd: int, run: list[tuple[str, str]]) -> list[Future]:
+        nonlocal pool
+        if pool is None:
+            return []
+        wanted = [
+            (rel, name)
+            for rel, name in run
+            # The loop's own order of decisions, up to its stat.
+            if _path_not_indexable_reason(rel) is None
+            and not (exclude_conflicts and is_conflict_copy(name))
+            and read_before_stat(rel, snapshot.get(rel)) is None
+        ]
+        if len(wanted) < 2:
+            return []
+        futures: list[Future] = []
+        try:
+            for rel, name in wanted:
+                future = pool.submit(_stat_follow, parent_fd, name)
+                prestats[rel] = future
+                futures.append(future)
+        except RuntimeError as e:
+            # No thread could be started. The pool is shut down — what it
+            # queued is cancelled, what it runs is waited for, untracked
+            # work included — and every stat from here on is the loop's own.
+            logger.warning(f"Scan stats in parallel stopped: {e}")
+            pool.shutdown(wait=True, cancel_futures=True)
+            pool = None
+            prestats.clear()
+            return []
+        return futures
+
+    walk = discover_markdown_files_at(
+        root_fd,
+        skips=walk_failures,
+        failed_prefixes=walk_failed_prefixes,
+        prestat=prestat if pool is not None else None,
+    )
+    # The walk is closed first, settling its directories' stats, then the
+    # pool is shut down.
+    with (
+        pool if pool is not None else contextlib.nullcontext(),
+        contextlib.closing(walk),
+    ):
         for found in walk:
             if stop.is_set():
                 raise ScanCancelled("the index pass was cancelled mid-walk")
@@ -2519,24 +2684,20 @@ def _scan_vault(
                 result.not_indexable[rel] = EXCLUDED_CONFLICT_COPY
                 continue
             row = snapshot.get(rel)
-            if force_read:
-                why = "forced"
-            elif row is None:
-                why = "new"
-            elif row.stat is None:
-                why = "no stored stat"
-            elif row.extraction_version != CURRENT_EXTRACTION_VERSION:
-                why = "parser version"
-            elif re_derive and not _row_is_current(facts, rel, row):
-                why = "re-derive"
-            elif row.task_dirty:
-                # #428 R3: a task-dirty row is read whatever its stat says.
-                why = "task dirty"
-            else:
+            why = read_before_stat(rel, row)
+            if why is None:
+                started_stat = time.perf_counter()
+                taken = prestats.pop(rel, None)
                 try:
-                    current = _stat_tuple(_stat_follow(found.parent_fd, found.name))
+                    current = _stat_tuple(
+                        taken.result()
+                        if taken is not None
+                        else _stat_follow(found.parent_fd, found.name)
+                    )
                 except OSError:
                     current = None
+                result.stats += 1
+                result.stat_wait_seconds += time.perf_counter() - started_stat
                 if current is not None and current == row.stat:
                     result.shortcut += 1
                     result.files[rel] = ScannedFile(
@@ -2600,6 +2761,7 @@ def _scan_vault(
     result.unverified.extend(walk_failures)
     result.walk_failures.extend(walk_failures)
     result.walk_failed_prefixes.extend(walk_failed_prefixes)
+    result.seconds = time.perf_counter() - started
     return result
 
 
@@ -3256,6 +3418,8 @@ async def _index_vault_pinned(
         + ("; full-hash pass" if backstop else "")
         + ("; stat shortcut off (INDEX_STAT_SHORTCUT=false)"
            if not settings.index_stat_shortcut else "")
+        + f"; scan {scan.seconds:.1f} s, of it {scan.stat_wait_seconds:.1f} s "
+        f"waiting on {scan.stats} stat(s)"
     )
 
     # ── An indeterminate root (#309, D3) ──────────────────────────────────
