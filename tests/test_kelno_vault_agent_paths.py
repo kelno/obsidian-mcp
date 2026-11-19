@@ -475,3 +475,38 @@ def test_without_a_snapshot_the_pc_side_is_said_to_be_missing(vault):
     result = path(PathStart(typical=3))
     assert result.machine is None and not any(i.startswith(("file:", "hook:")) for i in ids(result))
     assert any("no PC has written a snapshot" in line for line in result.structure.not_followed)
+
+
+def test_between_rule_notes_only_the_conventions_pointer_shapes_are_followed(vault):
+    # P259: a pointer's bullet or sentence opens with At the start, While, When or Before (anything before the
+    # first word that isn't a letter ignored), or takes the guide index's shape; any other link is a mention.
+    (vault / "_/agent/Common-rules.md").write_text(
+        "Rules every agent follows.\n\n"
+        "- When working on one of the owner's areas, read [[_/agent/Vault conventions|Vault conventions]].\n"
+        "> **While** the setup is on trial, read [[_/agent/roles/Coordinator]].\n"
+        "- [[_/agent/guides/coding-practices|coding-practices]]: any code work.\n"
+        "- **Roles**: when in doubt, read [[_/agent/roles/Worker]].\n"
+        "- Read [[_/agent/Notes kept]] first.\n"
+        "- Whenever stuck, read [[_/agent/roles/Relay]].\n"
+        "- The index's shape, as code: `[[_/agent/Memory reference]]: when`.\n"
+        "```\n[[_/agent/Memory reference]]\n```\n"
+        "- Old copies sit beside it, such as `Reference/Old/KDO~20261022.md`.\n"
+        "- Before filing, read `_/agent/Gone.md`.\n"
+        "- See [[_/agent/Missing]] too.\n", encoding="utf-8")
+    result = path(PathStart(surface="claude-ai"))
+    by_id = {p.id: p for p in result.pieces}
+    assert by_id["note:_/agent/Vault conventions.md"].moment == "When working on one of the owner's areas"
+    coordinator = by_id["note:_/agent/roles/Coordinator.md"]
+    assert coordinator.moment == "While the setup is on trial" and coordinator.always
+    assert by_id["note:_/agent/guides/coding-practices.md"].moment == "any code work"
+    # A bold label in front, a bare "read", another opening word: mentions, not on the path. A link written as
+    # code isn't a link at all.
+    for gone in ("roles/Worker.md", "Notes kept.md", "roles/Relay.md"):
+        assert f"note:_/agent/{gone}" not in by_id
+    assert {m["target"] for m in result.structure.rule_file_mentions} == {
+        "_/agent/roles/Worker.md", "_/agent/Notes kept.md", "_/agent/roles/Relay.md"}
+    assert result.structure.mentions_not_followed == 3
+    # A link to nothing is reported; an example path in a plain sentence isn't a pointer.
+    assert {b["target"] for b in result.structure.broken_pointers} == {"_/agent/Gone.md", "_/agent/Missing"}
+    # A hook's message isn't written under the convention: its plain "Read the vault note …" still points.
+    assert "note:_/agent/roles/Worker.md" in ids(path(PathStart(typical=3)))

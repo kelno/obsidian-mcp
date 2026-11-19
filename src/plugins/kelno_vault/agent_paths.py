@@ -72,11 +72,14 @@ STAGE_NAMES = {
     TOOLS: "when the connector's tools load",
 }
 
-# A pointer's moment, read from the start of the line or sentence that holds it. Anything else is unplaced.
-MOMENT_LEAD = re.compile(
-    r"^(?:\*\*)?((?:at the start|when|whenever|before|after|once|if|while|voice only|in voice|in text|across|only when)\b[^:;,.]*)",
-    re.I,
-)
+# A pointer to a rule note says when to read it in one of a closed list of shapes, set out in "How to write an
+# instruction" in WHERE_NOTE [P259]: its bullet or sentence opens with one of these words (anything before the first
+# word that isn't a letter is ignored, so a bold label in front doesn't pass), or it takes the guide index's shape,
+# `[[note]]: when to read it`. The moment is that opening, up to the first : ; , or full stop.
+POINTER_LEAD = re.compile(r"^((?:at the start|while|when|before)\b[^:;,.]*)", re.I)
+NOT_LETTERS = re.compile(r"^[\W\d_]+")
+INDEX_SHAPE = re.compile(r"^\[\[[^\]]+\]\]:\s*(.+)")
+INLINE_CODE = re.compile(r"`[^`\n]*`")
 WIKILINK = re.compile(r"\[\[([^\]|#]+?)\\?(#[^\]|]*?)?\\?(?:\|[^\]]*)?\]\]")
 BACKTICK_MD = re.compile(r"`([^`\n]+?\.md)`")
 ABS_MD = re.compile(r"[A-Za-z]:[\\/][^\n\"'`]*?\.md")
@@ -416,9 +419,18 @@ class PathBuilder:
             self.follow_imports(p)  # Claude Code expands imports only in what it loads itself
         if p.id.startswith("file:"):
             return  # outside the vault (a repo's CLAUDE.md): only its imports; the docs it points to aren't followed
+        fenced = False
         for line in p.text.splitlines():
+            if line.lstrip().startswith(("```", "~~~")):
+                fenced = not fenced
+                continue
+            if fenced:
+                continue  # code, not links
+            code = [(m.start(), m.end()) for m in INLINE_CODE.finditer(line)]
             targets = []
             for m in WIKILINK.finditer(line):
+                if any(a <= m.start() < b for a, b in code):
+                    continue  # a link written as code (an example) isn't one
                 targets.append((m.group(1), (m.group(2) or "").lstrip("#") or None, m.start(), True))
             for m in BACKTICK_MD.finditer(line):
                 targets.append((m.group(1), None, m.start(), False))
@@ -499,16 +511,20 @@ class PathBuilder:
         if p.rules_only and (r is None or not self.v.is_rule_file(r)):
             return
         via = line.strip()
+        shaped = pointer_moment(via, sentence)
         if r is None:
-            # Placeholders (`Areas/<Name>/<Name>.md`, `YYYY-MM-DD.md`), memory's own files (`/preferences.md`) and
-            # bare repo file names (`AGENTS.md`) aren't vault notes; anything else that resolves to nothing is reported.
-            looks_like_note = by_name or ("/" in target and not re.search(r"[<>@]|YYYY|^/|^[A-Za-z]+/[A-Za-z]+\.md$", target))
+            # A link to nothing is reported; a path in backticks only when its line points to it (an example path,
+            # such as a Syncthing version's file name, isn't a pointer). Placeholders (`Areas/<Name>/<Name>.md`,
+            # `YYYY-MM-DD.md`), memory's own files (`/preferences.md`) and bare repo file names (`AGENTS.md`) aren't
+            # vault notes.
+            looks_like_note = by_name or ((shaped is not None or reads_it(sentence, at)) and "/" in target
+                                          and not re.search(r"[<>@]|YYYY|^/|^[A-Za-z]+/[A-Za-z]+\.md$", target))
             if looks_like_note:
                 self.broken.append({"from": p.id, "target": target, "via": via})
             return
         if r.lower() == (self.piece_rel(p) or "").lower() and heading is None:
             return
-        moment = moment_of(via, sentence, at)
+        moment = shaped or ("when met" if reads_it(sentence, at) else "unplaced")
         reads = reads_it(sentence, at) or bool(re.match(r"^\s*[-*]\s+\[\[", line))  # a verb, or the guide index
         # "at the start" and a standing condition ("While the setup is on trial") hold from the moment the pointer is met.
         always = p.always and (moment == "when met" or moment.lower().startswith(("at the start", "while")))
@@ -517,8 +533,9 @@ class PathBuilder:
             stage = p.stage
         arrives = f"pointed to by {p.id}"
         if self.v.is_rule_file(r):
-            if moment == "unplaced":
-                # A link that says neither when nor "read" is a mention, not a pointer [P250]: listed, not followed.
+            if moment == "unplaced" or (shaped is None and self.bound(p)):
+                # Between rule notes, a link in none of the pointer shapes is a mention [P250, P259]; elsewhere (a
+                # hook's message, a main note's text) one that says neither when nor "read". Listed, not followed.
                 self.mentions.append({"from": p.id, "target": r, "via": via, "rule_file": True})
                 return
             self.push(self.note_piece(r, stage, arrives, p.id, via, moment, always))
@@ -541,6 +558,12 @@ class PathBuilder:
         for h in rule_sections:
             self.push(Piece(f"section:{r}#{h}", stage, arrives, self.v.where(r), section(text, h), via, moment,
                             p.id, always))
+
+    @staticmethod
+    def bound(p: Piece) -> bool:
+        """Whether the pointer convention binds this piece's links: a rule note or section, or memory's lines as
+        their mirror note states them. A hook's message, a tool's text or a main note's text isn't written under it."""
+        return p.id.startswith(("note:", "section:", "memory:")) and not p.rules_only
 
     def piece_rel(self, p: Piece) -> str | None:
         return p.id.split(":", 1)[1].split("#")[0] if p.id.startswith(("note:", "section:")) else None
@@ -770,27 +793,31 @@ def reads_it(sentence: str, at: int) -> bool:
                 or re.search(r"\b(?:read|follow)\s+(?:it|that note|this note|them)\b", after, re.I))
 
 
-def moment_of(line: str, sentence: str, at: int = 0) -> str:
-    """When the pointing line says to read the target: the guide index's "when to read it", a bullet's or the
-    sentence's leading condition, "when met" for a plain reading verb aimed at it, else "unplaced"."""
+def pointer_moment(line: str, sentence: str) -> str | None:
+    """When a pointer in one of the convention's shapes says to read its target (`POINTER_LEAD`): the guide index's
+    "when to read it", or the opening of its bullet or sentence; None for a line in none of the shapes."""
     s = re.sub(r"^\s*(?:>\s*)*(?:[-*]|\d+\.)?\s*", "", line).strip()  # quote or callout marks, then a bullet
     s = re.sub(r"\s*\[[PQFC]\d+(?:,\s*[PQFC]\d+)*\]", "", s)  # ledger refs aren't part of a moment
-    index = re.match(r"^\[\[[^\]]+\]\]:\s*(.+)", s)
+    index = INDEX_SHAPE.match(s)
     if index:  # the guide index's shape: the guide, then when to read it
         return re.split(r"(?<=[a-z\)])\.(?:\s|$)", index.group(1))[0].strip().rstrip(".")
-    candidates = [re.sub(r"^\s*(?:>\s*)+", "", sentence)]
-    if re.match(r"^\s*(?:[-*]|\d+\.)\s", line):  # a bullet's leading condition covers the whole bullet
+    candidates = [sentence]
+    if re.match(r"^\s*(?:>\s*)*(?:[-*]|\d+\.)\s", line):  # a bullet's opening covers the whole bullet
         candidates.insert(0, s)
     for cand in candidates:
-        lead = MOMENT_LEAD.match(re.sub(r"^\*\*[^*]+\*\*\s*", "", cand).lstrip("*"))
+        lead = POINTER_LEAD.match(NOT_LETTERS.sub("", cand))
         if lead:
-            m = lead.group(1).strip().rstrip("*")
+            m = lead.group(1).replace("**", "").strip()  # a bold opening is still the opening
             if m.count("(") > m.count(")"):  # cut by a comma inside a parenthesis: keep what comes before it
                 m = m[: m.rfind("(")].strip()
             return m
-    if reads_it(sentence, at):
-        return "when met"
-    return "unplaced"
+    return None
+
+
+def moment_of(line: str, sentence: str, at: int = 0) -> str:
+    """When the pointing line says to read the target: a pointer shape's moment (`pointer_moment`), "when met" for
+    a plain reading verb aimed at it (outside the rule notes, such as a hook's message), else "unplaced"."""
+    return pointer_moment(line, sentence) or ("when met" if reads_it(sentence, at) else "unplaced")
 
 
 # --- runs ----------------------------------------------------------------------------------------------------

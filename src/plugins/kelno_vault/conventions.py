@@ -19,6 +19,8 @@ DATES = "Dates in note names"
 #: In `RULES_NOTE`: a bullet's bold lead, under the heading `RULE_REFS_UNDER`, not a heading of its own.
 RULE_REFS = "Ledger refs on rules"
 RULE_REFS_UNDER = "Working principles"
+#: In `RULES_NOTE`: the heading of how a rule is written, the pointer shapes among it.
+RULE_WRITING = "How to write an instruction"
 
 
 def see_below(section: str) -> str:

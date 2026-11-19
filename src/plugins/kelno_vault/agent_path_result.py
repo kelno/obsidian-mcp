@@ -67,7 +67,8 @@ class PathPiece(_OmitNone):
     hash: str
     #: The line that points to it, word for word up to 240 characters, then cut with "…".
     via: str | None = None
-    #: When that line says to read it; "unplaced" when it doesn't say.
+    #: When that line says to read it: its opening (At the start, While, When, Before) or the guide index's
+    #: "when to read it"; "unplaced" when a line outside the rule notes doesn't say.
     moment: str | None = None
     #: Other pieces on the path pointing to it.
     also_pointed_by: list[str] | None = None
@@ -98,13 +99,13 @@ class PathStructure(_OmitNone):
     pointers_outside_rule_files: list[dict] | None = None
     #: Pointers into an area's notes from the trunk, or from one area into another.
     into_areas: list[dict] | None = None
-    #: Links to notes that aren't rule files, with no reading verb: counted, not followed.
+    #: Links that are mentions, not pointers: counted, not followed.
     mentions_not_followed: int | None = None
-    #: Of those, the links to rule files: a link that says neither when nor "read" is a mention, not a
-    #: pointer, so the rule file it names is not put on the path. One entry per rule file
+    #: Of those, the links to rule files: between rule notes, a link in none of the pointer shapes is a
+    #: mention, not a pointer, so the rule file it names is not put on the path. One entry per rule file
     #: (`{target, from: [...]}`), the notes linking to it.
     rule_file_mentions: list[dict] | None = None
-    #: Pointers to nothing found.
+    #: Pointers to nothing found: a wikilink to nothing, or a path to nothing on a line that points to it.
     broken_pointers: list[dict] | None = None
     #: Imports Claude Code doesn't load (`{from, import, target, why}`): one in a project's file resolving outside
     #: the session's folder waits for an approval the desktop app never asks for, so its file is not on the path.

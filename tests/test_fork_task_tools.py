@@ -1148,6 +1148,37 @@ def test_a_rule_edit_without_a_proposal_ref_is_nudged(vault, kelno_vault):
     assert "rule_change_unlogged" in root and "- line 1: - A root rule." in root
 
 
+def test_a_rule_line_linking_another_rule_note_in_no_pointer_shape_asks_which_it_is(vault, kelno_vault):
+    # P259: between rule notes, a link in none of the pointer shapes is read as a mention; the write asks.
+    note(vault, "_/agent/Rules.md", "- Rule one. [P35]\n- See [[_/agent/Old]] for that. [P35]\n")
+    added = asyncio.run(tools.edit_note_impl(
+        "_/agent/Rules.md",
+        "- Read [[_/agent/Other|Other]] first. [P95]\n"
+        "- When filing, read [[_/agent/Filing|Filing]]. [P95]\n"
+        "- [[_/agent/guides/coding|coding]]: any code work. [P95]\n"
+        "- The shape, as code: `[[_/agent/Other]]: when`. [P95]\n"
+        "- **Roles**: when in doubt, see [[Areas/Home/Home#For agents|Home's rules]]. [P95]\n"
+        "- Plain notes are fine: [[Notes/Plain]], ![[_/agent/Other]], [[_/agent/Rules#Top]]. [P95]\n",
+        append=True, dry_run=True))
+    assert "pointer_or_mention: these rule lines link to another rule note in none of the pointer shapes" in added
+    block = added.split("pointer_or_mention:")[1].split("Is each")[0]
+    assert block.count("\n- line ") == 2, block
+    assert ", [[_/agent/Other]]: - Read [[_/agent/Other|Other]] first. [P95]" in block
+    assert ", [[Areas/Home/Home]]: - **Roles**: when in doubt" in block
+    assert "Old" not in block and "Filing" not in block and "coding" not in block and "Plain" not in block
+    assert '"How to write an instruction" in `_/agent/Where agent instructions go.md`' in added
+    # Only the lines a write adds or changes: one already there says nothing.
+    other = asyncio.run(tools.edit_note_impl("_/agent/Rules.md", "- Rule one, reworded. [P95]",
+                                             find="- Rule one. [P35]", dry_run=True))
+    assert "pointer_or_mention" not in other
+    # A For agents section is a rule part of any note; the rest of the note isn't.
+    area = "Top: see [[_/agent/Other]].\n\n## For agents\n\n- Mind [[_/agent/Other]]. [P95]\n"
+    created = asyncio.run(tools.create_note_impl("Areas/Home/Home.md", area))
+    assert created.count("\n- line ") == 1 and ", [[_/agent/Other]]: - Mind [[_/agent/Other]]. [P95]" in created
+    plain = asyncio.run(tools.create_note_impl("Notes/Plain.md", "See [[_/agent/Other]].\n"))
+    assert "pointer_or_mention" not in plain
+
+
 
 def test_the_rule_nudge_numbers_lines_as_written_when_the_stamp_adds_a_block(vault, kelno_vault, monkeypatch):
     monkeypatch.setattr(tools.settings, "last_ai_edit_field", "last_ai_edit")
