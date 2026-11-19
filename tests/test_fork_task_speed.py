@@ -170,3 +170,75 @@ def test_outside_a_call_every_scan_is_made():
     finally:
         task_scan._scan_note = saved
     assert len(count) == 4
+
+
+# --- the parse cache (list_tasks, 2026-11-19) -----------------------------------------
+
+from datetime import date  # noqa: E402
+
+from src.services.fork_tasks import format as task_format, ops as task_ops  # noqa: E402
+from src.services.fork_tasks.settings import StatusConfig, TasksSettings  # noqa: E402
+
+PARSE_LINES = [
+    "- [ ] plain task",
+    "- [x] done task ✅ 2026-11-01",
+    "- [/] in progress #area/x ⏳ 2026-11-20 📅 2026-11-25 🆔 abc123",
+    "- [?] odd status 🔁 every week",
+    "  * [ ] indented ⛔ abc123,def456 🔼",
+    "- [ ] #task only with the global filter",
+    "- [ ] bad date 📅 2026-13-40",
+    "not a task",
+    "- [ ]",
+    "",
+]
+CUSTOM = (StatusConfig("?", "Question", " ", True, "IN_PROGRESS"),
+          StatusConfig(" ", "Todo", "x", True, "TODO"),
+          StatusConfig("x", "Done", " ", True, "DONE"))
+SETTINGS = [
+    TasksSettings(),
+    TasksSettings(statuses=CUSTOM),
+    TasksSettings(global_filter="#task"),
+    TasksSettings(use_filename_as_scheduled_date=True, filename_as_scheduled_date_format="YYYY-MM-DD"),
+]
+PATHS = ["Areas/x.md", "Daily/2026-11-19.md", "Daily/2026-11-20.md"]
+
+
+def test_a_cached_parse_is_the_parse_for_every_line_settings_and_path():
+    """Twice over (the second answered from the cache), every combination
+    gives exactly what `parse_task_line` gives: the statuses, the global
+    filter and the file-name date are all in the cache's key."""
+    for _ in range(2):
+        for s in SETTINGS:
+            registry = task_format.StatusRegistry.from_settings(s)
+            for path in PATHS:
+                for line in PARSE_LINES:
+                    expected = task_format.parse_task_line(
+                        line, registry, global_filter=s.global_filter,
+                        fallback_date=task_ops.fallback_date(path, s))
+                    got = task_ops.parse_line(line, path, s, registry)
+                    assert got == expected, (line, path, s)
+                    if got is not None:
+                        assert got.warnings == expected.warnings  # compare=False on the field
+                        assert got.status == expected.status
+
+
+def test_the_cache_tells_registries_and_file_name_dates_apart():
+    line = "- [?] odd status"
+    plain = TasksSettings()
+    custom = TasksSettings(statuses=CUSTOM)
+    a = task_ops.parse_line(line, "x.md", plain, task_format.StatusRegistry.from_settings(plain))
+    b = task_ops.parse_line(line, "x.md", custom, task_format.StatusRegistry.from_settings(custom))
+    assert a.status.name == "Unknown" and b.status.name == "Question"
+    dated = TasksSettings(use_filename_as_scheduled_date=True, filename_as_scheduled_date_format="YYYY-MM-DD")
+    registry = task_format.StatusRegistry.from_settings(dated)
+    one = task_ops.parse_line("- [ ] t", "2026-11-19.md", dated, registry)
+    two = task_ops.parse_line("- [ ] t", "2026-11-20.md", dated, registry)
+    assert one.scheduled.value == date(2026, 11, 19) and two.scheduled.value == date(2026, 11, 20)
+
+
+def test_a_settings_error_is_raised_on_every_call_never_cached():
+    bad = TasksSettings(use_filename_as_scheduled_date=True, filename_as_scheduled_date_format="DD.MM.YYYY")
+    registry = task_format.StatusRegistry.from_settings(bad)
+    for _ in range(2):
+        with pytest.raises(task_ops.TaskOpError):
+            task_ops.parse_line("- [ ] t", "2026-11-19.md", bad, registry)

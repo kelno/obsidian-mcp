@@ -24,6 +24,7 @@ below testable on strings:
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import functools
 from datetime import date, datetime
 from pathlib import PurePosixPath
 import re
@@ -103,10 +104,33 @@ def _ymd(y: str, m: str, d: str) -> date | None:
         return None
 
 
-def parse_line(text: str, path: str, settings: TasksSettings, registry: tf.StatusRegistry) -> tf.Task | None:
+#: How many parsed lines `parse_line` keeps (least recently used out). The
+#: vault's task lines are a few thousand; a parse is about 30 µs on a desktop
+#: and several times that on the owner's server, and `list_tasks`, the task
+#: writes' id checks, `open_area` and the ledger's task links parse every task
+#: line of the vault on each call.
+PARSE_CACHE_LINES = 20_000
+
+
+@functools.lru_cache(maxsize=PARSE_CACHE_LINES)
+def _parse_cached(text: str, statuses: tuple[tf.Status, ...], global_filter: str,
+                  fallback: date | None) -> tf.Task | None:
+    # Everything `parse_task_line` reads is in the key: the line, the
+    # registry (which is its statuses and nothing else), the global filter and
+    # the date the file name implies. It is pure (no clock, no I/O) and a
+    # `Task` is frozen, its fields strings, tuples and frozen values, so one
+    # parse can be handed to every caller. An exception is not cached.
     return tf.parse_task_line(
-        text, registry, global_filter=settings.global_filter, fallback_date=fallback_date(path, settings)
+        text, tf.StatusRegistry(list(statuses)), global_filter=global_filter, fallback_date=fallback
     )
+
+
+def parse_line(text: str, path: str, settings: TasksSettings, registry: tf.StatusRegistry) -> tf.Task | None:
+    """The task on `text`, or None when the line is not a task, as
+    `tf.parse_task_line` reads it; answered from a cache of earlier parses
+    (2026-11-19), the same `Task` for the same line, statuses, global filter
+    and file-name date."""
+    return _parse_cached(text, registry.registered, settings.global_filter, fallback_date(path, settings))
 
 
 @dataclass(frozen=True)
