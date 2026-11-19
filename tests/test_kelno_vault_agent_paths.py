@@ -828,6 +828,10 @@ def test_a_rule_section_is_checked_by_its_own_place(writing):
     added = asyncio.run(tools.edit_note_impl("Notes/Some note.md", "\n## For agents\n\n- Be kind. [P3]\n",
                                              append=True))
     assert "\n- section:Notes/Some note.md#For agents\n" in added.split("reached_by_no_path:")[1]
+    # A heading the path tools don't read as a rule section (case, a closing `#`) is no place of theirs.
+    for heading in ("## For Agents", "## For agents ##"):
+        odd = asyncio.run(tools.create_note_impl(f"Notes/Odd {len(heading)}.md", f"{heading}\n\n- Be kind. [P3]\n"))
+        assert "reached_by_no_path" not in odd, heading
 
 
 def test_a_rule_write_says_in_one_line_when_reach_cannot_be_checked(writing):

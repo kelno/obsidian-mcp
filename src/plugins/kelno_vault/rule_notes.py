@@ -98,9 +98,12 @@ def _places(path: str, old: str | None, new: str, definition: rule_files.RuleFil
     spelled = {h.casefold(): h for h in definition.sections}
     out = []
     for first, end in rule_files.section_ranges(lines, definition.sections, frontmatter_lines(lines)):
-        heading = rule_files.heading_text(lines[first - 1])
-        place = f"section:{norm}#{spelled.get(heading.casefold(), heading)}"
-        if place not in out and any(first <= i < end for i in changed):
+        heading = spelled.get(rule_files.heading_text(lines[first - 1]).casefold(), "")
+        place = f"section:{norm}#{heading}"
+        # Only a section the path tools read as one (their `section`): one they don't (`## For Agents`, a
+        # closing `#`, a tab) is no place of theirs, and asking for a pointer to it would help nothing.
+        if (place not in out and any(first <= i < end for i in changed)
+                and agent_paths.section("\n".join(lines), heading)):
             out.append(place)
     return out
 
