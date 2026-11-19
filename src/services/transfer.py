@@ -38,6 +38,7 @@ import os
 import re
 import secrets
 import socket
+import ssl
 import time
 import unicodedata
 import weakref
@@ -2458,6 +2459,25 @@ async def resolve_and_check(
     return chosen  # type: ignore[return-value]
 
 
+_pinned_tls: ssl.SSLContext | None = None
+
+
+def _pinned_tls_context() -> ssl.SSLContext:
+    """The TLS context every `PinnedTransport` verifies with, built once rather than per hop.
+
+    Exactly what httpx builds for each new transport by default
+    (`httpx.create_ssl_context()`: certifi's bundle, or `SSL_CERT_FILE` /
+    `SSL_CERT_DIR` when set), which loads the whole CA bundle each time.
+    Sharing it carries nothing from one hop to the next: the context holds
+    trust settings only, Python resumes a TLS session only when handed one, and
+    each hop still gets its own client, pool and pinned address.
+    """
+    global _pinned_tls
+    if _pinned_tls is None:
+        _pinned_tls = httpx.create_ssl_context()
+    return _pinned_tls
+
+
 class PinnedTransport(httpx.AsyncHTTPTransport):
     """Connect to a pre-validated address while keeping the original identity.
 
@@ -2468,6 +2488,7 @@ class PinnedTransport(httpx.AsyncHTTPTransport):
     """
 
     def __init__(self, *, address: str, host_header: str, **kwargs):
+        kwargs.setdefault("verify", _pinned_tls_context())
         super().__init__(**kwargs)
         self.address = address
         self.host_header = host_header

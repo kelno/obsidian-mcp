@@ -1765,3 +1765,17 @@ async def test_tls_verification_fails_for_the_wrong_name(local_https, trusting_t
             policy=loopback_policy,
         ):
             pass  # pragma: no cover
+
+
+def test_every_hop_verifies_with_one_tls_context_built_as_httpx_builds_it():
+    """Built once, not per hop: loading the CA bundle is the costly part of a new transport.
+    Each hop still gets its own transport, pool and pinned address."""
+    first = transfer.PinnedTransport(address="203.0.113.1", host_header="a.example")
+    second = transfer.PinnedTransport(address="203.0.113.2", host_header="b.example")
+    shared = transfer._pinned_tls_context()
+    assert first._pool is not second._pool
+    assert first._pool._ssl_context is shared and second._pool._ssl_context is shared
+    assert shared.verify_mode == ssl.CERT_REQUIRED and shared.check_hostname
+    own = ssl.create_default_context()
+    assert transfer.PinnedTransport(address="203.0.113.3", host_header="c.example",
+                                    verify=own)._pool._ssl_context is own
