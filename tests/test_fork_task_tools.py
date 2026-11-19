@@ -1155,17 +1155,20 @@ def test_a_rule_line_linking_another_rule_note_in_no_pointer_shape_asks_which_it
         "_/agent/Rules.md",
         "- Read [[_/agent/Other|Other]] first. [P95]\n"
         "- When filing, read [[_/agent/Filing|Filing]]. [P95]\n"
-        "- [[_/agent/guides/coding|coding]]: any code work. [P95]\n"
+        "- [[_/agent/guides/coding|coding]]: any code work; Python adds [[_/agent/guides/python|python]]. [P95]\n"
+        "- **Landing.** When you merge, read [[_/agent/Landing|Landing]]. [P95]\n"
         "- The shape, as code: `[[_/agent/Other]]: when`. [P95]\n"
         "- **Roles**: when in doubt, see [[Areas/Home/Home#For agents|Home's rules]]. [P95]\n"
         "- Plain notes are fine: [[Notes/Plain]], ![[_/agent/Other]], [[_/agent/Rules#Top]]. [P95]\n",
         append=True, dry_run=True))
     assert "pointer_or_mention: these rule lines link to another rule note in none of the pointer shapes" in added
     block = added.split("pointer_or_mention:")[1].split("Is each")[0]
-    assert block.count("\n- line ") == 2, block
+    assert block.count("\n- line ") == 3, block
     assert ", [[_/agent/Other]]: - Read [[_/agent/Other|Other]] first. [P95]" in block
-    assert ", [[Areas/Home/Home]]: - **Roles**: when in doubt" in block
-    assert "Old" not in block and "Filing" not in block and "coding" not in block and "Plain" not in block
+    # On an index line only the leading link is the note the line is about.
+    assert ", [[_/agent/guides/python]]: - [[_/agent/guides/coding|coding]]" in block
+    assert ", [[Areas/Home/Home#For agents]]: - **Roles**: when in doubt" in block
+    assert "Old" not in block and "Filing" not in block and "Landing" not in block and "Plain" not in block
     assert '"How to write an instruction" in `_/agent/Where agent instructions go.md`' in added
     # Only the lines a write adds or changes: one already there says nothing.
     other = asyncio.run(tools.edit_note_impl("_/agent/Rules.md", "- Rule one, reworded. [P95]",

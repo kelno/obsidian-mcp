@@ -75,8 +75,8 @@ STAGE_NAMES = {
 # A pointer to a rule note says when to read it in one of a closed list of shapes, set out in "How to write an
 # instruction" in WHERE_NOTE [P259]: its bullet or sentence opens with one of these words (anything before the first
 # word that isn't a letter is ignored, so a bold label in front doesn't pass), or it takes the guide index's shape,
-# `[[note]]: when to read it`. The moment is that opening, up to the first : ; , or full stop.
-POINTER_LEAD = re.compile(r"^((?:at the start|while|when|before)\b[^:;,.]*)", re.I)
+# `[[note]]: when to read it`. The moment is that opening, up to the first : ; , full stop or table cell.
+POINTER_LEAD = re.compile(r"^((?:at the start|while|when|before)\b(?:[^:;,.|]|\|(?!\s))*)", re.I)
 NOT_LETTERS = re.compile(r"^[\W\d_]+")
 INDEX_SHAPE = re.compile(r"^\[\[[^\]]+\]\]:\s*(.+)")
 INLINE_CODE = re.compile(r"`[^`\n]*`")
@@ -511,14 +511,13 @@ class PathBuilder:
         if p.rules_only and (r is None or not self.v.is_rule_file(r)):
             return
         via = line.strip()
-        shaped = pointer_moment(via, sentence)
+        shaped = pointer_moment(via, sentence, target)
         if r is None:
-            # A link to nothing is reported; a path in backticks only when its line points to it (an example path,
-            # such as a Syncthing version's file name, isn't a pointer). Placeholders (`Areas/<Name>/<Name>.md`,
-            # `YYYY-MM-DD.md`), memory's own files (`/preferences.md`) and bare repo file names (`AGENTS.md`) aren't
-            # vault notes.
-            looks_like_note = by_name or ((shaped is not None or reads_it(sentence, at)) and "/" in target
-                                          and not re.search(r"[<>@]|YYYY|^/|^[A-Za-z]+/[A-Za-z]+\.md$", target))
+            # Placeholders (`Areas/<Name>/<Name>.md`, `YYYY-MM-DD.md`), memory's own files (`/preferences.md`), bare
+            # repo file names (`AGENTS.md`) and Syncthing's versions of a note (`<name>~YYYYMMDD-HHMMSS.md`, outside
+            # the vault) aren't vault notes; anything else that resolves to nothing is reported.
+            looks_like_note = by_name or ("/" in target and not re.search(
+                r"[<>@]|YYYY|^/|^[A-Za-z]+/[A-Za-z]+\.md$|~\d{8}-\d{6}\.md$", target))
             if looks_like_note:
                 self.broken.append({"from": p.id, "target": target, "via": via})
             return
@@ -539,6 +538,10 @@ class PathBuilder:
                 self.mentions.append({"from": p.id, "target": r, "via": via, "rule_file": True})
                 return
             self.push(self.note_piece(r, stage, arrives, p.id, via, moment, always))
+            return
+        if heading and heading in self.v.rule_headings and (moment == "unplaced" or (shaped is None and self.bound(p))):
+            # A link to a rule section (`[[Areas/X/X#For agents]]`) is read as one to a rule note.
+            self.mentions.append({"from": p.id, "target": f"{r}#{heading}", "via": via, "rule_file": True})
             return
         text = self.v.text(r) or ""
         rule_sections = [h for h in self.v.rule_headings if section(text, h)] if reads else []
@@ -768,7 +771,7 @@ def sentence_at(line: str, pos: int) -> tuple[str, int]:
     """The sentence of the line holding position pos, with the next one when it reads it back ("Read that note"),
     and pos within it."""
     spans, start = [], 0
-    for m in re.finditer(r"(?<=[.!?])\s+(?=[A-Z\[*])", line):
+    for m in re.finditer(r"(?:(?<=[.!?])|(?<=[.!?]\*\*)|(?<=[.!?][*_]))\s+(?=[A-Z\[*])", line):
         spans.append((start, m.start()))
         start = m.end()
     spans.append((start, len(line)))
@@ -793,14 +796,18 @@ def reads_it(sentence: str, at: int) -> bool:
                 or re.search(r"\b(?:read|follow)\s+(?:it|that note|this note|them)\b", after, re.I))
 
 
-def pointer_moment(line: str, sentence: str) -> str | None:
+def pointer_moment(line: str, sentence: str, target: str | None = None) -> str | None:
     """When a pointer in one of the convention's shapes says to read its target (`POINTER_LEAD`): the guide index's
-    "when to read it", or the opening of its bullet or sentence; None for a line in none of the shapes."""
+    "when to read it" (for the line's leading link only, when `target` names the link), or the opening of its bullet
+    or sentence; None for a line in none of the shapes."""
     s = re.sub(r"^\s*(?:>\s*)*(?:[-*]|\d+\.)?\s*", "", line).strip()  # quote or callout marks, then a bullet
     s = re.sub(r"\s*\[[PQFC]\d+(?:,\s*[PQFC]\d+)*\]", "", s)  # ledger refs aren't part of a moment
     index = INDEX_SHAPE.match(s)
+    leading = re.match(r"^\[\[([^\]|#]+)", s)
+    if index and target is not None and leading.group(1).strip().rstrip("\\").casefold() != target.strip().casefold():
+        index = None  # another link on an index line isn't the note the line is about
     if index:  # the guide index's shape: the guide, then when to read it
-        return re.split(r"(?<=[a-z\)])\.(?:\s|$)", index.group(1))[0].strip().rstrip(".")
+        return re.split(r"(?<=[a-z\)])\.(?:\s|$)|\s\|\s", index.group(1))[0].strip().rstrip(".")
     candidates = [sentence]
     if re.match(r"^\s*(?:>\s*)*(?:[-*]|\d+\.)\s", line):  # a bullet's opening covers the whole bullet
         candidates.insert(0, s)

@@ -484,13 +484,16 @@ def test_between_rule_notes_only_the_conventions_pointer_shapes_are_followed(vau
         "Rules every agent follows.\n\n"
         "- When working on one of the owner's areas, read [[_/agent/Vault conventions|Vault conventions]].\n"
         "> **While** the setup is on trial, read [[_/agent/roles/Coordinator]].\n"
-        "- [[_/agent/guides/coding-practices|coding-practices]]: any code work.\n"
+        "- [[_/agent/guides/coding-practices|coding-practices]]: any code work | see [[_/agent/Memory reference]].\n"
+        "- **Landing.** When you merge, read [[_/agent/Where agent instructions go]].\n"
         "- **Roles**: when in doubt, read [[_/agent/roles/Worker]].\n"
         "- Read [[_/agent/Notes kept]] first.\n"
         "- Whenever stuck, read [[_/agent/roles/Relay]].\n"
+        "- See [[Areas/Repo/Repo#For agents|Repo's rules]].\n"
         "- The index's shape, as code: `[[_/agent/Memory reference]]: when`.\n"
         "```\n[[_/agent/Memory reference]]\n```\n"
-        "- Old copies sit beside it, such as `Reference/Old/KDO~20261022.md`.\n"
+        "- Old copies sit beside it, such as `Reference/Old/KDO~20261022-153000.md`.\n"
+        "- The old list was in `_/agent/Renamed.md`.\n"
         "- Before filing, read `_/agent/Gone.md`.\n"
         "- See [[_/agent/Missing]] too.\n", encoding="utf-8")
     result = path(PathStart(surface="claude-ai"))
@@ -498,15 +501,21 @@ def test_between_rule_notes_only_the_conventions_pointer_shapes_are_followed(vau
     assert by_id["note:_/agent/Vault conventions.md"].moment == "When working on one of the owner's areas"
     coordinator = by_id["note:_/agent/roles/Coordinator.md"]
     assert coordinator.moment == "While the setup is on trial" and coordinator.always
+    # The index's moment, cut at a table cell, for its leading link only.
     assert by_id["note:_/agent/guides/coding-practices.md"].moment == "any code work"
-    # A bold label in front, a bare "read", another opening word: mentions, not on the path. A link written as
-    # code isn't a link at all.
-    for gone in ("roles/Worker.md", "Notes kept.md", "roles/Relay.md"):
-        assert f"note:_/agent/{gone}" not in by_id
+    # A bold title that is a sentence of its own: the next sentence opens the pointer.
+    assert by_id["note:_/agent/Where agent instructions go.md"].moment == "When you merge"
+    # A bold label in front, a bare "read", another opening word, a second link on an index line, a rule section's
+    # link in no shape: mentions, not on the path. A link written as code isn't a link at all.
+    for gone in ("note:_/agent/roles/Worker.md", "note:_/agent/Notes kept.md", "note:_/agent/roles/Relay.md",
+                 "note:_/agent/Memory reference.md", "section:Areas/Repo/Repo.md#For agents"):
+        assert gone not in by_id
     assert {m["target"] for m in result.structure.rule_file_mentions} == {
-        "_/agent/roles/Worker.md", "_/agent/Notes kept.md", "_/agent/roles/Relay.md"}
-    assert result.structure.mentions_not_followed == 3
-    # A link to nothing is reported; an example path in a plain sentence isn't a pointer.
-    assert {b["target"] for b in result.structure.broken_pointers} == {"_/agent/Gone.md", "_/agent/Missing"}
+        "_/agent/roles/Worker.md", "_/agent/Notes kept.md", "_/agent/roles/Relay.md", "_/agent/Memory reference.md",
+        "Areas/Repo/Repo.md#For agents"}
+    assert result.structure.mentions_not_followed == 5
+    # A path to nothing is reported, but for a Syncthing version's name (outside the vault).
+    assert {b["target"] for b in result.structure.broken_pointers} == {
+        "_/agent/Renamed.md", "_/agent/Gone.md", "_/agent/Missing"}
     # A hook's message isn't written under the convention: its plain "Read the vault note …" still points.
     assert "note:_/agent/roles/Worker.md" in ids(path(PathStart(typical=3)))

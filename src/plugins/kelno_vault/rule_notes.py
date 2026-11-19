@@ -118,14 +118,18 @@ def _unshaped(path: str, old: str | None, new: str, definition: rule_files.RuleF
                 continue
             target = m.group(1).strip()
             note = target if target.lower().endswith(".md") else f"{target}.md"
-            heading = (m.group(2) or "").lstrip("#").strip().casefold()
+            heading = (m.group(2) or "").lstrip("#").strip()
             if note.replace("\\", "/").lstrip("/").casefold() == own:
                 continue  # a link within the note
-            if not (definition.is_rule_file(note) or heading in sections):
+            if definition.is_rule_file(note):
+                shown = target
+            elif heading.casefold() in sections:
+                shown = f"{target}#{heading}"
+            else:
                 continue
-            sentence, at = agent_paths.sentence_at(line, m.start())
-            if agent_paths.pointer_moment(line.strip(), sentence) is None and target not in found:
-                found.append(target)
+            sentence, _ = agent_paths.sentence_at(line, m.start())
+            if agent_paths.pointer_moment(line.strip(), sentence, m.group(1)) is None and shown not in found:
+                found.append(shown)
         if found:
             out.append((i + 1, found, line))
     return out

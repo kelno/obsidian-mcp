@@ -105,7 +105,7 @@ class PathStructure(_OmitNone):
     #: mention, not a pointer, so the rule file it names is not put on the path. One entry per rule file
     #: (`{target, from: [...]}`), the notes linking to it.
     rule_file_mentions: list[dict] | None = None
-    #: Pointers to nothing found: a wikilink to nothing, or a path to nothing on a line that points to it.
+    #: Links and vault paths to nothing found.
     broken_pointers: list[dict] | None = None
     #: Imports Claude Code doesn't load (`{from, import, target, why}`): one in a project's file resolving outside
     #: the session's folder waits for an approval the desktop app never asks for, so its file is not on the path.
