@@ -247,6 +247,7 @@ class Vault:
     def __init__(self, paths: list[str], read: Callable[[str], str | None], rule_files, areas: list,
                  pc_vault: str | None):
         self._read, self._texts = read, {}
+        self._matches: dict[re.Pattern, list[str]] = {}
         self.by_rel: dict[str, str] = {}
         self.by_stem: dict[str, list[str]] = {}
         for r in sorted(paths):
@@ -288,6 +289,13 @@ class Vault:
             return None
         hits = self.by_stem.get(posixpath.basename(t).removesuffix(".md").lower(), [])
         return hits[0] if len(hits) == 1 else None
+
+    def matching(self, pattern: re.Pattern) -> list[str]:
+        """The `.md` notes whose vault path matches `pattern` whole, sorted; kept for the call, as each path follows
+        the same pattern pointers (a scan of every path took most of a path's time)."""
+        if pattern not in self._matches:
+            self._matches[pattern] = sorted(r for r in self.by_rel.values() if r.endswith(".md") and pattern.fullmatch(r))
+        return self._matches[pattern]
 
     def text(self, r: str) -> str | None:
         if r not in self._texts:
@@ -663,7 +671,7 @@ class PathBuilder:
         to_rules = moment != "unplaced" and not (shaped is None and self.bound(p))
         own = (self.piece_rel(p) or "").lower()
         brought = False
-        for r in sorted(r for r in self.v.by_rel.values() if r.endswith(".md") and pattern.fullmatch(r)):
+        for r in self.v.matching(pattern):
             if r.lower() == own:
                 continue
             text = self.v.text(r) or ""
@@ -1170,33 +1178,56 @@ def every_rule_file(v: Vault) -> list[str]:
     return sorted(out)
 
 
-def all_runs(setup: Setup) -> list[tuple[str, Start, Work, PathBuilder]]:
+def iter_runs(setup: Setup):
     """The typical agents, a claude.ai chat opening each area, and a Claude Code session in each related folder
-    the PC's snapshot holds."""
+    the PC's snapshot holds, each path drawn only when the caller asks for the next one."""
     v, snap = setup.vault, setup.snapshot
-    runs = [(t.name, t, Work(), run(setup, t, Work())) for t in setup.points.typical]
+    for t in setup.points.typical:
+        yield t.name, t, Work(), run(setup, t, Work())
     for a in v.areas:
         s, w = Start("claude-ai"), Work(a["name"])
-        runs.append((f"a claude.ai chat working on {a['name']}", s, w, run(setup, s, w)))
+        yield f"a claude.ai chat working on {a['name']}", s, w, run(setup, s, w)
         for f in a["folders"]:
             if snap and snap.holds(f):
                 s = Start("claude-code", f, role="worker")
-                runs.append((f"a Claude Code worker in {f}", s, Work(), run(setup, s, Work())))
-    return runs
+                yield f"a Claude Code worker in {f}", s, Work(), run(setup, s, Work())
 
 
-def unreached_rule_files(setup: Setup, runs) -> list[str]:
-    """Rule files no run reaches; hook scripts count as reached when the PC registers them."""
-    reached = set()
-    for *_, b in runs:
-        reached.update(b.order)
-    registered = set()
+def all_runs(setup: Setup) -> list[tuple[str, Start, Work, PathBuilder]]:
+    return list(iter_runs(setup))
+
+
+def registered_hook_scripts(setup: Setup) -> set[str]:
+    """The vault's hook scripts the PC registers (`note:<path>`): they reach agents as hooks, whatever points to them."""
+    out = set()
     for h in setup.snapshot.hooks if setup.snapshot else []:
         for a in h.get("args", []):
             r = setup.vault.rel(str(a)) if str(a).endswith(".py") else None
             if r:
-                registered.add(f"note:{r}")
-    return [r for r in every_rule_file(setup.vault) if r not in reached and r not in registered]
+                out.add(f"note:{r}")
+    return out
+
+
+def reached_places(setup: Setup, places, runs) -> set[str]:
+    """Which of `places` (piece ids, `note:<path>` or `section:<path>#<heading>`) some path reaches: one of `runs`
+    has it on its path, or it is a hook script the PC registers. This is what "reached" means for the rule files
+    no path reaches. Stops drawing paths once every place is found, so `runs` may be `iter_runs`."""
+    places = set(places)
+    found = places & registered_hook_scripts(setup)
+    if found == places:
+        return found
+    for *_, b in runs:
+        found |= places & b.pieces.keys()
+        if found == places:
+            break
+    return found
+
+
+def unreached_rule_files(setup: Setup, runs) -> list[str]:
+    """Rule files no run reaches (`reached_places`)."""
+    every = every_rule_file(setup.vault)
+    reached = reached_places(setup, every, runs)
+    return [r for r in every if r not in reached]
 
 
 def across_runs(runs) -> dict:
