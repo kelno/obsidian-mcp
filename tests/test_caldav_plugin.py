@@ -12,6 +12,7 @@ setting, a refused login or an unreachable server each give their own refusal;
 the password never appears in a result or a log line.
 """
 
+import asyncio
 import datetime as dt
 import logging
 import os
@@ -302,6 +303,110 @@ async def test_a_session_serves_only_its_own_login(monkeypatch, server):
     before = len(server.requests)
     assert code(await call("list_calendars")()) == "calendar_not_configured"   # the fake knows one login only
     assert all(server.session_of(r) is None for r in server.requests[before:])
+
+
+async def test_calls_arriving_together_on_a_cold_session_share_one_login(owner_events):
+    """After a restart, calls arriving together wait for the one login under way rather than each
+    paying their own (8 s each on the owner's Nextcloud)."""
+    owner_events.delay_seconds = 0.02
+    results = await asyncio.gather(*(call("list_events")(start="2026-11-16", end="2026-11-22") for _ in range(3)))
+    assert all(r.error is None for r in results)
+    assert owner_events.logins == 1
+
+
+def _listings(server):
+    """The requests that listed the calendars (the home's PROPFIND, Depth 1)."""
+    return [r for r in server.requests if r.method == "PROPFIND" and r.headers.get("depth") == "1"]
+
+
+async def test_the_calendar_list_is_reused_for_two_minutes(monkeypatch, owner_events):
+    await call("list_calendars")()
+    assert (await call("list_events")(start="2026-11-16", end="2026-11-22")).error is None
+    assert (await call("update_event")(event=f"{SHARED}/dentist.ics", summary="Dentist (moved)")).error is None
+    assert len(_listings(owner_events)) == 1
+    monkeypatch.setattr(caldav_client, "CALENDARS_MAX_AGE_SECONDS", -1.0)   # two minutes later
+    await call("list_events")()
+    assert len(_listings(owner_events)) == 2
+
+
+async def test_list_calendars_always_asks_the_server(server):
+    await call("list_calendars")()
+    server.add_calendar("rdv", "RDV")
+    result = await call("list_calendars")()
+    assert "RDV" in [c.name for c in result.calendars]
+    assert len(_listings(server)) == 2
+
+
+async def test_every_refusal_about_a_calendar_comes_from_a_fresh_list(server):
+    """A calendar made in the owner's app a minute ago is found; one that is not there is refused as before."""
+    await call("list_calendars")()
+    server.add_calendar("rdv", "RDV")
+    created = await call("create_event")(summary="Checkup", start="2026-11-20T10:00", calendar="RDV")
+    assert created.error is None and created.event.calendar == "RDV"
+    assert len(_listings(server)) == 2
+    missing = await call("list_events")(calendar="Nowhere")
+    assert code(missing) == "not_found" and "RDV" in missing.error
+    assert len(_listings(server)) == 3
+    server.calendars["rdv"].writable = False
+    # Made read-only meanwhile: the kept list still says writable, so the server's 403 answers (the same
+    # code), and drops the list; the next call is refused from a fresh one.
+    refused = await call("create_event")(summary="Checkup 2", start="2026-11-21T10:00", calendar="RDV")
+    assert code(refused) == "calendar_read_only" and len(_listings(server)) == 3
+    again = await call("create_event")(summary="Checkup 2", start="2026-11-21T10:00", calendar="RDV")
+    assert code(again) == "calendar_read_only" and "read-only for this login" in again.error
+    assert len(_listings(server)) == 4
+
+
+async def test_a_failed_request_drops_the_kept_calendar_list(owner_events):
+    await call("list_calendars")()
+    owner_events.failing_calendars = {SHARED}
+    assert (await call("list_events")()).notes
+    owner_events.failing_calendars = set()
+    await call("list_events")()
+    assert len(_listings(owner_events)) == 2
+
+
+def _multigets(server):
+    return [r for r in server.requests if r.method == "REPORT" and b"calendar-multiget" in r.content]
+
+
+async def test_a_repeat_rule_is_read_once_per_version_of_its_event(owner_events):
+    def yoga_rules(result):
+        return {e.repeat for e in result.events if e.summary == "Yoga"}
+
+    first = await call("list_events")(start="2026-11-16", end="2026-11-22")
+    second = await call("list_events")(start="2026-11-16", end="2026-11-22")
+    assert yoga_rules(first) == yoga_rules(second) == {"FREQ=WEEKLY;BYDAY=TH"}
+    assert len(_multigets(owner_events)) == 1
+    owner_events.put_object(SHARED, "yoga.ics", YOGA.replace("BYDAY=TH", "BYDAY=TH,FR"))   # a new ETag
+    third = await call("list_events")(start="2026-11-16", end="2026-11-22")
+    assert yoga_rules(third) == {"FREQ=WEEKLY;BYDAY=TH,FR"}
+    assert len(_multigets(owner_events)) == 2
+
+
+async def test_the_session_is_opened_at_startup_and_kept_warm(monkeypatch, server):
+    """A restart would otherwise cost the first calendar call its logins (some 18 s on the owner's Nextcloud)."""
+    (plugin,) = plugins.load(("caldav",))
+    assert plugin.startup is caldav_tools.startup
+    monkeypatch.setattr(caldav_tools, "KEEP_WARM_SECONDS", 0.05)
+    task = asyncio.create_task(caldav_tools.startup())
+    for _ in range(100):
+        if len(_listings(server)) >= 2:
+            break
+        await asyncio.sleep(0.02)
+    assert len(_listings(server)) >= 2 and server.logins == 1
+    before = len(server.requests)
+    assert (await call("list_events")()).error is None
+    assert server.logins == 1 and len(server.requests) > before
+    task.cancel()
+    await asyncio.wait([task])
+    assert caldav_client._SESSIONS == {}
+
+
+async def test_the_session_warms_nothing_when_the_tools_are_not_set_up(monkeypatch, server):
+    reconfigure(monkeypatch, url=None)
+    assert caldav_tools.startup() is None
+    assert server.requests == []
 
 
 # ── list_calendars ───────────────────────────────────────────────────────

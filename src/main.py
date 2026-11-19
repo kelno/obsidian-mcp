@@ -796,6 +796,8 @@ async def lifespan(app: FastAPI):
         warmup_task = asyncio.create_task(_warm_embedding_model())
         indexer_task = asyncio.create_task(run_indexer_loop())
         indexer_task.add_done_callback(_on_indexer_done)
+        # The plugins' background work (`Plugin.startup`): never delays or fails the start.
+        plugin_tasks = plugins.start_background()
         try:
             async with mcp.session_manager.run():
                 yield
@@ -803,6 +805,12 @@ async def lifespan(app: FastAPI):
             warmup_task.cancel()
             indexer_task.cancel()
             counters_task.cancel()
+            try:
+                await plugins.stop_background(plugin_tasks)
+            except Exception as e:  # noqa: BLE001 - shutdown, never fatal
+                logging.getLogger(__name__).error(
+                    f"Stopping the plugins' startup tasks failed: {type(e).__name__}"
+                )
             try:
                 await counters_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001

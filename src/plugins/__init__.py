@@ -23,6 +23,10 @@ A plugin fills only the hooks it needs:
 - `tool_text` and `guide_text`: what the plugin adds to tool descriptions and
   to `get_vault_guide`, so a deployment without it never describes what it
   does.
+- `startup()`: called once as the server starts serving; it may return a
+  coroutine, which runs as a background task (warming a connection, say). It
+  never delays or fails the start: an error is logged and the server goes on
+  without it, and the task is cancelled at shutdown.
 
 `check` and `rewrite` run for `create_note`, `edit_note` (dry runs included)
 and `write_file` on a `.md`, on a write that changes the note; not for the task
@@ -40,11 +44,13 @@ See docs/architecture/plugins.md.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import importlib
+import inspect
 import logging
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
 
 from src.config import settings
@@ -182,6 +188,10 @@ class Plugin:
             One paragraph per line, unwrapped.
         guide_text: sections appended to `get_vault_guide`, each starting
             with a `## … (this server)` heading.
+        startup: called once as the server starts serving (not in sandbox
+            mode); returns None, or a coroutine that runs as a background
+            task until it ends or the server shuts down (`start_background`).
+            It must return at once: its work goes in the coroutine.
     """
 
     name: str
@@ -191,6 +201,7 @@ class Plugin:
     tools: tuple[PluginTool, ...] = ()
     tool_text: Mapping[str, str] = field(default_factory=dict)
     guide_text: str = ""
+    startup: Callable[[], Coroutine[object, object, object] | None] | None = None
 
 
 class PluginLoadError(RuntimeError):
@@ -292,6 +303,49 @@ def active() -> tuple[Plugin, ...]:
             name stops the server before it serves.
     """
     return load(tuple(settings.plugins))
+
+
+def _background_done(name: str, task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("plugin %s: its startup task failed", name, exc_info=exc)
+
+
+def start_background() -> list[asyncio.Task]:
+    """Each loaded plugin's `startup`, in plugin order; the coroutines it returns, started as tasks.
+
+    Never raises and never waits on a plugin: a `startup` that raises or returns something
+    other than None or a coroutine is logged at ERROR and skipped, and a task that fails
+    later is logged at ERROR when it ends. The server serves either way.
+    """
+    tasks: list[asyncio.Task] = []
+    for plugin in active():
+        if plugin.startup is None:
+            continue
+        try:
+            work = plugin.startup()
+        except Exception:  # noqa: BLE001 - a plugin bug must not stop the server; logged
+            logger.exception("plugin %s: startup failed; the server starts without it", plugin.name)
+            continue
+        if work is None:
+            continue
+        if not inspect.iscoroutine(work):
+            logger.error("plugin %s: startup returned %r, not None or a coroutine; ignored", plugin.name, type(work))
+            continue
+        task = asyncio.create_task(work, name=f"plugin-{plugin.name}-startup")
+        task.add_done_callback(functools.partial(_background_done, plugin.name))
+        tasks.append(task)
+    return tasks
+
+
+async def stop_background(tasks: list[asyncio.Task], timeout: float = 5.0) -> None:
+    """Cancel the plugins' startup tasks and give them `timeout` seconds to finish (to close what they opened)."""
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=timeout)
 
 
 def _error_line(plugin: Plugin, step: str, why: str, what: str = "write") -> str:

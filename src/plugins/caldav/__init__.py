@@ -3,7 +3,8 @@
 Generic: any CalDAV server (written against Nextcloud), any vault. It adds
 five tools (`tools`): `list_calendars`, `list_events` (repeating events
 expanded by the server into occurrences), `create_event`, `update_event` and
-`delete_event`. It touches no note and no hook of the note writers.
+`delete_event`. It touches no note and no hook of the note writers. Its
+`startup` opens the CalDAV session in the background and keeps it warm.
 
 Settings (`config`): `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD` (an
 app password), and optionally `CALDAV_CALENDARS` (which calendars agents see,
@@ -31,4 +32,4 @@ GUIDE = (
     "or deleted, with its date."
 )
 
-plugin = plugins.Plugin(name="caldav", tools=tools.TOOLS, guide_text=GUIDE)
+plugin = plugins.Plugin(name="caldav", tools=tools.TOOLS, guide_text=GUIDE, startup=tools.startup)

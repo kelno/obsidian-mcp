@@ -560,3 +560,45 @@ def test_open_area_registered_as_the_server_does_keeps_its_schema():
         assert listed[name].meta == {"anthropic/maxResultSizeChars": 100_000}
         assert listed[name].model_dump(by_alias=True, exclude_none=True)["_meta"] == listed[name].meta
 
+
+
+# ── startup ──────────────────────────────────────────────────────────────
+
+
+async def test_a_startup_coroutine_runs_in_the_background_and_is_cancelled_at_shutdown(monkeypatch):
+    started, stopped = asyncio.Event(), asyncio.Event()
+
+    async def warm():
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            stopped.set()
+
+    use(monkeypatch, plugins.Plugin("a", startup=lambda: warm()), plugins.Plugin("b"),
+        plugins.Plugin("c", startup=lambda: None))
+    tasks = plugins.start_background()   # returns at once: nothing of the plugin's work is awaited
+    assert len(tasks) == 1 and not started.is_set()
+    await asyncio.wait_for(started.wait(), 1)
+    await plugins.stop_background(tasks)
+    assert stopped.is_set() and tasks[0].cancelled()
+
+
+async def test_a_startup_that_fails_never_stops_the_server(monkeypatch, caplog):
+    def raising():
+        raise RuntimeError("plugin bug")
+
+    async def failing_later():
+        raise RuntimeError("background bug")
+
+    use(monkeypatch, plugins.Plugin("raises", startup=raising), plugins.Plugin("odd", startup=lambda: 42),
+        plugins.Plugin("later", startup=lambda: failing_later()))
+    tasks = plugins.start_background()
+    assert len(tasks) == 1
+    await asyncio.wait(tasks)
+    await asyncio.sleep(0)   # the done callback
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert any("raises" in m and "startup failed" in m for m in errors)
+    assert any("odd" in m and "not None or a coroutine" in m for m in errors)
+    assert any("later" in m and "startup task failed" in m for m in errors)
+    await plugins.stop_background(tasks)   # an ended task is fine to stop

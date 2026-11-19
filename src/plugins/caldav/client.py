@@ -15,6 +15,11 @@ server's `OUTBOUND_USER_AGENT`, one deadline for all the requests of a call
 request goes to `CALDAV_URL`'s own scheme and host, whatever host an `href` in a
 response names. Answers are parsed off the event loop (`asyncio.to_thread`): a
 large one takes seconds, and the server runs one worker.
+
+One HTTP client per login serves every call (`_Session`): its connections and
+the server's session cookies are kept between calls, and until the server's
+session is established, requests go one at a time, so calls arriving together
+on a cold session share one slow login rather than each paying their own.
 """
 
 from __future__ import annotations
@@ -22,8 +27,9 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
 import httpx
@@ -45,18 +51,78 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 # moves while the server runs, so the two discovery requests run once.
 _HOMES: dict[tuple[str, str], str] = {}
 
-# The server's session cookies, per (CALDAV_URL, CALDAV_USERNAME), kept between calls.
-# Nextcloud checks a login slowly and a session fast: on a small home server, a request
-# that logs in took 8 s and one in a session 0.25 s (2026-11-18), so a call of three
-# requests ran out of time on logins alone. The login still goes with every request,
-# so a session the server has dropped costs one login, never a refusal.
-_SESSIONS: dict[tuple[str, str], httpx.Cookies] = {}
+#: How long a calendar list is reused by the calls that only work within it (`recent_calendars`).
+CALENDARS_MAX_AGE_SECONDS = 120.0
+
+# The calendar list last fetched, per (CALDAV_URL, CALDAV_USERNAME), with when (`time.monotonic`).
+# Dropped whenever a request fails, so an error (a calendar gone, a right withdrawn) is never
+# followed by another call working from the same list.
+_CALENDARS: dict[tuple[str, str], tuple[float, list["CalendarInfo"]]] = {}
+
+# The repeat rule of each repeating event `list_events` read, per (login, href), with the ETag of
+# the version it was read from (None: no rule of its own to show). An ETag names one version of an
+# object, and the expanded query's answer carries the stored object's, so a rule kept for the ETag
+# that query gives is the rule `calendar-multiget` would give now: that request is then skipped.
+RULES: dict[tuple[tuple[str, str], str], tuple[str, str | None]] = {}
+
+#: Requests sent one at a time on a new session before it counts as established anyway.
+_OPENING_REQUESTS = 3
+
+
+@dataclass(eq=False)
+class _Session:
+    """One login's HTTP client, shared by every call: its connections and the server's session.
+
+    Nextcloud checks a login slowly and a session fast: on a small home server, a request
+    that logs in took 8 s and one in a session 0.25 s (2026-11-18), so a call of three
+    requests ran out of time on logins alone. The login still goes with every request, so a
+    session the server has dropped costs one login, never a refusal. Until a request comes
+    back without the server changing the session cookies (or `_OPENING_REQUESTS` came back),
+    requests go one at a time: concurrent calls on a cold session then share one login
+    rather than each logging in.
+    """
+
+    cfg: CalDavSettings
+    http: httpx.AsyncClient
+    opening: asyncio.Lock = field(default_factory=asyncio.Lock)
+    established: bool = False
+    answered: int = 0
+
+    def cookies(self) -> dict[tuple[str, str, str], str | None]:
+        return {(c.domain, c.path, c.name): c.value for c in self.http.cookies.jar}
+
+
+# The sessions, per (CALDAV_URL, CALDAV_USERNAME). The cookies are a credential: memory only, never logged.
+_SESSIONS: dict[tuple[str, str], _Session] = {}
+
+
+def _session(cfg: CalDavSettings, login: tuple[str, str]) -> _Session:
+    """The login's session, opened on first use (or when a setting changed)."""
+    session = _SESSIONS.get(login)
+    if session is None or session.cfg != cfg:
+        session = _Session(cfg, httpx.AsyncClient(
+            auth=httpx.BasicAuth(cfg.username, cfg.password.get_secret_value()),
+            timeout=cfg.timeout_seconds, follow_redirects=False, trust_env=False,
+            headers={"User-Agent": core_settings.outbound_user_agent}))
+        _SESSIONS[login] = session
+    return session
 
 
 def forget_server_state() -> None:
-    """Drop the discovered calendar homes and the sessions (tests; a changed setting)."""
+    """Drop the discovered calendar homes, the calendar lists, the kept repeat rules and the sessions
+    (tests; a changed setting)."""
     _HOMES.clear()
+    _CALENDARS.clear()
+    RULES.clear()
     _SESSIONS.clear()
+
+
+async def close_sessions() -> None:
+    """Close every session's HTTP client (the server shutting down)."""
+    sessions = list(_SESSIONS.values())
+    _SESSIONS.clear()
+    for session in sessions:
+        await session.http.aclose()
 
 
 class CalDavError(Exception):
@@ -133,7 +199,7 @@ def _utc_stamp(moment: datetime.datetime) -> str:
 
 
 class Client:
-    """One session with the CalDAV server; use as `async with Client(cfg) as client:`."""
+    """One call's use of the login's session; use as `async with Client(cfg) as client:`."""
 
     def __init__(self, cfg: CalDavSettings):
         self._cfg = cfg
@@ -141,25 +207,25 @@ class Client:
         self._origin = f"{parts.scheme}://{parts.netloc}"
         self._root = parts.path or "/"
         self._login = (cfg.url.strip(), cfg.username)
-        self._http: httpx.AsyncClient | None = None
+        self._session: _Session | None = None
         self._deadline = 0.0
+
+    @property
+    def login(self) -> tuple[str, str]:
+        """`(CALDAV_URL, CALDAV_USERNAME)`: what the server's state is kept per."""
+        return self._login
 
     async def __aenter__(self) -> "Client":
         # One deadline for the whole call: httpx's timeout is per phase of one request, and a
         # write makes up to five requests, each of which a hung server could hold to the limit.
         self._deadline = asyncio.get_running_loop().time() + self._cfg.timeout_seconds
-        self._http = httpx.AsyncClient(
-            auth=httpx.BasicAuth(self._cfg.username, self._cfg.password.get_secret_value()),
-            timeout=self._cfg.timeout_seconds, follow_redirects=False, trust_env=False,
-            headers={"User-Agent": core_settings.outbound_user_agent}, cookies=_SESSIONS.get(self._login))
+        self._session = _session(self._cfg, self._login)
         return self
 
     async def __aexit__(self, *exc) -> None:
-        assert self._http is not None
-        # Kept even when the call failed or ran out of time: the session its requests got
-        # spares the next call the slow logins.
-        _SESSIONS[self._login] = httpx.Cookies(self._http.cookies)
-        await self._http.aclose()
+        # The session stays open for the next call, a failed or timed-out one's included: the
+        # session its requests got spares the next call the slow logins.
+        self._session = None
 
     # ── Requests ────────────────────────────────────────────────────────
 
@@ -177,24 +243,27 @@ class Client:
                 error, `calendar_not_configured` for a refused login or a redirect, and the codes
                 of `_status_error` for the rest.
         """
-        assert self._http is not None
+        try:
+            return await self._checked(method, path, body=body, headers=headers, ok=ok, what=what,
+                                       event_write=event_write)
+        except CalDavError:
+            # A calendar gone or a right withdrawn shows as an error: the next call asks for the list again.
+            _CALENDARS.pop(self._login, None)
+            raise
+
+    async def _checked(self, method: str, path: str, *, body: bytes | None, headers: dict[str, str] | None,
+                       ok: tuple[int, ...], what: str, event_write: bool) -> _Reply:
+        session = self._session
+        assert session is not None
         url = self._url(path)
         try:
-            async with asyncio.timeout_at(self._deadline), \
-                    self._http.stream(method, url, content=body, headers=headers) as response:
-                status, response_headers = response.status_code, response.headers
-                if status not in ok:
-                    content = b""   # an error's body is not read: closing the stream drops it
+            async with asyncio.timeout_at(self._deadline):
+                if session.established:
+                    status, response_headers, content = await _exchange(session, method, url, body, headers, ok,
+                                                                        what)
                 else:
-                    chunks, size = [], 0
-                    async for chunk in response.aiter_bytes():
-                        size += len(chunk)
-                        if size > MAX_RESPONSE_BYTES:
-                            raise CalDavError("calendar_unavailable", f"The calendar server's answer to {what} is "
-                                              f"larger than {MAX_RESPONSE_BYTES // (1024 * 1024)} MB; ask for a "
-                                              "shorter time range or one calendar.")
-                        chunks.append(chunk)
-                    content = b"".join(chunks)
+                    status, response_headers, content = await _opening(session, method, url, body, headers, ok,
+                                                                       what)
         except TimeoutError as exc:
             logger.warning("caldav: %s %s ran past the call's deadline", method, urlsplit(url).path)
             raise CalDavError("calendar_unavailable", "The calendar server took longer than "
@@ -251,8 +320,16 @@ class Client:
         _HOMES[self._login] = home
         return home
 
+    def recent_calendars(self) -> list[CalendarInfo] | None:
+        """The calendar list `calendars` fetched in the last `CALENDARS_MAX_AGE_SECONDS`, if any."""
+        kept = _CALENDARS.get(self._login)
+        if kept is None or time.monotonic() - kept[0] > CALENDARS_MAX_AGE_SECONDS:
+            return None
+        return list(kept[1])
+
     async def calendars(self) -> list[CalendarInfo]:
-        """The calendars in the login's home (shared ones included), task lists marked."""
+        """The calendars in the login's home (shared ones included), task lists marked: always
+        asked of the server, and kept for `recent_calendars`."""
         home = await self.home()
         body = _propfind((D, "resourcetype"), (D, "displayname"), (D, "current-user-privilege-set"),
                          (C, "supported-calendar-component-set"), (C, "calendar-description"),
@@ -284,6 +361,7 @@ class Client:
             found.append(CalendarInfo(id=cal_id, href=path, name=name, writable=writable,
                                       events=not components or "VEVENT" in components, color=color,
                                       description=description))
+        _CALENDARS[self._login] = (time.monotonic(), list(found))
         return found
 
     # ── Events ──────────────────────────────────────────────────────────
@@ -371,6 +449,40 @@ class Client:
         """
         await self._request("DELETE", href, headers={"If-Match": etag} if etag else None, ok=(200, 204),
                             what="deleting the event")
+
+
+async def _opening(session: _Session, method: str, url: str, body: bytes | None, headers: dict[str, str] | None,
+                   ok: tuple[int, ...], what: str) -> tuple[int, httpx.Headers, bytes]:
+    """`_exchange`, one request at a time until the session is established (see `_Session`)."""
+    async with session.opening:
+        if not session.established:
+            before = session.cookies()
+            reply = await _exchange(session, method, url, body, headers, ok, what)
+            session.answered += 1
+            if session.cookies() == before or session.answered >= _OPENING_REQUESTS:
+                session.established = True
+            return reply
+    # Established while this request waited its turn: no need to keep the others waiting.
+    return await _exchange(session, method, url, body, headers, ok, what)
+
+
+async def _exchange(session: _Session, method: str, url: str, body: bytes | None, headers: dict[str, str] | None,
+                    ok: tuple[int, ...], what: str) -> tuple[int, httpx.Headers, bytes]:
+    """`(status, headers, body)` of one request; the body is read only for a status in `ok`, up to
+    `MAX_RESPONSE_BYTES`."""
+    async with session.http.stream(method, url, content=body, headers=headers) as response:
+        status, response_headers = response.status_code, response.headers
+        if status not in ok:
+            return status, response_headers, b""   # an error's body is not read: closing the stream drops it
+        chunks, size = [], 0
+        async for chunk in response.aiter_bytes():
+            size += len(chunk)
+            if size > MAX_RESPONSE_BYTES:
+                raise CalDavError("calendar_unavailable", f"The calendar server's answer to {what} is larger than "
+                                  f"{MAX_RESPONSE_BYTES // (1024 * 1024)} MB; ask for a shorter time range or one "
+                                  "calendar.")
+            chunks.append(chunk)
+        return status, response_headers, b"".join(chunks)
 
 
 def object_href(calendar: CalendarInfo, name: str) -> str:

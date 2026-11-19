@@ -4,8 +4,10 @@ Tools of the `caldav` plugin (`Plugin.tools`), registered by the core, which
 wraps each in `_tracked` (rate buckets, quota, usage row); the three writers
 draw on the write budget and need write permission like the note writers.
 
-Each call reads the settings (`config`), opens one connection to the CalDAV
-server (`client`), lists the calendars this login sees, keeps those
+Each call reads the settings (`config`), uses the login's session with the
+CalDAV server (`client`, shared by every call and opened at startup by
+`keep_warm`), lists the calendars this login sees (or reuses the list of the
+last two minutes, never for a refusal: `_choose`), keeps those
 `CALDAV_CALENDARS` names (all when unset), and works on those only: an event
 id naming another calendar is refused before any request reaches it.
 
@@ -24,8 +26,9 @@ import datetime as dt
 import logging
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, TypeVar
 from urllib.parse import unquote
 
 from mcp.types import ToolAnnotations
@@ -110,6 +113,43 @@ def _settings() -> tuple[config.CalDavSettings, dt.tzinfo]:
     return cfg, config.zone(cfg)
 
 
+#: How often the background task uses the session: Nextcloud drops one unused for a day
+#: (`session_lifetime`), and a new one costs the next call its slow logins.
+KEEP_WARM_SECONDS = 30 * 60
+
+
+def startup():
+    """The plugin's `startup` hook: the coroutine keeping the session warm, or None when the tools
+    are not set up (each call then refuses as it says)."""
+    try:
+        cfg, _tz = _settings()
+    except _Refusal:
+        return None
+    return keep_warm(cfg)
+
+
+async def keep_warm(cfg: config.CalDavSettings) -> None:
+    """Open the login's session as the server starts, then use it every `KEEP_WARM_SECONDS`.
+
+    The server's restart would otherwise cost the first calendar call its logins (some 18 s
+    measured on the owner's Nextcloud). Each round lists the calendars (`list_calendars`'
+    request, which also refreshes the calendar list the other calls reuse); a failure is
+    logged by its refusal code only and the next round tries again. The sessions close when
+    the task is cancelled, at shutdown.
+    """
+    try:
+        while True:
+            try:
+                async with client.Client(cfg) as dav:
+                    await dav.calendars()
+            except client.CalDavError as exc:
+                logger.info("caldav: keeping the calendar session open failed (%s); the next call logs in",
+                            exc.code)
+            await asyncio.sleep(KEEP_WARM_SECONDS)
+    finally:
+        await client.close_sessions()
+
+
 @dataclass
 class _View:
     """The calendars this call works with, in order, and what the result should say about the rest."""
@@ -117,6 +157,9 @@ class _View:
     calendars: list[client.CalendarInfo]
     default: client.CalendarInfo | None
     notes: list[str]
+
+
+_Chosen = TypeVar("_Chosen")
 
 
 def _names(calendars) -> str:
@@ -168,6 +211,22 @@ def _view(found: list[client.CalendarInfo], wanted: list[str]) -> _View:
 
 async def _open_view(dav: client.Client, cfg: config.CalDavSettings) -> _View:
     return _view(await dav.calendars(), cfg.calendars)
+
+
+async def _choose(dav: client.Client, cfg: config.CalDavSettings, pick: Callable[[_View], _Chosen]) \
+        -> tuple[_View, _Chosen]:
+    """The view and `pick(view)`, from the calendar list of the last two minutes when there is one
+    (`client.CALENDARS_MAX_AGE_SECONDS`, a request saved) and `pick` accepts it; else, and whenever
+    `pick` refuses, from the list asked of the server now, so every refusal comes from a fresh list."""
+    recent = dav.recent_calendars()
+    if recent is not None:
+        view = _view(recent, cfg.calendars)
+        try:
+            return view, pick(view)
+        except _Refusal:
+            pass
+    view = await _open_view(dav, cfg)
+    return view, pick(view)
 
 
 def _pick(view: _View, given: str) -> client.CalendarInfo:
@@ -316,6 +375,7 @@ class _Found:
     occurrences: list[tuple[ical.Occurrence, str]]   # (occurrence, its object's href)
     unexpanded: int = 0     # objects the server left unexpanded (a repeat rule still in them)
     unreadable: int = 0     # objects that could not be read
+    etags: dict[str, str] = dataclasses.field(default_factory=dict)   # href → the object's ETag, when given
 
 
 async def _occurrences(dav: client.Client, calendar: client.CalendarInfo, begin: dt.datetime,
@@ -337,23 +397,44 @@ def _read_found(objects: list[client.CalendarObject], begin: dt.datetime, finish
             continue
         found.unexpanded += left
         found.occurrences += [(occ, obj.href) for occ in occs if _within(occ, begin, finish, tz)]
+        if obj.etag:
+            found.etags[obj.href] = obj.etag
     return found
+
+
+#: The most repeat rules `client.RULES` holds before it starts over.
+_RULES_MAX = 5000
 
 
 async def _calendar_events(dav: client.Client, calendar: client.CalendarInfo, begin: dt.datetime,
                            finish: dt.datetime, tz: dt.tzinfo) -> tuple[_Found, dict[str, str]]:
-    """One calendar's occurrences over the range, and `{href: repeat rule}` for the repeating ones."""
+    """One calendar's occurrences over the range, and `{href: repeat rule}` for the repeating ones.
+
+    A rule already read for the version the expansion names (its ETag) is reused; the others
+    come from one `calendar-multiget` of the stored objects.
+    """
     found = await _occurrences(dav, calendar, begin, finish, tz)
     repeating = sorted({href for occ, href in found.occurrences if occ.recurrence_id is not None})
-    rules = {}
-    if repeating:
-        for obj in await dav.multiget(calendar, repeating):
+    rules, missing = {}, []
+    for href in repeating:
+        kept = client.RULES.get((dav.login, href))
+        if kept is not None and kept[0] == found.etags.get(href):
+            if kept[1]:
+                rules[href] = kept[1]
+        else:
+            missing.append(href)
+    if missing:
+        for obj in await dav.multiget(calendar, missing):
             try:
                 rule = ical.rule_text(ical.master(ical.parse_calendar(obj.data)))
             except ical.EventError:
                 rule = None   # only changed occurrences stored, or unreadable: they still list, without a rule
             if rule:
                 rules[obj.href] = rule
+            if obj.etag and obj.etag == found.etags.get(obj.href):
+                if len(client.RULES) >= _RULES_MAX:
+                    client.RULES.clear()
+                client.RULES[(dav.login, obj.href)] = (obj.etag, rule)
     return found, rules
 
 
@@ -366,8 +447,8 @@ async def list_events_impl(start: str | None = None, end: str | None = None, cal
         span = _range(start, end, tz)
         begin, finish = span.begin, span.finish
         async with client.Client(cfg) as dav:
-            view = await _open_view(dav, cfg)
-            chosen = [_pick(view, calendar)] if calendar is not None else view.calendars
+            _, chosen = await _choose(
+                dav, cfg, lambda view: [_pick(view, calendar)] if calendar is not None else view.calendars)
             per_calendar = await asyncio.gather(*(_calendar_events(dav, c, begin, finish, tz) for c in chosen),
                                                 return_exceptions=True)
         failed = [(cal, exc) for cal, exc in zip(chosen, per_calendar) if isinstance(exc, BaseException)]
@@ -455,17 +536,20 @@ async def create_event_impl(summary: str, start: str, end: str | None = None, ca
         first = ical.parse_moment(start, tz, "start")
         stored_end = ical.end_exclusive(first, ical.parse_moment(end, tz, "end") if end is not None else None)
         rule = ical.parse_repeat(repeat, first, tz) if repeat is not None and repeat.strip() else None
-        async with client.Client(cfg) as dav:
-            view = await _open_view(dav, cfg)
+        def choose_target(view: _View) -> client.CalendarInfo:
             if calendar is not None:
-                target = _pick(view, calendar)
+                chosen = _pick(view, calendar)
             elif view.default is not None:
-                target = view.default
+                chosen = view.default
             else:
                 raise _Refusal("invalid_argument", "No calendar was named and none takes new events by default: "
                                "give `calendar`. Writable calendars: "
                                f"{_names([c for c in view.calendars if c.writable is not False])}.")
-            _writable(view, target)
+            _writable(view, chosen)
+            return chosen
+
+        async with client.Client(cfg) as dav:
+            _, target = await _choose(dav, cfg, choose_target)
             twin = await _duplicate(dav, target, title, first, stored_end, tz)
             if twin is not None:
                 raise _Refusal("duplicate_event", f"{target.name!r} already has {_said(twin)} (event {twin.event}); "
@@ -529,9 +613,12 @@ class _Target:
 
 
 async def _read_target(dav: client.Client, cfg: config.CalDavSettings, cal_id: str, name: str) -> _Target:
-    view = await _open_view(dav, cfg)
-    calendar, href = _locate(view, cal_id, name)
-    _writable(view, calendar)
+    def locate(view: _View) -> tuple[client.CalendarInfo, str]:
+        found = _locate(view, cal_id, name)
+        _writable(view, found[0])
+        return found
+
+    view, (calendar, href) = await _choose(dav, cfg, locate)
     obj = await dav.get(href)
     try:
         stored = ical.parse_calendar(obj.data)
