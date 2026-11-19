@@ -87,6 +87,8 @@ class PathPiece(_OmitNone):
     next_offset: int | None = None
     #: True for a note in a private folder: its text is not shown.
     private: bool | None = None
+    #: True for a repo's doc the PC's snapshot gives by hash and size only: its text is read on that PC.
+    text_on_pc: bool | None = None
 
 
 # Facts about the structure itself, found on the way; judging them is left to the caller.

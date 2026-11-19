@@ -179,7 +179,7 @@ def _piece(p: ap.Piece, known: dict | None) -> PathPiece:
         id=p.id, stage=ap.STAGE_NAMES[p.stage], arrives=p.arrives, always=p.always, where=p.where, chars=p.chars,
         hash=p.hash, via=_short(p.via, _VIA_MAX) if p.via else None, moment=moment,
         also_pointed_by=p.also or None, status=status,
-        private=True if path and private_folders.is_private(path) else None)
+        private=True if path and private_folders.is_private(path) else None, text_on_pc=True if p.on_pc else None)
 
 
 _DETAILS = ("arrives", "where", "chars", "via", "also_pointed_by")
@@ -211,9 +211,9 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
     budget = PAGE_CHARS - _NOTES_RESERVE
     listing = known is not None
     order = {id(o): i for i, o in enumerate(out)}
-    due = [(p, o) for p, o in zip(pieces, out) if o.status != "unchanged" and not o.private]
+    due = [(p, o) for p, o in zip(pieces, out) if o.status != "unchanged" and not (o.private or o.text_on_pc)]
     if listing:
-        result.pieces = [o for o in out if o.status != "unchanged" and o.private]
+        result.pieces = [o for o in out if o.status != "unchanged" and (o.private or o.text_on_pc)]
         # The chains and the structure came with the first call too, unchanged by a later one (owner,
         # 2026-11-18: 9,000 characters a call on a backward question); a call without known shows them again.
         result.structure = None
@@ -359,6 +359,8 @@ def _one_part(result, p: ap.Piece, o: PathPiece, offset: int) -> None:
     """Make `result` carry one part of `p`'s text, from `offset`, as much as fits; `o` alone in its pieces."""
     if o.private:
         raise _SetupError(f"{p.id} is in a private folder: its text is not shown.")
+    if o.text_on_pc:
+        raise _SetupError(f"{p.id} is a repo's doc: the snapshot holds its hash and size only; read it on the PC.")
     if offset > len(p.text):
         raise _SetupError(f"read_from.offset {offset} is past the end of {p.id} ({len(p.text)} characters).")
     result.pieces = [o]
@@ -393,11 +395,15 @@ def _changed_hook_scripts(setup: ap.Setup, piece_ids) -> list[str]:
     snap = setup.snapshot
     if not snap or not snap.hook_scripts:
         return []
-    out = []
+    out, seen = [], set()
     for pid in piece_ids:
         if not pid.startswith("hook:"):
             continue
+        pid = pid.split("#")[0]  # a hook's messages at other events are `hook:<event>/<script>#<n>`
         script = pid.split("/", 1)[-1]
+        if pid in seen:
+            continue
+        seen.add(pid)
         for sid, then in snap.hook_scripts.items():
             if not (sid.startswith("note:") and posixpath.basename(sid) == script):
                 continue

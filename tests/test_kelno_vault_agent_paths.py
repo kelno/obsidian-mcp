@@ -520,3 +520,137 @@ def test_between_rule_notes_only_the_conventions_pointer_shapes_are_followed(vau
         "_/agent/Renamed.md", "_/agent/Gone.md", "_/agent/Missing"}
     # A hook's message isn't written under the convention: its plain "Read the vault note …" still points.
     assert "note:_/agent/roles/Worker.md" in ids(path(PathStart(typical=3)))
+
+
+def test_a_backticked_path_naming_a_kind_of_note_reaches_every_match(vault):
+    # P261, P262: a vault path with <placeholder> segments names a kind of note; every match is reached, with the
+    # line's moment. When the sentence names a rule section, each match's section is the piece, and only notes
+    # that have one count.
+    before = path(PathStart(surface="claude-ai")).structure.mentions_not_followed
+    (vault / "_/agent/Vault conventions.md").write_text(
+        "Conventions.\n\n## Folder notes\n\n"
+        "A folder note is `<folder>/<folder>.md`: one line per subfolder.\n"
+        "Before filing into a folder or changing it, read the `## For agents` section of its folder note, "
+        "`<folder>/<folder>.md`, if it has one. [P261]\n\n## Working on an area\n\n- Start with open_area.\n",
+        encoding="utf-8")
+    (vault / "_/agent/Common-rules.md").write_text(
+        NOTES["_/agent/Common-rules.md"] + "- Before reaching another machine (SSH, a deploy), read its note, "
+        "`Reference/Servers/<name>/<name>.md`: ask the owner first. [P262]\n", encoding="utf-8")
+    for note, text in {"Inbox/Inbox.md": "Inbox.\n\n## For agents\n\n- File by date.\n",
+                       "Log/Log.md": "Log, no rules.\n",
+                       "Reference/Servers/box/box.md": "A box.\n\n## For agents\n\n- Restart freely.\n",
+                       "Reference/Servers/pi/pi.md": "A Pi.\n",
+                       "Reference/Servers/pi/old/old.md": "Not a machine note.\n"}.items():
+        (vault / note).parent.mkdir(parents=True, exist_ok=True)
+        (vault / note).write_text(text, encoding="utf-8")
+
+    result = path(PathStart(surface="claude-ai"))
+    by_id = {p.id: p for p in result.pieces}
+    inbox = by_id["section:Inbox/Inbox.md#For agents"]
+    assert inbox.moment == "Before filing into a folder or changing it" and not inbox.always
+    assert inbox.stage == ap.STAGE_NAMES[ap.LATER] and inbox.text == "## For agents\n\n- File by date."
+    assert "matching `<folder>/<folder>.md`" in inbox.arrives
+    # Every folder note's For agents section, at any depth, the area's main note's too; a folder note without
+    # one brings nothing, and the folder notes aren't read whole.
+    assert {"section:Areas/Repo/Repo.md#For agents", "section:Reference/Servers/box/box.md#For agents"} <= set(by_id)
+    assert not any(i.startswith(("note:Log/", "section:Log/", "note:Inbox/")) for i in by_id)
+    # The machine notes: each read whole, with its rule sections, and nothing below a machine's own folder.
+    for machine in ("box", "pi"):
+        assert by_id[f"note:Reference/Servers/{machine}/{machine}.md"].moment == "Before reaching another machine"
+    assert "note:Reference/Servers/pi/old/old.md" not in by_id
+    # The line that only says what a folder note is points to nothing: one mention, not one per match.
+    assert result.structure.mentions_not_followed == before + 1
+
+    reached = asyncio.run(apt.agent_path_reached_by_impl("Inbox/Inbox.md", None, None))
+    assert reached.matched_by == "the place itself"
+    assert all(hit["via"][-1] == "section:Inbox/Inbox.md#For agents" for hit in reached.reached_by)
+    assert {a for hit in reached.reached_by for a in hit["agents"]} >= {"a claude.ai chat",
+                                                                       "a Claude Code worker in a repo"}
+    machine = asyncio.run(apt.agent_path_reached_by_impl("Reference/Servers/pi/pi.md", None, None))
+    assert machine.reached_by and all(hit["via"][-1] == "note:Reference/Servers/pi/pi.md"
+                                      for hit in machine.reached_by)
+
+
+def test_a_note_pattern_reads_placeholders_as_names():
+    folder_note = ap.note_pattern("<folder>/<folder>.md")
+    assert folder_note.fullmatch("Inbox/Inbox.md") and folder_note.fullmatch("Areas/My mind/My mind.md")
+    assert not folder_note.fullmatch("Areas/My mind/Other.md") and not folder_note.fullmatch("Inbox.md")
+    machine = ap.note_pattern("Reference/Servers/<name>/<name>.md")
+    assert machine.fullmatch("reference/servers/Pi/pi.md") and not machine.fullmatch("Reference/Servers/a/b/b.md")
+    assert ap.note_pattern("Log/<date> Current position.md").fullmatch("Log/2026-11-19 Current position.md")
+    for not_a_pattern in ("_/agent/Common-rules.md", "@<vault path>/_/agent/Common-rules.md",
+                          "~/.claude/<id>.keep.md", "D:/<vault>/x.md"):
+        assert ap.note_pattern(not_a_pattern) is None
+
+
+def test_what_hooks_say_at_other_events_is_on_claude_codes_paths(vault):
+    when = "before a Bash command naming a rule note (refuses it)"
+    snap = {**SNAPSHOT, "format": 2, "hook_messages": {
+        "hook:PreToolUse/guard.py": {"event": "PreToolUse", "matcher": "Bash", "messages": [
+            {"when": when, "text": "Refused: use edit_note. Read the vault note D:\\vault\\_\\agent\\roles\\Relay.md.",
+             "hash": "aaaaaaaaaaaa"},
+            {"when": "before a direct edit (refuses it)", "text": "Refused, again.", "hash": "bbbbbbbbbbbb"}]},
+        "hook:UserPromptSubmit/keep.py": {"event": "UserPromptSubmit", "matcher": "", "messages": None,
+                                          "why": "the script has no messages role"},
+        "hook:PostToolUse/quiet.py": {"event": "PostToolUse", "matcher": "", "messages": []}}}
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
+
+    result = path(PathStart(typical=3))
+    by_id = {p.id: p for p in result.pieces}
+    guard = by_id["hook:PreToolUse/guard.py#1"]
+    assert guard.moment == when and not guard.always and guard.stage == ap.STAGE_NAMES[ap.LATER]
+    assert guard.where == "D:/vault/_/claude-code-hooks/guard.py" and guard.arrives.startswith(
+        "PreToolUse hook (matcher Bash): ")
+    assert guard.hash == ap.digest(guard.text) and "hook:PreToolUse/guard.py#2" in by_id
+    assert not any(i.startswith(("hook:PostToolUse/", "hook:UserPromptSubmit/")) for i in by_id)
+    # Not a rule file: what a message points to isn't followed from it.
+    assert "note:_/agent/roles/Relay.md" not in by_id
+    nf = result.structure.not_followed
+    assert not any(line.startswith("hook messages at other events") for line in nf)
+    assert "what hook:UserPromptSubmit/keep.py says: the script has no messages role" in nf
+    # Only Claude Code runs hooks.
+    assert not any(p.id.startswith("hook:") for p in path(PathStart(surface="claude-ai")).pieces)
+
+    reached = asyncio.run(apt.agent_path_reached_by_impl("hook:PreToolUse/guard.py", None, None))
+    assert reached.matched_by == "the place itself" and reached.reached_by
+    assert all(hit["surface"] == "claude-code" for hit in reached.reached_by)
+
+
+def test_docs_a_repos_claude_md_points_to_are_on_the_path_by_hash(vault):
+    claude_md = ("Repo rules.\n"
+                 "- Before changing the build, read [the build notes](docs/build.md#steps).\n"
+                 "- When releasing, follow `RELEASE.md`.\n"
+                 "- When unsure, read `AGENTS.md`.\n"
+                 "- Background: [design](docs/design.md), [upstream](https://example.org/x.md).\n"
+                 "- Before deploying, read `docs/missing.md`.\n"
+                 "- When contributing, read `git show main:CLAUDE.md`.\n"
+                 "```\nBefore anything, read [fenced](docs/fenced.md).\n```\n")
+    doc = {"hash": "aaaaaaaaaaaa", "chars": 120_000}
+    snap = {**SNAPSHOT, "format": 2,
+            "files": {**SNAPSHOT["files"], "file:D:/work/repo/CLAUDE.md": {"text": claude_md},
+                      "file:D:/work/repo/AGENTS.md": {"text": "Agents. Before testing, read [deep](docs/deep.md).\n"}},
+            "docs": {f"file:D:/work/repo/{d}": {**doc, "path": f"D:/work/repo/{d}"}
+                     for d in ("docs/build.md", "RELEASE.md", "docs/design.md", "docs/deep.md", "docs/fenced.md")}}
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
+
+    result = path(PathStart(typical=3))
+    by_id = {p.id: p for p in result.pieces}
+    build = by_id["file:D:/work/repo/docs/build.md"]
+    assert build.moment == "Before changing the build" and not build.always
+    # Its hash and size from the snapshot; its text stays on the PC.
+    assert build.hash == "aaaaaaaaaaaa" and build.chars == 120_000 and build.text is None and build.text_on_pc
+    assert by_id["file:D:/work/repo/RELEASE.md"].moment == "When releasing"
+    agents = by_id["file:D:/work/repo/AGENTS.md"]
+    assert agents.text.startswith("Agents.") and agents.moment == "When unsure"
+    # One level only; a mention, a URL, a command and a fenced line aren't pointers.
+    for gone in ("docs/deep.md", "docs/design.md", "docs/fenced.md"):
+        assert f"file:D:/work/repo/{gone}" not in by_id
+    assert not any("example.org" in i or "git show" in i for i in by_id)
+    nf = result.structure.not_followed
+    assert "`docs/missing.md`, pointed to by file:D:/work/repo/CLAUDE.md: PC's snapshot doesn't hold it" in nf
+    assert not any("docs a repo's CLAUDE.md points to" in line for line in nf)
+    # Held by hash like any piece; its text can't be asked for in parts.
+    again = path(PathStart(typical=3), known={p.id: p.hash for p in result.pieces})
+    assert not again.pieces
+    refused = asyncio.run(apt.agent_path_impl(PathStart(typical=3), None, None, ReadFrom(id=build.id)))
+    assert "read it on the PC" in refused.error
