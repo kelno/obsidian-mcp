@@ -13,11 +13,9 @@ for with `read_from`. See docs/architecture/agent-paths.md.
 """
 
 import asyncio
-import hashlib
 import json
 import os
 import posixpath
-import time
 from typing import Annotated
 
 from mcp.types import ToolAnnotations
@@ -136,12 +134,10 @@ async def _served(uid) -> ap.ServedTexts:
                           open_area_instructions="\n".join(OPEN_AREA_INSTRUCTIONS))
 
 
-def _setup(uid, machine: str | None, served: ap.ServedTexts, read=None) -> ap.Setup:
+def _setup(uid, machine: str | None, served: ap.ServedTexts) -> ap.Setup:
     notes: list[str] = []
     paths = _vault_files(uid)
-    read = read or _reader(uid)
-    if isinstance(read, _AfterWrite):
-        paths = read.paths(paths)
+    read = _reader(uid)
     try:
         rule_files = _rule_files.read(uid)
     except (FileNotFoundError, ValueError, OSError, _rule_files.RuleFilesError) as exc:
@@ -163,111 +159,6 @@ def _setup(uid, machine: str | None, served: ap.ServedTexts, read=None) -> ap.Se
     snapshot = _snapshot(paths, read, machine, notes)
     vault = ap.Vault(paths, read, rule_files, areas, snapshot.vault if snapshot else None)
     return ap.Setup(vault, points, snapshot, served, notes)
-
-
-# ── Whether a rule's place is reached, after a write ─────────────────
-
-
-class ReachUnknown(Exception):
-    """Whether a place is reached could not be told; the message says why, in a few words."""
-
-
-#: How long a write waits for the paths before saying the check could not be done. Drawing every path took about
-#: 1.5 s on the owner's vault, 60 paths (2026-11-19); a place some path reaches is found after one or two (0.1 s).
-REACH_BUDGET_SECONDS = 5.0
-
-
-class _AfterWrite:
-    """The caller's vault as it is once a write lands (`path` holds `text`), each file's digest kept as it is read."""
-
-    def __init__(self, uid, path: str, text: str):
-        self._read = _reader(uid)
-        self.path = path.replace("\\", "/").lstrip("/")
-        self.text = ap.as_text(text.encode("utf-8"))
-        #: Every file read, vault path to its digest (None when it couldn't be read): what the paths were drawn from.
-        self.seen: dict[str, str | None] = {}
-
-    def __call__(self, path: str) -> str | None:
-        text = self.text if path == self.path else self._read(path)
-        self.seen[path] = _digest(text)
-        return text
-
-    def paths(self, paths: list[str]) -> list[str]:
-        return paths if self.path in paths else [*paths, self.path]
-
-
-def _digest(text: str | None) -> str | None:
-    return None if text is None else hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-#: By vault root, the last time every path was drawn: (the vault's file list and the served texts, by digest),
-#: every file the paths read with its digest, and every place they reach. A write to a rule no path reaches draws
-#: every path; the next writes, while none of those inputs changes, are answered from here. A write to a note on
-#: some path changes what that path read, so it is drawn again.
-_DRAWN: dict[str, tuple[tuple, dict[str, str | None], frozenset[str]]] = {}
-
-
-def _unchanged(drawn, inputs: tuple, read: _AfterWrite) -> bool:
-    """Whether nothing the last full draw read has changed: the file list, the served texts, each file's text."""
-    key, seen, _ = drawn
-    if key != inputs or (read.path in seen and seen[read.path] != _digest(read.text)):
-        return False  # the written note was on a path: checked first, as it is the likeliest change
-    return all(_digest(read(p)) == d for p, d in seen.items())
-
-
-def _place_id(v: ap.Vault, place: str) -> str:
-    """`note:<path>` or `section:<path>#<heading>`, its path spelled as the vault holds it."""
-    kind, rest = place.split(":", 1)
-    path, sep, heading = rest.partition("#")
-    return f"{kind}:{v.by_rel.get(path.lower(), path)}{sep}{heading}"
-
-
-async def reached_after_write(uid, path: str, text: str, places: list[str]) -> set[str]:
-    """Which of `places` (`note:<path>`, `section:<path>#<heading>`) some agent path reaches, the vault taken as it
-    is once `text` is written to `path`: what the path tools count as reached (`agent_paths.reached_places`).
-
-    Raises ReachUnknown when that can't be told: no PC snapshot, an input the paths need unreadable, or longer than
-    `REACH_BUDGET_SECONDS`.
-    """
-    served = await _served(uid)
-    served_digest = _digest(json.dumps([served.tools, served.instructions, served.guide,
-                                        served.open_area_instructions]))
-    root = str(_vault_root(uid))
-
-    def draw() -> set[str]:
-        read = _AfterWrite(uid, path, text)
-        try:
-            setup = _setup(uid, None, served, read)
-        except (_SetupError, ap.StartingPointsError) as exc:
-            raise ReachUnknown(str(exc)) from exc
-        if setup.snapshot is None:
-            raise ReachUnknown(f"no PC has written a snapshot to {ap.SNAPSHOT_FOLDER}/, so what Claude Code loads is "
-                               "unknown")
-        read(_rule_files.RULE_FILES_PATH)  # read by `_setup` outside `read`: its digest joins the inputs
-        ids = {place: _place_id(setup.vault, place) for place in places}
-        inputs = (_digest("\n".join(sorted(setup.vault.by_rel.values()))), served_digest)
-        drawn = _DRAWN.get(root)
-        if drawn and _unchanged(drawn, inputs, read):
-            return {place for place, i in ids.items() if i in drawn[2]}
-        deadline = time.monotonic() + REACH_BUDGET_SECONDS
-        builders: list[ap.PathBuilder] = []
-        every = []
-
-        def runs():
-            for r in ap.iter_runs(setup):
-                if time.monotonic() > deadline:
-                    raise ReachUnknown(f"drawing the agent paths took over {REACH_BUDGET_SECONDS:g} s")
-                builders.append(r[3])
-                yield r
-            every.append(True)
-
-        found = ap.reached_places(setup, ids.values(), runs())
-        if every:
-            reached = ap.registered_hook_scripts(setup).union(*(b.pieces for b in builders))
-            _DRAWN[root] = (inputs, dict(read.seen), frozenset(reached))
-        return {place for place, i in ids.items() if i in found}
-
-    return await asyncio.to_thread(draw)
 
 
 # ── Shaping the result ───────────────────────────────────────────────

@@ -148,12 +148,6 @@ def section_ranges(lines: list[str], headings: tuple[str, ...], start: int = 0) 
     return out
 
 
-def heading_text(line: str) -> str:
-    """A heading line's text, without its `#` marks; "" for a line that isn't a heading."""
-    match = _HEADING_RE.match(line.rstrip("\r"))
-    return match.group(2).strip() if match else ""
-
-
 def split_sections(text: str, headings: tuple[str, ...]) -> tuple[str, list[str]]:
     """`(text without the sections, [each section's body])`, for the sections `section_ranges` finds."""
     lines = text.split("\n")

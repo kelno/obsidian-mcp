@@ -213,63 +213,49 @@ def sql_ref_pattern(ref: Ref) -> str:
     return f"{ref.letter}0*{ref.number}([^0-9]|$)"
 
 
-def _rule_rows(text: str | None) -> list[tuple[int, str, set]]:
-    """`[(0-based line number, line, the proposal refs it cites in brackets)]`, refs read in the note's fence context."""
-    if text is None:
-        return []
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    masked = _masked(text).split("\n")
-    return [(i, line, {r for _, r in _bracketed_found(m) if r.letter == "P"})
-            for i, (line, m) in enumerate(zip(text.split("\n"), masked))]
+def rule_lines_unlogged(old: str | None, new: str, *, skip_leading: int = 0) -> list[tuple[int, str]]:
+    """The lines a rule edit adds or changes, when none of them gains a proposal ref.
 
-
-def _same(line: str) -> str:
-    return line.lstrip("\ufeff").strip()
-
-
-def _added_rows(old_rows, new_rows, skip_leading: int) -> list[tuple[int, str, set]]:
+    `[(line number, text)]` of the non-blank lines `new` holds that `old` did
+    not (compared as the other note checks compare: line endings and
+    surrounding spaces ignored), past the first `skip_leading` lines (the
+    frontmatter). Empty when there are none, or when at least one of them
+    cites in brackets a proposal (`P`) the lines the write removed did not
+    cite: the change carries its proposal. Refs are read in the note's own
+    fence context, as everywhere else.
+    """
     from collections import Counter
 
-    left = Counter(_same(line) for _, line, _refs in old_rows)
+    def rows(text: str | None):
+        if text is None:
+            return []
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        masked = _masked(text).split("\n")
+        return [(i, line, {r for _, r in _bracketed_found(m) if r.letter == "P"})
+                for i, (line, m) in enumerate(zip(text.split("\n"), masked))]
+
+    def same(line: str) -> str:
+        return line.lstrip("﻿").strip()
+
+    def bare(line: str) -> str:
+        """The line without its bracketed refs: a change that only drops a ref is no rule change."""
+        return " ".join(_BRACKET_RE.sub(" ", same(line)).split())
+
+    old_rows, new_rows = rows(old), rows(new)
+    left = Counter(same(line) for _, line, _refs in old_rows)
     added = []
     for i, line, refs in new_rows:
-        key = _same(line)
+        key = same(line)
         if left[key] > 0:
             left[key] -= 1
         elif i >= skip_leading and key:
             added.append((i, line, refs))
-    return added
-
-
-def rule_lines_added(old: str | None, new: str, *, skip_leading: int = 0) -> list[tuple[int, str]]:
-    """`[(line number, text)]` of the non-blank lines `new` holds that `old` did not (compared as the other note
-    checks compare: line endings and surrounding spaces ignored), past the first `skip_leading` lines (the
-    frontmatter): the lines a rule edit adds or changes, before `rule_lines_unlogged` looks at their refs."""
-    return [(i + 1, line.strip()) for i, line, _refs in _added_rows(_rule_rows(old), _rule_rows(new), skip_leading)]
-
-
-def rule_lines_unlogged(old: str | None, new: str, *, skip_leading: int = 0) -> list[tuple[int, str]]:
-    """The lines a rule edit adds or changes (`rule_lines_added`), when none of them gains a proposal ref.
-
-    `[(line number, text)]` of those lines. Empty when there are none, or
-    when at least one of them cites in brackets a proposal (`P`) the lines
-    the write removed did not cite: the change carries its proposal. Refs are
-    read in the note's own fence context, as everywhere else.
-    """
-    from collections import Counter
-
-    def bare(line: str) -> str:
-        """The line without its bracketed refs: a change that only drops a ref is no rule change."""
-        return " ".join(_BRACKET_RE.sub(" ", _same(line)).split())
-
-    old_rows, new_rows = _rule_rows(old), _rule_rows(new)
-    added = _added_rows(old_rows, new_rows, skip_leading)
     if not added:
         return []
-    kept = Counter(_same(line) for _, line, _refs in new_rows)
+    kept = Counter(same(line) for _, line, _refs in new_rows)
     removed_refs, removed_bare = set(), Counter()
     for _, line, refs in old_rows:
-        key = _same(line)
+        key = same(line)
         if kept[key] > 0:
             kept[key] -= 1
         else:
