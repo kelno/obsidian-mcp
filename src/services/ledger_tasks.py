@@ -68,26 +68,40 @@ def task_state(status_types: Iterable[str]) -> str | None:
     return "done" if "DONE" in types else "cancelled"
 
 
-async def citing_rows(session: AsyncSession, uid: int | None) -> list:
-    """The caller's indexed task lines that may cite a ledger entry."""
+async def citing_rows(session: AsyncSession, uid: int | None, refs: Iterable[Ref] | None = None) -> list:
+    """The caller's indexed task lines that may cite a ledger entry; with
+    `refs`, only those that may cite one of them (a superset, matched exactly
+    by `link`)."""
     owner = NoteMetadata.user_id.is_(None) if uid is None else NoteMetadata.user_id == uid
+    where = [owner, ForkNoteTask.kind == "task", ForkNoteTask.line.op("~")(citations.SQL_BRACKET_PREFILTER)]
+    if refs is not None:
+        refs = list(dict.fromkeys(refs))
+        if not refs:
+            return []
+        where.append(ForkNoteTask.line.op("~")(
+            "(" + "|".join(f"({citations.sql_ref_pattern(r)})" for r in refs) + ")"))
     return (await session.execute(
         select(NoteMetadata.file_path, ForkNoteTask.line_number, ForkNoteTask.line)
         .join(NoteMetadata, NoteMetadata.id == ForkNoteTask.note_id)
-        .where(owner, ForkNoteTask.kind == "task", ForkNoteTask.line.op("~")(citations.SQL_BRACKET_PREFILTER))
+        .where(*where)
         .order_by(NoteMetadata.file_path, ForkNoteTask.line_number)
     )).all()
 
 
-def link(rows, parse: Callable[[str, str], object]) -> dict[str, list[CitingTask]]:
+def link(rows, parse: Callable[[str, str], object],
+         only: Iterable[Ref] | None = None) -> dict[str, list[CitingTask]]:
     """`{ref such as "F12": [tasks citing it]}` from `citing_rows`.
 
     `parse(line, path)` returns the plugin's reading of the line (a task with
     a `status.type`) or None when the plugin would not read it as a task.
+    With `only`, just those refs: a line citing none of them is not parsed.
     """
+    wanted = None if only is None else {str(r) for r in only}
     out: dict[str, list[CitingTask]] = {}
     for row in rows:
         refs = citations.bracketed(row.line)
+        if wanted is not None:
+            refs = [r for r in refs if str(r) in wanted]
         if not refs:
             continue
         task = parse(row.line, row.file_path)
@@ -230,8 +244,10 @@ async def refs_on_line(session: AsyncSession, uid: int | None, text: str,
     cases = await current_cases(session, entries.values())
     task_states = {}
     if cited:
-        rows = [r for r in await citing_rows(session, uid) if r.file_path != note_path] + list(note_rows)
-        task_states = states(link(rows, parse))
+        # Only the tasks citing these refs: the database keeps the lines that
+        # may name one, and only lines citing one are parsed.
+        rows = [r for r in await citing_rows(session, uid, cited) if r.file_path != note_path] + list(note_rows)
+        task_states = states(link(rows, parse, only=cited))
     refs = []
     for ref in cited:
         entry = entries.get(ref)

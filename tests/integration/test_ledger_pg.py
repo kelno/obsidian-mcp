@@ -821,6 +821,38 @@ async def test_a_task_citing_feedback_is_linked_both_ways(sessionmaker, ctx):
     assert code(bad) == "invalid_argument"
 
 
+async def test_a_task_writes_citation_check_reads_only_the_cited_refs_tasks(sessionmaker, ctx):
+    """The citation check after a task write asks the index for the lines that
+    may cite the written line's refs only, and parses those; the states are
+    the ones every citing task gives (agent-ledger.md, "Citations checked at
+    the moment of writing")."""
+    from src.services import ledger_citations, ledger_tasks
+
+    await _task_note(sessionmaker, ctx, "o.md")
+    await _task_note(sessionmaker, ctx)
+    a = await tools.ledger_add_impl("feedback", "A", area="home", details={"subtype": "friction"})
+    b = await tools.ledger_add_impl("feedback", "B", area="home", details={"subtype": "friction"})
+    both = await tools.create_task_impl(f"Both [{a.ref}, {b.ref}]", path="o.md")
+    both_done = await tools.set_task_status_impl("o.md", both.line, both.text, both.content_hash, status="done")
+    b_only = await tools.create_task_impl(f"B only [{b.ref.replace('F', 'F00')}]", path="o.md")
+    assert b_only.ledger_refs[0]["tasks"] == "open"
+    created = await tools.create_task_impl(f"A again [{a.ref}]", path="t.md")
+    assert created.error is None, created.error
+
+    task_settings, registry, _today = await tools._task_context(None)
+
+    def parse(line, path):
+        return task_ops.parse_line(line, path, task_settings, registry)
+
+    ref_a = ledger_citations.bracketed(f"[{a.ref}]")[0]
+    async with sessionmaker() as session:
+        every = ledger_tasks.states(ledger_tasks.link(await ledger_tasks.citing_rows(session, None), parse))
+        narrow = await ledger_tasks.citing_rows(session, None, [ref_a])
+    assert sorted(r.line for r in narrow) == sorted([both_done.text, created.text])
+    assert ledger_tasks.states(ledger_tasks.link(narrow, parse, only=[ref_a])) == {a.ref: every[a.ref]}
+    assert created.ledger_refs[0]["tasks"] == every[a.ref] == "open"
+
+
 async def test_ticking_a_recurring_task_citing_feedback_does_not_say_close_it(sessionmaker, ctx):
     """Its next occurrence still cites the entry, open: no "now all done" nudge."""
     await _task_note(sessionmaker, ctx)
@@ -1519,7 +1551,6 @@ async def test_note_writers_give_bare_name_links_their_full_path(sessionmaker, c
     cr = await tools.edit_note_impl("cr.md", "New [[Home]]", append=True)
     assert "links_rewritten:" in cr and "plugin_error" not in cr
     assert (ctx / "cr.md").read_bytes() == b"Old [[Home]]\r\rNew [[projects/Home/Home|Home]]"
-
 
 
 # ── Dated note names, where the folder notes declare them ────────────────────
