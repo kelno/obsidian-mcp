@@ -321,9 +321,11 @@ def _parsed(*texts):
     return [(i, t) for i, t in enumerate(texts)]
 
 
-def _snip(i, hl=None, title=False, body=True, excerpt=True, mt0=None, **pairs):
+def _snip(i, hl=None, title=False, body=True, excerpt=True, mt0=None, head=None, **pairs):
+    # Since 2026-11-19 the first snippet statement also carries the head of a
+    # row whose body part did not match.
     m = {"id": i, "hl_0": hl, "matched_title": title, "matched_body": body, "has_excerpt": excerpt,
-         **pairs}
+         "head": head, **pairs}
     if mt0 is not None:
         m["mt_0"] = mt0
     return SimpleNamespace(_mapping=m)
@@ -366,12 +368,15 @@ async def test_an_underfilled_page_runs_the_fallback_and_tags_the_rows(monkeypat
     # Conjunctive select, the parse text, the fallback select.
     kinds = [type(s) for s in session.statements]
     assert kinds[0] is Select and kinds[1] is TextClause and kinds[2] is Select
-    # The fallback statement excludes the conjunctive matches and is limited
-    # to the remainder of the page.
+    # The fallback statement excludes the conjunctive block's ids (not the
+    # conjunctive query again, since 2026-11-19) and is limited to the
+    # remainder of the page.
     from sqlalchemy.dialects import postgresql
 
-    fallback_sql = str(session.statements[2].compile(dialect=postgresql.dialect()))
-    assert "NOT (notes_metadata.content_tsvector @@" in fallback_sql
+    fallback_sql = str(session.statements[2].compile(
+        dialect=postgresql.dialect(), compile_kwargs={"render_postcompile": True}))
+    assert "notes_metadata.id NOT IN (" in fallback_sql
+    assert "NOT (notes_metadata.content_tsvector @@" not in fallback_sql
     assert "CAST(%(fallback_0)s AS TSQUERY)" in fallback_sql
     assert session.statements[2]._limit_clause.value == 4
 
@@ -401,9 +406,8 @@ async def test_snippets_cover_the_first_rows_only_and_render_the_sentinels(monke
         _parsed("'alpha' & 'beta'"),                    # parse (for terms)
         [                                               # snippet statement: ids 1, 2
             _snip(1, hl="x \x02alpha\x03 y \x02beta\x03", mt0=2),
-            _snip(2, hl="no highlight here", title=True, body=False, mt0=1),
+            _snip(2, hl=None, title=True, body=False, mt0=1, head="the opening words"),
         ],
-        [SimpleNamespace(_mapping={"id": 2, "head": "the opening words"})],  # head for 2
     ])
     token = timing.begin()
     try:
@@ -528,15 +532,14 @@ async def test_a_headline_is_a_snippet_only_when_the_body_part_matched(monkeypat
         [_row(1, "title.md"), _row(2, "split.md")],
         _parsed("'quarterly' & 'review'"),
         [
-            # Title matched; the body holds one query word, marked anyway.
-            _snip(1, hl="\x02Quarterly\x03 numbers were up", title=True, body=False, mt0=2),
+            # Title matched; the body holds one query word. Were its headline
+            # computed it would mark the word; the head is computed instead,
+            # in the same statement (since 2026-11-19).
+            _snip(1, title=True, body=False, mt0=2,
+                  head="\x02Quarterly\x03 numbers were up"),
             # Split: one term in the title, the other in the body.
-            _snip(2, hl="the \x02review\x03 of the period", title=False, body=False, mt0=2,
-                  matched_title_body=True),
-        ],
-        [
-            SimpleNamespace(_mapping={"id": 1, "head": "\x02Quarterly\x03 numbers were up"}),
-            SimpleNamespace(_mapping={"id": 2, "head": "the \x02review\x03 of the period"}),
+            _snip(2, title=False, body=False, mt0=2, matched_title_body=True,
+                  head="the \x02review\x03 of the period"),
         ],
     ])
     results = await full_text_search(session, "quarterly review", limit=2)
@@ -761,18 +764,16 @@ async def test_a_tags_only_row_gets_the_head_and_an_empty_body_gets_nothing(monk
     monkeypatch.setattr(settings, "keyword_snippet_rows", 5, raising=False)
     rows = [_row(1, "tagged.md"), _row(2, "empty.md")]
 
-    def flags(i):
-        m = {"id": i, "hl_0": "words", "matched_title": False, "matched_tags": True,
+    def flags(i, head):
+        m = {"id": i, "hl_0": None, "matched_title": False, "matched_tags": True,
              "matched_body": False, "matched_title_tags": True, "matched_title_body": False,
-             "matched_tags_body": True, "has_excerpt": True}
+             "matched_tags_body": True, "has_excerpt": True, "head": head}
         return SimpleNamespace(_mapping=m)
 
     session = _Session([
         rows,
         _parsed("'hoa'"),
-        [flags(1), flags(2)],
-        [SimpleNamespace(_mapping={"id": 1, "head": "the siding \x02x\x03 complaint"}),
-         SimpleNamespace(_mapping={"id": 2, "head": ""})],
+        [flags(1, "the siding \x02x\x03 complaint"), flags(2, "")],
     ])
     results = await full_text_search(session, "hoa", limit=2)
     assert results[0]["matched_in"] == ["tags"] and results[0]["head"] == "the siding x complaint"

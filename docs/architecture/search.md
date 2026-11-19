@@ -82,21 +82,26 @@ whatever mix of eligible and ineligible configs a query yields — the case
 that forced this (Codex r1 #3) is `english,simple` on `the running`: english
 parses to `'run'`, simple to `'the' & 'running'`, and `runs fast` matches the
 conjunction only through english. The fallback statement is the conjunctive
-one with the fallback tsquery, `AND NOT (v @@ <and query>)` (the conjunctive
-block was not full, so that excludes exactly its rows), the same filters,
+one with the fallback tsquery, `AND id NOT IN (<the conjunctive block's
+ids>)` (the block was not full, so it holds every note the conjunctive query
+matches under the same filters, and excluding its ids excludes exactly what
+`AND NOT (v @@ <and query>)` did before 2026-11-19; re-testing that query on
+every candidate was 30-45 % of the statement on the owner's server), the same filters,
 `rank DESC, file_path ASC`, `LIMIT limit − n`; its rows are `match: any`,
 appended after every `all` row and never interleaved (their rank is against
 a different query — L1). **Every statement of the call reads one
 snapshot**: the transaction opens with `SET TRANSACTION ISOLATION LEVEL
 REPEATABLE READ, READ ONLY` before the `SET LOCAL`, because the fallback's
-`NOT (v @@ <and query>)` excludes exactly the conjunctive block only when
-both statements see the same rows — at READ COMMITTED an index commit
+exclusion of the conjunctive block's ids leaves out exactly the conjunctive
+matches only when both statements see the same rows — at READ COMMITTED an index commit
 between them could drop a note from both blocks for that call (Codex C-1).
 `SET TRANSACTION` is legal only before the first snapshot-taking statement;
 `SET LOCAL` takes none, and `search_notes_impl` hands over a session with
 nothing run. Read-only REPEATABLE READ raises no serialization failure. The
 superset property is asserted over a generated
-query corpus under `english` and `english,simple`. Telemetry: `fallback`
+query corpus under `english` and `english,simple`, and the fill's rows, order
+and ranks against the `AND NOT` statement over another
+(`test_snippets_and_fill_match_the_statements_before`). Telemetry: `fallback`
 (`ran | skipped | not_needed`) and `any_rows` in `usage_logs.params`.
 
 **"Nothing run" includes the connection's own setup (2026-10-30).** Under a
@@ -130,7 +135,7 @@ successful attempt bound, written in the same UPDATE, preserved by moves,
 sentinel-free, deferred with raiseload, **never projected** — `ts_headline`
 reads it server-side. The snippet statement names the ids of the first
 `KEYWORD_SNIPPET_ROWS` (20) rows of the assembled page, whatever `limit` is,
-and projects one headline per config (`MaxFragments=2, MaxWords=18,
+and projects the headline (`MaxFragments=2, MaxWords=18,
 MinWords=6`, U+0002/U+0003 as `StartSel`/`StopSel`, rendered `«»`),
 `matched_in` from `ts_filter(v, '{a}') @@ q` / `ts_filter(v, '{d}') @@ q`, and
 the per-config `matched_terms` counts (the parse statement therefore runs
@@ -138,13 +143,26 @@ whenever snippets are on, even on a full page). A headline counts as the
 row's snippet **only when the body part itself matched** — with no full
 cover `ts_headline` still marks single query words, so a title-only match
 whose body holds one of the words would otherwise show a highlight that is
-not the match. A second statement supplies the `head:` text
+not the match. The snippet is the first config's headline, in
+`fts_configs` order, that holds a highlight. The `head:` text
 (`ts_headline(fts_configs[0], …, 'MaxFragments=0, MinWords=18,
 MaxWords=24')` with the same sentinels, stripped from the result — never
 PostgreSQL's default `<b>`, which a note may contain literally; in fragment
-mode a no-cover headline is only `MinWords` words, measured) for every other
-row with an excerpt: a title/alias-only match, a split match (rendered
-`matched_in: title+body`), or a match beyond the excerpt (L3). Nothing fabricated: `head:` is text the index holds for that
+mode a no-cover headline is only `MinWords` words, measured) goes to every
+other row with an excerpt: a title/alias-only match, a split match (rendered
+`matched_in: title+body`), or a match beyond the excerpt (L3). **Each
+headline is computed only where it can be used** (2026-11-19; before, every
+config's headline was computed for every row, and a second statement
+computed the heads, 50-70 % of `snippet_ms` thrown away): the snippet
+statement computes the first config's headline only for the rows whose body
+part matched (a `CASE` on the same `ts_filter(v, '{d}') @@ q` as the flag)
+and the head only for the rows whose body part did not; then, only for the
+rows whose body matched with no highlight yet, one statement per further
+config computes that config's headline, and a last one the head of the
+rows left without a snippet. The result is unchanged, row for row:
+`test_snippets_and_fill_match_the_statements_before` compares it with the
+statements before over generated notes and queries, in `english`,
+`english,simple` and `simple,english`. Nothing fabricated: `head:` is text the index holds for that
 note, labelled as not the matching span. Rows beyond the cap carry no
 `snippet`/`head` key and the header says `snippets: first N`; a row with a
 NULL excerpt (indexed before 031) carries neither, the header counts such
@@ -1097,7 +1115,7 @@ Seven read statements select an explicit column list instead of whole entities:
 | --- | --- |
 | `semantic_search` | `ne.note_id, ne.chunk_index, ne.chunk_text, ne.heading_path, ne.section_ordinal, nm.file_path, nm.title, nm.tags, nm.content_hash, nm.embedded_content_hash, nm.chunks_truncated, distance` |
 | `find_related_stmt` | `ne.note_id, ne.chunk_text, ne.heading_path, ne.section_ordinal, nm.file_path, nm.title, nm.tags, nm.content_hash, nm.embedded_content_hash, nm.chunks_truncated, distance` — a different shape: no `chunk_index`, because its dedupe keeps the nearest chunk per note by distance alone |
-| `keyword_search` | `nm.id, nm.file_path, nm.title, nm.tags, rank` (both ranking blocks); the snippet statement projects `id`, one `ts_headline` per config, the two `matched_in` flags, `has_excerpt` and the `matched_terms` counts — `body_excerpt` is read inside `ts_headline` and never projected |
+| `keyword_search` | `nm.id, nm.file_path, nm.title, nm.tags, rank` (both ranking blocks); the snippet statement projects `id`, the first config's `ts_headline` and the head's (each under a `CASE`, see above; a further config's headline comes in its own statement, only for the rows that need it), the `matched_in` flags, `has_excerpt` and the `matched_terms` counts — `body_excerpt` is read inside `ts_headline` and never projected |
 | `list_notes` | `file_path, file_size, modified_at` |
 | `get_recent` / `find_orphans` | `file_path, title, tags, modified_at` |
 | `get_neighborhood` hydration | `id, file_path, title, tags` |

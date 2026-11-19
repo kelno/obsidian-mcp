@@ -258,8 +258,11 @@ async def test_rare_term_uses_the_tsvector_index_and_reads_fewer_buffers(
 
 async def test_the_disjunctive_fallback_uses_the_tsvector_index(sessionmaker, corpus):
     """#344: the `any` block's statement — the fallback tsquery derived from
-    PostgreSQL's own parse, `AND NOT` the conjunctive query — still plans as
-    a GIN bitmap scan (a bitmap OR of the two rare units)."""
+    PostgreSQL's own parse, excluding the conjunctive block's ids (since
+    2026-11-19; `AND NOT` the conjunctive query before) — still plans as a
+    GIN bitmap scan (a bitmap OR of the two rare units)."""
+    from sqlalchemy import bindparam
+
     from src.services import fts
 
     query = f"{RARE_TERM} {RARE_TERM_2}"
@@ -272,15 +275,21 @@ async def test_the_disjunctive_fallback_uses_the_tsvector_index(sessionmaker, co
 
     async with sessionmaker() as session:
         await session.execute(text("SET LOCAL random_page_cost = 1.1"))
+        block_ids = (await session.execute(text(
+            "SELECT id FROM notes_metadata "
+            "WHERE content_tsvector @@ websearch_to_tsquery('english', :q)"
+        ), {"q": query})).scalars().all()
+        assert block_ids, "the corpus has notes holding both rare terms"
         rows = (await session.execute(text(
             "EXPLAIN (ANALYZE, BUFFERS) "
             "SELECT id, file_path, title, tags, "
             "  ts_rank_cd('{0.02,0.2,0.4,1.0}', content_tsvector, CAST(:fb AS tsquery)) AS rank "
             "FROM notes_metadata "
             "WHERE content_tsvector @@ CAST(:fb AS tsquery) "
-            "  AND NOT (content_tsvector @@ websearch_to_tsquery('english', :q)) "
+            "  AND id NOT IN :ids "
             "ORDER BY rank DESC, file_path ASC LIMIT 50"
-        ), {"fb": plan.forms[0], "q": query})).fetchall()
+        ).bindparams(bindparam("ids", expanding=True)),
+            {"fb": plan.forms[0], "ids": list(block_ids)})).fetchall()
     explained = "\n".join(r[0] for r in rows)
     print(f"\n[fallback/{query}]\n{explained}")
     assert TSVECTOR_INDEX in explained, explained

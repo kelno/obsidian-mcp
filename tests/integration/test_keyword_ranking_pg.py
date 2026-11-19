@@ -961,3 +961,172 @@ async def test_startup_warns_about_rows_without_an_excerpt(sessionmaker, vault, 
         await main._warn_missing_keyword_excerpts()
     warnings = [r for r in caplog.records if "no stored excerpt" in r.getMessage()]
     assert len(warnings) == 1 and warnings[0].getMessage().startswith("2 note(s)")
+
+
+# ── 2026-11-19: the snippet and fill statements, against the ones before ───
+#
+# The snippet statements now compute each headline only where it can be used,
+# and the disjunctive fill excludes the conjunctive block's ids instead of
+# testing the conjunctive query again. Both must give exactly what the
+# statements before them gave; these are those statements, kept as the oracle.
+
+
+async def _snippets_before_2026_11_19(session, ids, tsquery, plan):
+    from sqlalchemy import Integer, cast, func, select
+    from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
+
+    from src.models.db import NoteMetadata
+    from src.services import search as search_mod
+
+    if not ids:
+        return {}
+    v = NoteMetadata.content_tsvector
+    columns = [NoteMetadata.id.label("id")]
+    for i, cfg in enumerate(settings.fts_configs):
+        columns.append(func.ts_headline(
+            cast(bindparam(f"hl_cfg_{i}", value=cfg), REGCONFIG), NoteMetadata.body_excerpt,
+            tsquery, bindparam(f"hl_opts_{i}", value=fts.HEADLINE_OPTIONS),
+        ).label(f"hl_{i}"))
+    for label, weights in search_mod.MATCHED_IN_FLAGS:
+        columns.append(search_mod._part(v, weights).op("@@")(tsquery).label(label))
+    columns.append((NoteMetadata.body_excerpt.is_not(None)).label("has_excerpt"))
+    units_by_config = fts.matched_terms_units(plan) if plan is not None else []
+    for i, units in units_by_config:
+        total = None
+        for j, unit in enumerate(units):
+            term = cast(v.op("@@")(cast(bindparam(f"mt_{i}_{j}", value=unit), TSQUERY)), Integer)
+            total = term if total is None else total + term
+        columns.append(total.label(f"mt_{i}"))
+    rows = (await session.execute(select(*columns).where(NoteMetadata.id.in_(ids)))).all()
+    out = {}
+    need_head = []
+    for row in rows:
+        m = row._mapping
+        snippet = None
+        if m.get("matched_body"):
+            for i in range(len(settings.fts_configs)):
+                hl = m.get(f"hl_{i}")
+                if hl and fts.HEADLINE_START in hl:
+                    snippet = hl.replace(fts.HEADLINE_START, search_mod.RENDER_START).replace(
+                        fts.HEADLINE_STOP, search_mod.RENDER_STOP)
+                    break
+        pairs = [(int(m.get(f"mt_{i}") or 0), len(units)) for i, units in units_by_config]
+        has_excerpt = bool(m.get("has_excerpt"))
+        out[m["id"]] = {
+            "snippet": snippet, "head": None,
+            "matched_in": search_mod.matched_in_from_flags(m),
+            "matched_terms": fts.best_matched_terms(pairs), "has_excerpt": has_excerpt,
+        }
+        if snippet is None and has_excerpt:
+            need_head.append(m["id"])
+    if need_head:
+        head_stmt = select(
+            NoteMetadata.id.label("id"),
+            func.ts_headline(
+                cast(bindparam("head_cfg", value=settings.fts_configs[0]), REGCONFIG),
+                NoteMetadata.body_excerpt, tsquery, bindparam("head_opts", value=fts.HEAD_OPTIONS),
+            ).label("head"),
+        ).where(NoteMetadata.id.in_(need_head))
+        for row in (await session.execute(head_stmt)).all():
+            m = row._mapping
+            if m["id"] in out:
+                out[m["id"]]["head"] = "" if m["head"] is None else fts.strip_sentinels(m["head"])
+    return out
+
+
+async def _fill_before_2026_11_19(session, any_query, and_query, *, limit, user_id):
+    from sqlalchemy import select
+
+    from src.models.db import NoteMetadata
+    from src.services.filters import apply_note_filters
+
+    rank = fts.rank_expression(NoteMetadata.content_tsvector, any_query).label("rank")
+    stmt = select(NoteMetadata.id, NoteMetadata.file_path, rank).where(
+        NoteMetadata.content_tsvector.op("@@")(any_query),
+        ~NoteMetadata.content_tsvector.op("@@")(and_query),
+    )
+    stmt = apply_note_filters(stmt, folder=None, tags=None, frontmatter=None, user_id=user_id)
+    stmt = stmt.order_by(rank.desc(), NoteMetadata.file_path.asc()).limit(limit)
+    return [(r.id, r.file_path, float(r.rank)) for r in (await session.execute(stmt)).all()]
+
+
+@pytest.mark.parametrize("configs", [["english"], ["english", "simple"], ["simple", "english"]])
+async def test_snippets_and_fill_match_the_statements_before(sessionmaker, vault, monkeypatch, configs):
+    """For generated notes and queries, in one snapshot: `_snippets` returns
+    exactly what the statements before 2026-11-19 returned for the same rows,
+    and the fill (`exclude_ids`) exactly the rows, order and ranks of the
+    `AND NOT (v @@ <and query>)` statement. The corpus mixes title-only,
+    body-only and split matches, stop words (which `english` drops and
+    `simple` keeps, so a later config's headline is the one with the
+    highlight), empty bodies, matches beyond the excerpt and NULL excerpts."""
+    from src.services import search as search_mod
+
+    monkeypatch.setattr(settings, "fts_configs", configs, raising=False)
+    monkeypatch.setattr(settings, "keyword_excerpt_chars", 1_000, raising=False)
+    rng = random.Random(1119)
+    files = {}
+    for i in range(70):
+        title = " ".join(rng.choice(STOP_AND_WORDS[4:]) for _ in range(2)).replace("\\", "")
+        name = f"eq/{i:02d} {title}.md".replace(":", "")
+        shape = rng.random()
+        if shape < 0.1:
+            body = ""
+        elif shape < 0.2:
+            body = ("prose " * 300) + " ".join(rng.choice(STOP_AND_WORDS) for _ in range(5))
+        else:
+            body = " ".join(rng.choice(STOP_AND_WORDS) for _ in range(rng.randint(3, 25)))
+        files[name] = body + "\n"
+    write(vault, files)
+    await index(vault)
+    async with sessionmaker() as session:
+        await session.execute(text(
+            "UPDATE notes_metadata SET body_excerpt = NULL WHERE file_path LIKE 'eq/0%'"))
+        await session.commit()
+
+    cfg_params = {f"fts_cfg_{i}": c for i, c in enumerate(configs)}
+    compared = fills = 0
+    for _ in range(150):
+        words = [rng.choice(STOP_AND_WORDS) for _ in range(rng.randint(1, 3))]
+        if rng.random() < 0.2:
+            words.append("-" + rng.choice(STOP_AND_WORDS))
+        query = " ".join(words)
+        limit = rng.randint(1, 40)
+        async with sessionmaker() as session:
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            and_q = fts.combined_tsquery(query)
+            all_rows = await search_mod._ranked_block(
+                session, and_q, folder=None, tags=None, frontmatter=None, user_id=None, limit=limit)
+            parsed = [row[1] for row in (await session.execute(
+                text(fts.tsquery_text_sql()), {"q": query, **cfg_params})).all()]
+            plan = fts.fallback_plan(parsed)
+            ids = [r.id for r in all_rows]
+            assert await search_mod._snippets(session, ids, and_q, plan) == \
+                await _snippets_before_2026_11_19(session, ids, and_q, plan), query
+            compared += len(ids)
+            if len(all_rows) < limit and plan.eligible:
+                any_q = fts.fallback_tsquery(plan, query)
+                new = await search_mod._ranked_block(
+                    session, any_q, folder=None, tags=None, frontmatter=None, user_id=None,
+                    limit=limit - len(all_rows), exclude_ids=ids)
+                old = await _fill_before_2026_11_19(
+                    session, any_q, and_q, limit=limit - len(all_rows), user_id=None)
+                assert [(r.id, r.file_path, float(r.rank)) for r in new] == old, query
+                any_ids = [r.id for r in new]
+                assert await search_mod._snippets(session, any_ids, any_q, plan) == \
+                    await _snippets_before_2026_11_19(session, any_ids, any_q, plan), query
+                fills += 1
+                compared += len(any_ids)
+    assert compared > 300 and fills > 20, (compared, fills)
+
+
+async def test_a_later_configs_headline_is_the_snippet_when_the_first_has_no_highlight(
+        sessionmaker, vault, monkeypatch):
+    """`english` drops the stop word, so only `simple`'s headline marks it: the
+    second config's statement (2026-11-19) supplies the snippet, and a row
+    whose body matched with no highlight in any config still gets its head."""
+    monkeypatch.setattr(settings, "fts_configs", ["english", "simple"], raising=False)
+    write(vault, {"stop.md": "nothing here but the word we want\n"})
+    await index(vault)
+    rows = await search(sessionmaker, "the", limit=5)
+    assert rows[0]["path"] == "stop.md" and rows[0]["matched_in"] == ["body"]
+    assert "«the»" in rows[0]["snippet"] and rows[0]["head"] is None

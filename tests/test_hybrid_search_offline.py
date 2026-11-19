@@ -124,9 +124,12 @@ def sem_row(i, path, *, distance=0.1, chunk="chunk text", stale=False, truncated
     )
 
 
-def snip(i, hl=None, title=False, body=True, excerpt=True):
+def snip(i, hl=None, title=False, body=True, excerpt=True, head=None):
+    # Since 2026-11-19 the first snippet statement also carries the head of a
+    # row whose body part did not match.
     return SimpleNamespace(_mapping={"id": i, "hl_0": hl, "matched_title": title,
-                                     "matched_body": body, "has_excerpt": excerpt})
+                                     "matched_body": body, "has_excerpt": excerpt,
+                                     "head": head})
 
 
 @pytest.fixture(autouse=True)
@@ -582,12 +585,11 @@ def _worst_case(monkeypatch, *, keyword_only: bool, split: bool = False):
     semantic = [sem_row(1, path, title=title, tags=tags, chunk="x" * 500)] + [
         sem_row(100 + i, f"s{i}.md") for i in range(49)]
     session = _Session(ranked=[keyword], semantic=[semantic],
-                       snippet=[[snip(1, hl="a \x02b\x03", title=False, body=not split)]
-                                + [snip(10 + i) for i in range(19)]]
                        # A split row gets a computed head (V5), so its keyword
                        # preview exists and `preview omitted` is asserted.
-                       + ([[SimpleNamespace(_mapping={"id": 1, "head": "opening words"})]]
-                          if split else []))
+                       snippet=[[snip(1, hl="a \x02b\x03", title=False, body=not split,
+                                      head="opening words" if split else None)]
+                                + [snip(10 + i) for i in range(19)]])
     result = _search(session, query, limit=50)
     assert result.rows[0].path == path
     if split:
