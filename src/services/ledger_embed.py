@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import settings
 from src.database import async_session
 from src.models.db import LedgerEmbedding, LedgerEntry
-from src.services import ledger
+from src.services import ledger, timing
 from src.services.embeddings import NoteEmbedOutcome, chunk_text, get_embedding, get_embeddings_batch
 from src.services.index_state import (
     KEY_EMBEDDING_FINGERPRINT,
@@ -238,10 +238,23 @@ async def sweep(user_id: int | None, budget, outcome, log_suffix: str, is_paused
     stage back nor hide an outage. Returns how many entries it embedded.
     `sessions` is the indexer's session factory, so the sweep reads and
     writes the database the stage does.
+
+    First, whatever the budget, it stores the search words of entries that
+    lack current ones (`ledger.store_missing_words`): database work only, no
+    provider call, and a search is right without them, only slower.
     """
+    sessions = sessions or async_session
+    if not is_paused():
+        try:
+            async with sessions() as session:
+                stored = await ledger.store_missing_words(session, user_id)
+                await session.commit()
+            if stored:
+                logger.info("Ledger sweep%s: search words stored for %d entries.", log_suffix, stored)
+        except Exception as exc:  # noqa: BLE001 - searches compute them meanwhile; the next pass retries
+            logger.warning("Storing ledger search words failed%s: %s: %s", log_suffix, type(exc).__name__, exc)
     if budget.stopped is not None:
         return 0
-    sessions = sessions or async_session
     async with sessions() as session:
         rows = (await session.execute(
             select(LedgerEntry.id, LedgerEntry.ref, LedgerEntry.content_hash)
@@ -310,14 +323,25 @@ class MeaningResult:
     error: str | None = None
 
 
+async def query_vector(query: str) -> list[float]:
+    """The query's embedding, within `LEDGER_QUERY_EMBED_TIMEOUT_SECONDS` (TimeoutError past it).
+
+    `ledger_search` starts it as a task before its other reads, so the
+    provider works while the words list is found.
+    """
+    return await asyncio.wait_for(get_embedding(query, kind="query"),
+                                  timeout=float(settings.ledger_query_embed_timeout_seconds))
+
+
 async def meaning_search(session: AsyncSession, uid: int | None, query: str, filters: "ledger.Filters",
-                         limit: int) -> MeaningResult:
+                         limit: int, vector_task: "asyncio.Task | None" = None) -> MeaningResult:
     """Entries closest in meaning to `query`, best chunk per entry, exact distance.
 
     Exact rather than through a vector index (the ledger is small, and an
     exact scan cannot miss a candidate a filter would have discarded). Only
     current vectors are read; `not_embedded` counts the filtered entries
-    that have none yet, which the words list still covers.
+    that have none yet, which the words list still covers. `vector_task`,
+    when given, is `query_vector(query)` already started.
     """
     clauses = filters.where(uid)
     # Counted in the same statement as the hits (one snapshot): the provider
@@ -333,7 +357,11 @@ async def meaning_search(session: AsyncSession, uid: int | None, query: str, fil
         return (await session.execute(unembedded)).scalar_one()
 
     try:
-        vector = await asyncio.wait_for(get_embedding(query, kind="query"), timeout=float(settings.ledger_query_embed_timeout_seconds))
+        waited = time.perf_counter()
+        try:
+            vector = await (vector_task if vector_task is not None else query_vector(query))
+        finally:
+            timing.add_ms("embed_wait_ms", time.perf_counter() - waited)
     except asyncio.TimeoutError:
         return MeaningResult([], await count_unembedded(), error=(
             f"the embedding provider did not answer within {settings.ledger_query_embed_timeout_seconds:g} s, "

@@ -75,6 +75,10 @@ DURABLE = {
     # vectors are current, so a schema-only dump would leave entries claiming
     # vectors they lack.
     "ledger_embeddings",
+    # Derived too (migration 1005), and kept with its entries for the same
+    # reason: small, and a restored row is used only while its revision is
+    # the entry's.
+    "ledger_entry_words",
     "ledger_digests",
     "ledger_digest_columns",
     "ledger_digest_lines",

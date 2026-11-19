@@ -11354,7 +11354,7 @@ async def ledger_search_impl(
     limit: int = _ledger.SEARCH_DEFAULT_LIMIT,
     rule: str | None = None,
 ) -> LedgerSearchResult:
-    from sqlalchemy import func, select
+    from sqlalchemy import select
 
     from src.models.db import LedgerEntry
 
@@ -11369,97 +11369,114 @@ async def ledger_search_impl(
         return _ledger_refused(LedgerSearchResult, _ledger.invalid(
             f"tasks is open, done or cancelled (got {tasks!r}).", allowed=[{"name": t} for t in LEDGER_TASK_STATES]))
     query = (query or "").strip() or None
-    async with async_session() as session:
-        try:
-            filters = await _ledger.build_filters(
-                session, uid, kinds=kinds, area=area, topics=topics, status=status, origin=origin,
-                unseen=unseen, since=since, rule=rule)
-        except _ledger.LedgerError as exc:
-            return _ledger_refused(LedgerSearchResult, exc)
-        links, links_note = await _ledger_task_links(session, uid)
-        vocabulary = await _ledger.names(session, uid)
-        task_states = _ledger_tasks.states(links) if links is not None else {}
-        if tasks is not None:
-            if links is None:
-                return _ledger_failed(LedgerSearchResult, _body_refusal(
-                    f"{links_note}. The tasks filter needs them. Nothing was listed.", "task_settings_invalid"))
-            filters.feedback_numbers = tuple(sorted(
-                int(ref[1:]) for ref, state in task_states.items() if ref[0] == "F" and state == tasks))
-        described = {"status": status, "kinds": kinds, "area": filters.area or ("none" if filters.no_area else None),
-                     "topics": topics, "origin": origin, "unseen": unseen or None, "since": since, "tasks": tasks,
-                     "rule": rule}
-        described = {k: v for k, v in described.items() if v is not None}
-        notes = [links_note] if links_note else []
+    # The query's embedding starts once the arguments are accepted and runs
+    # while the words list is read: the provider is the slow part.
+    vector_task: asyncio.Task | None = None
 
-        via: dict[int, str] = {}
-
-        def summary(row, **extra):
-            return _ledger_summary(row, tasks=task_states.get(_ledger_tasks.canonical(row.ref)),
-                                   via_topic=via.get(row.id), **extra)
-
-        clauses = filters.where(uid)
-        if query is None:
-            rows, truncated, found_via = await _ledger_listed(session, uid, filters, limit)
-            via.update(found_via)
-            return LedgerSearchResult(entries=[summary(r) for r in rows],
-                                      truncated=truncated, filters=described, notes=notes or None,
-                                      areas_and_topics=vocabulary)
-
-        words: list = []
-        if mode in ("both", "words"):
-            exact = None
+    async def run() -> LedgerSearchResult:
+        nonlocal vector_task
+        async with async_session() as session:
             try:
-                kind, number = _ledger.parse_ref(query)
-                exact = (await session.execute(select(*_ledger_summary_columns()).where(
-                    LedgerEntry.owner_key == _ledger.owner_key(uid), LedgerEntry.kind == kind,
-                    LedgerEntry.number == number))).first()
-            except _ledger.LedgerError:
-                pass
-            doc = _ledger.search_document()
+                filters = await _ledger.build_filters(
+                    session, uid, kinds=kinds, area=area, topics=topics, status=status, origin=origin,
+                    unseen=unseen, since=since, rule=rule)
+            except _ledger.LedgerError as exc:
+                return _ledger_refused(LedgerSearchResult, exc)
+            links, links_note = await _ledger_task_links(session, uid)
+            vocabulary = await _ledger.names(session, uid)
+            task_states = _ledger_tasks.states(links) if links is not None else {}
+            if tasks is not None:
+                if links is None:
+                    return _ledger_failed(LedgerSearchResult, _body_refusal(
+                        f"{links_note}. The tasks filter needs them. Nothing was listed.", "task_settings_invalid"))
+                filters.feedback_numbers = tuple(sorted(
+                    int(ref[1:]) for ref, state in task_states.items() if ref[0] == "F" and state == tasks))
+            if query is not None and mode in ("both", "meaning"):
+                vector_task = asyncio.create_task(_ledger_embed.query_vector(query))
+            described = {"status": status, "kinds": kinds,
+                         "area": filters.area or ("none" if filters.no_area else None),
+                         "topics": topics, "origin": origin, "unseen": unseen or None, "since": since, "tasks": tasks,
+                         "rule": rule}
+            described = {k: v for k, v in described.items() if v is not None}
+            notes = [links_note] if links_note else []
 
-            async def by_words_query(any_word: bool):
-                tsquery = _ledger.tsquery_for(query, any_word=any_word)
-                rank = func.ts_rank_cd(doc, tsquery)
-                return (await session.execute(
-                    select(*_ledger_summary_columns(), rank.label("rank")).where(*clauses, doc.op("@@")(tsquery))
-                    .order_by(rank.desc(), LedgerEntry.id).limit(limit + 1)
-                )).all()
+            via: dict[int, str] = {}
 
-            ranked = await by_words_query(any_word=False)
-            if not ranked and exact is None and len(re.findall(r"\w{3,}", query)) > 1:
-                # An agent checking for a duplicate writes several words; an
-                # entry holding all of them is a strong sign, one sharing some
-                # is still worth seeing (ledger F34's agent test).
-                ranked = await by_words_query(any_word=True)
-                if ranked:
-                    notes.append("No entry holds every word of the query; by_words lists entries sharing any of "
-                                 "them, best first: a weaker sign of a duplicate.")
-            words = ([exact] if exact is not None else []) + [r for r in ranked if exact is None or r.id != exact.id]
-        meaning = None
-        if mode in ("both", "meaning"):
-            meaning = await _ledger_embed.meaning_search(session, uid, query, filters, limit)
-        via.update(await _ledger.via_topics(
-            session, filters, words[:limit] + ([h["row"] for h in meaning.hits] if meaning else [])))
-    by_words_ids = {r.id for r in words[:limit]}
-    by_meaning_ids = {h["row"].id for h in meaning.hits} if meaning else set()
-    both = mode == "both"
-    result = LedgerSearchResult(filters=described, areas_and_topics=vocabulary)
-    if mode in ("both", "words"):
-        result.by_words = [summary(r, in_both_lists=(r.id in by_meaning_ids) if both else None)
-                           for r in words[:limit]]
-        result.truncated = len(words) > limit
-    if meaning is not None:
-        result.by_meaning = [summary(h["row"], similarity=h["similarity"],
-                                     in_both_lists=(h["row"].id in by_words_ids) if both else None)
-                             for h in meaning.hits]
-        result.meaning_unavailable = meaning.error
-        result.not_embedded = meaning.not_embedded
-        if meaning.not_embedded:
-            notes.append(f"{meaning.not_embedded} entr{'y' if meaning.not_embedded == 1 else 'ies'} within the "
-                         f"filters {'has' if meaning.not_embedded == 1 else 'have'} no vector yet (new or just "
-                         "changed): they can only turn up in by_words.")
-    result.notes = notes or None
-    return result
+            def summary(row, **extra):
+                return _ledger_summary(row, tasks=task_states.get(_ledger_tasks.canonical(row.ref)),
+                                       via_topic=via.get(row.id), **extra)
+
+            clauses = filters.where(uid)
+            if query is None:
+                rows, truncated, found_via = await _ledger_listed(session, uid, filters, limit)
+                via.update(found_via)
+                return LedgerSearchResult(entries=[summary(r) for r in rows],
+                                          truncated=truncated, filters=described, notes=notes or None,
+                                          areas_and_topics=vocabulary)
+
+            words: list = []
+            if mode in ("both", "words"):
+                exact = None
+                try:
+                    kind, number = _ledger.parse_ref(query)
+                    exact = (await session.execute(select(*_ledger_summary_columns()).where(
+                        LedgerEntry.owner_key == _ledger.owner_key(uid), LedgerEntry.kind == kind,
+                        LedgerEntry.number == number))).first()
+                except _ledger.LedgerError:
+                    pass
+
+                async def by_words_query(any_word: bool):
+                    started = time.perf_counter()
+                    rows = (await session.execute(_ledger.words_hits(
+                        _ledger_summary_columns(), clauses, _ledger.tsquery_for(query, any_word=any_word), limit + 1,
+                    ))).all()
+                    timing.add_ms("words_ms", time.perf_counter() - started)
+                    return rows
+
+                ranked = await by_words_query(any_word=False)
+                if not ranked and exact is None and len(re.findall(r"\w{3,}", query)) > 1:
+                    # An agent checking for a duplicate writes several words; an
+                    # entry holding all of them is a strong sign, one sharing some
+                    # is still worth seeing (ledger F34's agent test).
+                    ranked = await by_words_query(any_word=True)
+                    if ranked:
+                        notes.append("No entry holds every word of the query; by_words lists entries sharing any of "
+                                     "them, best first: a weaker sign of a duplicate.")
+                words = ([exact] if exact is not None else []) + [
+                    r for r in ranked if exact is None or r.id != exact.id]
+            meaning = None
+            if mode in ("both", "meaning"):
+                meaning = await _ledger_embed.meaning_search(session, uid, query, filters, limit, vector_task)
+            via.update(await _ledger.via_topics(
+                session, filters, words[:limit] + ([h["row"] for h in meaning.hits] if meaning else [])))
+        by_words_ids = {r.id for r in words[:limit]}
+        by_meaning_ids = {h["row"].id for h in meaning.hits} if meaning else set()
+        both = mode == "both"
+        result = LedgerSearchResult(filters=described, areas_and_topics=vocabulary)
+        if mode in ("both", "words"):
+            result.by_words = [summary(r, in_both_lists=(r.id in by_meaning_ids) if both else None)
+                               for r in words[:limit]]
+            result.truncated = len(words) > limit
+        if meaning is not None:
+            result.by_meaning = [summary(h["row"], similarity=h["similarity"],
+                                         in_both_lists=(h["row"].id in by_words_ids) if both else None)
+                                 for h in meaning.hits]
+            result.meaning_unavailable = meaning.error
+            result.not_embedded = meaning.not_embedded
+            if meaning.not_embedded:
+                notes.append(f"{meaning.not_embedded} entr{'y' if meaning.not_embedded == 1 else 'ies'} within the "
+                             f"filters {'has' if meaning.not_embedded == 1 else 'have'} no vector yet (new or just "
+                             "changed): they can only turn up in by_words.")
+        result.notes = notes or None
+        return result
+
+    try:
+        return await run()
+    finally:
+        if vector_task is not None:
+            # Retrieved whatever happens, so an unused result logs no "never retrieved".
+            vector_task.add_done_callback(lambda task: task.cancelled() or task.exception())
+            vector_task.cancel()
 
 
 @_tracked("ledger_get", ["refs", "history", "include_private"], refusal_result=_ledger_gate(LedgerGetResult))
@@ -11593,11 +11610,11 @@ async def ledger_add_impl(
         notes.append(f"{entry.ref} has no area, so it is to_triage until one is set (ledger_update area=…).")
     elif entry.area_tag is None:
         notes.append(f"{entry.ref} has no area: set one if it concerns an area (ledger_update area=…).")
-    if not added.similar:
+    if added.similar == []:
         notes.append("No active entry shares words with the title: no duplicate found by words.")
     if not added.topics:
         counts: dict[str, int] = {}
-        for item in added.similar:
+        for item in added.similar or ():
             for slug in item.get("topics", ()):
                 counts[slug] = counts.get(slug, 0) + 1
         suggested = sorted(counts, key=lambda s: (-counts[s], s))[:4]

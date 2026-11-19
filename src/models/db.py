@@ -2290,6 +2290,7 @@ _LEDGER_MARKERS = {
     "ledger_revisions": "append-only history of ledger changes (032_agent_ledger)",
     "ledger_embeddings": "ledger entry vectors, derived (032_agent_ledger)",
     "ledger_case_rules": "rule case to proposal links (1004_ledger_cases)",
+    "ledger_entry_words": "ledger entry search words, derived (1005_ledger_entry_words)",
 }
 #: Migration 1004's marker on each rule-case column of `ledger_entries`.
 _LEDGER_CASE_COLUMN_MARKER = "rule case field (1004_ledger_cases)"
@@ -2793,4 +2794,31 @@ class LedgerEmbedding(Base):
         ),
         Index("ix_ledger_embeddings_entry", "entry_id"),
         {"comment": _LEDGER_MARKERS["ledger_embeddings"]},
+    )
+
+
+class LedgerEntryWords(Base):
+    """An entry's search words, stored (migration 1005): derived, like its vectors.
+
+    `words` is `ledger.search_document()` as computed for the entry at
+    `revision` under the ordered `FTS_CONFIGS` named in `configs`. A row is
+    current only while both still match the entry and the settings; a search
+    reads current rows through the GIN index and computes the words of every
+    other entry on the spot, so a missing or outdated row costs speed, never a
+    result (agent-ledger.md, "Search").
+    """
+
+    __tablename__ = "ledger_entry_words"
+
+    entry_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    configs: Mapped[str] = mapped_column(Text, nullable=False)
+    words: Mapped[str] = mapped_column(TSVECTOR, nullable=False, deferred=True, deferred_raiseload=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["entry_id"], ["ledger_entries.id"], name="fk_ledger_entry_words_entry", ondelete="CASCADE"
+        ),
+        Index("ix_ledger_entry_words_words", "words", postgresql_using="gin"),
+        {"comment": _LEDGER_MARKERS["ledger_entry_words"]},
     )

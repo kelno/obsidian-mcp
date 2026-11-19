@@ -53,7 +53,8 @@ DIM = int(settings.embedding_dimensions)
 TODAY = date(2026, 11, 5)
 LEDGER_TABLES = (
     "ledger_case_rules", "ledger_revisions", "ledger_digest_sources", "ledger_digest_lines", "ledger_digest_columns",
-    "ledger_digests", "ledger_entry_topics", "ledger_entry_links", "ledger_embeddings", "ledger_entries",
+    "ledger_digests", "ledger_entry_topics", "ledger_entry_links", "ledger_embeddings", "ledger_entry_words",
+    "ledger_entries",
     "ledger_topics", "ledger_ref_counters",
 )
 
@@ -1827,3 +1828,117 @@ async def test_superseding_a_proposal_with_cases_says_where_they_are(ctx):
     plain = await tools.ledger_update_impl(ref="P2", expected_revision=1, reason="r", status="superseded",
                                            superseded_by="P1")
     assert code(plain) == "invalid_argument"  # P1 is closed: a superseded target is refused, as before
+
+
+# ── Stored search words (migration 1005) ─────────────────────────────────────
+
+async def _words(sessionmaker) -> dict[int, tuple[int, str]]:
+    async with sessionmaker() as session:
+        return {r.entry_id: (r.revision, r.configs) for r in (await session.execute(text(
+            "SELECT entry_id, revision, configs FROM ledger_entry_words"))).all()}
+
+
+async def _set_words(sessionmaker, statement: str) -> None:
+    async with sessionmaker() as session:
+        await session.execute(text(statement))
+        await session.commit()
+
+
+async def test_writes_store_their_words_at_the_new_revision(sessionmaker, ctx):
+    added = await add_quirk("Stored words for a quirk")
+    entry = await _entry(sessionmaker, added.ref)
+    assert await _words(sessionmaker) == {entry.id: (1, ledger.words_configs())}
+    await tools.ledger_update_impl(ref=added.ref, expected_revision=1, reason="r", body="Pelican sightings.")
+    assert (await _words(sessionmaker))[entry.id] == (2, ledger.words_configs())
+    found = await tools.ledger_search_impl(query="pelican", mode="words")
+    assert [e.ref for e in found.by_words] == [added.ref]
+
+
+async def test_a_current_stored_row_is_what_the_search_reads_and_an_outdated_one_is_not(sessionmaker, ctx):
+    added = await add_quirk("Ordinary title")
+    # Planted words, at the entry's revision: the search finds the entry by them.
+    await _set_words(sessionmaker, "UPDATE ledger_entry_words SET words = to_tsvector('simple', 'zanzibar')")
+    planted = await tools.ledger_search_impl(query="zanzibar", mode="words")
+    assert [e.ref for e in planted.by_words] == [added.ref]
+    # One revision behind: ignored, the entry's own words computed instead.
+    await _set_words(sessionmaker, "UPDATE ledger_entry_words SET revision = revision - 1")
+    assert not (await tools.ledger_search_impl(query="zanzibar", mode="words")).by_words
+    ordinary = await tools.ledger_search_impl(query="ordinary", mode="words")
+    assert [e.ref for e in ordinary.by_words] == [added.ref]
+
+
+async def test_the_sweep_stores_missing_words_and_those_of_other_configs(sessionmaker, ctx, monkeypatch):
+    await add_quirk("First pelican")
+    second = await add_quirk("Second heron")
+    await _set_words(sessionmaker, "DELETE FROM ledger_entry_words")
+    # Without stored words the search is still right, only slower.
+    found = await tools.ledger_search_impl(query="heron", mode="words")
+    assert [e.ref for e in found.by_words] == [second.ref]
+    await ledger_embed.sweep(None, indexer.EmbedBudget(), indexer.EmbedPassResult(), "", lambda: False)
+    assert {configs for _rev, configs in (await _words(sessionmaker)).values()} == {ledger.words_configs()}
+    assert len(await _words(sessionmaker)) == 2
+
+    monkeypatch.setattr(settings, "fts_configs", ["simple", *settings.fts_configs])
+    found = await tools.ledger_search_impl(query="heron", mode="words")
+    assert [e.ref for e in found.by_words] == [second.ref]
+    # Paused, the sweep leaves them; then it stores them under the new configs.
+    await ledger_embed.sweep(None, indexer.EmbedBudget(), indexer.EmbedPassResult(), "", lambda: True)
+    assert ledger.words_configs() not in {c for _r, c in (await _words(sessionmaker)).values()}
+    await ledger_embed.sweep(None, indexer.EmbedBudget(), indexer.EmbedPassResult(), "", lambda: False)
+    assert {c for _r, c in (await _words(sessionmaker)).values()} == {ledger.words_configs()}
+
+
+async def test_stored_and_computed_words_rank_alike(sessionmaker, ctx):
+    for title, body in (("Browser extension needed for Chrome", "browser chrome browser"),
+                        ("Chrome crashes on voice", "a browser once"), ("Voice only", "nothing about it")):
+        await add_quirk(title, body=body)
+
+    async def ranks():
+        async with sessionmaker() as session:
+            rows = (await session.execute(ledger.words_hits(
+                (LedgerEntry.id, LedgerEntry.ref), (), ledger.tsquery_for("browser chrome", any_word=True), 10,
+            ))).all()
+        return [(r.ref, r.rank) for r in rows]
+
+    stored = await ranks()
+    await _set_words(sessionmaker, "DELETE FROM ledger_entry_words")
+    computed = await ranks()
+    assert len(stored) == 2 and stored == computed
+
+
+async def test_an_older_revision_never_overwrites_newer_stored_words(sessionmaker, ctx):
+    added = await add_quirk("Kestrel")
+    entry = await _entry(sessionmaker, added.ref)
+    await tools.ledger_update_impl(ref=added.ref, expected_revision=1, reason="r", body="Owl.")
+    # A sweep that read the entry before the update stores what it read: refused.
+    await _set_words(sessionmaker, "UPDATE ledger_entry_words SET revision = 3")
+    async with sessionmaker() as session:
+        await ledger.store_words(session, [entry.id])
+        await session.commit()
+    assert (await _words(sessionmaker))[entry.id][0] == 3
+
+
+async def test_an_add_whose_similar_read_fails_is_still_written_and_says_so(sessionmaker, ctx, monkeypatch):
+    async def broken(*_a, **_kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ledger, "similar_entries", broken)
+    result = await add_quirk("Written anyway", area="home")
+    assert result.ref == "Q1" and result.similar is None
+    assert any("could not be read" in n for n in result.notes)
+    assert not any("No active entry shares words" in n for n in result.notes)
+    assert (await _entry(sessionmaker, "Q1")).title == "Written anyway"
+
+
+async def test_a_refused_search_sends_nothing_to_the_provider(ctx, monkeypatch):
+    calls = []
+
+    async def counted(text_, **_kw):
+        calls.append(text_)
+        return [0.0] * DIM
+
+    monkeypatch.setattr(ledger_embed, "get_embedding", counted)
+    result = await tools.ledger_search_impl(query="anything", area="no-such-area")
+    assert code(result) == "invalid_argument"
+    await asyncio.sleep(0)
+    assert calls == []

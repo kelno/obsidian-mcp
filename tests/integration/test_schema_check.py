@@ -61,7 +61,7 @@ DIM = 64  # irrelevant here; keeps the migration cheap.
 # The current head. Every case that migrates forward asserts it, so adding a
 # revision without teaching this module about it fails loudly rather than
 # leaving the new migration unexercised.
-HEAD_REVISION = "1004"
+HEAD_REVISION = "1005"
 
 # Every test builds and drops its own database, nothing is module-scoped:
 # pytest-xdist may share the tests out one by one (see tests/conftest.py).
@@ -9747,7 +9747,8 @@ def test_1001_chains_from_030():
     assert script.get_revision("1002").down_revision == "1001"
     assert script.get_revision("1003").down_revision == ("040", "1002")
     assert script.get_revision("1004").down_revision == "1003"
-    assert script.get_current_head() == HEAD_REVISION == "1004"
+    assert script.get_revision("1005").down_revision == "1004"
+    assert script.get_current_head() == HEAD_REVISION == "1005"
 
 
 def test_1001_rows_cascade_with_their_note_and_the_checks_hold():
@@ -9845,7 +9846,7 @@ LEDGER_ENTRY_1002 = (
 
 def test_1002_fresh_head_is_clean_and_marked():
     with throwaway_db("schema_1002_fresh") as url:
-        assert alembic_version(url) == HEAD_REVISION == "1004"
+        assert alembic_version(url) == HEAD_REVISION == "1005"
         assert fetchval(
             url, "SELECT obj_description('public.ledger_entries'::regclass, 'pg_class')"
         ) == "agent ledger entries, primary data (032_agent_ledger)"
@@ -10072,4 +10073,69 @@ def test_downgrade_1004_refuses_while_a_case_exists_and_up_again_is_clean():
         _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
         assert alembic_version(url) == HEAD_REVISION
         assert fetchval(url, "SELECT count(*) FROM ledger_entries") == 1
+        assert_alembic_check_clean(url, DIM)
+
+
+# ── 1005: the ledger's stored search words ───────────────────────────────────
+#
+# Fresh head: the table, its GIN index and marker, the cascade with its
+# entry. A stamp-back rerun recreates its own (derived) table and refuses one
+# without the marker; the downgrade drops it, and up again is clean.
+
+WORDS_1005 = (
+    "INSERT INTO ledger_entry_words (entry_id, revision, configs, words) "
+    "SELECT id, revision, 'english', to_tsvector('english', title) FROM ledger_entries"
+)
+
+
+def test_1005_fresh_head_is_marked_indexed_and_cascades():
+    with throwaway_db("schema_1005_fresh") as url:
+        assert fetchval(url, "SELECT obj_description('public.ledger_entry_words'::regclass, 'pg_class')") == (
+            "ledger entry search words, derived (1005_ledger_entry_words)")
+        assert "USING gin (words)" in fetchval(
+            url, "SELECT indexdef FROM pg_indexes WHERE indexname = 'ix_ledger_entry_words_words'")
+        sql(url, LEDGER_ENTRY_1002)
+        sql(url, WORDS_1005)
+        assert fetchval(url, "SELECT count(*) FROM ledger_entry_words") == 1
+
+        async def remove_the_entry(conn):
+            async with conn.transaction():
+                await conn.execute("SET LOCAL ledger.allow_delete = 'on'")
+                await conn.execute("DELETE FROM ledger_entries")
+        asyncio.run(_run(url, remove_the_entry))
+        assert fetchval(url, "SELECT count(*) FROM ledger_entry_words") == 0
+        assert_alembic_check_clean(url, DIM)
+
+
+def test_1005_stamp_back_rerun_recreates_its_table_and_refuses_an_unmarked_one():
+    with throwaway_db("schema_1005_rerun") as url:
+        sql(url, LEDGER_ENTRY_1002)
+        sql(url, WORDS_1005)
+        _harness.run_alembic(url, "stamp", "1004", dimensions=DIM)
+        _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
+        assert alembic_version(url) == HEAD_REVISION
+        # Derived rows: recreated empty, the ledger sweep refills them.
+        assert fetchval(url, "SELECT count(*) FROM ledger_entry_words") == 0
+        assert fetchval(url, "SELECT count(*) FROM ledger_entries") == 1
+        assert_alembic_check_clean(url, DIM)
+    with throwaway_db("schema_1005_unmarked") as url:
+        sql(url, "COMMENT ON TABLE ledger_entry_words IS 'somebody else'")
+        _harness.run_alembic(url, "stamp", "1004", dimensions=DIM)
+        result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
+        assert result.returncode != 0
+        assert "1005 found a ledger_entry_words table without its marker" in (result.stdout + result.stderr)
+        assert alembic_version(url) == "1004"
+        assert fetchval(url, "SELECT to_regclass('public.ledger_entry_words')") is not None
+
+
+def test_downgrade_1005_drops_the_table_and_up_again_is_clean():
+    with throwaway_db("schema_1005_downgrade") as url:
+        sql(url, LEDGER_ENTRY_1002)
+        sql(url, WORDS_1005)
+        _harness.run_alembic(url, "downgrade", "1004", dimensions=DIM)
+        assert alembic_version(url) == "1004"
+        assert fetchval(url, "SELECT to_regclass('public.ledger_entry_words')") is None
+        assert fetchval(url, "SELECT count(*) FROM ledger_entries") == 1
+        _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
+        assert alembic_version(url) == HEAD_REVISION
         assert_alembic_check_clean(url, DIM)

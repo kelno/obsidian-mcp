@@ -20,13 +20,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time as _time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from functools import reduce
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, case, delete, func, insert, literal, or_, select, text, update
+from sqlalchemy import Text, and_, case, delete, func, insert, literal, or_, select, text, union_all, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -42,11 +43,13 @@ from src.models.db import (
     LedgerEntry,
     LedgerEntryLink,
     LedgerEntryTopic,
+    LedgerEntryWords,
     LedgerRefCounter,
     LedgerRevision,
     LedgerTopic,
     NoteMetadata,
 )
+from src.services import timing
 from src.services.fork_tasks import ops as task_ops, query as task_query
 from src.services.ledger_tasks import CASE_REFS_SHOWN, case_when
 
@@ -66,6 +69,8 @@ SEARCH_MAX_LIMIT = 100
 SIMILAR_MAX = 5
 #: A list or a related/topic argument holds at most this many items.
 LIST_ARG_MAX = 20
+#: Entries whose stored words the sweep computes per scope and index pass.
+WORDS_SWEEP_BATCH = 200
 
 #: Per-kind fields, the ones a kind must have, and their caps (characters).
 KIND_FIELDS: dict[str, dict[str, int]] = {
@@ -723,12 +728,97 @@ async def view_hints(session: AsyncSession, uid: int | None, topic_ids: list[int
 def search_document():
     """The words an entry is found by: its ref, title, body and own fields.
 
-    Computed at query time rather than stored: the ledger is small, and a
-    stored vector would go stale silently when `FTS_CONFIGS` changes.
+    The one expression for them: `store_words` stores it per entry, and
+    `words_hits` computes it on the spot for an entry without a current
+    stored row, so both give the same vector and the same rank.
     """
     doc = func.concat_ws(" ", LedgerEntry.ref, *text_columns())
     parts = [func.to_tsvector(literal(cfg).cast(text_regconfig()), doc) for cfg in settings.fts_configs]
     return reduce(lambda a, b: a.op("||")(b), parts)
+
+
+def words_configs() -> str:
+    """The `FTS_CONFIGS` a stored row's words are computed under, in order.
+
+    In order, not sorted: `||` shifts the right vector's positions, which
+    `ts_rank_cd` reads, so another order can give other ranks.
+    """
+    return ",".join(settings.fts_configs)
+
+
+def _current_words():
+    """Join condition: the entry's stored words are current.
+
+    The history trigger (migration 1002) makes every change to an entry's
+    content raise its revision, so a row computed at the entry's revision
+    under the running `FTS_CONFIGS` holds exactly what `search_document()`
+    would compute now.
+    """
+    return and_(LedgerEntryWords.entry_id == LedgerEntry.id, LedgerEntryWords.revision == LedgerEntry.revision,
+                LedgerEntryWords.configs == literal(words_configs(), Text))
+
+
+async def store_words(session: AsyncSession, entry_ids) -> None:
+    """Compute and store the words of `entry_ids`, as this transaction sees them.
+
+    Called by the writers after their flush, so a search sees an entry's new
+    words as soon as the write commits, and by the sweep. A row never goes
+    back to an older revision: the sweep may have read an entry just before
+    a writer changed it.
+    """
+    ids = sorted(set(entry_ids))
+    if not ids:
+        return
+    stmt = pg_insert(LedgerEntryWords).from_select(
+        ["entry_id", "revision", "configs", "words"],
+        select(LedgerEntry.id, LedgerEntry.revision, literal(words_configs(), Text), search_document())
+        .where(LedgerEntry.id.in_(ids)).order_by(LedgerEntry.id),
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[LedgerEntryWords.entry_id],
+        set_={"revision": stmt.excluded.revision, "configs": stmt.excluded.configs, "words": stmt.excluded.words},
+        where=LedgerEntryWords.revision <= stmt.excluded.revision,
+    )
+    await session.execute(stmt)
+
+
+async def store_missing_words(session: AsyncSession, uid: int | None) -> int:
+    """Store the words of up to `WORDS_SWEEP_BATCH` of `uid`'s entries that lack current ones.
+
+    Entries imported, written before migration 1005 or by hand, or last
+    stored under other `FTS_CONFIGS`, are searched correctly meanwhile, only
+    slower. Returns how many it stored; the caller commits.
+    """
+    ids = (await session.execute(
+        select(LedgerEntry.id).outerjoin(LedgerEntryWords, _current_words())
+        .where(LedgerEntry.owner_key == owner_key(uid), LedgerEntryWords.entry_id.is_(None))
+        .order_by(LedgerEntry.id).limit(WORDS_SWEEP_BATCH)
+    )).scalars().all()
+    await store_words(session, ids)
+    return len(ids)
+
+
+def words_hits(columns, clauses, tsquery, limit: int):
+    """The statement for the entries matching `tsquery`, best first: `columns` plus `rank`.
+
+    Entries with current stored words are found through their GIN index, so
+    the cost follows the matches rather than the ledger's size; the others
+    (none, once the sweep has passed) get their words computed on the spot.
+    `columns` must include `LedgerEntry.id`, the tie-break.
+    """
+    stored = (
+        select(*columns, func.ts_rank_cd(LedgerEntryWords.words, tsquery).label("rank"))
+        .join(LedgerEntryWords, _current_words())
+        .where(*clauses, LedgerEntryWords.words.op("@@")(tsquery))
+    )
+    doc = search_document()
+    computed = (
+        select(*columns, func.ts_rank_cd(doc, tsquery).label("rank"))
+        .outerjoin(LedgerEntryWords, _current_words())
+        .where(*clauses, LedgerEntryWords.entry_id.is_(None), doc.op("@@")(tsquery))
+    )
+    hits = union_all(stored, computed).subquery()
+    return select(hits).order_by(hits.c.rank.desc(), hits.c.id).limit(limit)
 
 
 #: An entry's text fields: what it says, and so what it can cite.
@@ -897,7 +987,8 @@ class AddOutcome:
     entry: LedgerEntry
     topics: list[str]
     related: list[str]
-    similar: list[dict]
+    #: None when they could not be read (the entry is written regardless).
+    similar: list[dict] | None
     flagged: list[Flagged]
     hints: list[dict]
     notes: list[str]
@@ -931,6 +1022,7 @@ async def add_entry(
 ) -> AddOutcome:
     # Every independent check runs and one refusal names every problem
     # (`Problems`); a check that depends on a failed one is skipped.
+    started = _time.perf_counter()
     problems = Problems()
     with problems.check("kind"):
         if kind not in db.LEDGER_KINDS:
@@ -1030,10 +1122,25 @@ async def add_entry(
     flagged = await flag_lines(
         session, uid, challenged, f"{entry.ref} says it contradicts this line: {title}", entry.created_by, author)
     await session.flush()
-    similar = await similar_entries(session, uid, entry)
-    hints = await view_hints(session, uid, sorted(set(topic_ids.values()))) if kind == "quirk" else []
-    vocabulary = await names(session, uid) if area_tag is None or not topic_ids else None
+    await store_words(session, [entry.id])
     await session.commit()
+    timing.add_ms("write_ms", _time.perf_counter() - started)
+    started = _time.perf_counter()
+    # Read after the commit, so the write's locks (the kind's ref counter
+    # above all) are not held while they run: they only inform the answer,
+    # and a failure among them must not be answered as "nothing written".
+    similar, hints, vocabulary = None, [], None
+    try:
+        similar = await similar_entries(session, uid, entry)
+        hints = await view_hints(session, uid, sorted(set(topic_ids.values()))) if kind == "quirk" else []
+        vocabulary = await names(session, uid) if area_tag is None or not topic_ids else None
+    except Exception as exc:  # noqa: BLE001 - the entry is written; the note says what is missing
+        # No rollback: it would expire `entry`, which the answer reads. The
+        # caller's session closes, ending the failed read.
+        notes.append(f"{entry.ref} was written, but what comes with the answer (similar entries, view hints, "
+                     f"area and topic names) could not be read ({type(exc).__name__}): search for duplicates "
+                     "with ledger_search; ledger_topics lists the names.")
+    timing.add_ms("similar_ms", _time.perf_counter() - started)
     return AddOutcome(
         entry=entry, topics=sorted(topic_ids), related=sorted({e.ref for e in related_entries.values()},
                                                               key=_ref_sort_key),
@@ -1048,16 +1155,12 @@ async def similar_entries(session: AsyncSession, uid: int | None, entry: LedgerE
     Words only: a new entry has no vector yet, and the write never waits for
     one. Not a refusal: a fuzzy score must not block logging.
     """
-    query = tsquery_for(entry.title, any_word=True)
-    doc = search_document()
-    rank = func.ts_rank_cd(doc, query)
-    rows = (await session.execute(
-        select(LedgerEntry.id, LedgerEntry.ref, LedgerEntry.kind, LedgerEntry.status, LedgerEntry.title,
-               LedgerEntry.area_tag, LedgerEntry.outcome, rank.label("rank"))
-        .where(_owner(LedgerEntry, uid), LedgerEntry.id != entry.id, LedgerEntry.status.in_(ACTIVE_STATUSES),
-               doc.op("@@")(query))
-        .order_by(rank.desc(), LedgerEntry.id).limit(SIMILAR_MAX)
-    )).all()
+    rows = (await session.execute(words_hits(
+        (LedgerEntry.id, LedgerEntry.ref, LedgerEntry.kind, LedgerEntry.status, LedgerEntry.title,
+         LedgerEntry.area_tag, LedgerEntry.outcome),
+        (_owner(LedgerEntry, uid), LedgerEntry.id != entry.id, LedgerEntry.status.in_(ACTIVE_STATUSES)),
+        tsquery_for(entry.title, any_word=True), SIMILAR_MAX,
+    ))).all()
     topics = await entry_topics(session, [r.id for r in rows]) if rows else {}
     out = []
     for r in rows:
@@ -1351,6 +1454,11 @@ async def _update_entry(
     flagged += await flag_lines(
         session, uid, [i for i in challenged if i not in {f.line_id for f in flagged}],
         f"{entry.ref} says it contradicts this line: {reason}", who, author)
+    if changed:
+        # The entry's UPDATE first (its one flush, revision already bumped),
+        # so its words are computed from what this change wrote.
+        await session.flush()
+        await store_words(session, [entry.id])
     await session.commit()
     await session.refresh(entry)
     return UpdateOutcome(entry=entry, changed=changed, flagged=flagged, notes=notes)
