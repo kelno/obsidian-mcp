@@ -688,6 +688,7 @@ def test_docs_a_repos_claude_md_points_to_are_on_the_path_by_hash(vault):
     assert build.moment == "Before changing the build" and not build.always
     # Its hash and size from the snapshot; its text stays on the PC.
     assert build.hash == "aaaaaaaaaaaa" and build.chars == 120_000 and build.text is None and build.text_on_pc
+    assert any(n.startswith("2 pieces are marked text_on_pc") and "Read them on that PC" in n for n in result.notes)
     assert by_id["file:D:/work/repo/RELEASE.md"].moment == "When releasing"
     agents = by_id["file:D:/work/repo/AGENTS.md"]
     assert agents.text.startswith("Agents.") and agents.moment == "When unsure"

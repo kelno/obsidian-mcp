@@ -212,6 +212,10 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
     listing = known is not None
     order = {id(o): i for i, o in enumerate(out)}
     due = [(p, o) for p, o in zip(pieces, out) if o.status != "unchanged" and not (o.private or o.text_on_pc)]
+    on_pc = sum(1 for o in out if o.text_on_pc and o.status != "unchanged")
+    if on_pc:  # one-time guidance in the result rather than in the description (owner, ledger C145)
+        notes.append(f"{on_pc} piece{' is' if on_pc == 1 else 's are'} marked text_on_pc: a repo's docs, whose hash "
+                     "and size the PC's snapshot holds but not their text. Read them on that PC, at their `where`.")
     if listing:
         result.pieces = [o for o in out if o.status != "unchanged" and (o.private or o.text_on_pc)]
         # The chains and the structure came with the first call too, unchanged by a later one (owner,
