@@ -812,9 +812,10 @@ def test_a_rule_write_no_path_reaches_says_so_and_how_to_tell_why(writing):
     assert "reached_by_no_path: after this write, no agent path reaches these rules" in created
     block = created.split("reached_by_no_path:")[1]
     assert "\n- note:_/agent/Orphan.md\n" in block
-    assert "both need fixing" in block
+    assert "either way it needs fixing" in block and "To tell which, look for what is meant to send agents" in block
     assert '"How to write an instruction" (`_/agent/Where agent instructions go.md`)' in block
-    assert '"Checking a rule against agent paths" in the same note' in block
+    assert '"Checking a rule against agent paths" in `_/agent/Where agent instructions go.md` says' in block
+    assert "isn't yours to make in this session, tell the owner." in block
     # A rule some path reaches says nothing; nor does a write changing no rule line.
     common = asyncio.run(tools.edit_note_impl("_/agent/Common-rules.md", "- A new line. [P2]", append=True))
     assert "reached_by_no_path" not in common
@@ -840,4 +841,4 @@ def test_a_rule_write_says_in_one_line_when_reach_cannot_be_checked(writing):
     result = asyncio.run(tools.edit_note_impl("_/agent/Common-rules.md", "- A new line. [P2]", append=True))
     line = result.split("reached_by_no_path:")[1].split("\n\n")[0]
     assert line.startswith(" not checked (The starting points") and "\n" not in line
-    assert "agent_path_reached_by" in line
+    assert line.endswith("`agent_path_reached_by` on each changed place tells whether an agent path reaches it.")
