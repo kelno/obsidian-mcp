@@ -64,18 +64,23 @@ class Explain(Executable, ClauseElement):
 
     inherit_cache = False
 
-    def __init__(self, statement):
+    def __init__(self, statement, options: str = ""):
         self.statement = statement
+        self.options = options
 
 
 @compiles(Explain, "postgresql")
 def _compile_explain(element, compiler, **kw):  # pragma: no cover - via tests
-    return "EXPLAIN " + compiler.process(element.statement, **kw)
+    options = f"({element.options}) " if element.options else ""
+    return "EXPLAIN " + options + compiler.process(element.statement, **kw)
 
 
-async def explain(session, statement) -> str:
-    """The plan for `statement`, as one string, on `session`'s transaction."""
-    rows = (await session.execute(Explain(statement))).fetchall()
+async def explain(session, statement, options: str = "") -> str:
+    """The plan for `statement`, as one string, on `session`'s transaction.
+
+    `options` such as `"ANALYZE"` go in the parentheses; ANALYZE runs it.
+    """
+    rows = (await session.execute(Explain(statement, options))).fetchall()
     return "\n".join(row[0] for row in rows)
 
 

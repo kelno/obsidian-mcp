@@ -1937,6 +1937,27 @@ async def test_stored_and_computed_words_rank_alike(sessionmaker, ctx):
     assert len(stored) == 2 and stored == computed
 
 
+async def test_words_are_computed_on_the_spot_only_when_an_entry_lacks_stored_ones(sessionmaker, ctx):
+    # PostgreSQL pushes the computed half's `doc @@ query` down to the entry
+    # scan, below the join that drops entries with stored words: without the
+    # EXISTS gate it computed every entry's words on every search and add.
+    for title in ("Heron by the lake", "Pelican on the shore", "Heron again"):
+        await add_quirk(title)
+
+    async def plan() -> str:
+        async with sessionmaker() as session:
+            return await _harness.explain(session, ledger.words_hits(
+                (LedgerEntry.id, LedgerEntry.ref), (), ledger.tsquery_for("heron"), 10), "ANALYZE, COSTS OFF")
+
+    stored = await plan()
+    # The gate (an InitPlan) is false, so the computed half's scan never runs.
+    assert "One-Time Filter" in stored and "(never executed)" in stored, stored
+    await _set_words(sessionmaker, "DELETE FROM ledger_entry_words WHERE entry_id = "
+                                   "(SELECT min(id) FROM ledger_entries)")
+    one_missing = await plan()
+    assert "(never executed)" not in one_missing.split("One-Time Filter", 1)[1].split("InitPlan", 1)[0], one_missing
+
+
 async def test_an_older_revision_never_overwrites_newer_stored_words(sessionmaker, ctx):
     added = await add_quirk("Kestrel")
     entry = await _entry(sessionmaker, added.ref)

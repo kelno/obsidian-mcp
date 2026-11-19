@@ -805,6 +805,13 @@ def words_hits(columns, clauses, tsquery, limit: int):
     the cost follows the matches rather than the ledger's size; the others
     (none, once the sweep has passed) get their words computed on the spot.
     `columns` must include `LedgerEntry.id`, the tie-break.
+
+    The computed half is gated on an uncorrelated EXISTS: PostgreSQL pushes
+    `doc @@ tsquery`, which reads only the entry, down to the entry scan,
+    below the join that drops the entries with stored words, so without the
+    gate it computed every entry's words on every call (about 6 s for 694
+    entries on the deployment). The EXISTS runs once, as an InitPlan, and
+    when it is false the computed half's scan never runs.
     """
     stored = (
         select(*columns, func.ts_rank_cd(LedgerEntryWords.words, tsquery).label("rank"))
@@ -812,10 +819,14 @@ def words_hits(columns, clauses, tsquery, limit: int):
         .where(*clauses, LedgerEntryWords.words.op("@@")(tsquery))
     )
     doc = search_document()
+    missing = (
+        select(literal(1)).select_from(LedgerEntry).outerjoin(LedgerEntryWords, _current_words())
+        .where(*clauses, LedgerEntryWords.entry_id.is_(None)).correlate(None).exists()
+    )
     computed = (
         select(*columns, func.ts_rank_cd(doc, tsquery).label("rank"))
         .outerjoin(LedgerEntryWords, _current_words())
-        .where(*clauses, LedgerEntryWords.entry_id.is_(None), doc.op("@@")(tsquery))
+        .where(missing, *clauses, LedgerEntryWords.entry_id.is_(None), doc.op("@@")(tsquery))
     )
     hits = union_all(stored, computed).subquery()
     return select(hits).order_by(hits.c.rank.desc(), hits.c.id).limit(limit)
