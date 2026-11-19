@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import shutil
 import tempfile
 
 os.environ.setdefault("SECRET_KEY", "test")
@@ -571,6 +573,33 @@ def test_write_file_refusals_never_refresh(world):
     out = run(tools.write_file_impl("a.md", "!!!", encoding="base64", overwrite=True))
     assert "invalid_argument" in out
     assert world.seen == []
+
+
+# ── TASK_REFRESH_ON_WRITE (fork) ────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("call", [
+    lambda: tools.edit_note_impl("a.md", "- [x] Buy milk", find="- [ ] Buy milk"),
+    lambda: tools.set_frontmatter_impl("a.md", {"b": 2}),
+    lambda: tools.write_file_impl("a.md", PLAIN, encoding="text", overwrite=True),
+    lambda: tools.delete_note_impl("a.md"),
+])
+def test_with_the_refresh_off_no_writer_refreshes_and_the_response_is_the_same(world, monkeypatch, call):
+    put(world, "a.md", TASKS)
+    on = run(call())
+    on_bytes = (world.root / "a.md").read_bytes() if (world.root / "a.md").exists() else None
+    assert world.refreshes, world.seen
+    world.seen.clear()
+    world.usage.clear()
+    shutil.rmtree(world.root / ".trash", ignore_errors=True)   # a second soft delete lands where the first did
+    put(world, "a.md", TASKS)
+    monkeypatch.setattr(tools.settings, "task_refresh_on_write", False)
+    off = run(call())
+    trash_name = re.compile(r"-[0-9a-f]{8}\b")   # a soft delete's random suffix
+    assert trash_name.sub("-…", off) == trash_name.sub("-…", on)
+    assert ((world.root / "a.md").read_bytes() if (world.root / "a.md").exists() else None) == on_bytes
+    assert world.refreshes == [] and [s[0] for s in world.seen] == ["event"]
+    assert "task_refresh" not in usage_of(world)
 
 
 REAL_REFRESH = task_index.refresh_note_tasks

@@ -596,6 +596,14 @@ class Settings(BaseSettings):
     # exact path; their rows are removed by the next pass. Deployment-wide.
     # See openspec/changes/archive/2026-11-12-index-exclude-conflict-files/design.md.
     index_exclude_conflict_files: bool = False
+    # Fork: the note writers' write-time refresh of upstream's `note_tasks`
+    # rows (#432, `tools._refresh_after_write`). On, upstream's behaviour. Off,
+    # those rows wait for the next index pass, as before #432: a deployment
+    # whose upstream task tools are all switched off (`SWITCHED_OFF` in
+    # `server.py`) reads them nowhere at once, and saves a gate and a refresh
+    # per note write. The fork's task rows (`fork_note_tasks`) are not
+    # concerned. See docs/architecture/indexing-and-embeddings.md.
+    task_refresh_on_write: bool = True
     # The change feed (#351, `note_events`, design D9/D10). Retention runs in
     # the periodic tick's `finally`, never inside a pass. The age limit is a
     # `NullableLimit`-style "null disables" setting (`OAUTH_CLIENT_UNUSED_

@@ -1144,7 +1144,10 @@ async def _refresh_after_write(uid: int | None, target, *, replaced, published) 
     outcome and event are identical whatever happens here. Only the usage
     row learns of it, through `task_refresh`, and only when a refresh was
     attempted. A refresh that cannot run leaves the rows to the next pass.
+    With `TASK_REFRESH_ON_WRITE` off (fork), none is attempted.
     """
+    if not settings.task_refresh_on_write:
+        return  # the deployment leaves upstream's rows to the next pass (fork)
     try:
         if published is not task_index.ABSENT:
             if (

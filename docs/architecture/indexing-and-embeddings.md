@@ -1879,6 +1879,16 @@ writers do not refresh") is narrowed:
   hold the bytes, and a re-read would break R1), `delete_file` (refuses
   `.md`).
 
+**`TASK_REFRESH_ON_WRITE`** (fork, default on, upstream's behaviour): off,
+`_refresh_after_write` returns at once and the generic writers' (and the
+fork's task tools') rows wait for the next pass, as before #432. Nothing a
+caller sees changes; only upstream's task tools (`list_tasks`, `task_agenda`,
+`complete_task`, `update_task`, `add_task`, `move_task`) read `note_tasks`,
+and the fork switches them all off, so a
+deployment that keeps them off spends a gate scan and a refresh per note
+write for nothing. Upstream's own task writers refresh through
+`_refresh_task_rows` directly and are not concerned.
+
 The pass is unchanged: R3/R4 cover every refreshing writer exactly as a task
 tool's. Two residuals are accepted: the
 refresh's root re-check is not under a lock, so a reassignment between the
