@@ -41,13 +41,17 @@ one transaction, so there is no partial result, and there is no semantic-only
 mode.
 
 **Private folders (fork, P98).** With `hide_private` and private folders
-configured, both arms leave notes under a private folder out inside their own
-statements (so each still fills its 50; steps 4 and 5 differ from upstream's
-by that argument only), and after step 7c each arm runs a second time
-unfiltered, in the same snapshot (`_private_hidden_count`). Those two are the
-arms an unfiltered call would have fused, in their own order; the service
-fuses them and counts the private notes ranked ahead of the furthest note on
-the page (`count_private_hidden`). Nothing from the unfiltered runs reaches
+configured, both arms leave notes under a private folder out (so each still
+fills its 50), and the count needs each arm as an unfiltered call would have
+ranked it. Step 4 ranks both keyword arms at once
+(`search.keyword_arm_rows_split`): one ranking statement per block, whose
+rows are the unfiltered block and the filtered one, exactly as two runs would
+have returned them. Step 5 differs from upstream's by the filter argument
+only, and after step 7c the semantic arm runs a second time unfiltered, in
+the same snapshot (`_private_hidden_count`): an approximate scan's filtered
+rows cannot be derived from an unfiltered one. The service fuses the two
+unfiltered arms and counts the private notes ranked ahead of the furthest note
+on the page (`count_private_hidden`). Nothing from the unfiltered arms reaches
 the result but that number.
 
 The service records the timing keys but **not** `record_results`: the tool
@@ -224,17 +228,17 @@ def count_private_hidden(page: list[str], keyword: list[str], semantic: list[str
     return min(len(hidden), limit)
 
 
-async def _private_hidden_count(session, query: str, query_embedding: list[float] | None,
+async def _private_hidden_count(session, k_all: list[str], query_embedding: list[float] | None,
                                 page: list[str], *, filters: dict, k: int, limit: int) -> int:
-    """The fork's step after 7c (P98): both arms run again unfiltered, in the
-    call's snapshot, after every statement of upstream's sequence, and only
-    `count_private_hidden` reads them. The keyword arm keeps the database's
-    own order (rank ties fall to its collation); the semantic arm runs only
-    when the call's did (`query_embedding`), with the index scans upstream's
-    step 5 has already restored, and restores them after an exact re-run of
-    its own, so nothing after this inherits the exact plan."""
-    k_all = [r["path"] for r in (
-        await search.keyword_arm_rows(session, query, limit=HYBRID_ARM_DEPTH, **filters)).rows]
+    """The fork's step after 7c (P98): the semantic arm runs again
+    unfiltered, in the call's snapshot, after every statement of upstream's
+    sequence, and `count_private_hidden` reads it with `k_all`, the unfiltered
+    keyword arm step 4 ranked alongside the filtered one
+    (`search.keyword_arm_rows_split`, in the database's own order: rank ties
+    fall to its collation). The semantic arm runs only when the call's did
+    (`query_embedding`), with the index scans upstream's step 5 has already
+    restored, and restores them after an exact re-run of its own, so nothing
+    after this inherits the exact plan."""
     s_all: list[str] = []
     if query_embedding is not None:
         s_arm = await embeddings.semantic_arm_rows(
@@ -313,10 +317,17 @@ async def hybrid_search(
         await session.execute(text("SET LOCAL hnsw.iterative_scan = 'relaxed_order'"))
 
     # ── 4. The keyword arm (the snapshot is taken here) ─────────────────────
-    k_arm = await search.keyword_arm_rows(
-        session, query, limit=HYBRID_ARM_DEPTH, with_excerpt_flag=True, **filters,
-        **({"private": "exclude"} if hiding else {}),
-    )
+    k_unfiltered: list[str] = []
+    if hiding:
+        # Fork (P98): the filtered arm and the unfiltered one the count
+        # needs, from one ranking statement per block.
+        k_arm, k_unfiltered = await search.keyword_arm_rows_split(
+            session, query, limit=HYBRID_ARM_DEPTH, with_excerpt_flag=True, **filters,
+        )
+    else:
+        k_arm = await search.keyword_arm_rows(
+            session, query, limit=HYBRID_ARM_DEPTH, with_excerpt_flag=True, **filters,
+        )
 
     if _between_arms_hook is not None:
         await _between_arms_hook(session)
@@ -396,7 +407,7 @@ async def hybrid_search(
         # before any rerank reorders the candidates and before the response
         # cap drops any.
         private_hidden = await _private_hidden_count(
-            session, query, query_embedding, [path for path, *_ in fused[:limit]],
+            session, k_unfiltered, query_embedding, [path for path, *_ in fused[:limit]],
             filters=filters, k=k, limit=limit,
         )
     timing.add_ms("db_ms", time.monotonic() - db_start)

@@ -38,7 +38,7 @@ cannot drop a note from both blocks (Codex C-1):
 import time
 from dataclasses import dataclass, field
 
-from sqlalchemy import Integer, and_, case, cast, func, literal_column, or_, select, text
+from sqlalchemy import Integer, and_, case, cast, func, literal_column, or_, select, text, union_all
 from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import bindparam
@@ -402,6 +402,132 @@ async def keyword_arm_rows(
         rows=results, and_query=and_query, any_query=any_query, plan=plan,
         fallback=fallback,
     )
+
+
+async def _ranked_block_split(
+    session, tsquery, *, folder, tags, frontmatter, user_id, limit_all, limit_public,
+    exclude_ids=None, with_excerpt_flag=False,
+):
+    """`_ranked_block` for two arms in one statement (fork, P98): the block
+    without the private filter, cut at `limit_all`, and the block with it
+    (`private="exclude"`), cut at `limit_public`. Returns the two lists of
+    rows, each in its own block's order.
+
+    The matching rows, their rank and their `public` flag are computed once,
+    in a materialized CTE; each block is then that CTE ordered and cut as
+    `_ranked_block` orders and cuts it (`rank DESC, file_path ASC`, a total
+    order: `file_path` is unique within the owner scope every statement is
+    held to), the filtered one over the rows whose flag is true. `public` is
+    the very predicate `apply_note_filters(private="exclude")` puts in the
+    WHERE clause, projected instead of applied, so the database decides it as
+    it decided the filter, and the order with its collation tie-break is the
+    database's too. Each block is therefore the rows its own statement would
+    have returned, in the same order; the rank (detoasting every matching
+    vector) is paid once instead of twice."""
+    rank = rank_expression(NoteMetadata.content_tsvector, tsquery).label("rank")
+    public = (~private_folders.sql_predicate(NoteMetadata.file_path)).label("public")
+    columns = [
+        NoteMetadata.id,
+        NoteMetadata.file_path,
+        NoteMetadata.title,
+        NoteMetadata.tags,
+        rank,
+        public,
+    ]
+    if with_excerpt_flag:
+        columns.append(NoteMetadata.body_excerpt.is_(None).label("no_excerpt"))
+    stmt = select(*columns).where(NoteMetadata.content_tsvector.op("@@")(tsquery))
+    if exclude_ids:
+        # As in `_ranked_block`: the unfiltered conjunctive block was not
+        # full, so its ids are every conjunctive match under these filters,
+        # private or not, which is what both blocks' fills leave out.
+        stmt = stmt.where(NoteMetadata.id.not_in(exclude_ids))
+    matches = apply_note_filters(
+        stmt, folder=folder, tags=tags, frontmatter=frontmatter, user_id=user_id
+    ).cte("matches").prefix_with("MATERIALIZED", dialect="postgresql")
+    order = (matches.c.rank.desc(), matches.c.file_path.asc())
+    unfiltered = (
+        select(*matches.c, literal_column("0").label("block")).order_by(*order).limit(limit_all)
+    )
+    filtered = (
+        select(*matches.c, literal_column("1").label("block"))
+        .where(matches.c.public).order_by(*order).limit(limit_public)
+    )
+    both = union_all(unfiltered, filtered).subquery("blocks")
+    stmt = select(*both.c).order_by(both.c.block, both.c.rank.desc(), both.c.file_path.asc())
+    rows = (await session.execute(stmt)).all()
+    return [r for r in rows if r.block == 0], [r for r in rows if r.block == 1]
+
+
+async def keyword_arm_rows_split(
+    session,
+    query: str,
+    *,
+    limit: int,
+    folder: str | None = None,
+    tags: list[str] | None = None,
+    frontmatter: dict | None = None,
+    user_id: int | None = None,
+    with_excerpt_flag: bool = False,
+) -> tuple[KeywordArm, list[str]]:
+    """`hybrid_search`'s keyword arm with private notes left out, and the
+    paths of the same arm unfiltered, for its count (fork, P98): exactly
+    `keyword_arm_rows(..., private="exclude")` and the paths of
+    `keyword_arm_rows(...)`, from one ranking statement per block instead of
+    one per block and arm. Only with private folders configured.
+
+    The conjunctive block is one `_ranked_block_split`. The parse runs when
+    the filtered arm needs it (the unfiltered block is never shorter, so it
+    needs it only then too). The disjunctive fill runs as in each arm alone:
+    when the unfiltered block is short too, one split statement serves both,
+    each with its own remaining limit; when only the filtered block is short,
+    the filtered fill runs alone, `_ranked_block` as `keyword_arm_rows` runs
+    it. The exclusion of conjunctive matches is the same in both, since
+    neither arm runs the fill unless its conjunctive block held every match
+    it could: the split fill leaves out the unfiltered block's ids (every
+    conjunctive match, private ones included), the filtered fill alone the
+    filtered block's (every public one)."""
+    and_query = combined_tsquery(query)
+    filters = dict(folder=folder, tags=tags, frontmatter=frontmatter, user_id=user_id)
+    all_unfiltered, all_public = await _ranked_block_split(
+        session, and_query, limit_all=limit, limit_public=limit,
+        with_excerpt_flag=with_excerpt_flag, **filters,
+    )
+    results = [_row_dict(r, "all", with_excerpt_flag) for r in all_public]
+    unfiltered = [r.file_path for r in all_unfiltered]
+
+    snippet_rows = settings.keyword_snippet_rows
+    plan: FallbackPlan | None = None
+    fallback = "not_needed"
+    any_query = None
+    if len(results) < limit or snippet_rows > 0:
+        plan = fallback_plan(await _parsed_texts(session, query))
+    if len(results) < limit:
+        if plan is not None and plan.eligible:
+            any_query = fallback_tsquery(plan, query)
+            if len(unfiltered) < limit:
+                any_unfiltered, any_public = await _ranked_block_split(
+                    session, any_query, limit_all=limit - len(unfiltered),
+                    limit_public=limit - len(results),
+                    exclude_ids=[r.id for r in all_unfiltered],
+                    with_excerpt_flag=with_excerpt_flag, **filters,
+                )
+                unfiltered.extend(r.file_path for r in any_unfiltered)
+            else:
+                any_public = await _ranked_block(
+                    session, any_query, limit=limit - len(results),
+                    exclude_ids=[r.id for r in all_public],
+                    with_excerpt_flag=with_excerpt_flag, private="exclude", **filters,
+                )
+            results.extend(_row_dict(r, "any", with_excerpt_flag) for r in any_public)
+            fallback = "ran"
+        else:
+            fallback = "skipped"
+    arm = KeywordArm(
+        rows=results, and_query=and_query, any_query=any_query, plan=plan,
+        fallback=fallback,
+    )
+    return arm, unfiltered
 
 
 async def keyword_snippets(session, rows: list[dict], arm: KeywordArm) -> None:

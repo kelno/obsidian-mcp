@@ -184,11 +184,21 @@ def _hybrid_log(upstream, *, ranked, semantic, hide_private, limit=10):
     return result, session.log, holder
 
 
+def _split_row(i, path, block):
+    """A row of `search._ranked_block_split`'s statement, which returns both
+    keyword blocks: `block` 0 is the unfiltered one, 1 the filtered one."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(id=i, file_path=path, title=path[:-3], tags=None, rank=0.5,
+                           no_excerpt=False, block=block)
+
+
 def test_hybrid_counts_after_upstream_s_last_statement(scripted, owner_setting):
     up = scripted
     result, log, holder = _hybrid_log(
         up, hide_private=True,
-        ranked=[[up.kw_row(1, "a.md")], [up.kw_row(1, "a.md"), up.kw_row(4, "Diary (private)/q.md")]],
+        # One ranking for both keyword arms: a.md in both, q.md only unfiltered.
+        ranked=[[_split_row(1, "a.md", 0), _split_row(4, "Diary (private)/q.md", 0), _split_row(1, "a.md", 1)]],
         # The filtered scan finds nothing and re-runs exact; the unfiltered one does not.
         semantic=[[], [up.sem_row(2, "b.md")], [up.sem_row(3, "Diary (private)/p.md")]],
     )
@@ -200,12 +210,15 @@ def test_hybrid_counts_after_upstream_s_last_statement(scripted, owner_setting):
     # Upstream's step 5: the filtered scan, off, its identical re-run, on.
     assert semantic[:2] == [off - 1, off + 1] and on == off + 2
     assert filtered[semantic[0]] and filtered[semantic[1]]
-    # The unfiltered runs come after every upstream statement (the snippets,
-    # the transition count), keyword first, with the index scans back on.
-    upstream_last = max(i for i, k in enumerate(kinds) if k in ("snippet", "rechunk"))
+    # Step 4 ranks both keyword arms in one statement, before the semantic
+    # arm; no keyword statement runs again for the count.
     ranked = [i for i, k in enumerate(kinds) if k == "ranked"]
-    assert filtered[ranked[0]] and not filtered[ranked[1]]
-    assert upstream_last < ranked[1] < semantic[2] and not filtered[semantic[2]]
+    assert len(ranked) == 1 and ranked[0] < semantic[0]
+    assert "UNION ALL" in sqls[ranked[0]] and "~*" in sqls[ranked[0]]
+    # The unfiltered semantic run comes after every upstream statement (the
+    # snippets, the transition count), with the index scans back on.
+    upstream_last = max(i for i, k in enumerate(kinds) if k in ("snippet", "rechunk"))
+    assert upstream_last < semantic[2] and not filtered[semantic[2]]
     assert sqls.count("SET LOCAL enable_indexscan = on") == 1, "no exact re-run of its own, nothing to restore"
     assert [r.path for r in result.rows] == ["a.md", "b.md"]
     assert result.private_hidden == 2
@@ -216,7 +229,7 @@ def test_an_exact_rerun_of_the_unfiltered_scan_is_restored(scripted, owner_setti
     up = scripted
     result, log, holder = _hybrid_log(
         up, hide_private=True,
-        ranked=[[up.kw_row(1, "a.md")], [up.kw_row(1, "a.md")]],
+        ranked=[[_split_row(1, "a.md", 0), _split_row(1, "a.md", 1)]],
         semantic=[[up.sem_row(2, "b.md")], [], [up.sem_row(3, "Diary (private)/p.md")]],
     )
     sqls = [sql for _, sql in log]
