@@ -141,6 +141,10 @@ def path(start=None, work=None, known=None):
     return asyncio.run(apt.agent_path_impl(start, work, known))
 
 
+def moments(piece):
+    return [m.moment for m in piece.moments or []]
+
+
 def ids(result):
     return [p.id for p in result.pieces]
 
@@ -161,18 +165,22 @@ def test_agent_path_draws_a_path_with_texts_hashes_and_known(vault):
     assert order[4] == "note:_/agent/roles/Worker.md" and "note:_/agent/roles/Coordinator.md" not in order
     # The repo's area, as open_area serves it, then what its rules point to.
     work = [i for i in order if first.pieces[order.index(i)].stage == ap.STAGE_NAMES[ap.WORK]]
+    # coding-practices, met earlier behind the guide index's moment, is on the path from the opening of an area
+    # worked as a code project, whatever comes: it arrives there.
     assert work == ["section:Areas/Repo/Repo.md#For agents", "open_area:Areas/Repo/Repo.md",
                     "section:_/agent/Vault conventions.md#Working on an area",
+                    "note:_/agent/guides/coding-practices.md",
                     "tool:obsidian-mcp:open_area/instructions", "note:Areas/Repo/Repo notes.md"]
     # A pointer that says when comes later; a link that says neither when nor "read" is a mention, counted and
     # not followed, a rule file's listed by name [P250].
     by_id = {p.id: p for p in first.pieces}
-    assert by_id["note:_/agent/Vault conventions.md"].moment == "Before working on one of the owner's areas"
+    assert moments(by_id["note:_/agent/Vault conventions.md"]) == ["Before working on one of the owner's areas"]
     assert "note:_/agent/Notes kept.md" not in by_id and "note:Notes/Some note.md" not in by_id
     assert first.structure.mentions_not_followed == 2
     assert [m["target"] for m in first.structure.rule_file_mentions] == ["_/agent/Notes kept.md"]
-    # Already met through the guide index before the area opens, so code_project adds no second copy.
-    assert by_id["note:_/agent/guides/coding-practices.md"].moment == "any code work"
+    # One copy, with the guide index's moment (code_project brings it with no line).
+    assert moments(by_id["note:_/agent/guides/coding-practices.md"]) == ["any code work"]
+    assert by_id["note:_/agent/guides/coding-practices.md"].always
     # This server's texts as served come last.
     assert {"instructions:obsidian-mcp", "guide:obsidian-mcp", "tool:obsidian-mcp:read_note"} <= set(order)
     served = dict(asyncio.run(apt._served(None)).tools)
@@ -204,7 +212,7 @@ def test_a_claude_ai_chat_starts_from_memory_and_reads_what_its_lines_point_to(v
     result = path(PathStart(surface="claude-ai"), PathWork(area="Repo"))
     order = ids(result)
     assert order[:2] == ["memory:/preferences.md", "note:_/agent/Common-rules.md"]
-    assert result.pieces[1].moment == "At the start of every chat"
+    assert moments(result.pieces[1]) == ["At the start of every chat"]
     assert "section:Areas/Repo/Repo.md#For agents" in order
     assert not any(i.startswith(("file:", "hook:")) for i in order)
 
@@ -456,7 +464,7 @@ def test_agent_path_without_start_gives_the_overview(vault):
     # Nothing points to these on this vault (memory is read through its mirror's lines, not the note; Notes
     # kept is only mentioned).
     assert result.rule_files_no_path_reaches == [
-        "note:CLAUDE.md", "note:_/agent/Memory reference.md", "note:_/agent/Notes kept.md",
+        "note:_/agent/Memory reference.md", "note:_/agent/Notes kept.md",
         "note:_/agent/Where agent instructions go.md", "note:_/agent/roles/Coordinator.md",
         "note:_/agent/roles/Relay.md"]
     assert result.pieces is None
@@ -515,13 +523,13 @@ def test_between_rule_notes_only_the_conventions_pointer_shapes_are_followed(vau
         "- See [[_/agent/Missing]] too.\n", encoding="utf-8")
     result = path(PathStart(surface="claude-ai"))
     by_id = {p.id: p for p in result.pieces}
-    assert by_id["note:_/agent/Vault conventions.md"].moment == "When working on one of the owner's areas"
+    assert moments(by_id["note:_/agent/Vault conventions.md"])[0] == "When working on one of the owner's areas"
     coordinator = by_id["note:_/agent/roles/Coordinator.md"]
-    assert coordinator.moment == "While the setup is on trial" and coordinator.always
+    assert moments(coordinator)[0] == "While the setup is on trial" and coordinator.always
     # The index's moment, cut at a table cell, for its leading link only.
-    assert by_id["note:_/agent/guides/coding-practices.md"].moment == "any code work"
+    assert moments(by_id["note:_/agent/guides/coding-practices.md"])[0] == "any code work"
     # A bold title that is a sentence of its own: the next sentence opens the pointer.
-    assert by_id["note:_/agent/Where agent instructions go.md"].moment == "When you merge"
+    assert moments(by_id["note:_/agent/Where agent instructions go.md"])[0] == "When you merge"
     # A bold label in front, a bare "read", another opening word, a second link on an index line, a rule section's
     # link in no shape: mentions, not on the path. A link written as code isn't a link at all.
     for gone in ("note:_/agent/roles/Worker.md", "note:_/agent/Notes kept.md", "note:_/agent/roles/Relay.md",
@@ -563,7 +571,7 @@ def test_a_backticked_path_naming_a_kind_of_note_reaches_every_match(vault):
     result = path(PathStart(surface="claude-ai"))
     by_id = {p.id: p for p in result.pieces}
     inbox = by_id["section:Inbox/Inbox.md#For agents"]
-    assert inbox.moment == "Before filing into a folder or changing it" and not inbox.always
+    assert moments(inbox) == ["Before filing into a folder or changing it"] and not inbox.always
     assert inbox.stage == ap.STAGE_NAMES[ap.LATER] and inbox.text == "## For agents\n\n- File by date."
     assert "matching `<folder>/<folder>.md`" in inbox.arrives
     # Every folder note's For agents section, at any depth, the area's main note's too; a folder note without
@@ -572,13 +580,14 @@ def test_a_backticked_path_naming_a_kind_of_note_reaches_every_match(vault):
     assert not any(i.startswith(("note:Log/", "section:Log/", "note:Inbox/")) for i in by_id)
     # The machine notes: each read whole, with its rule sections, and nothing below a machine's own folder.
     for machine in ("box", "pi"):
-        assert by_id[f"note:Reference/Servers/{machine}/{machine}.md"].moment == "Before reaching another machine"
+        assert moments(by_id[f"note:Reference/Servers/{machine}/{machine}.md"]) == ["Before reaching another machine"]
     assert "note:Reference/Servers/pi/old/old.md" not in by_id
     # The line that only says what a folder note is points to nothing: one mention, not one per match.
     assert result.structure.mentions_not_followed == before + 1
 
     reached = asyncio.run(apt.agent_path_reached_by_impl("Inbox/Inbox.md", None, None))
-    assert reached.matched_by == "the place itself"
+    # The note itself is on no path: its rule section is (test bench, 2026-11-19: "the place itself").
+    assert reached.matched_by == "its rule sections (the note itself is on no path)"
     assert all(hit["via"][-1] == "section:Inbox/Inbox.md#For agents" for hit in reached.reached_by)
     assert {a for hit in reached.reached_by for a in hit["agents"]} >= {"a claude.ai chat",
                                                                        "a Claude Code worker in a repo"}
@@ -614,7 +623,7 @@ def test_what_hooks_say_at_other_events_is_on_claude_codes_paths(vault):
     result = path(PathStart(typical=3))
     by_id = {p.id: p for p in result.pieces}
     guard = by_id["hook:PreToolUse/guard.py#1"]
-    assert guard.moment == when and not guard.always and guard.stage == ap.STAGE_NAMES[ap.LATER]
+    assert moments(guard) == [when] and not guard.always and guard.stage == ap.STAGE_NAMES[ap.LATER]
     assert guard.where == "D:/vault/_/claude-code-hooks/guard.py" and guard.arrives.startswith(
         "PreToolUse hook (matcher Bash): ")
     assert guard.hash == ap.digest(guard.text) and "hook:PreToolUse/guard.py#2" in by_id
@@ -658,15 +667,15 @@ def test_the_voice_bridges_texts_reach_the_relay_and_the_sessions_on_the_bridge(
     # A session the relay started: the guide when it first calls the bridge, the notes at their moments.
     worker = path(PathStart(typical=3))
     by_id = {p.id: p for p in worker.pieces}
-    assert by_id["guide:claude-voice"].moment == "when it first calls the bridge" and not by_id["guide:claude-voice"].always
+    assert moments(by_id["guide:claude-voice"]) == ["when it first calls the bridge"] and not by_id["guide:claude-voice"].always
     note = by_id["bridge:claude-voice#2"]
-    assert note.moment == "about once an hour" and note.stage == ap.STAGE_NAMES[ap.LATER] and not note.always
+    assert moments(note) == ["about once an hour"] and note.stage == ap.STAGE_NAMES[ap.LATER] and not note.always
     assert not any("voice bridge" in line for line in worker.structure.not_followed)
     # A session the bridge didn't start: no bridge. A claude.ai chat has it among its connectors: the guide when
     # it first calls the bridge, the tools when they load, no notes (those come under relayed messages).
     assert not any("claude-voice" in i for i in ids(path(PathStart(typical=4))))
     chat = {p.id: p for p in path(PathStart(typical=1)).pieces}
-    assert chat["guide:claude-voice"].moment == "when it first calls the bridge" and not chat["guide:claude-voice"].always
+    assert moments(chat["guide:claude-voice"]) == ["when it first calls the bridge"] and not chat["guide:claude-voice"].always
     assert "tool:claude-voice:health" in chat and not any(i.startswith("bridge:") for i in chat)
     # The overview folds each server's tool texts into one line.
     over = path()
@@ -711,7 +720,7 @@ def test_in_a_repo_the_tools_stop_at_what_claude_code_loads(vault):
     assert repo == ["file:D:/work/repo/CLAUDE.md"]
     assert result.structure.mentions_not_followed == before
     coding = next(p for p in result.pieces if p.id == "note:_/agent/guides/coding-practices.md")
-    assert "file:D:/work/repo/CLAUDE.md" in [coding.arrives.removeprefix("pointed to by "), *(coding.also_pointed_by or [])]
+    assert "file:D:/work/repo/CLAUDE.md" in [m.piece for m in coding.moments]
     by_design = [line for line in result.structure.not_followed if line.startswith("The tools don't follow, by design:")]
     assert by_design == ["The tools don't follow, by design: in a repo, anything beyond what Claude Code loads "
                          "there. When one of these matters, point to it from a rule file the tools follow."]
@@ -1118,9 +1127,9 @@ def test_a_folder_the_snapshot_holds_nothing_of_still_loads_what_every_folder_lo
     result = path(PathStart(surface="claude-code", folder="Z:/elsewhere", role="worker"))
     order = ids(result)
     assert order[:2] == ["file:C:/Users/me/.claude/CLAUDE.md", "note:_/agent/Common-rules.md"]
-    assert not any(i.startswith("hook:SessionStart/") for i in order)  # its message there is unknown
-    assert any(line.startswith("the CLAUDE.md files of Z:/elsewhere and what the session-start hooks say there")
-               for line in result.structure.not_followed)
+    # The hooks are the user's: they run there too (`test_a_start_in_a_folder_the_snapshot_doesnt_hold_...`).
+    assert "hook:SessionStart/area-start.py" in order
+    assert any(line.startswith("the CLAUDE.md files of Z:/elsewhere: ") for line in result.structure.not_followed)
 
 
 def test_known_is_kept_by_piece_id_not_by_text(vault):
@@ -1141,8 +1150,8 @@ def test_without_a_role_each_role_note_waits_on_its_role(vault):
     result = path(PathStart(surface="claude-code", folder="D:/work/repo"))
     by_id = {p.id: p for p in result.pieces}
     worker, coordinator = by_id["note:_/agent/roles/Worker.md"], by_id["note:_/agent/roles/Coordinator.md"]
-    assert not worker.always and worker.moment == "if its role is Worker"
-    assert not coordinator.always and coordinator.moment == "if its role is Coordinator"
+    assert not worker.always and moments(worker) == ["if its role is Worker"]
+    assert not coordinator.always and moments(coordinator) == ["if its role is Coordinator"]
     assert any(n.startswith("No role given") for n in result.notes)
     picked = path(PathStart(surface="claude-code", folder="D:/work/repo", role="worker"))
     assert {p.id: p for p in picked.pieces}["note:_/agent/roles/Worker.md"].always
@@ -1151,10 +1160,13 @@ def test_without_a_role_each_role_note_waits_on_its_role(vault):
 
 def test_a_note_read_as_soon_as_a_waiting_piece_points_to_it_waits_on_that_moment(vault):
     _write(vault, "_/agent/Vault conventions.md", NOTES["_/agent/Vault conventions.md"]
-           + "\nRead [[Notes/Some note]] for the details.\n")
+           + "\n## Details\n\nRead [[Notes/Some note]] for the details.\n")
     by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
     some = by_id["note:Notes/Some note.md"]
-    assert not some.always and some.moment == "Before working on one of the owner's areas"
+    assert not some.always and moments(some) == ["Before working on one of the owner's areas"]
+    # The moment is Common-rules' line, through Vault conventions, which reads it as soon as it is met.
+    assert some.moments[0].piece == "note:_/agent/Common-rules.md"
+    assert some.moments[0].through == ["note:_/agent/Vault conventions.md"]
     # The connector's guide is on every path: every agent on the connector calls get_vault_guide first.
     assert "calls first" in by_id["guide:obsidian-mcp"].arrives
 
@@ -1299,10 +1311,10 @@ def test_a_claude_md_below_the_start_folder_loads_when_the_session_works_there(v
     _snapshot(vault, folders=folders, files=files)
     by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
     sub = by_id["file:D:/work/repo/sub/CLAUDE.md"]
-    assert not sub.always and sub.moment == "when it works on a file in D:/work/repo/sub"
+    assert not sub.always and moments(sub) == ["when it reads a file in D:/work/repo/sub"]
     assert sub.arrives == "loaded by Claude Code when it reads a file in D:/work/repo/sub"
     more = by_id["file:D:/work/repo/sub/more.md"]  # its imports are expanded, waiting on the same moment
-    assert not more.always and more.moment == sub.moment
+    assert not more.always and moments(more) == moments(sub)
     assert by_id["file:D:/work/repo/CLAUDE.md"].always  # the start folder's own is loaded at the start
 
 
@@ -1314,3 +1326,114 @@ def test_a_rule_section_listed_after_its_note_read_whole_says_so(vault):
     assert "note:Areas/Repo/Repo notes.md" in by_id
     assert by_id["section:Areas/Repo/Repo notes.md#For agents"].arrives.endswith(
         "(its text is in note:Areas/Repo/Repo notes.md, read whole earlier on this path)")
+
+
+# --- Every moment that leads to a piece (owner, 2026-11-19: "Yes with option 1") ----------------------------------
+
+
+def test_a_piece_shows_every_moment_leading_to_it_each_with_its_line(vault):
+    _write(vault, "_/agent/Common-rules.md", NOTES["_/agent/Common-rules.md"]
+           + "- When choosing it, read [[_/agent/Vault conventions]] for the names.\n")
+    result = path(PathStart(typical=3))
+    conv = {p.id: p for p in result.pieces}["note:_/agent/Vault conventions.md"]
+    # In the order the agent meets them, each with the piece holding the line; no route picked.
+    assert moments(conv) == ["Before working on one of the owner's areas", "When choosing it"]
+    assert {m.piece for m in conv.moments} == {"note:_/agent/Common-rules.md"}
+    first, second = conv.moments
+    assert first.line.startswith("- Before working on one of the owner's areas, read")
+    # A moment that doesn't stand alone comes with its whole line.
+    assert second.line == "- When choosing it, read [[_/agent/Vault conventions]] for the names."
+    # The short form (a piece held, or one whose text comes later) keeps only that line.
+    held = path(PathStart(typical=3), known={p.id: p.hash for p in result.pieces})
+    assert held.pieces == [] or all(p.id != conv.id for p in held.pieces)
+    short = apt._no_lines(conv.moments)
+    assert short[0].line is None and short[1].line == second.line
+
+
+def test_whether_a_moment_stands_alone():
+    for moment in ("When in voice", "Before working on one of the owner's areas", "When the owner talks about their areas",
+                   "any session in a fork (such as claude-voice)", "At the start"):
+        assert ap.stands_alone(moment), moment
+    for moment in ("When choosing it", "When starting one", "When working in this area", "When writing its text",
+                   "Before doing that", "When it's a rule change"):
+        assert not ap.stands_alone(moment), moment
+
+
+def test_a_pointer_in_a_waiting_note_leads_with_that_notes_moment(vault):
+    # "At the start" in a note read only "When in voice" holds from when the note is read: its moment is the
+    # voice line's, through the Relay note (test bench, 2026-11-19: it showed "At the start" alone).
+    _write(vault, "_/agent/Common-rules.md", NOTES["_/agent/Common-rules.md"]
+           + "- When in voice, read [[_/agent/roles/Relay]].\n")
+    _write(vault, "_/agent/roles/Relay.md", "Relay rules.\n\n- At the start, read [[_/agent/Notes kept]].\n")
+    kept = {p.id: p for p in path(PathStart(surface="claude-ai")).pieces}["note:_/agent/Notes kept.md"]
+    assert not kept.always and moments(kept) == ["When in voice"]
+    assert kept.moments[0].piece == "note:_/agent/Common-rules.md"
+    assert kept.moments[0].through == ["note:_/agent/roles/Relay.md"]
+    over = path()
+    assert any("note:_/agent/Notes kept.md" in line and "moment: When in voice" in line for line in over.typical[0].pieces)
+
+
+def test_an_areas_for_agents_arrives_at_the_areas_opening_beside_the_folder_filing_route(vault):
+    _write(vault, "_/agent/Vault conventions.md", NOTES["_/agent/Vault conventions.md"]
+           + "\n## Folder notes\n\n- Before filing a note into a folder, read the `## For agents` section of its "
+             "folder note, `<folder>/<folder>.md`.\n")
+    result = path(PathStart(typical=3))
+    section = {p.id: p for p in result.pieces}["section:Areas/Repo/Repo.md#For agents"]
+    # Met first behind the filing rule (waiting), then at the area's opening: it arrives there, whatever comes.
+    assert section.always and section.stage == ap.STAGE_NAMES[ap.WORK]
+    assert section.arrives == "served by open_area on Repo (for_agents)"
+    assert moments(section) == ["Before filing a note into a folder"]
+    # What it points to is placed the same way: read as soon as it's met.
+    assert {p.id: p for p in result.pieces}["note:Areas/Repo/Repo notes.md"].always
+    # The backward question shows the area's own chain: the section, served by open_area.
+    hits = reached_by("Areas/Repo/Repo.md#For agents").reached_by
+    assert any(hit["via"] == ["section:Areas/Repo/Repo.md#For agents"]
+               and hit["first_arrives"] == "served by open_area on Repo (for_agents)" for hit in hits)
+
+
+def test_the_guide_brings_the_vaults_conventions_note_with_it(vault, monkeypatch):
+    monkeypatch.setattr(tools.settings, "vault_guide_note", "_/agent/Vault conventions.md")
+    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    conv, guide = by_id["note:_/agent/Vault conventions.md"], by_id["guide:obsidian-mcp"]
+    # On the path as the guide is: every agent on the connector calls get_vault_guide first.
+    assert conv.always and guide.always and conv.stage == guide.stage == ap.STAGE_NAMES[ap.TOOLS]
+    assert conv.arrives.startswith("returned by get_vault_guide after the connector's own guide")
+    assert moments(conv) == ["Before working on one of the owner's areas", "when get_vault_guide is called"]
+    assert conv.moments[-1].piece == "tool:obsidian-mcp:get_vault_guide"
+    # It counts as the vault note it is, not as a tool text.
+    over = path().typical[1]
+    assert any(line.split(". ", 1)[1].startswith("note:_/agent/Vault conventions.md") for line in over.pieces)
+
+
+def test_a_start_in_a_folder_the_snapshot_doesnt_hold_still_gets_the_session_start_hooks(vault):
+    folders = json.loads(json.dumps(SNAPSHOT["folders"]))
+    everywhere = folders["D:/work/repo"]["session_start"][0]["text"]
+    folders["C:/Users/me"]["session_start"] = [{"id": "hook:SessionStart/area-start.py", "matcher": "startup",
+                                                "hash": "h", "text": everywhere}]
+    folders["D:/work/repo"]["session_start"][0]["text"] = (
+        everywhere + "\n\nThis session runs in D:\\work\\repo, outside the vault: open_area on D:\\work\\repo.")
+    _snapshot(vault, folders=folders)
+    result = path(PathStart(surface="claude-code", folder="D:/work/elsewhere", role="worker"))
+    by_id = {p.id: p for p in result.pieces}
+    hook = by_id["hook:SessionStart/area-start.py"]
+    # The hooks are the user's, so they run in every folder; the folder's own part, with this folder's path.
+    assert hook.text == everywhere + "\n\nThis session runs in D:\\work\\elsewhere, outside the vault: open_area on D:\\work\\elsewhere."
+    assert "in D:/work/repo, with this folder's path" in hook.arrives
+    assert by_id["note:_/agent/roles/Worker.md"].always
+    # A start folder no area lists is said as the start's, not as a work.area naming nothing.
+    assert {"from": "start.folder", "target": "D:/work/elsewhere",
+            "via": f"no area in {ap.AREAS_NOTE} lists it"} in result.structure.broken_pointers
+    assert not any(n.startswith("work.area") for n in result.notes or [])
+
+
+def test_a_worktree_start_loads_its_repos_own_claude_md_not_those_above_it(vault):
+    folders = json.loads(json.dumps(SNAPSHOT["folders"]))
+    folders["D:/work/repo"]["loads"].insert(2, {"id": "file:D:/work/CLAUDE.md", "exists": True,
+                                                "arrives": "loaded at the start by Claude Code (D:/work)"})
+    _snapshot(vault, folders=folders, files={**SNAPSHOT["files"], "file:D:/work/CLAUDE.md": {"text": "Work.\n"}})
+    assert "file:D:/work/CLAUDE.md" in ids(path(PathStart(typical=3)))
+    tree = path(PathStart(surface="claude-code", folder="D:/work/repo/.claude/worktrees/fix", role="worker"))
+    order = ids(tree)
+    assert "file:D:/work/repo/CLAUDE.md" in order and "file:D:/work/CLAUDE.md" not in order
+    assert "hook:SessionStart/area-start.py" in order
+    assert any(line.startswith("the CLAUDE.md files of the worktree") for line in tree.structure.not_followed)

@@ -46,6 +46,22 @@ class ReadFrom(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
+# One moment that leads to a piece.
+class PieceMoment(_OmitNone):
+    #: When the line says to read it: its opening (At the start, While, When, Before) or the guide index's "when to
+    #: read it"; "when met" for a line that says to read it with no moment (outside the rule notes); "unplaced"
+    #: when such a line doesn't say; or how it comes with no line (a hook's message, a nested CLAUDE.md).
+    moment: str
+    #: The piece holding the line.
+    piece: str | None = None
+    #: The line, word for word: whole when the moment doesn't read right without it ("When choosing it"), else cut
+    #: at 240 characters with "…". In short form, only for a moment that doesn't read right without it.
+    line: str | None = None
+    #: The pieces between `piece` and this one: a line that says to read it as soon as it is met (or "At the
+    #: start"), in a piece that itself waits on a moment, leads here when that piece's moment comes.
+    through: list[str] | None = None
+
+
 class PathPiece(_OmitNone):
     #: What it is: `note:<vault path>`, `section:<note path>#<heading>`, `open_area:<main note path>` (the main
     #: note as `open_area` serves it), `file:<PC path>` (outside the vault), `hook:<event>/<script>`, `memory:/<file>`, `tool:obsidian-mcp:<tool>`, `instructions:obsidian-mcp`,
@@ -54,24 +70,20 @@ class PathPiece(_OmitNone):
     #: When it arrives: loaded at the start, session-start hook, read at the start, at the first bridge
     #: result, when the work's area is opened, when its moment comes, when the connector's tools load.
     stage: str
-    #: How it arrives, in words: what loads it or points to it. Left out, with `where`, `chars`, `via` and
-    #: `also_pointed_by`, for a piece you hold (`unchanged`) and one whose text comes later (`text_withheld`):
-    #: the short form, its details coming with its text.
+    #: How it arrives first, in words: what loads it or points to it. Left out, with `where`, `chars` and the
+    #: moments' lines, for a piece you hold (`unchanged`) and one whose text comes later (`text_withheld`): the
+    #: short form, its details coming with its text.
     arrives: str | None = None
-    #: False when it arrives only if its moment comes (`moment`).
+    #: False when it arrives only if one of its moments comes (`moments`).
     always: bool
     #: Where it lives: a path on the PC, a vault path, or this server.
     where: str | None = None
     chars: int | None = None
     #: The first 12 hex digits of the sha256 of its text: the same hash means the same text.
     hash: str
-    #: The line that points to it, word for word up to 240 characters, then cut with "…".
-    via: str | None = None
-    #: When that line says to read it: its opening (At the start, While, When, Before) or the guide index's
-    #: "when to read it"; "unplaced" when a line outside the rule notes doesn't say.
-    moment: str | None = None
-    #: Other pieces on the path pointing to it.
-    also_pointed_by: list[str] | None = None
+    #: Every moment that leads to it, in the order the agent meets them, each with the line it comes from; none
+    #: for what arrives with no line (loaded at the start, a session-start hook, what open_area serves).
+    moments: list[PieceMoment] | None = None
     #: With `known`: new, changed or unchanged against the hash you passed.
     status: Literal["new", "changed", "unchanged"] | None = None
     #: The piece's text: given when it is new or changed (always, without `known`), within the size budget.
@@ -127,8 +139,9 @@ class PathStructure(_OmitNone):
 class TypicalPath(_OmitNone):
     number: int | None = None
     name: str
-    #: `<n>. <id>  <chars> chars  #<hash>`, with `[status]` against `known` and `when: <moment>` for a piece
-    #: that arrives only when its moment comes.
+    #: `<n>. <id>  <chars> chars  #<hash>`, with `[status]` against `known` and `moment: <moments>` for a piece
+    #: that arrives only when one of its moments comes (` | ` between them), without their lines: those come with
+    #: `agent_path` for that agent.
     pieces: list[str]
     structure: PathStructure
 

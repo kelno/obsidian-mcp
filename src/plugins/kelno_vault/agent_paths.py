@@ -266,6 +266,15 @@ class Snapshot:
 NESTED_LOAD = "loaded by Claude Code when it reads a file in"
 
 
+BACKSLASH = chr(92)
+
+
+def worktree_of(folder: str) -> str | None:
+    """The repo a folder is a worktree of (`<repo>/.claude/worktrees/<name>`, or a folder in one), else None."""
+    m = re.match(r"^(.+?)/\.claude/worktrees/[^/]+(?:/.*)?$", pc_norm(folder))
+    return m.group(1) if m else None
+
+
 def folder_load(entry: dict) -> bool:
     """Whether a snapshot entry is one of the folder's own CLAUDE.md files (or rules), not the user's."""
     how = entry.get("arrives", "")
@@ -495,6 +504,8 @@ class ServedTexts:
     guide: str
     #: `open_area`'s instruction lines (`OPEN_AREA_INSTRUCTIONS`).
     open_area_instructions: str
+    #: The vault note `get_vault_guide` returns after its own part (the server's `VAULT_GUIDE_NOTE`).
+    guide_note: str = CONVENTIONS_NOTE
 
 
 # --- pieces --------------------------------------------------------------------------------------------------
@@ -506,13 +517,19 @@ class Piece:
     arrives: str
     where: str
     text: str
-    via: str | None = None  # the line that points to it, word for word
-    moment: str | None = None  # when that line says to read it; "unplaced" when it doesn't say
+    # The arrival that places it (its earliest certain one): the line pointing to it, word for word, when that
+    # line says to read it ("unplaced" when it doesn't say), and the piece holding the line.
+    via: str | None = None
+    moment: str | None = None
     parent: str | None = None
     always: bool = True  # on the path whatever the conversation brings, once the start and work are given
     rule: bool = True  # whether its own pointers are followed
     rules_only: bool = False  # follow only its pointers to rule files (text the agent reads that isn't a rule file)
-    also: list[str] = field(default_factory=list)  # other pieces pointing to it
+    #: Every way it arrives, in the order the agent meets them: (moment, pointing piece, line), the piece and
+    #: line None for what no line brings (what loads at the start, a hook's message).
+    arrivals: list[tuple[str | None, str | None, str | None]] = field(default_factory=list)
+    #: The moments that lead to it (`PathBuilder.moments_of`), set once the path is drawn.
+    moments: list[dict] = field(default_factory=list)
 
     @property
     def hash(self) -> str:
@@ -559,6 +576,8 @@ class PathBuilder:
         self.role_unpicked = False
         #: The role notes of the line being followed, when the start gives no role: vault path (lower) to its role.
         self.role_choice: dict[str, str] = {}
+        #: Whether the piece being followed was placed again (`drain`): what it found the first time isn't counted twice.
+        self.again = False
 
     # --- queueing -----------------------------------------------------------------------------------------
     def push(self, piece: Piece) -> None:
@@ -568,16 +587,33 @@ class PathBuilder:
         heapq.heappush(self.queue, (piece.stage, 0 if piece.always else 1, placed, self.seq, piece))
 
     def drain(self) -> None:
+        """Take in what was pushed. Every arrival of a piece is kept (`arrivals`), none picked as its route; the
+        earliest certain one places it: one on the path whatever the conversation brings beats one waiting on a
+        moment, then the earlier stage. A piece placed again that way is followed again, so what it points to is
+        placed the same way (an area's `## For agents`, met first behind "Before filing a note into a
+        folder", then at the area's opening)."""
         while self.queue:
             *_, p = heapq.heappop(self.queue)
-            if p.id in self.pieces:
-                if p.parent and p.parent not in self.pieces[p.id].also and p.parent != self.pieces[p.id].parent:
-                    self.pieces[p.id].also.append(p.parent)
-                continue
-            self.pieces[p.id] = p
-            self.order.append(p.id)
+            arrival = (p.moment, p.parent, p.via)
+            kept = self.pieces.get(p.id)
+            self.again = kept is not None
+            if kept is None:
+                p.arrivals = [arrival]
+                self.pieces[p.id] = p
+                self.order.append(p.id)
+            else:
+                if arrival not in kept.arrivals:
+                    kept.arrivals.append(arrival)
+                if not ((p.always and not kept.always) or (p.always == kept.always and p.stage < kept.stage)):
+                    continue
+                kept.stage, kept.always, kept.arrives = p.stage, p.always, p.arrives
+                kept.via, kept.moment, kept.parent = p.via, p.moment, p.parent
+                self.order.remove(p.id)  # shown where it is now placed
+                self.order.append(p.id)
+                p = kept
             if p.rule:
                 self.follow(p)
+        self.again = False
 
     # --- following pointers ------------------------------------------------------------------------------
     def follow(self, p: Piece) -> None:
@@ -717,7 +753,7 @@ class PathBuilder:
             looks_like_note = by_name or ("/" in target and not re.search(
                 r"[<>@]|YYYY|^/|^[A-Za-z]+/[A-Za-z]+\.md$|~\d{8}-\d{6}\.md$", target))
             if looks_like_note:
-                self.broken.append({"from": p.id, "target": target, "via": via})
+                self.mention({"from": p.id, "target": target, "via": via}, self.broken)
             return
         copied = COPIED_SECTION.search(sentence) if p.id.startswith("hook:") and heading is None else None
         if copied and copied.group(1) in self.v.rule_headings:
@@ -744,13 +780,13 @@ class PathBuilder:
             if moment == "unplaced" or (shaped is None and self.bound(p)):
                 # Between rule notes, a link in none of the pointer shapes is a mention [P250, P259]; elsewhere (a
                 # hook's message, a main note's text) one that says neither when nor "read". Listed, not followed.
-                self.mentions.append({"from": p.id, "target": r, "via": via, "rule_file": True})
+                self.mention({"from": p.id, "target": r, "via": via, "rule_file": True})
                 return
             self.push(self.note_piece(r, stage, arrives, p.id, via, moment, always))
             return
         if heading and heading in self.v.rule_headings and (moment == "unplaced" or (shaped is None and self.bound(p))):
             # A link to a rule section (`[[Areas/X/X#For agents]]`) is read as one to a rule note.
-            self.mentions.append({"from": p.id, "target": f"{r}#{heading}", "via": via, "rule_file": True})
+            self.mention({"from": p.id, "target": f"{r}#{heading}", "via": via, "rule_file": True})
             return
         text = self.v.text(r) or ""
         rule_sections = [h for h in self.v.rule_headings if section(text, h)] if reads else []
@@ -766,7 +802,7 @@ class PathBuilder:
             self.push(Piece(f"note:{r}", stage, arrives, self.v.where(r), text, via, moment, p.id, always,
                             rule=False))
         else:
-            self.mentions.append({"from": p.id, "target": r, "via": via})
+            self.mention({"from": p.id, "target": r, "via": via})
         for h in rule_sections:
             self.push(Piece(f"section:{r}#{h}", stage, arrives, self.v.where(r), section(text, h), via, moment,
                             p.id, always))
@@ -822,7 +858,14 @@ class PathBuilder:
                                         p.id, always))
                 brought = True
         if not brought:
-            self.mentions.append({"from": p.id, "target": target, "via": via})
+            self.mention({"from": p.id, "target": target, "via": via})
+
+    def mention(self, entry: dict, into: list | None = None) -> None:
+        """A mention (or, `into` broken, a pointer to nothing): each link counts, but a piece placed again and
+        followed again doesn't count its links twice."""
+        into = self.mentions if into is None else into
+        if not (self.again and entry in into):
+            into.append(entry)
 
     @staticmethod
     def bound(p: Piece) -> bool:
@@ -875,14 +918,11 @@ class PathBuilder:
             self.load_tools(server)
         self.drain()
         self.note_not_followed()
-        for pid in self.order:  # parents come first: a chain of them takes the moment from its head
-            p = self.pieces[pid]
-            if (not p.always and p.moment == "when met" and p.parent in self.pieces
-                    and self.pieces[p.parent].moment not in (None, "unplaced", "when met")):
-                # Read as soon as its pointer is met, in a piece that waits on a moment: it waits on that one.
-                p.moment = self.pieces[p.parent].moment
-        # The start's pieces are all taken in before the area's, so a piece met both ways keeps its first route
-        # (the moments, owner's question); the order shown is the stages' (stable within a stage).
+        done: dict[str, list[dict]] = {}
+        for pid in self.order:
+            self.pieces[pid].moments = self.moments_of(pid, done, frozenset())
+        # The order shown is the stages' (stable within a stage: the start's pieces, then the area's, then what the
+        # hooks say at other events, then the tools).
         self.order.sort(key=lambda i: self.pieces[i].stage)
         seen = set()
         for pid in self.order:
@@ -892,6 +932,38 @@ class PathBuilder:
             seen.add(pid)
         return self
 
+    def moments_of(self, pid: str, done: dict, visiting: frozenset) -> list[dict]:
+        """Every moment that leads to a piece, in the order the agent meets them, each with the piece whose line
+        says it, that line, and the pieces between them (`through`) (owner, 2026-11-19: "Yes with option 1").
+
+        A pointer that holds from when it is met ("when met", "At the start", "While…"), in a piece that itself
+        waits on a moment, leads to its target only when that piece is read: the moments it gives are that
+        piece's own, through it (test bench, 2026-11-19: the Relay note's "At the start" was shown alone). Any other
+        pointer's moment is its own. An arrival no line brings gives its moment when it has one (a hook's message,
+        a nested CLAUDE.md), nothing otherwise (what loads at the start, what open_area serves)."""
+        if pid in done:
+            return done[pid]
+        out: list[dict] = []
+        for moment, src, line in self.pieces[pid].arrivals:
+            if src is None or src not in self.pieces:
+                if moment and moment != "when met":
+                    out.append({"moment": moment, "piece": src, "line": line, "through": []})
+                continue
+            holds = moment == "when met" or (moment or "").lower().startswith(("at the start", "while"))
+            if holds and not self.pieces[src].always and src not in visiting and src != pid:
+                inherited = self.moments_of(src, done, visiting | {pid})
+                if inherited:
+                    out += [{**e, "through": [*e["through"], src]} for e in inherited]
+                    continue
+            out.append({"moment": moment, "piece": src, "line": line, "through": []})
+        unique = []
+        for e in out:
+            if e not in unique:
+                unique.append(e)
+        if not visiting:  # one cut short by a loop is not kept
+            done[pid] = unique
+        return unique
+
     def pc_folder(self) -> tuple[str, dict] | None:
         """The snapshot's entry for this start's folder (the home folder when none is given)."""
         if self.snap is None:
@@ -900,16 +972,23 @@ class PathBuilder:
             return None
         folder = self.start.folder or self.snap.home
         found = self.snap.folder(folder)
+        repo = worktree_of(folder)
+        if repo and found and found[0].lower() == repo.lower():
+            # Claude Code loads a worktree's own CLAUDE.md files, not those of the folders above it (Q134; the PC
+            # snapshot's rule): the repo's own, as its main checkout has them.
+            self.not_followed.append(f"the CLAUDE.md files of the worktree {folder}: taken as {repo}'s main checkout "
+                                     "has them, without those of the folders above it, which Claude Code doesn't "
+                                     "load in a worktree (Q134)")
+            return found
         if found is None:
             # What loads in every folder (the user CLAUDE.md, its imports, the user rules) is the home folder's; the
             # folder's own CLAUDE.md files, and what the session-start hooks say there, can't be known.
             found = self.snap.folder(self.snap.home)
-            self.not_followed.append(f"the CLAUDE.md files of {folder} and what the session-start hooks say there: "
-                                     f"{self.snap.machine}'s snapshot holds neither that folder nor one above it, so "
-                                     "only what Claude Code loads in every folder is on the path"
-                                     + (f", as it loads in {found[0]}" if found else ""))
+            self.not_followed.append(f"the CLAUDE.md files of {folder}: {self.snap.machine}'s snapshot holds neither "
+                                     "that folder nor one above it, so only what Claude Code loads in every folder "
+                                     "is on the path" + (f", as it loads in {found[0]}" if found else ""))
         elif found[0].lower() != pc_norm(folder).lower():
-            self.not_followed.append(f"CLAUDE.md files below {found[0]} and the hook messages in {folder}: "
+            self.not_followed.append(f"CLAUDE.md files below {found[0]} in {folder}: "
                                      f"{self.snap.machine}'s snapshot holds only {found[0]}, so its are used")
         return found
 
@@ -939,8 +1018,13 @@ class PathBuilder:
         if not self.start.folder or self.snap is None:
             return
         found = self.snap.folder(self.start.folder)
+        repo = worktree_of(self.start.folder)
         loaded = set()
         for entry in (found[1].get("loads", []) if found else []):
+            how = entry.get("arrives", "").lower()
+            mine = f"loaded at the start by claude code ({repo.lower()}" if repo else ""
+            if repo and not (how.startswith(mine) and how[len(mine):len(mine) + 1] in (")", " ", "/")):
+                continue  # in a worktree, the folders above it load nothing (`pc_folder`)
             if folder_load(entry):
                 self.load_entry(entry)
                 loaded.add(entry["id"].lower())
@@ -953,7 +1037,7 @@ class PathBuilder:
                 if folder_load(entry) and entry["id"].lower() not in loaded and entry.get("exists") is not False:
                     loaded.add(entry["id"].lower())
                     piece = self.file_piece(self.entry_path(entry), LATER, f"{NESTED_LOAD} {sub}",
-                                            moment=f"when it works on a file in {sub}", always=False)
+                                            moment=f"when it reads a file in {sub}", always=False)
                     self.nested.add(piece.id)  # its imports are expanded too
                     self.push(piece)
 
@@ -972,16 +1056,51 @@ class PathBuilder:
     def load_session_start_hooks(self) -> None:
         if self.snap is None:
             return
-        found = self.snap.folder(self.start.folder or self.snap.home)
+        folder = pc_norm(self.start.folder or self.snap.home)
+        source = self.hook_source(folder)
         scripts = {posixpath.basename(a.replace("\\", "/")): a for h in self.snap.hooks for a in h.get("args", [])
                    if str(a).endswith(".py")}
-        for hook in (found[1].get("session_start", []) if found else []):
+        for hook in (self.snap.folders[source.lower()].get("session_start", []) if source else []):
             if not hook.get("text"):
                 continue  # a hook that prints nothing puts nothing in front of the agent
             script = hook["id"].rsplit("/", 1)[-1]
             matcher = hook.get("matcher") or ""
-            self.push(Piece(hook["id"], HOOK, f"SessionStart hook (matcher {matcher or 'any'}), run on a sample "
-                            "startup", scripts.get(script, script), hook["text"]))
+            text, how = hook["text"], f"SessionStart hook (matcher {matcher or 'any'}), run on a sample startup"
+            if source.lower() != folder.lower():
+                text = self.hook_text_here(hook["id"], text, source, folder)
+                how += f" in {source}, with this folder's path in place of that one (the snapshot doesn't hold {folder})"
+            self.push(Piece(hook["id"], HOOK, how, scripts.get(script, script), text))
+
+    def hook_source(self, folder: str) -> str | None:
+        """The folder whose sampled session-start messages stand for this one's: itself when the snapshot holds it.
+        Otherwise (an unlisted folder, a worktree) the hooks still run, being the user's: a held folder of the same
+        kind stands for it (`hook_text_here`): the vault for a folder in it, else the deepest held folder above it
+        outside the vault and the home folder, else the first such (test bench, 2026-11-19: a start in an unlisted
+        folder got no hook)."""
+        snap = self.snap
+        if snap.holds(folder):
+            return snap.folder_names.get(folder.lower(), folder)
+        if self.v.rel(folder) is not None:
+            return snap.folder_names.get(snap.vault.lower()) if snap.holds(snap.vault) else None
+        if folder.lower() == snap.home.lower():
+            return None
+        mine = {snap.vault.lower(), snap.home.lower()}
+        others = [k for k in snap.folders if k not in mine and self.v.rel(k) is None]
+        above = [k for k in others if folder.lower().startswith(k + "/")]
+        pick = max(above, key=len) if above else min(others) if others else None
+        return snap.folder_names.get(pick, pick) if pick else None
+
+    def hook_text_here(self, hid: str, text: str, source: str, folder: str) -> str:
+        """A hook's message in a folder the snapshot doesn't hold, from its message in `source`: what it says in the
+        home folder (what it says everywhere: the role, the machine's rules), then what it adds in `source`, with that
+        folder's path replaced by this one's there only (the machine's rules may name `source` too). The area-start
+        hook's message differs between folders outside the vault by the folder's path alone."""
+        home = self.snap.folders.get(self.snap.home.lower(), {})
+        base = next((h.get("text") or "" for h in home.get("session_start", []) if h.get("id") == hid), "")
+        start, rest = (base, text[len(base):]) if base and text.startswith(base) else ("", text)
+        for a, b in ((source, folder), (source.replace("/", BACKSLASH), folder.replace("/", BACKSLASH))):
+            rest = rest.replace(a, b)
+        return start + rest
 
     def load_hook_messages(self) -> None:
         """What the PC's hooks say at events other than a session's start (the snapshot's `hook_messages`), each
@@ -1092,16 +1211,17 @@ class PathBuilder:
         """What `open_area` serves, read from the files: the area's `## For agents`, its main note without that
         section and its Tasks, Vault conventions' "Working on an area", coding-practices for a code project, and
         the tool's own instruction lines as served."""
-        name = self.work.area
+        name, asked = self.work.area, "work.area"
         home = self.snap.home if self.snap else None
         if (not name and self.start.folder and self.v.rel(self.start.folder) is None
                 and pc_norm(self.start.folder).lower() != (home or "").lower()):
-            name = self.start.folder  # the session-start hook has it open the area that lists its folder
+            # The session-start hook has it open the area that lists its folder.
+            name, asked = self.start.folder, "start.folder"
         if not name:
             return
         area = self.v.area(name)
         if not area or not area["main"]:
-            self.broken.append({"from": "work", "target": name, "via": f"no area in {AREAS_NOTE} lists it"})
+            self.broken.append({"from": asked, "target": name, "via": f"no area in {AREAS_NOTE} lists it"})
             return
         main = area["main"]
         text = self.v.text(main) or ""
@@ -1138,8 +1258,15 @@ class PathBuilder:
         # tool's first line say (the fork's decision "Agents read the guide": one that skips it is a bug to fix).
         self.push(Piece(f"guide:{SERVER}", TOOLS, "returned by get_vault_guide, which an agent on the connector "
                         "calls first (the server's instructions and the tool's first line say so), ahead of the "
-                        f"vault's conventions note ({CONVENTIONS_NOTE})", f"{SERVER}: get_vault_guide", served.guide,
+                        f"vault's conventions note ({served.guide_note})", f"{SERVER}: get_vault_guide", served.guide,
                         rule=False))
+        # The conventions note comes in the same result, after the guide's own part: on the path as the guide is.
+        r = self.v.lookup(served.guide_note)
+        if r is not None:
+            line = next((t.splitlines()[0] for n, t in served.tools if n == "get_vault_guide" and t), None)
+            self.push(self.note_piece(r, TOOLS, f"returned by get_vault_guide after the connector's own guide "
+                                      f"(guide:{SERVER})", f"tool:{SERVER}:get_vault_guide", line,
+                                      "when get_vault_guide is called", True))
         for name, text in served.tools:
             self.push(Piece(f"tool:{SERVER}:{name}", TOOLS, how, f"{SERVER}: tools/list", text, rule=False))
 
@@ -1271,6 +1398,24 @@ def index_target(link: str) -> str | None:
     return path.split("#")[0].strip().replace("\\", "/").casefold() or None
 
 
+#: Words that point back into the line a moment was cut from ("When choosing it", "When working in this area",
+#: "When starting one"): such a moment doesn't stand alone.
+BACK_REFERENCE = re.compile(r"\b(?:it|its|it's|this|these|those|there|here|that(?=\s*(?:[.,;:)]|$))"
+                            r"|such(?!\s+as\b)|one(?!\s+of\b))\b", re.I)
+
+
+def stands_alone(moment: str | None) -> bool:
+    """Whether a moment reads right without its line: it holds no word pointing back into the line (`it`, `its`,
+    `this`, `these`, `those`, `there`, `here`, `that` ending a clause, `such` but not "such as", `one` but not
+    "one of"). They, them and their are left out: in the vault they are the owner's pronouns ("about their
+    areas"). The test is on words, not meaning: a word caught wrongly only costs a line shown whole; a noun
+    naming what the line is about ("When the area is new") isn't caught. Only the moment's own clause counts: what
+    is in parentheses or quotes, and anything after a colon or semicolon (the guide index's "when to read it" may
+    go on: "…: it starts with an upstream check"), is left out."""
+    own = re.sub(r"\([^()]*\)|\"[^\"]*\"|“[^”]*”", "", moment or "")
+    return not BACK_REFERENCE.search(re.split(r"[:;]", own)[0])
+
+
 def moment_of(line: str, sentence: str, at: int = 0) -> str:
     """When the pointing line says to read the target: a pointer shape's moment (`pointer_moment`), "when met" for
     a plain reading verb aimed at it (outside the rule notes, such as a hook's message), else "unplaced"."""
@@ -1306,10 +1451,11 @@ def run(setup: Setup, start: Start, work: Work) -> PathBuilder:
 
 def structure_of(b: PathBuilder) -> dict:
     pieces = [b.pieces[i] for i in b.order]
-    always = [p for p in pieces if p.always and p.stage != TOOLS]
-    later = [p for p in pieces if not p.always and p.stage != TOOLS]
-    tools = [p for p in pieces if p.stage == TOOLS]
-    unplaced = [{"piece": p.id, "from": p.parent, "via": p.via} for p in pieces if p.moment == "unplaced"]
+    tools = [p for p in pieces if tool_text(p)]
+    always = [p for p in pieces if p.always and not tool_text(p)]
+    later = [p for p in pieces if not p.always and not tool_text(p)]
+    unplaced = [{"piece": p.id, "from": src, "via": line} for p in pieces for moment, src, line in p.arrivals
+                if moment == "unplaced"]
     return {
         "size": {"always_chars": sum(p.chars for p in always), "always_pieces": len(always),
                  "when_moment_chars": sum(p.chars for p in later), "when_moment_pieces": len(later),
@@ -1327,16 +1473,31 @@ def structure_of(b: PathBuilder) -> dict:
     }
 
 
+def tool_text(p: Piece) -> bool:
+    """A server's own text (a tool's, its instructions, its guide), at the stage the tools load; not a vault note
+    arriving there (the conventions note, with the guide)."""
+    return p.stage == TOOLS and not p.id.startswith(VAULT_IDS)
+
+
+def pointing(p: Piece) -> list[tuple[str, str | None]]:
+    """The pieces pointing to `p`, each once, with the first line by which it does."""
+    out: dict[str, str | None] = {}
+    for _, src, line in p.arrivals:
+        if src and src not in out:
+            out[src] = line
+    return list(out.items())
+
+
 def outside_rules(b: PathBuilder) -> list[dict]:
     """Rule files reached through a pointer that sits outside every rule file (a main note's text, a non-rule note)."""
     out = []
     for p in b.pieces.values():
-        for parent in [p.parent, *p.also]:
-            if not parent or not parent.startswith(("note:", OPEN_AREA_ID)):
+        for parent, line in pointing(p):
+            if not parent.startswith(("note:", OPEN_AREA_ID)):
                 continue
             src = parent.split(":", 1)[1]
             if not b.v.is_rule_file(src) and p.id.startswith("note:") and b.v.is_rule_file(p.id.split(":", 1)[1]):
-                out.append({"from": parent, "to": p.id, "via": p.via if parent == p.parent else None})
+                out.append({"from": parent, "to": p.id, "via": line})
     return out
 
 
@@ -1346,8 +1507,8 @@ def into_areas(b: PathBuilder) -> list[dict]:
     kind; a local one only by agents working in that area, folder, machine or repo [P276]."""
     out = []
     for p in b.pieces.values():
-        for parent in [p.parent, *p.also]:
-            if not parent or not p.id.startswith(VAULT_IDS):
+        for parent, _ in pointing(p):
+            if not p.id.startswith(VAULT_IDS):
                 continue
             target = p.id.split(":", 1)[1].split("#")[0]
             to_area = b.v.area_of_note(target)
@@ -1496,6 +1657,11 @@ def reached_by(setup: Setup, place: str, runs: list | None = None) -> dict:
         ids = [i for i in b.order if matches(place, i)]
         for i in ids if every else ids[:1]:
             hits.append((label, s, w, b, i))
+    if hits and "#" not in place and not place.startswith(("hook:", "bridge:", "tool:", "memory:", "guide:",
+                                                           "instructions:")) and all(
+            h[4].startswith("section:") for h in hits):
+        # A whole note no path reads, whose rule sections paths do reach (a machine note's `## For agents`).
+        how = "its rule sections (the note itself is on no path)"
     if not hits:  # a place no path holds (one that doesn't exist yet, or a part of a note): its note, then its area
         note = place.removeprefix("note:").removeprefix("section:").split("#")[0]
         for label, s, w, b in runs:

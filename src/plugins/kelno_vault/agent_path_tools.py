@@ -38,6 +38,7 @@ from src.plugins.kelno_vault import rule_files as _rule_files
 from src.plugins.kelno_vault.agent_path_result import (
     AgentPathResult,
     PathPiece,
+    PieceMoment,
     PathStart,
     PathStructure,
     PathWork,
@@ -62,8 +63,9 @@ _NOTES_RESERVE = 1_000
 #: What a `read_from` call carries besides the piece itself (start, work, machine, notes): a text that
 #: wouldn't fit beside that in any result comes in parts.
 _PART_SHELL = 1_000
-#: A pointing line (`via`) longer than this is cut, ending with "…": the whole line is in the text of the
-#: piece that points (its `arrives`), and on a large path the lines alone ran past the result's budget.
+#: A pointing line (a moment's `line`, a structure entry's `via`) longer than this is cut, ending with "…": the
+#: whole line is in the text of the piece that points, and on a large path the lines alone ran past the result's
+#: budget. A moment that doesn't stand alone keeps its whole line (`_moments`).
 _VIA_MAX = 240
 #: The PC hook that writes the snapshots; `run` refreshes one at once (named in the stale-snapshot notice).
 _SNAPSHOT_SCRIPT = "_/claude-code-hooks/agent-paths-snapshot.py"
@@ -128,6 +130,7 @@ async def _served(uid) -> ap.ServedTexts:
     """This server's own texts as it serves them now, every loaded plugin's lines included."""
     from mcp.server.fastmcp import FastMCP
 
+    from src.config import settings
     from src.mcp_server import server as _server
     from src.mcp_server.tools import vault_guide_server_part
     from src.plugins.kelno_vault.open_area import OPEN_AREA_INSTRUCTIONS
@@ -141,7 +144,8 @@ async def _served(uid) -> ap.ServedTexts:
             f"\n{k}: {v.get('description', '')}" for k, v in params.items() if v.get("description"))))
     return ap.ServedTexts(tools=tools, instructions=_server.mcp.instructions or "",
                           guide=await vault_guide_server_part(uid),
-                          open_area_instructions="\n".join(OPEN_AREA_INSTRUCTIONS))
+                          open_area_instructions="\n".join(OPEN_AREA_INSTRUCTIONS),
+                          guide_note=settings.vault_guide_note)
 
 
 def _setup(uid, machine: str | None, served: ap.ServedTexts, read=None, trace: ap.Trace | None = None,
@@ -773,29 +777,48 @@ def _piece(p: ap.Piece, known: dict | None) -> PathPiece:
     status = None if known is None else ("unchanged" if known.get(p.id) == p.hash
                                          else "changed" if p.id in known else "new")
     path = p.id.split(":", 1)[1].split("#")[0] if p.id.startswith(ap.VAULT_IDS) else None
-    moment = p.moment if p.moment and p.moment != "when met" else None
+    moments = _moments(p)
     if status == "unchanged":
         # The caller holds this piece from an earlier call: what places it on the path, and its hash, are
-        # enough; the rest (where, how, the pointing line) came then. Keeps a call with `known` small, so
+        # enough; the rest (where, how, the pointing lines) came then. Keeps a call with `known` small, so
         # withheld texts always find room on the next one.
-        return PathPiece(id=p.id, stage=ap.STAGE_NAMES[p.stage], always=p.always, moment=moment, hash=p.hash,
-                         status=status)
+        return PathPiece(id=p.id, stage=ap.STAGE_NAMES[p.stage], always=p.always, moments=_no_lines(moments),
+                         hash=p.hash, status=status)
     return PathPiece(
         id=p.id, stage=ap.STAGE_NAMES[p.stage], arrives=p.arrives, always=p.always, where=p.where, chars=p.chars,
-        hash=p.hash, via=_short(p.via, _VIA_MAX) if p.via else None, moment=moment,
-        also_pointed_by=p.also or None, status=status,
+        hash=p.hash, moments=moments, status=status,
         private=True if path and private_folders.is_private(path) else None)
 
 
-_DETAILS = ("arrives", "where", "chars", "via", "also_pointed_by")
+def _moments(p: ap.Piece) -> list[PieceMoment] | None:
+    """The piece's moments, each line whole when its moment doesn't stand alone (`ap.stands_alone`), else cut."""
+    out = []
+    for e in p.moments:
+        line = e["line"]
+        if line:
+            line = " ".join(line.split()) if not ap.stands_alone(e["moment"]) else _short(line.strip(), _VIA_MAX)
+        out.append(PieceMoment(moment=e["moment"], piece=e["piece"], line=line, through=e["through"] or None))
+    return out or None
+
+
+def _no_lines(moments: list[PieceMoment] | None) -> list[PieceMoment] | None:
+    """The short form's moments: without their lines, except a moment that doesn't read right without its line
+    ("When choosing it"); the lines come with the piece's details (owner: the short form stays short)."""
+    if not moments:
+        return moments
+    return [m if not ap.stands_alone(m.moment) else m.model_copy(update={"line": None}) for m in moments]
+
+
+_DETAILS = ("arrives", "where", "chars")
 
 
 def _short_form(o: PathPiece) -> dict:
     """Strip a piece to what places it on the path and its hash; the details taken, to give back with its
     text."""
-    taken = {k: getattr(o, k) for k in _DETAILS}
+    taken = {k: getattr(o, k) for k in (*_DETAILS, "moments")}
     for k in _DETAILS:
         setattr(o, k, None)
+    o.moments = _no_lines(o.moments)
     return taken
 
 
@@ -804,8 +827,8 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
     """Fill in the texts of new or changed pieces, in path order, while the result stays within the budget.
 
     Sets `result.notes`. A first call (no `known`) lists every piece: those whose text waits for a later call
-    in short form (id, stage, always, moment, hash), their details (how it arrives, where, its pointing line)
-    coming with their text, so the whole path shows at once. A call with `known` lists only what it brings:
+    in short form (id, stage, always, moments without their lines, hash), their details (how it arrives, where,
+    the pointing lines) coming with their text, so the whole path shows at once. A call with `known` lists only what it brings:
     the pieces with their text this time, those now marked in parts, and new private ones; the pieces held
     and those still waiting were in the first call, so they are left out and counted (`waiting`), and a removal
     shows in `left_path` (owner, 2026-11-18). Measured on the owner's vault, repeating them took most of each
@@ -877,7 +900,8 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
         n = withheld()
         if n:
             lines.append(f"{texts(n)} not in this result (text_withheld, counted in waiting): those pieces come in "
-                         "short form. Call again with the same arguments, passing in known the hash of every piece "
+                         "short form, their moments without the lines they come from (a moment that doesn't read "
+                         "right alone keeps its line). Call again with the same arguments, passing in known the hash of every piece "
                          "whose text you now hold, and only what's new comes next, with these texts.")
         if count["in_parts"]:
             lines.append(f"{texts(count['in_parts'])} too long for the room in this result (text_in_parts): call "
@@ -1086,17 +1110,28 @@ def _short(s: str | None, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _overview_moments(p: ap.Piece) -> str:
+    """A waiting piece's moments on one line, without their lines (room: five paths side by side, owner: the short
+    form stays short): each once, ` | ` between them."""
+    out = []
+    for e in p.moments:
+        m = _short(e["moment"], 60)
+        if m not in out:
+            out.append(m)
+    return _short(" | ".join(out), 150) or "unplaced"
+
+
 def _overview_lines(b: ap.PathBuilder, known: dict | None) -> list[str]:
     """One line per piece, each server's tool texts as one, as the prototype's overview prints them."""
     lines, tools = [], {}
     for pid in b.order:
         p = b.pieces[pid]
-        if p.stage == ap.TOOLS:
+        if ap.tool_text(p):
             tools.setdefault(pid.split(":")[1], []).append(p)  # instructions:<server>, tool:<server>:<name>, …
             continue
         status = "" if known is None else (" [unchanged]" if known.get(p.id) == p.hash
                                            else " [changed]" if p.id in known else " [new]")
-        when = "" if p.always else f"  moment: {_short(p.moment, 90)}"
+        when = "" if p.always else f"  moment: {_overview_moments(p)}"
         lines.append(f"{len(lines) + 1}. {pid}  {p.chars:,} chars  #{p.hash}{status}{when}")
     for server, texts in tools.items():
         combined = ap.digest("".join(p.hash for p in texts))
@@ -1200,8 +1235,8 @@ def _path_result(kept: _Kept, start: PathStart | None, work: PathWork | None, kn
         notes.append(f"role: {s.role} changed nothing: no line on this path picks a role note.")
     if b.role_unpicked:
         notes.append("No role given: a line on this path names several role notes, so each waits on its role (its "
-                     "moment says which); pass start.role for that role's path.")
-    if w.area and any(x.get("from") == "work" for x in b.broken):
+                     "moments say which); pass start.role for that role's path.")
+    if w.area and any(x.get("from") == "work.area" for x in b.broken):
         notes.append(f"work.area {w.area!r} names no area of {ap.AREAS_NOTE} (by its name, its main note's name, "
                      "a related folder, its slug or its tag): the path goes on without one.")
     notes += _changed_hook_scripts(setup, b.order)
@@ -1211,7 +1246,9 @@ def _path_result(kept: _Kept, start: PathStart | None, work: PathWork | None, kn
         start={("typical" if k == "handwritten" else k): v for k, v in vars(s).items() if v}, work={k: v for k, v in vars(w).items() if v} or None,
         pieces=out, left_path=_left_path(known, b.order),
         structure=_structure(ap.structure_of(b), mentions=True), notes=notes or None, **common)
-    result.notes = (notes := notes + _structure_notes(result.structure)) or None
+    if known is None and read_from is None:  # the structure comes only then, and its note with it
+        notes += _structure_notes(result.structure)
+    result.notes = notes or None
     if read_from is not None:
         return _part_of(result, pieces, out, read_from)
     _with_texts(result, pieces, out, notes, known)
@@ -1233,7 +1270,9 @@ def _reached_by_result(kept: _Kept, place: str, known: dict | None, machine: str
         place=r["place"], matched_by=r["matched_by"], reached_by=r["reached_by"],
         machine=snap.machine if snap else None, snapshot_made=snap.made if snap else None, pieces=out,
         left_path=_left_path(known, r["pieces"]), structure=_structure(r["structure"]), notes=notes or None)
-    result.notes = (notes := notes + _structure_notes(result.structure)) or None
+    if known is None and read_from is None:  # the structure comes only then, and its note with it
+        notes += _structure_notes(result.structure)
+    result.notes = notes or None
     if read_from is not None:
         result.reached_by = None
         return _part_of(result, pieces, out, read_from)
