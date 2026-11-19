@@ -1169,7 +1169,7 @@ def test_a_rule_line_linking_another_rule_note_in_no_pointer_shape_asks_which_it
     assert ", [[_/agent/guides/python]]: - [[_/agent/guides/coding|coding]]" in block
     assert ", [[Areas/Home/Home#For agents]]: - **Roles**: when in doubt" in block
     assert "Old" not in block and "Filing" not in block and "Landing" not in block and "Plain" not in block
-    assert '"How to write an instruction" in `_/agent/Where agent instructions go.md`' in added
+    assert 'the shapes in "How to write an instruction" (`_/agent/Where agent instructions go.md`).' in added
     # Only the lines a write adds or changes: one already there says nothing.
     other = asyncio.run(tools.edit_note_impl("_/agent/Rules.md", "- Rule one, reworded. [P95]",
                                              find="- Rule one. [P35]", dry_run=True))

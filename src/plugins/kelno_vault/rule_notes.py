@@ -199,10 +199,8 @@ def render_unshaped(lines: list[tuple[int, list[str], str]], shift: int) -> str:
     more = f"\n- and {len(lines) - SHOWN} more" if len(lines) > SHOWN else ""
     return ("\n\npointer_or_mention: these rule lines link to another rule note in none of the pointer shapes, so "
             "they are read as mentions, which send no agent to read the note:\n" + shown + more
-            + "\nIs each a pointer or a mention? A mention needs nothing. A pointer opens its bullet or sentence with "
-              "At the start, While, When or Before (the first word counts), or takes the guide index's shape, "
-              "`[[note]]: when to read it`: reword the line. The shapes: "
-              f"\"{conventions.RULE_WRITING}\" in `{conventions.RULES_NOTE}`.")
+            + "\nIs each a pointer or a mention? A mention needs nothing; a pointer is reworded into one of the "
+              f"shapes in \"{conventions.RULE_WRITING}\" (`{conventions.RULES_NOTE}`).")
 
 
 GUIDE = (
