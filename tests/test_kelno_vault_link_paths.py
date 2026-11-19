@@ -1,4 +1,6 @@
 """Bare-name wikilinks get the note's full path on the lines a write adds or changes."""
+import re
+
 import pytest
 
 from src.plugins.kelno_vault import link_paths as lp
@@ -162,3 +164,60 @@ def test_a_link_already_at_its_full_path_is_neither_changed_nor_reported(written
     text, report = run(written, notes=NOTES + ["Recent.md", "CLAUDE.md"])
     assert text == written
     assert not report.rewritten
+
+
+# --- only the notes the links may name are read (speed, 2026-11-19) ------------------
+
+#: Names Python's `lower` treats unusually: case, LIKE's own characters, accents, the Kelvin sign, `İ`.
+TRICKY = NOTES + [
+    "Recent.md", "Ref/Under_score.md", "Ref/UnderXscore.md", "Ref/100%.md", "Ref/1000.md", "Ref/ÉTÉ.md",
+    "Old/été.md", "Ref/Kelvin.md", "Ref/kelvin.md", "Ref/İstanbul.md", "Ref/UPPER.MD", "Ref/..md",
+    "Ref/a.b.md", "Ref/back\\slash.md", "Ref/photo.png.md", "Ref/Areas.md.md", "Ref/tab\there.md",
+]
+
+
+def like(pattern: str, value: str) -> bool:
+    """PostgreSQL's LIKE with `\\` as the escape character."""
+    out, i = "", 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\":
+            out += re.escape(pattern[i + 1])
+            i += 2
+            continue
+        out += ".*" if c == "%" else "." if c == "_" else re.escape(c)
+        i += 1
+    return re.fullmatch(out, value, re.S) is not None
+
+
+def narrowed(old, new, notes):
+    """The notes the database would return for `lookups`' patterns."""
+    patterns = lp.lookups(lp.prepare(old, new))
+    if patterns is None:
+        return list(notes)
+    fold = str.maketrans(lp.FOLD_FROM, lp.FOLD_TO)
+    return [p for p in notes if any(like(pat, p.translate(fold)) for pat in patterns)]
+
+
+@pytest.mark.parametrize("written", [
+    "See [[Areas]] and [[areas#Rows]] and ![[Areas]] and [[Areas.md]] and [[Champignons]] and [[Not yet]]",
+    "[[Areas/Gone|g]] [[areas/areas]] [[AREAS/AREAS.MD]] [[Reference/v1.2 notes]] [[v1.2 notes]]",
+    "[[under_score]] [[UNDERXSCORE]] [[100%]] [[1000]] [[été]] [[ÉTÉ]] [[kelvin]] [[KELVIN]]",
+    "[[İstanbul]] [[i̇stanbul]] [[upper]] [[Ref/upper]] [[..md]] [[..md.md]] [[a.b]] [[A.B.md]]",
+    "[[back\\slash]] [[photo.png]] ![[photo.png]] [[photo.png.md]] [[Areas.md.md]] [[tab\there]]",
+    TABLE + "| [[Areas\\|A]] | [[Recent]] |",
+    "`[[Areas]]` and [[Recent]]",
+    "- [ ] task [[Areas]]",
+])
+def test_the_narrowed_note_list_gives_the_same_rewrite(written):
+    full_text, full_report = lp.rewrite(None, written, lp.NoteIndex(TRICKY))
+    notes = narrowed(None, written, TRICKY)
+    assert lp.rewrite(None, written, lp.NoteIndex(notes)) == (full_text, full_report)
+
+
+def test_the_narrowed_note_list_is_the_named_notes():
+    assert narrowed(None, "See [[Areas]] and [[log/2026-11-04 call]]", TRICKY) == [
+        "Areas/Areas.md", "Log/2026-11-04 Call.md"]
+    assert narrowed("old [[Areas]]", "old [[Areas]]\nnew", TRICKY) == []      # an unchanged line looks nothing up
+    assert lp.lookups(lp.prepare(None, "[[i̇stanbul]]")) is None        # `İ` lowers to two characters
+    assert lp.lookups(lp.prepare(None, " ".join(f"[[n{i}]]" for i in range(120)))) is None  # too many

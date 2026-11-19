@@ -28,7 +28,7 @@ docs/architecture/plugins.md.
 import asyncio
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from src import database, plugins
 from src.models.db import NoteMetadata
@@ -109,11 +109,19 @@ async def _full_path_links(write: plugins.NoteWrite, new: str) -> tuple[str, lin
     if not link_paths.needs_check(write.old, new):
         return new, None, ""
     try:
-        async with database.async_session() as session:
-            paths = (await session.execute(
-                apply_note_filters(select(NoteMetadata.file_path), user_id=write.user_id))).scalars().all()
+        prepared = await asyncio.to_thread(link_paths.prepare, write.old, new)
+        # Only the notes the links may name (`lookups`), not the vault's thousands of paths.
+        patterns = await asyncio.to_thread(link_paths.lookups, prepared)
+        paths: list[str] = []
+        if patterns is None or patterns:
+            stmt = apply_note_filters(select(NoteMetadata.file_path), user_id=write.user_id)
+            if patterns:
+                folded = func.translate(NoteMetadata.file_path, link_paths.FOLD_FROM, link_paths.FOLD_TO)
+                stmt = stmt.where(or_(*[folded.like(p, escape="\\") for p in patterns]))
+            async with database.async_session() as session:
+                paths = list((await session.execute(stmt)).scalars().all())
         index = link_paths.NoteIndex([*paths, write.path])
-        rewritten, report = await asyncio.to_thread(link_paths.rewrite, write.old, new, index)
+        rewritten, report = await asyncio.to_thread(link_paths.rewrite, write.old, new, index, prepared)
         return rewritten, report, ""
     except Exception as exc:  # noqa: BLE001 — the write goes ahead unchanged; the result says so
         # debug, not warning: a caller drives this path (the D18 permit rule); the result tells the caller.

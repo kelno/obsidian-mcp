@@ -173,33 +173,37 @@ def needs_check(old: str | None, new: str) -> bool:
 _CHECKBOX_RE = re.compile(r"^[ \t]*(?:>[ \t]?)*[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+\[.\]")
 
 
-def rewrite(old: str | None, new: str, index: NoteIndex) -> tuple[str, LinkReport]:
-    """`new` with its bare-name links given full paths, on changed lines only, and the report.
+@dataclass
+class Prepared:
+    """What `rewrite` reads of a write before it looks at the note list: the
+    lines, the ones the write adds or changes, and the lines with code blanked."""
+    lines: list[str]
+    changed: set[int]
+    masked_lines: list[str]
 
-    Checkbox lines are never rewritten: a task's line is changed by the task
-    tools only, and the task check compares lines the same way.
-    """
-    report = LinkReport()
+
+def prepare(old: str | None, new: str) -> Prepared | None:
+    """The write's lines for `rewrite` and `lookups`; None when `new` holds no `[[`."""
     if "[[" not in new:
-        return new, report
+        return None
     lines = new.split("\n")
     changed = changed_lines(old, new) - set(range(frontmatter_lines(lines))) - _quoted_code_lines(lines)
     masked = mask_code(new, context=FULL_NOTE)
     # The masker blanks a fenced block whole, its line breaks included: put
     # them back so masked lines align with the note's.
     masked = "".join("\n" if c == "\n" else m for c, m in zip(new, masked))
-    masked_lines = masked.split("\n")
-    table_rows = _table_rows(masked_lines)
-    for i in sorted(changed):
-        line, masked = lines[i], masked_lines[i]
+    return Prepared(lines, changed, masked.split("\n"))
+
+
+def _examined(prepared: Prepared):
+    """`(line index, match, target, anchor, alias)` for every link `rewrite` examines, in order."""
+    for i in sorted(prepared.changed):
+        line, masked = prepared.lines[i], prepared.masked_lines[i]
         if "[[" not in masked or _CHECKBOX_RE.match(line):
             continue
-        pipe = "\\|" if i in table_rows else "|"
-        pieces, last = [], 0
         for m in _WIKILINK_RE.finditer(masked):
             start, end = m.span()
-            raw = line[start:end]
-            if raw != masked[start:end]:
+            if line[start:end] != masked[start:end]:
                 continue                              # code inside or across the link: not touched
             target = m.group("target")
             anchor, alias = m.group("anchor"), m.group("alias")
@@ -208,6 +212,105 @@ def rewrite(old: str | None, new: str, index: NoteIndex) -> tuple[str, LinkRepor
                 anchor = anchor[:-1]
             elif alias is not None and target.endswith("\\"):
                 target = target[:-1]
+            yield i, m, target, anchor, alias
+
+
+#: Past this many names to look up, the whole note list is read instead.
+MAX_LOOKUPS = 100
+_ASCII_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+#: `FOLD_TO` is what a path's characters in `FOLD_FROM` become before the patterns of `lookups` apply:
+#: ASCII capitals, and the Kelvin sign, the one other character Python's `lower` makes an ASCII letter.
+FOLD_FROM = _ASCII_UPPER + "K"
+FOLD_TO = _ASCII_UPPER.lower() + "k"
+
+
+def _like(lowered: str) -> str | None:
+    """A LIKE pattern (escape `\\`) matching, once folded, every path whose `lower()` is `lowered`; None if none can.
+
+    Python's `lower` turns a character into an ASCII one only from an ASCII
+    capital, the Kelvin sign (both folded first) or `İ` (into `i` and U+0307,
+    which changes the length: no pattern then). Any other character of
+    `lowered` may come from several, so it matches any one character.
+    """
+    if "̇" in lowered:
+        return None
+    out = []
+    for ch in lowered:
+        if ch in "%_\\":
+            out.append("\\" + ch)
+        elif ord(ch) < 128:
+            out.append(ch)
+        else:
+            out.append("_")
+    return "".join(out)
+
+
+def lookups(prepared: Prepared | None) -> list[str] | None:
+    """LIKE patterns (escape `\\`) over the folded path (`FOLD_FROM` → `FOLD_TO`) that keep every note
+    `rewrite(…, prepared)` may look up: `[]` when it looks none up, None when the whole list is needed.
+
+    A superset: `rewrite` matches the names exactly against what comes back.
+    The lookups are the names `NoteIndex.named` and the paths
+    `NoteIndex.has_path` may be asked about, whatever the answers.
+    """
+    if prepared is None:
+        return []
+    names: set[str] = set()
+    paths: set[str] = set()
+    for _i, _m, target, _anchor, _alias in _examined(prepared):
+        name = target.strip()
+        if "/" in name:
+            names.add(os.path.basename(name))
+            paths.add(name)
+        else:
+            names.add(name)
+            names.add(name[:-3] if name.lower().endswith(".md") else name)
+    if len(names) + len(paths) > MAX_LOOKUPS:
+        return None
+    patterns: set[str] = set()
+    for name in names:
+        lowered = name.lower()
+        like = _like(lowered)
+        if like is None:
+            return None
+        patterns.update((like + ".md", "%/" + like + ".md"))
+        if lowered.startswith("."):
+            # `os.path.splitext` keeps a name of dots and `md` whole (`..md`): its stem is all of it.
+            patterns.update((like, "%/" + like))
+    for path in paths:
+        lowered = path.lower()
+        like = _like(lowered if lowered.endswith(".md") else lowered + ".md")
+        if like is None:
+            return None
+        patterns.add(like)
+    return sorted(patterns)
+
+
+def rewrite(old: str | None, new: str, index: NoteIndex,
+            prepared: Prepared | None = None) -> tuple[str, LinkReport]:
+    """`new` with its bare-name links given full paths, on changed lines only, and the report.
+
+    Checkbox lines are never rewritten: a task's line is changed by the task
+    tools only, and the task check compares lines the same way. `prepared`
+    is `prepare(old, new)` when the caller made it already.
+    """
+    report = LinkReport()
+    if "[[" not in new:
+        return new, report
+    if prepared is None:
+        prepared = prepare(old, new)
+    lines = list(prepared.lines)
+    table_rows = _table_rows(prepared.masked_lines)
+    by_line: dict[int, list] = {}
+    for i, m, target, anchor, alias in _examined(prepared):
+        by_line.setdefault(i, []).append((m, target, anchor, alias))
+    for i, links in by_line.items():
+        line = lines[i]
+        pipe = "\\|" if i in table_rows else "|"
+        pieces, last = [], 0
+        for m, target, anchor, alias in links:
+            start, end = m.span()
+            raw = line[start:end]
             name = target.strip()
             embed = bool(m.group("embed"))
             after = _PATH_AFTER_RE.match(line, end)
