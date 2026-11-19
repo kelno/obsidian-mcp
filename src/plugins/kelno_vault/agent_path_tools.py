@@ -13,11 +13,16 @@ for with `read_from`. See docs/architecture/agent-paths.md.
 """
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
+import logging
+import multiprocessing
 import os
 import posixpath
 import time
+from concurrent.futures.process import BrokenProcessPool
+from dataclasses import dataclass
 from typing import Annotated
 
 from mcp.types import ToolAnnotations
@@ -63,6 +68,8 @@ _VIA_MAX = 240
 _SNAPSHOT_SCRIPT = "_/claude-code-hooks/agent-paths-snapshot.py"
 #: Roles whose start adds more than a role note: the relay is handed its notes by the bridge.
 _ROLE_EXTRAS = {"relay": ["relay_notes"]}
+
+logger = logging.getLogger(__name__)
 
 
 # ── Reading the setup ────────────────────────────────────────────────
@@ -140,8 +147,6 @@ def _setup(uid, machine: str | None, served: ap.ServedTexts, read=None) -> ap.Se
     notes: list[str] = []
     paths = _vault_files(uid)
     read = read or _reader(uid)
-    if isinstance(read, _AfterWrite):
-        paths = read.paths(paths)
     try:
         rule_files = _rule_files.read(uid)
     except (FileNotFoundError, ValueError, OSError, _rule_files.RuleFilesError) as exc:
@@ -166,108 +171,280 @@ def _setup(uid, machine: str | None, served: ap.ServedTexts, read=None) -> ap.Se
 
 
 # ── Whether a rule's place is reached, after a write ─────────────────
+#
+# Drawing every path took about a minute on the owner's server (an Atom C2750, 2026-11-19), so a write never
+# draws. Every path is drawn in a helper process, after the vault changes (`_Drawer`), into a reach map; a write
+# answers from the map with a few file stats, or says it can't tell. See docs/architecture/agent-paths.md,
+# "Reached, after a rule write".
 
 
 class ReachUnknown(Exception):
     """Whether a place is reached could not be told; the message says why, in a few words."""
 
 
-#: How long a write waits for the paths before saying the check could not be done. Drawing every path took about
-#: 1.5 s on the owner's vault, 60 paths (2026-11-19); a place some path reaches is found after one or two (0.1 s).
-REACH_BUDGET_SECONDS = 5.0
+#: Seconds of quiet after the last request before the map is drawn again, so a burst of writes is one draw.
+REDRAW_AFTER_SECONDS = 20.0
+#: The helper process's niceness: the server's own requests come first.
+_HELPER_NICENESS = 10
+#: False draws in a thread of this process instead of the helper (tests).
+DRAW_IN_HELPER = True
 
 
-class _AfterWrite:
-    """The caller's vault as it is once a write lands (`path` holds `text`), each file's digest kept as it is read."""
-
-    def __init__(self, uid, path: str, text: str):
-        self._read = _reader(uid)
-        self.path = path.replace("\\", "/").lstrip("/")
-        self.text = ap.as_text(text.encode("utf-8"))
-        #: Every file read, vault path to its digest (None when it couldn't be read): what the paths were drawn from.
-        self.seen: dict[str, str | None] = {}
-
-    def __call__(self, path: str) -> str | None:
-        text = self.text if path == self.path else self._read(path)
-        self.seen[path] = _digest(text)
-        return text
-
-    def paths(self, paths: list[str]) -> list[str]:
-        return paths if self.path in paths else [*paths, self.path]
+@dataclass(frozen=True)
+class _Run:
+    #: Each note or section on the path, with the vault files its chain from the start passes through.
+    reached: dict[str, tuple[str, ...]]
+    #: What the path read and looked up.
+    trace: ap.Trace
 
 
-def _digest(text: str | None) -> str | None:
-    return None if text is None else hashlib.sha256(text.encode("utf-8")).hexdigest()
+@dataclass(frozen=True)
+class ReachMap:
+    """Every path, drawn once: what each reached, and what each read and looked up."""
+
+    #: The vault's files, by their lower-case path.
+    by_lower: dict[str, str]
+    #: Every file the drawing read, vault path to `(its stat, its text's digest)`; None for a missing file.
+    inputs: dict[str, tuple | None]
+    #: Of those, what the setup reads (the starting points, the list of areas, the rule files, the snapshots):
+    #: a change to one may change every path.
+    setup_inputs: frozenset[str]
+    #: The hook scripts the PC registers: reached as hooks.
+    registered: frozenset[str]
+    runs: tuple[_Run, ...]
 
 
-#: By vault root, the last time every path was drawn: (the vault's file list and the served texts, by digest),
-#: every file the paths read with its digest, and every place they reach. A write to a rule no path reaches draws
-#: every path; the next writes, while none of those inputs changes, are answered from here. A write to a note on
-#: some path changes what that path read, so it is drawn again.
-_DRAWN: dict[str, tuple[tuple, dict[str, str | None], frozenset[str]]] = {}
+def _stat(uid, path: str) -> tuple[int, int] | None:
+    try:
+        st = os.stat(os.path.join(_vault_root(uid), path))
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
 
 
-def _unchanged(drawn, inputs: tuple, read: _AfterWrite) -> bool:
-    """Whether nothing the last full draw read has changed: the file list, the served texts, each file's text."""
-    key, seen, _ = drawn
-    if key != inputs or (read.path in seen and seen[read.path] != _digest(read.text)):
-        return False  # the written note was on a path: checked first, as it is the likeliest change
-    return all(_digest(read(p)) == d for p, d in seen.items())
-
-
-def _place_id(v: ap.Vault, place: str) -> str:
-    """`note:<path>` or `section:<path>#<heading>`, its path spelled as the vault holds it."""
-    kind, rest = place.split(":", 1)
-    path, sep, heading = rest.partition("#")
-    return f"{kind}:{v.by_rel.get(path.lower(), path)}{sep}{heading}"
-
-
-async def reached_after_write(uid, path: str, text: str, places: list[str]) -> set[str]:
-    """Which of `places` (`note:<path>`, `section:<path>#<heading>`) some agent path reaches, the vault taken as it
-    is once `text` is written to `path`: what the path tools count as reached (`agent_paths.reached_places`).
-
-    Raises ReachUnknown when that can't be told: no PC snapshot, an input the paths need unreadable, or longer than
-    `REACH_BUDGET_SECONDS`.
-    """
-    served = await _served(uid)
-    served_digest = _digest(json.dumps([served.tools, served.instructions, served.guide,
-                                        served.open_area_instructions]))
-    root = str(_vault_root(uid))
-
-    def draw() -> set[str]:
-        read = _AfterWrite(uid, path, text)
+def _content(path: str, text: str | None) -> str | None:
+    """A file's digest for the map: a snapshot's leaves out `made`, rewritten at every session's start on the PC."""
+    if text is None:
+        return None
+    if posixpath.dirname(path) == ap.SNAPSHOT_FOLDER and path.endswith(".json"):
         try:
-            setup = _setup(uid, None, served, read)
-        except (_SetupError, ap.StartingPointsError) as exc:
-            raise ReachUnknown(str(exc)) from exc
-        if setup.snapshot is None:
-            raise ReachUnknown(f"no PC has written a snapshot to {ap.SNAPSHOT_FOLDER}/, so what Claude Code loads is "
-                               "unknown")
-        read(_rule_files.RULE_FILES_PATH)  # read by `_setup` outside `read`: its digest joins the inputs
-        ids = {place: _place_id(setup.vault, place) for place in places}
-        inputs = (_digest("\n".join(sorted(setup.vault.by_rel.values()))), served_digest)
-        drawn = _DRAWN.get(root)
-        if drawn and _unchanged(drawn, inputs, read):
-            return {place for place, i in ids.items() if i in drawn[2]}
-        deadline = time.monotonic() + REACH_BUDGET_SECONDS
-        builders: list[ap.PathBuilder] = []
-        every = []
+            data = json.loads(text)
+            data.pop("made", None)
+            text = json.dumps(data, sort_keys=True)
+        except ValueError:
+            pass
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-        def runs():
-            for r in ap.iter_runs(setup):
-                if time.monotonic() > deadline:
-                    raise ReachUnknown(f"drawing the agent paths took over {REACH_BUDGET_SECONDS:g} s")
-                builders.append(r[3])
-                yield r
-            every.append(True)
 
-        found = ap.reached_places(setup, ids.values(), runs())
-        if every:
-            reached = ap.registered_hook_scripts(setup).union(*(b.pieces for b in builders))
-            _DRAWN[root] = (inputs, dict(read.seen), frozenset(reached))
-        return {place for place, i in ids.items() if i in found}
+def _signed_reader(uid, signed: dict):
+    """`_reader`, each file's stat (taken before the read) and digest kept in `signed` at its first read."""
+    base = _reader(uid)
 
-    return await asyncio.to_thread(draw)
+    def read(path: str) -> str | None:
+        st = _stat(uid, path)
+        text = base(path)
+        signed.setdefault(path, None if text is None else (st, _content(path, text)))
+        return text
+    return read
+
+
+def _chain_files(b: ap.PathBuilder, pid: str) -> tuple[str, ...]:
+    files = []
+    for x in ap.chain(b, pid):
+        if x.startswith(("note:", "section:")):
+            files.append(x.split(":", 1)[1].split("#")[0])
+        elif x.startswith("memory:"):
+            files.append(ap.MEMORY_NOTE)
+    return tuple(dict.fromkeys(files))
+
+
+def draw_reach_map(uid, served: ap.ServedTexts) -> ReachMap | str:
+    """Every path, drawn on the vault as it is now: the reach map, or why it can't be drawn."""
+    signed: dict[str, tuple | None] = {}
+    read = _signed_reader(uid, signed)
+    try:
+        setup = _setup(uid, None, served, read)
+    except (_SetupError, ap.StartingPointsError) as exc:
+        return str(exc)
+    if setup.snapshot is None:
+        return f"no PC has written a snapshot to {ap.SNAPSHOT_FOLDER}/, so what Claude Code loads is unknown"
+    read(_rule_files.RULE_FILES_PATH)  # read by `_setup` outside `read`: its signature joins the setup's
+    setup_inputs = frozenset(signed)
+    v, runs = setup.vault, []
+    for _label, s, w in ap.run_starts(setup):
+        v.trace = ap.Trace()
+        b = ap.run(setup, s, w)
+        runs.append(_Run({pid: _chain_files(b, pid) for pid in b.order if pid.startswith(("note:", "section:"))},
+                         v.trace))
+        v.trace = None
+    return ReachMap(dict(v.by_rel), signed, setup_inputs, frozenset(ap.registered_hook_scripts(setup)), tuple(runs))
+
+
+def _draw_in_helper(root: str, served: ap.ServedTexts) -> ReachMap | str:
+    """Run in the helper process: the vault at `root` read as a single-user server reads it."""
+    from src.config import settings
+    from src.services import vault as vault_service
+
+    settings.multi_user_mode = False
+    settings.vault_path = root
+    vault_service.clear_user_vault_cache()
+    return draw_reach_map(None, served)
+
+
+def _lower_priority() -> None:
+    try:
+        os.nice(_HELPER_NICENESS)
+    except (AttributeError, OSError):
+        pass
+
+
+_HELPER: concurrent.futures.ProcessPoolExecutor | None = None
+
+
+def _helper() -> concurrent.futures.ProcessPoolExecutor:
+    """One helper process, started at its first use and kept: it imports the server's code once."""
+    global _HELPER
+    if _HELPER is None:
+        _HELPER = concurrent.futures.ProcessPoolExecutor(
+            max_workers=1, mp_context=multiprocessing.get_context("spawn"), initializer=_lower_priority)
+    return _HELPER
+
+
+def _drop_helper() -> None:
+    """Forget a helper process that died, so the next draw starts a new one."""
+    global _HELPER
+    if _HELPER is not None:
+        _HELPER.shutdown(wait=False, cancel_futures=True)
+        _HELPER = None
+
+
+class _Drawer:
+    """The reach map of one vault root, drawn again after changes: one draw at a time, a burst of requests one
+    draw, `REDRAW_AFTER_SECONDS` after the last of them (at once for the first)."""
+
+    def __init__(self, root: str):
+        self.root = root
+        self.map: ReachMap | None = None
+        #: Why the last draw failed; "" when it didn't.
+        self.failure = ""
+        self._due = 0.0
+        self._task: asyncio.Task | None = None
+
+    def request(self, uid) -> None:
+        self._due = time.monotonic() + (REDRAW_AFTER_SECONDS if self.map is not None or self.failure else 0.0)
+        if self._task is None or self._task.done():
+            self._task = asyncio.get_running_loop().create_task(self._draw(uid))
+
+    async def _draw(self, uid) -> None:
+        while True:
+            while (wait := self._due - time.monotonic()) > 0:
+                await asyncio.sleep(wait)
+            due = self._due
+            try:
+                served = await _served(uid)
+                if DRAW_IN_HELPER:
+                    result = await asyncio.get_running_loop().run_in_executor(
+                        _helper(), _draw_in_helper, self.root, served)
+                else:
+                    result = await asyncio.to_thread(draw_reach_map, uid, served)
+            except Exception as exc:  # noqa: BLE001 — a failed draw is said on the next write, never raised
+                logger.warning("agent paths: drawing the reach map failed", exc_info=True)
+                result = f"drawing the agent paths failed ({type(exc).__name__})"
+                if isinstance(exc, BrokenProcessPool):
+                    _drop_helper()
+            if isinstance(result, str):
+                self.failure = result
+            else:
+                self.map, self.failure = result, ""
+            if self._due == due:  # no request came while drawing
+                return
+
+
+_DRAWERS: dict[str, _Drawer] = {}
+
+
+def _drawer(uid) -> _Drawer:
+    root = str(_vault_root(uid))
+    return _DRAWERS.setdefault(root, _Drawer(root))
+
+
+def warm_reach_map(uid) -> None:
+    """Start the first drawing of the vault's paths, if none is under way: a rule write then finds it ready."""
+    d = _drawer(uid)
+    if d.map is None and (d._task is None or d._task.done()) and not d.failure:
+        d.request(uid)
+
+
+def _mentions(text: str, path: str) -> bool:
+    """Whether `text` could point to the note at `path`: it names the note, or holds a path pattern matching it.
+    A pointer always does one or the other; text that does neither can't send an agent there."""
+    if posixpath.basename(path).removesuffix(".md").casefold() in text.casefold():
+        return True
+    return any((pattern := ap.note_pattern(m.group(0).strip("`"))) is not None and pattern.fullmatch(path)
+               for m in ap.INLINE_CODE.finditer(text))
+
+
+_REDRAWING = "the agent paths are being drawn again after changes to notes they read"
+
+
+def _answer(uid, m: ReachMap, path: str, created: bool, places: list[str]) -> tuple[set[str], bool]:
+    """Which of `places` a path reaches once `path` is written, from the map: `(reached, whether the map is now
+    stale)`. Raises ReachUnknown when the map can't tell."""
+    written = path.replace("\\", "/").lstrip("/")
+    read = _reader(uid)
+
+    def changed(p: str) -> bool:
+        before = m.inputs[p]
+        st = _stat(uid, p)
+        if before is None or st is None:
+            return (before is None) != (st is None)
+        return st != before[0] and _content(p, read(p)) != before[1]
+
+    moved = {p for p in m.inputs if p != written and changed(p)}
+    touched = any(written.lower() in r.trace.texts or (created and r.trace.new_file_counts(written))
+                  for r in m.runs)
+    stale = bool(moved) or touched
+    if moved & m.setup_inputs:
+        raise ReachUnknown(_REDRAWING)
+    found = set()
+    for place in places:
+        kind, rest = place.split(":", 1)
+        note, sep, heading = rest.partition("#")
+        pid = f"{kind}:{m.by_lower.get(note.lower(), note)}{sep}{heading}"
+        # Reached when a path reached it by a chain none of whose notes changed since; the written note is the
+        # place's own, and a note's own text never cuts the way to it.
+        if pid in m.registered or any(pid in r.reached and not set(r.reached[pid]) & moved for r in m.runs):
+            found.add(place)
+            continue
+        # Not reached then. Still not, unless this write is to a note some path reads (a new rule section in a
+        # note opened for its sections, say), or a note changed since now names this one.
+        if touched or any(_mentions(read(p) or "", written) for p in moved):
+            raise ReachUnknown(_REDRAWING)
+    return found, stale
+
+
+async def reached_after_write(uid, path: str, places: list[str], created: bool = False) -> set[str]:
+    """Which of `places` (`note:<path>`, `section:<path>#<heading>`) some agent path reaches once the write to `path`
+    lands (`created`: it creates the note): what the path tools count as reached (`agent_paths.reached_places`), answered from the reach map.
+
+    Raises ReachUnknown, saying why, when it can't tell: no map yet, the last drawing failed, or changes since it
+    was drawn that may reach these places. Each time, and after a write to a note some path reads, the map is
+    drawn again.
+    """
+    d = _drawer(uid)
+    m = d.map
+    if m is None:
+        d.request(uid)
+        raise ReachUnknown(d.failure or "the agent paths are being drawn for the first time since the server "
+                                        "started")
+    try:
+        found, stale = await asyncio.to_thread(_answer, uid, m, path, created, places)
+    except ReachUnknown:
+        d.request(uid)
+        raise
+    if stale or d.failure:
+        d.request(uid)
+    return found
 
 
 # ── Shaping the result ───────────────────────────────────────────────

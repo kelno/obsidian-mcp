@@ -236,6 +236,28 @@ class Snapshot:
 
 # --- the vault -----------------------------------------------------------------------------------------------
 
+@dataclass
+class Trace:
+    """What one path read and looked up in the vault, lower case: a changed file it read, or a new file it looked
+    for, may change that path; any other change to the vault cannot."""
+
+    #: Notes whose text it read, existing or not.
+    texts: set[str] = field(default_factory=set)
+    #: Vault paths it looked for (`resolve`, a loaded file's vault path).
+    paths: set[str] = field(default_factory=set)
+    #: Note names it looked for (a bare-name link).
+    stems: set[str] = field(default_factory=set)
+    #: Path patterns it matched against every note (`Vault.matching`), as their regex source.
+    patterns: set[str] = field(default_factory=set)
+
+    def new_file_counts(self, path: str) -> bool:
+        """Whether a note created at `path` could change this path: it looked for that path or name, or matched it."""
+        low = path.lower()
+        stem = posixpath.basename(low).removesuffix(".md")
+        return (low in self.texts or low in self.paths or stem in self.stems
+                or any(re.fullmatch(p, path, re.I) for p in self.patterns))
+
+
 class Vault:
     """The vault's files, its rule-file definition and its area table, read once per call.
 
@@ -248,6 +270,8 @@ class Vault:
                  pc_vault: str | None):
         self._read, self._texts = read, {}
         self._matches: dict[re.Pattern, list[str]] = {}
+        #: Set by a caller drawing one path at a time (`Trace`); None otherwise.
+        self.trace: Trace | None = None
         self.by_rel: dict[str, str] = {}
         self.by_stem: dict[str, list[str]] = {}
         for r in sorted(paths):
@@ -281,23 +305,36 @@ class Vault:
         t = target.strip().replace("\\", "/")
         if re.match(r"^[A-Za-z]:/", t):
             r = self.rel(t)
-            return self.by_rel.get(r.lower()) if r else None
+            return self.lookup(r) if r else None
         for cand in (t, t + ".md"):
-            if cand.lower() in self.by_rel:
+            if self.lookup(cand):
                 return self.by_rel[cand.lower()]
         if not by_name:  # a path in backticks is a path, not a note name
             return None
-        hits = self.by_stem.get(posixpath.basename(t).removesuffix(".md").lower(), [])
+        stem = posixpath.basename(t).removesuffix(".md").lower()
+        if self.trace is not None:
+            self.trace.stems.add(stem)
+        hits = self.by_stem.get(stem, [])
         return hits[0] if len(hits) == 1 else None
+
+    def lookup(self, path: str) -> str | None:
+        """The vault path spelled as the vault holds it, or None when there is no such file."""
+        if self.trace is not None:
+            self.trace.paths.add(path.lower())
+        return self.by_rel.get(path.lower())
 
     def matching(self, pattern: re.Pattern) -> list[str]:
         """The `.md` notes whose vault path matches `pattern` whole, sorted; kept for the call, as each path follows
         the same pattern pointers (a scan of every path took most of a path's time)."""
+        if self.trace is not None:
+            self.trace.patterns.add(pattern.pattern)
         if pattern not in self._matches:
             self._matches[pattern] = sorted(r for r in self.by_rel.values() if r.endswith(".md") and pattern.fullmatch(r))
         return self._matches[pattern]
 
     def text(self, r: str) -> str | None:
+        if self.trace is not None:
+            self.trace.texts.add(r.lower())
         if r not in self._texts:
             self._texts[r] = self._read(r)
         return self._texts[r]
@@ -713,7 +750,7 @@ class PathBuilder:
         """A file Claude Code loads on the PC: a vault note read from the vault, any other file from the snapshot."""
         r = self.v.rel(path)
         if r is not None:
-            pid, text = f"note:{r}", self.v.text(self.v.by_rel.get(r.lower(), r))
+            pid, text = f"note:{r}", self.v.text(self.v.lookup(r) or r)
         else:
             pid, text = f"file:{path}", self.snap.file_text(path) if self.snap else None
         if text is None:
@@ -917,7 +954,7 @@ class PathBuilder:
         for pid in self.snap.relay_notes:
             if not pid.startswith("note:"):
                 continue
-            r = self.v.by_rel.get(pid[5:].lower(), pid[5:])
+            r = self.v.lookup(pid[5:]) or pid[5:]
             self.push(Piece(f"note:{r}", BRIDGE, f"handed to the relay with the bridge's guide (relay_notes in "
                             f"{self.snap.relay_config})", self.v.where(r), self.v.text(r) or "", "relay_notes",
                             "when met"))
@@ -1178,19 +1215,23 @@ def every_rule_file(v: Vault) -> list[str]:
     return sorted(out)
 
 
-def iter_runs(setup: Setup):
-    """The typical agents, a claude.ai chat opening each area, and a Claude Code session in each related folder
-    the PC's snapshot holds, each path drawn only when the caller asks for the next one."""
+def run_starts(setup: Setup):
+    """Every kind of agent a path is drawn for: the typical agents, a claude.ai chat opening each area, and a
+    Claude Code session in each related folder the PC's snapshot holds, as `(label, start, work)`."""
     v, snap = setup.vault, setup.snapshot
     for t in setup.points.typical:
-        yield t.name, t, Work(), run(setup, t, Work())
+        yield t.name, t, Work()
     for a in v.areas:
-        s, w = Start("claude-ai"), Work(a["name"])
-        yield f"a claude.ai chat working on {a['name']}", s, w, run(setup, s, w)
+        yield f"a claude.ai chat working on {a['name']}", Start("claude-ai"), Work(a["name"])
         for f in a["folders"]:
             if snap and snap.holds(f):
-                s = Start("claude-code", f, role="worker")
-                yield f"a Claude Code worker in {f}", s, Work(), run(setup, s, Work())
+                yield f"a Claude Code worker in {f}", Start("claude-code", f, role="worker"), Work()
+
+
+def iter_runs(setup: Setup):
+    """`run_starts` with each path drawn, only when the caller asks for the next one."""
+    for label, s, w in run_starts(setup):
+        yield label, s, w, run(setup, s, w)
 
 
 def all_runs(setup: Setup) -> list[tuple[str, Start, Work, PathBuilder]]:

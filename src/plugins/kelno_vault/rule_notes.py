@@ -16,9 +16,10 @@ that links to another rule note in none of the pointer shapes the vault sets
 mention, which sends no agent to read the note; the result asks which it is.
 
 A third (`reached_by_no_path:`): a write that creates a rule note, or adds or changes rule lines (the lines the
-first nudge looks at, whatever their refs), is checked against the agent paths on the vault as it is after the
-write; a rule note or section no path reaches is pointed out (`agent_path_tools.reached_after_write`, what the
-path tools count as reached). When that can't be told, the result says so in one line.
+first nudge looks at, whatever their refs), is checked against the agent paths as the write leaves the vault; a
+rule note or section no path reaches is pointed out (`agent_path_tools.reached_after_write`, what the path tools
+count as reached, answered from paths drawn in the background). When that can't be told, the result says so in
+one line.
 """
 
 from __future__ import annotations
@@ -210,8 +211,10 @@ async def check(path: str, old: str | None, new: str, user_id) -> RuleCheck:
     try:
         places = await asyncio.to_thread(_places, path, old, new, definition)
         if places:
-            reached = await agent_path_tools.reached_after_write(user_id, path, new, places)
+            reached = await agent_path_tools.reached_after_write(user_id, path, places, created=old is None)
             out.unreached = [p for p in places if p not in reached]
+        else:
+            agent_path_tools.warm_reach_map(user_id)  # so the first rule write after a start finds the map
     except agent_path_tools.ReachUnknown as exc:
         out.reach_unknown = str(exc)
     except Exception as exc:  # noqa: BLE001 — a nudge never fails the write it follows; the result says so

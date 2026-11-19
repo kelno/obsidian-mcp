@@ -754,3 +754,13 @@ def _offline_change_feed(request):
     finally:
         for name, real in saved.items():
             setattr(change_feed, name, real)
+
+
+@pytest.fixture(autouse=True)
+def _reach_map_in_a_thread(monkeypatch):
+    """The kelno_vault plugin draws its reach map in a helper process it starts; a test that loads the plugin
+    draws it in a thread instead, so no test leaves a process behind. The test of the helper itself calls it
+    directly."""
+    from src.plugins.kelno_vault import agent_path_tools
+
+    monkeypatch.setattr(agent_path_tools, "DRAW_IN_HELPER", False)
