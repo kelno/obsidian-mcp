@@ -212,6 +212,9 @@ class ReachMap:
     #: The hook scripts the PC registers: reached as hooks.
     registered: frozenset[str]
     runs: tuple[_Run, ...]
+    #: How long the drawing took, and the drawing process's peak memory (KiB; 0 where it can't be read).
+    seconds: float = 0.0
+    peak_kib: int = 0
 
 
 def _stat(uid, path: str) -> tuple[int, int] | None:
@@ -260,6 +263,7 @@ def _chain_files(b: ap.PathBuilder, pid: str) -> tuple[str, ...]:
 
 def draw_reach_map(uid, served: ap.ServedTexts) -> ReachMap | str:
     """Every path, drawn on the vault as it is now: the reach map, or why it can't be drawn."""
+    began = time.monotonic()
     signed: dict[str, tuple | None] = {}
     read = _signed_reader(uid, signed)
     try:
@@ -277,7 +281,14 @@ def draw_reach_map(uid, served: ap.ServedTexts) -> ReachMap | str:
         runs.append(_Run({pid: _chain_files(b, pid) for pid in b.order if pid.startswith(("note:", "section:"))},
                          v.trace))
         v.trace = None
-    return ReachMap(dict(v.by_rel), signed, setup_inputs, frozenset(ap.registered_hook_scripts(setup)), tuple(runs))
+    try:
+        import resource
+
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # KiB on Linux
+    except (ImportError, OSError):
+        peak = 0
+    return ReachMap(dict(v.by_rel), signed, setup_inputs, frozenset(ap.registered_hook_scripts(setup)), tuple(runs),
+                    round(time.monotonic() - began, 1), peak)
 
 
 def _draw_in_helper(root: str, served: ap.ServedTexts) -> ReachMap | str:
@@ -356,6 +367,8 @@ class _Drawer:
                 self.failure = result
             else:
                 self.map, self.failure = result, ""
+                logger.info("agent paths: reach map drawn in %.1f s, %d paths, drawing process peak memory %d MiB",
+                            result.seconds, len(result.runs), result.peak_kib // 1024)
             if self._due == due:  # no request came while drawing
                 return
 
