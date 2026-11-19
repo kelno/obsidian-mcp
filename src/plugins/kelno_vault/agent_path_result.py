@@ -20,7 +20,9 @@ from src.services.tool_outcomes import BodyOutcome
 class PathStart(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    typical: int | None = Field(default=None, description="A typical agent by number (1-5); give it alone.")
+    typical: int | None = Field(default=None, description=(
+        "A typical agent by number, given alone: 1 a claude.ai chat, 2 the voice relay passing on a request, 3 a "
+        "Claude Code worker in a repo, 4 a Claude Code session changing the rules, 5 the Coordinator."))
     surface: Literal["claude-code", "claude-ai"] | None = Field(default=None, description=(
         "claude-ai includes the voice relay."))
     folder: str | None = Field(default=None, description="Claude Code's start folder on the PC; default home.")
@@ -109,7 +111,8 @@ class PathStructure(_OmitNone):
     unplaced_pointers: list[dict] | None = None
     #: Rule files reached through a pointer outside every rule file.
     pointers_outside_rule_files: list[dict] | None = None
-    #: Pointers into an area's local pieces from a shared one, or from one area's local pieces into another's.
+    #: Pointers into an area's local pieces from a shared one, or from one area's local pieces into another's: one
+    #: entry per piece reached and kind, `{to, kind, from: [...]}`.
     into_areas: list[dict] | None = None
     #: Links that are mentions, not pointers: counted, not followed.
     mentions_not_followed: int | None = None
@@ -182,13 +185,21 @@ class ReachedByResult(_OmitNone):
     #: What was matched: the place itself; its note (a place no path holds: one that doesn't exist yet, or a part of
     #: a note, the note saying whether it holds that section); its area; or nothing, saying whether the place exists.
     matched_by: str | None = None
-    #: Each kind of agent with the chain that brings it there; "any area" or "any related folder" when every
-    #: one reaches it the same way.
+    #: Each kind of agent with the chain that brings it there (`via`) and every piece pointing to the place
+    #: (`pointed_to_by`); "any area" or "any related folder" when every one reaches it the same way.
     reached_by: list[dict] | None = None
     machine: str | None = None
     snapshot_made: str | None = None
-    #: Every piece on those paths; with `known`, only what this call brings, as in `agent_path`.
+    #: What those agents have in front of them when the place applies, in arrival order: the pieces of each
+    #: chain, the place included, every piece pointing to the place, and the start pieces every agent of a group
+    #: meets (loaded at the start, session-start hook, read at the start), each with its moments and text. For a
+    #: group reached through several areas, its first agent's chain stands for the others. With `known`, only
+    #: what this call brings, as in `agent_path`.
     pieces: list[PathPiece] | None = None
+    #: Every other piece on those paths, one line each: `<id>  <chars> chars  #<hash>`, `moment: <moments>` for one
+    #: waiting on a moment; each server's tool texts as one line. Any of them can be read with
+    #: `read_from: {id, offset: 0}`. Left out of a call with `known`, as the structure is.
+    other_pieces: list[str] | None = None
     #: How many pieces' texts come in later calls, as in `agent_path`.
     waiting: int | None = None
     #: With `known`: the pieces you hold that are on none of those paths any more.

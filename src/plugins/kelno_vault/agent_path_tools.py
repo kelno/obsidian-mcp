@@ -227,6 +227,8 @@ class ReachMap:
     keep_made: frozenset[str] = frozenset()
     #: How many paths this update drew again (all of them on a whole drawing).
     redrawn: int = 0
+    #: Why every path was drawn again, on a whole drawing (`_Kept.cause`); empty on an update.
+    cause: str = ""
 
 
 def _signature(full: str) -> tuple[int, int, int, int] | None:
@@ -425,6 +427,10 @@ class _Kept:
         self.runs = [self._draw(label, s, w) for label, s, w in ap.run_starts(self.setup)]
         self.extra: dict[tuple, _KeptRun] = {}
         self.redrawn, self.seconds = len(self.runs), round(time.monotonic() - began, 1)
+        #: Why this drawing is a whole one (set by `_kept`), then why the next must be (`refresh`); empty on an
+        #: update. Logged with the reach map, so the journal shows what forces whole drawings.
+        self.cause = ""
+        self.why = ""
         #: Whether the reach map sent out was drawn before the last change (`reach_map`).
         self.map_due = True
 
@@ -441,6 +447,7 @@ class _Kept:
         changed, or the served texts)."""
         began = time.monotonic()
         if served != self.served:
+            self.why = _served_change(self.served, served)
             return False
         moved = self.files.refresh()
         read = _reader(self.uid)
@@ -468,10 +475,16 @@ class _Kept:
                     self.setup.snapshot.made = data.get("made")
             self.signed[p] = now_signed
         touched = {p.lower() for p in set(changed) | moved}
-        if (touched & {p.lower() for p in self.setup_inputs}
-                or any(self.setup_trace.changed_by(p, t) for p, t in changed.items())
-                or any(self.setup_trace.new_file_counts(p) or _is_snapshot(p) for p in moved)):
+        setup = sorted(p for p in set(changed) | moved if p.lower() in {s.lower() for s in self.setup_inputs}
+                       or (p in changed and self.setup_trace.changed_by(p, changed[p]))
+                       or (p in moved and (self.setup_trace.new_file_counts(p) or _is_snapshot(p))))
+        if setup:
+            self.why = "changed: " + ", ".join(
+                (f"{p} (snapshot content)" if _is_snapshot(p) and p in changed and changed[p] is not None
+                 else f"{p} (added or removed)" if p in moved else p) for p in setup[:5]) + (
+                f" and {len(setup) - 5} more" if len(setup) > 5 else "")
             return False
+        self.cause = ""
         if not touched:
             self.redrawn = 0
             return True
@@ -541,7 +554,7 @@ class _Kept:
                           r.trace) for r in self.runs)
         return ReachMap(dict(self.setup.vault.by_rel), inputs, self.setup_inputs,
                         frozenset(ap.registered_hook_scripts(self.setup)), runs, self.seconds, _peak_kib(),
-                        self.setup_trace, self.keep_made, self.redrawn)
+                        self.setup_trace, self.keep_made, self.redrawn, cause=self.cause)
 
 
 #: The kept drawings of this process, by vault root and snapshot choice (`machine`, None for the default).
@@ -561,13 +574,25 @@ def _kept(uid, machine: str | None, served: ap.ServedTexts) -> _Kept:
         except Exception:
             _KEPT.pop(key, None)
             raise
-        files = k.files
+        files, why = k.files, k.why
     else:
-        files = None
+        files, why = None, "the first drawing since the server started"
     _KEPT.pop(key, None)
     k = _Kept(uid, machine, served, files)
+    k.cause = why
     _KEPT[key] = k
     return k
+
+
+def _served_change(before: ap.ServedTexts, now: ap.ServedTexts) -> str:
+    """Which of the served texts changed, in words, for the journal: the tools by name."""
+    parts = [name for name in ("instructions", "guide", "open_area_instructions", "guide_note")
+             if getattr(before, name) != getattr(now, name)]
+    old, new = dict(before.tools), dict(now.tools)
+    tools = sorted(n for n in set(old) | set(new) if old.get(n) != new.get(n))
+    if tools:
+        parts.append("tools " + ", ".join(tools[:5]) + (f" and {len(tools) - 5} more" if len(tools) > 5 else ""))
+    return "served texts changed: " + ("; ".join(parts) or "their order")
 
 
 def draw_reach_map(uid, served: ap.ServedTexts) -> ReachMap | str:
@@ -658,8 +683,9 @@ class _Drawer:
             self.failure = result
             return
         self.map, self.failure = result, ""
-        logger.info("agent paths: reach map drawn in %.1f s (redrew %d of %d paths), drawing process peak memory "
-                    "%d MiB", result.seconds, result.redrawn, len(result.runs), result.peak_kib // 1024)
+        logger.info("agent paths: reach map drawn in %.1f s (redrew %d of %d paths%s), drawing process peak memory "
+                    "%d MiB", result.seconds, result.redrawn, len(result.runs),
+                    f": {result.cause}" if result.cause else "", result.peak_kib // 1024)
 
     async def _draw(self, uid) -> None:
         while True:
@@ -840,19 +866,28 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
     listing = known is not None
     order = {id(o): i for i, o in enumerate(out)}
     due = [(p, o) for p, o in zip(pieces, out) if o.status != "unchanged" and not o.private]
+    # The rule pieces' texts first, the tool texts after them, wherever the tools load on the path: listed before
+    # the moments since round 3, the tool texts (over 100,000 characters) would otherwise fill the first pages.
+    due.sort(key=lambda po: ap.tool_text(po[0]))
     if listing:
         result.pieces = [o for o in out if o.status != "unchanged" and o.private]
         # The chains and the structure came with the first call too, unchanged by a later one (owner,
         # 2026-11-18: 9,000 characters a call on a backward question); a call without known shows them again.
         result.structure = None
         if hasattr(result, "reached_by"):
-            result.reached_by = None
-        notes.append("The structure (and for a backward question, who reaches the place) comes only with a call "
-                     "without known: call once without it if you haven't had them, or to see them again.")
+            result.reached_by = result.other_pieces = None
+        notes.append("The structure (and for a backward question, who reaches the place and the other pieces' lines) "
+                     "comes only with a call without known: call once without it if you haven't had them, or to "
+                     "see them again.")
     details = {id(o): _short_form(o) for _, o in due}
     used = len(result.model_dump_json())
     given: list[PathPiece] = []
     count = {"in_parts": 0, "waiting": 0}
+    #: Once a rule piece on the path whatever the conversation brings waits for a later call, no piece waiting on a
+    #: moment comes before it (test bench, 2026-11-20: typical 5's page 1 sent moment pieces and withheld an always
+    #: one, so a reader paging through met them out of order). The tool texts come after every rule piece (`due`),
+    #: so one waiting holds nothing back.
+    always_held = False
 
     def restore(o: PathPiece) -> None:
         for k, v in details[id(o)].items():
@@ -875,13 +910,15 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
                 result.pieces.append(o)
             used = len(result.model_dump_json())
             continue
-        if used + cost <= budget:
+        if used + cost <= budget and (p.always or not always_held):
             restore(o)
             o.text, used = p.text, used + cost
             given.append(o)
             if listing:
                 result.pieces.append(o)
-        elif listing:
+            continue
+        always_held = always_held or p.always
+        if listing:
             count["waiting"] += 1
         else:
             o.text_withheld, used = True, used + len(',"text_withheld":true')
@@ -1074,13 +1111,26 @@ def _grouped_mentions(ms: list[dict] | None) -> list[dict] | None:
     return None if ms is None else [{"target": t, "from": f} for t, f in out.items()]
 
 
+def _grouped_into(items: list[dict] | None) -> list[dict] | None:
+    """`into_areas`, one entry per piece reached and kind, `{to, kind, from: [...]}` (test bench, 2026-11-20: the
+    pointer to converting an area, in 26 area main notes, took 26 entries and the structure half a first page)."""
+    if items is None:
+        return None
+    out: dict[tuple, dict] = {}
+    for x in items:
+        e = out.setdefault((x["to"], x["kind"]), {"to": x["to"], "kind": x["kind"], "from": []})
+        if x["from"] not in e["from"]:
+            e["from"].append(x["from"])
+    return list(out.values())
+
+
 def _structure(st: dict, mentions: bool = False) -> PathStructure:
     """The structure as the result gives it: every check made, an empty list when it found nothing (a cold reader
     couldn't tell a check left out from one that found nothing); `mentions` listed on one agent's path only."""
     return PathStructure(
         size=st.get("size"), unplaced_pointers=_clip_vias(st.get("unplaced_pointers")),
         pointers_outside_rule_files=_clip_vias(st.get("pointers_outside_rule_files")),
-        into_areas=_clip_vias(st.get("into_areas")), mentions_not_followed=st.get("mentions_not_followed"),
+        into_areas=_grouped_into(st.get("into_areas")), mentions_not_followed=st.get("mentions_not_followed"),
         mentions=_grouped_mentions(st.get("mentions")) if mentions else None,
         rule_file_mentions=_grouped_mentions(st.get("rule_file_mentions")),
         broken_pointers=_clip_vias(st.get("broken_pointers")),
@@ -1123,22 +1173,31 @@ def _overview_moments(p: ap.Piece) -> str:
 
 def _overview_lines(b: ap.PathBuilder, known: dict | None) -> list[str]:
     """One line per piece, each server's tool texts as one, as the prototype's overview prints them."""
-    lines, tools = [], {}
-    for pid in b.order:
-        p = b.pieces[pid]
+    return _piece_lines([b.pieces[pid] for pid in b.order], known, numbered=True)
+
+
+def _piece_lines(pieces: list[ap.Piece], known: dict | None, numbered: bool) -> list[str]:
+    """One line per piece (`<id>  <chars> chars  #<hash>`, its status against `known`, its moments when it waits
+    on one), each server's tool texts as one line, where its first one comes."""
+    lines, tools, at = [], {}, {}
+    for p in pieces:
         if ap.tool_text(p):
-            tools.setdefault(pid.split(":")[1], []).append(p)  # instructions:<server>, tool:<server>:<name>, …
+            server = p.id.split(":")[1]  # instructions:<server>, tool:<server>:<name>, …
+            if server not in tools:
+                at[server] = len(lines)
+                lines.append(None)
+            tools.setdefault(server, []).append(p)
             continue
         status = "" if known is None else (" [unchanged]" if known.get(p.id) == p.hash
                                            else " [changed]" if p.id in known else " [new]")
         when = "" if p.always else f"  moment: {_overview_moments(p)}"
-        lines.append(f"{len(lines) + 1}. {pid}  {p.chars:,} chars  #{p.hash}{status}{when}")
+        lines.append(f"{p.id}  {p.chars:,} chars  #{p.hash}{status}{when}")
     for server, texts in tools.items():
         combined = ap.digest("".join(p.hash for p in texts))
         kinds = "instructions, guide, tools" if server == ap.SERVER else "instructions, tools"
-        lines.append(f"{len(lines) + 1}. tool:{server}:* ({len(texts)} texts: {kinds})  "
-                     f"{sum(p.chars for p in texts):,} chars  #{combined}")
-    return lines
+        lines[at[server]] = (f"tool:{server}:* ({len(texts)} texts: {kinds})  {sum(p.chars for p in texts):,} "
+                             f"chars  #{combined}")
+    return [f"{n}. {line}" for n, line in enumerate(lines, 1)] if numbered else lines
 
 
 def _start_of(start: PathStart, points: ap.StartingPoints) -> ap.Start:
@@ -1263,21 +1322,58 @@ def _reached_by_result(kept: _Kept, place: str, known: dict | None, machine: str
     notes += _changed_hook_scripts(setup, r["pieces"])
     if r["matched_by"].startswith("nothing"):
         notes.append(_NO_PATH_NOTE)
-    pieces = list(r["pieces"].values())
+    every = list(r["pieces"].values())
+    # The path up to the place, with texts; every other piece on those paths as a line (owner, 2026-11-19, round
+    # 3: six places gave the same 215 pieces, about 470,000 characters).
+    pieces = [r["pieces"][i] for i in r["texts"]]
     out = [_piece(p, known) for p in pieces]
+    held = set(r["texts"])
     snap = setup.snapshot
     result = ReachedByResult(
         place=r["place"], matched_by=r["matched_by"], reached_by=r["reached_by"],
         machine=snap.machine if snap else None, snapshot_made=snap.made if snap else None, pieces=out,
+        other_pieces=(_piece_lines([p for p in every if p.id not in held], None, numbered=False)
+                      + [f"{p.id}  {p.chars:,} chars  #{p.hash}  (another version, on {label}'s path)"
+                         for p, label in r["other_versions"]]) or None,
         left_path=_left_path(known, r["pieces"]), structure=_structure(r["structure"]), notes=notes or None)
     if known is None and read_from is None:  # the structure comes only then, and its note with it
         notes += _structure_notes(result.structure)
+        if r["other_versions"]:
+            notes.append(_VERSIONS_NOTE)
     result.notes = notes or None
-    if read_from is not None:
-        result.reached_by = None
-        return _part_of(result, pieces, out, read_from)
+    if read_from is not None:  # any piece on those paths, not only those listed with their text
+        result.reached_by = result.other_pieces = None
+        return _part_of(result, every, [_piece(p, known) for p in every], read_from)
+    if known is None:
+        _trim_structure(result, pieces, notes)
     _with_texts(result, pieces, out, notes, known)
     return result
+
+
+def _trim_structure(result, pieces: list[ap.Piece], notes: list[str]) -> None:
+    """When the texts would not all fit in one page beside the rest, but would without some of the structure's
+    lists, those lists are cut first, longest first, before any text waits for a later call (owner, round 3: a
+    pointer from 26 area main notes filled it). When the texts can't all fit anyway, nothing is cut: they come
+    over several calls, and the structure whole with the first."""
+    st = result.structure
+    if st is None:
+        return
+    texts = sum(len(json.dumps(p.text, ensure_ascii=False)) + len(',"text":') for p in pieces)
+    room = PAGE_CHARS - _NOTES_RESERVE - texts
+    names = ("into_areas", "pointers_outside_rule_files", "unplaced_pointers", "rule_file_mentions",
+             "broken_pointers", "skipped_imports", "import_warnings")
+    lists = sum(len(json.dumps(getattr(st, n) or [], ensure_ascii=False)) for n in names)
+    if len(result.model_dump_json()) - lists > room:
+        return
+    while len(result.model_dump_json()) > room:
+        longest = max(names, key=lambda n: len(getattr(st, n) or []))
+        items = getattr(st, longest) or []
+        if len(items) <= 1:
+            break
+        del items[(len(items) + 1) // 2:]
+        st.cut = sorted(set((st.cut or []) + [longest]))
+    if st.cut:
+        notes.append(f"Some lists of structure are cut short to leave room for the texts ({', '.join(st.cut)}).")
 
 
 async def agent_path_impl(start: PathStart | None, work: PathWork | None, known: dict | None,
@@ -1290,6 +1386,14 @@ async def agent_path_reached_by_impl(place: str, known: dict | None, machine: st
                                      read_from: ReadFrom | None = None) -> ReachedByResult:
     status, out = await _in_drawing(current_user_id.get(), "reached_by", (place, known, machine, read_from))
     return out if status == "ok" else _failed(ReachedByResult, out)
+
+
+#: Said when a piece has another text on another path (test bench, 2026-11-20: an area-start hook's messages, one
+#: per area, stood under one id).
+_VERSIONS_NOTE = ("Some pieces have another text on other paths (an area-start hook's message names the area): "
+                  "`pieces` and `read_from` give the one the chain's agents meet; each other version is a line "
+                  "in other_pieces, \"(another version, on <agent>'s path)\", its text in agent_path for that "
+                  "agent.")
 
 
 #: Said in a result that reports a place no path reaches: a cold reader took it for `not_followed` (2026-11-19).
@@ -1331,10 +1435,11 @@ async def agent_path_reached_by(
     machine: Annotated[str | None, _A_MACHINE] = None,
     read_from: Annotated[ReadFrom | None, _A_READ_FROM] = None,
 ) -> ReachedByResult:
-    """Which agents of this setup meet a rule's place, by which chain, and every piece on their paths.
+    """Which agents of this setup meet a rule's place, by which chain, and what they have in front of them then.
 
-    `agent_path` backward: use it before adding or changing a rule. Its pieces, `structure`, `known` and
-    `read_from` work as in `agent_path`.
+    `agent_path` backward: use it before adding or changing a rule. Texts come for each chain and the start pieces
+    its agents share; every other piece on their paths as one line, readable with `read_from`. Its pieces,
+    `structure`, `known` and `read_from` work as in `agent_path`.
     """
     return await agent_path_reached_by_impl(place, known, machine, read_from)
 

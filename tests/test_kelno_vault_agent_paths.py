@@ -459,7 +459,9 @@ def test_agent_path_without_start_gives_the_overview(vault):
     assert [t.number for t in result.typical] == [1, 3]
     worker = result.typical[1]
     assert worker.pieces[0].startswith("1. file:C:/Users/me/.claude/CLAUDE.md")
-    assert worker.pieces[-1].startswith(f"{len(worker.pieces)}. tool:obsidian-mcp:*")
+    # The tool texts as one line, where they load: before the pieces waiting on a moment.
+    tools_at = next(i for i, line in enumerate(worker.pieces) if line.startswith(f"{i + 1}. tool:obsidian-mcp:*"))
+    assert "moment: " not in worker.pieces[tools_at - 1] and "moment: " in worker.pieces[-1]
     assert any("moment: Before working on one of the owner's areas" in line for line in worker.pieces)
     # Nothing points to these on this vault (memory is read through its mirror's lines, not the note; Notes
     # kept is only mentioned).
@@ -967,8 +969,9 @@ def test_into_areas_names_shared_and_local_pieces(vault):
     common.write_text(common.read_text(encoding="utf-8") + "- When the build breaks, read [[Areas/Repo/Repo notes]].\n",
                       encoding="utf-8")
     st = path(PathStart(typical=1)).structure
-    assert {"from": "note:_/agent/Common-rules.md", "to": "note:Areas/Repo/Repo notes.md",
-            "kind": "shared into local"} in st.into_areas
+    # One entry per piece reached, with every piece pointing to it (test bench, 2026-11-20).
+    assert {"to": "note:Areas/Repo/Repo notes.md", "kind": "shared into local",
+            "from": ["note:_/agent/Common-rules.md"]} in st.into_areas
     source = open(ap.__file__, encoding="utf-8").read()
     assert "local into another local" in source and "leaf into another leaf" not in source
 
@@ -1437,3 +1440,127 @@ def test_a_worktree_start_loads_its_repos_own_claude_md_not_those_above_it(vault
     assert "file:D:/work/repo/CLAUDE.md" in order and "file:D:/work/CLAUDE.md" not in order
     assert "hook:SessionStart/area-start.py" in order
     assert any(line.startswith("the CLAUDE.md files of the worktree") for line in tree.structure.not_followed)
+
+
+# --- The backward question returns the path up to the place (owner, 2026-11-19, round 3) ------------------------
+
+
+def test_reached_by_gives_texts_up_to_the_place_and_every_other_piece_as_a_line(vault):
+    result = reached_by("_/agent/roles/Worker.md")
+    (hit,) = result.reached_by
+    assert hit["via"] == ["hook:SessionStart/area-start.py", "note:_/agent/roles/Worker.md"]
+    assert hit["pointed_to_by"] == ["hook:SessionStart/area-start.py"]
+    with_text = ids(result)
+    # The chain, the place included, and the start pieces its agents share, in arrival order, with their texts.
+    assert with_text[:3] == ["file:C:/Users/me/.claude/CLAUDE.md", "file:D:/work/repo/CLAUDE.md",
+                             "note:_/agent/Common-rules.md"]
+    assert {"hook:SessionStart/area-start.py", "note:_/agent/roles/Worker.md"} <= set(with_text)
+    assert all(p.text is not None for p in result.pieces)
+    # Every other piece on the path, one line each; the tool texts as one line per server.
+    assert "note:_/agent/Vault conventions.md" not in with_text
+    conv = [line for line in result.other_pieces if line.startswith("note:_/agent/Vault conventions.md  ")]
+    assert len(conv) == 1 and "moment: Before working on one of the owner's areas" in conv[0]
+    assert any(line.startswith("tool:obsidian-mcp:* (") for line in result.other_pieces)
+    assert not any(line.startswith("tool:obsidian-mcp:read_note") for line in result.other_pieces)
+    # Any piece on those paths can be read, not only those listed with their text.
+    part = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", None, None,
+                                                       ReadFrom(id="note:_/agent/Vault conventions.md")))
+    assert [p.id for p in part.pieces] == ["note:_/agent/Vault conventions.md"]
+    assert part.pieces[0].text == NOTES["_/agent/Vault conventions.md"]
+    # With known, the lines came with the first call, as the structure did.
+    again = reached_by("_/agent/roles/Worker.md", known={p.id: p.hash for p in result.pieces})
+    assert again.other_pieces is None and again.structure is None and not again.pieces
+
+
+def test_the_structure_is_cut_first_when_that_lets_the_texts_fit(vault):
+    from src.plugins.kelno_vault.agent_path_result import PathStructure, ReachedByResult
+
+    def result(n):
+        st = PathStructure(into_areas=[{"from": f"open_area:Areas/A{i}/A{i}.md", "to": "note:_/agent/x.md",
+                                        "kind": "shared into local"} for i in range(n)])
+        return ReachedByResult(place="x", pieces=[], structure=st)
+
+    big = ap.Piece("note:big.md", ap.LOADED, "loaded", "big.md", "x" * 60_000)
+    fits, notes = result(400), []
+    apt._trim_structure(fits, [big], notes)
+    assert fits.structure.cut == ["into_areas"] and 0 < len(fits.structure.into_areas) < 400
+    assert len(fits.model_dump_json()) + 60_010 <= apt.PAGE_CHARS - apt._NOTES_RESERVE
+    assert notes and notes[0].startswith("Some lists of structure are cut short to leave room for the texts")
+    # Texts that can't fit anyway come over several calls: the structure stays whole.
+    huge = ap.Piece("note:huge.md", ap.LOADED, "loaded", "huge.md", "x" * 90_000)
+    whole, notes = result(400), []
+    apt._trim_structure(whole, [huge], notes)
+    assert whole.structure.cut is None and len(whole.structure.into_areas) == 400 and not notes
+
+
+def test_a_whole_drawing_says_why(vault):
+    path(PathStart(typical=3))
+    (k,) = apt._KEPT.values()
+    assert k.cause == "the first drawing since the server started"
+    _write(vault, "Areas/Areas.md", NOTES["Areas/Areas.md"] + "| Other | | |\n")
+    path(PathStart(typical=3))
+    (k,) = apt._KEPT.values()
+    assert k.cause == "changed: Areas/Areas.md" and k.reach_map().cause == k.cause
+    # An update draws only what changed, and has no cause to give.
+    _write(vault, "_/agent/roles/Worker.md", "Worker rules, again.\n")
+    path(PathStart(typical=3))
+    (k,) = apt._KEPT.values()
+    assert k.cause == "" and k.redrawn < len(k.runs)
+    before = ap.ServedTexts([("a", "one"), ("b", "two")], "i", "g", "o")
+    now = ap.ServedTexts([("a", "one"), ("b", "three")], "i", "g2", "o")
+    assert apt._served_change(before, now) == "served texts changed: guide; tools b"
+
+
+# --- The test bench's rerun after round 2 (Agent paths, 2026-11-20) ---------------------------------------------
+
+
+def test_once_a_piece_always_on_the_path_waits_no_piece_waiting_on_a_moment_comes_before_it(vault):
+    from src.plugins.kelno_vault.agent_path_result import ReachedByResult
+
+    first = ap.Piece("note:a1.md", ap.LOADED, "loaded", "a1.md", "a" * 30_000)
+    held = ap.Piece("note:a2.md", ap.LOADED, "loaded", "a2.md", "b" * 60_000)
+    small = ap.Piece("note:w.md", ap.LATER, "later", "w.md", "c" * 1_000, None, "when x", always=False)
+    pieces = [first, held, small]
+    out = [apt._piece(p, None) for p in pieces]
+    result = ReachedByResult(place="x", pieces=out)
+    apt._with_texts(result, pieces, out, [], None)
+    # The small piece would fit, but it waits on a moment and an always piece before it waits: it waits too.
+    assert [o.text is not None for o in result.pieces] == [True, False, False]
+    assert result.waiting == 2
+
+
+def test_the_tool_texts_come_before_the_pieces_waiting_on_a_moment(vault):
+    common = vault / "_/agent/Common-rules.md"
+    common.write_text(common.read_text(encoding="utf-8") + "- When the build breaks, read [[_/agent/Notes kept]].\n",
+                      encoding="utf-8")
+    stages = [p.stage for p in path(PathStart(typical=1)).pieces]
+    tools_end = max(i for i, s in enumerate(stages) if s == ap.STAGE_NAMES[ap.TOOLS])
+    assert stages.index(ap.STAGE_NAMES[ap.LATER]) > tools_end
+    # The overview's line for the tool texts stands where they come.
+    lines = path().typical[0].pieces
+    tools_at = next(i for i, line in enumerate(lines) if ". tool:obsidian-mcp:* (" in line)
+    assert tools_at < next(i for i, line in enumerate(lines) if "  moment: " in line)
+
+
+def test_a_piece_with_another_text_on_another_path_is_a_line_of_its_own(vault):
+    folders = json.loads(json.dumps(SNAPSHOT["folders"]))
+    other = json.loads(json.dumps(folders["D:/work/repo"]))
+    other["session_start"][0]["text"] += " This session runs in another folder."
+    folders["D:/work/other"] = other
+    _snapshot(vault, folders=folders)
+    _write(vault, "Areas/Areas.md", NOTES["Areas/Areas.md"].replace("` | [[", "`; `D:/work/other` | [["))
+    result = reached_by("_/agent/roles/Worker.md")
+    hook = next(p for p in result.pieces if p.id == "hook:SessionStart/area-start.py")
+    assert "another folder" not in hook.text
+    lines = [line for line in result.other_pieces if line.startswith("hook:SessionStart/area-start.py  ")]
+    assert len(lines) == 1 and lines[0].endswith("(another version, on a Claude Code worker in D:/work/other's path)")
+    assert any(n.startswith("Some pieces have another text on other paths") for n in result.notes)
+
+
+def test_an_area_without_for_agents_says_so(vault):
+    _write(vault, "Areas/Repo/Repo.md", NOTES["Areas/Repo/Repo.md"].replace(
+        "## For agents\n\n- Read [[Areas/Repo/Repo notes]] before changing the build.\n\n", ""))
+    result = path(PathStart(typical=3))
+    assert "section:Areas/Repo/Repo.md#For agents" not in ids(result)
+    assert any(x.startswith("Repo's `## For agents`: its main note, Areas/Repo/Repo.md, has none")
+               for x in result.structure.not_followed)

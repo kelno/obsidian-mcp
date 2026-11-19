@@ -74,16 +74,17 @@ SERVER = "obsidian-mcp"
 #: The voice bridge, in its pieces' ids, its texts read from the PC's snapshot (`bridge`).
 BRIDGE_SERVER = "claude-voice"
 
-# Arrival stages, in the order things reach an agent.
-LOADED, HOOK, START_READ, BRIDGE, WORK, LATER, TOOLS = range(7)
+# Arrival stages, in the order things reach an agent. The connector's tools load before any moment comes (test
+# bench, 2026-11-20: listed after the moment pieces, the tool texts read as the last thing an agent meets).
+LOADED, HOOK, START_READ, BRIDGE, WORK, TOOLS, LATER = range(7)
 STAGE_NAMES = {
     LOADED: "loaded at the start",
     HOOK: "session-start hook",
     START_READ: "read at the start",
     BRIDGE: "at the first bridge result",
     WORK: "when the work's area is opened",
-    LATER: "when its moment comes",
     TOOLS: "when the connector's tools load",
+    LATER: "when its moment comes",
 }
 
 # A pointer to a rule note says when to read it in one of a closed list of shapes, set out in "How to write an
@@ -1229,6 +1230,9 @@ class PathBuilder:
         rules = section(text, "For agents")
         if rules:
             self.push(Piece(f"section:{main}#For agents", WORK, how + " (for_agents)", self.v.where(main), rules))
+        else:  # told apart from a section left out (test bench, 2026-11-20)
+            self.not_followed.append(f"{area['name']}'s `## For agents`: its main note, {main}, has none, so open_area "
+                                     "serves none; nothing is left out")
         # Not a rule file, but the agent reads it: its pointers are followed and flagged as outside the rule files.
         self.push(Piece(f"{OPEN_AREA_ID}{main}", WORK, how + " (main_note_text, without For agents and Tasks)",
                         self.v.where(main), without_sections(text, ["For agents", "Tasks"]), rules_only=True))
@@ -1686,6 +1690,8 @@ def reached_by(setup: Setup, place: str, runs: list | None = None) -> dict:
     groups: dict[tuple, list[str]] = {}
     #: Each group's chains as they are: when they are all one (a single area), it shows that one, not a placeholder.
     concrete: dict[tuple, set] = {}
+    #: Each group's runs, with the place's piece and its chain there.
+    members: dict[tuple, list] = {}
     for label, s, w, b, pid in hits:
         c = chain(b, pid)
         # The place itself keeps its own id: only the pieces leading to it stand for any area's.
@@ -1693,12 +1699,32 @@ def reached_by(setup: Setup, place: str, runs: list | None = None) -> dict:
                re.sub(r" on .*? \(", " on <the area> (", b.pieces[c[0]].arrives))
         groups.setdefault(key, []).append(label)
         concrete.setdefault(key, set()).add((tuple(c), b.pieces[c[0]].arrives))
+        members.setdefault(key, []).append((b, pid, c))
     # Group by run kind, not by label: a typical agent's name may share the per-folder runs' prefix.
     typical_names = {t.name for t in setup.points.typical}
     chat_runs = {l for l, *_ in runs if l not in typical_names and l.startswith("a claude.ai chat working on")}
     worker_runs = {l for l, *_ in runs if l not in typical_names and l.startswith("a Claude Code worker in ")}
     reached = []
+    #: The pieces whose text the question needs (owner, 2026-11-19, round 3): each group's chain, the place
+    #: included, with every piece pointing to the place, and the start pieces every agent of the group meets.
+    texts: dict[str, Piece] = {}
+    for key, ms in members.items():
+        # A group reached through several areas: its first run's chain stands for the others (the rest of those
+        # areas' pieces come as lines).
+        for b, pid, c in ms if len(concrete[key]) == 1 else ms[:1]:
+            for i in [*c, *(src for _, src, _ in b.pieces[pid].arrivals if src in b.pieces)]:
+                texts.setdefault(i, b.pieces[i])
+        shared = None
+        for b, _, _ in ms:
+            mine = {(i, b.pieces[i].hash) for i in b.order if b.pieces[i].stage <= START_READ}
+            shared = mine if shared is None else shared & mine
+        b0 = ms[0][0]
+        for i in b0.order:
+            if (i, b0.pieces[i].hash) in shared:
+                texts.setdefault(i, b0.pieces[i])
     for (surface, c, always, first), labels in groups.items():
+        b, pid, _ = members[(surface, c, always, first)][0]
+        pointers = [src for _, src, _ in b.pieces[pid].arrivals if src in b.pieces]
         if len(concrete[(surface, c, always, first)]) == 1:
             (c, first), = concrete[(surface, c, always, first)]
         chats = [l for l in labels if l in chat_runs]
@@ -1712,11 +1738,18 @@ def reached_by(setup: Setup, place: str, runs: list | None = None) -> dict:
             named.append("a Claude Code worker, any related folder")
         else:
             named += workers
-        reached.append({"agents": named, "surface": surface, "via": list(c), "always": always, "first_arrives": first})
+        reached.append({"agents": named, "surface": surface, "via": list(c), "always": always, "first_arrives": first,
+                        "pointed_to_by": pointers})
+    # Every piece on those paths, once; a piece whose text is given is the one its group meets. A piece with
+    # another text on another path (an area-start hook's message names the area) keeps each other version, with
+    # the first agent meeting it (test bench, 2026-11-20: one id stood for different texts).
     union: dict[str, Piece] = {}
-    for _, _, _, b, _ in hits:
+    versions: dict[tuple[str, str], tuple[Piece, str]] = {}
+    for label, _, _, b, _ in hits:
         for i in b.order:
-            union.setdefault(i, b.pieces[i])
+            union.setdefault(i, texts.get(i, b.pieces[i]))
+            if b.pieces[i].hash != union[i].hash:
+                versions.setdefault((i, b.pieces[i].hash), (b.pieces[i], label))
     # The facts on those paths, each pointer once; what can't be followed, each line once.
     hit_runs = [(label, s, w, b) for label, s, w, b, _ in hits]
     structure = across_runs(hit_runs)
@@ -1725,7 +1758,11 @@ def reached_by(setup: Setup, place: str, runs: list | None = None) -> dict:
         structure[key] = []
         for *_, b in hit_runs:
             structure[key] += [e for e in getattr(b, attr) if e not in structure[key]]
-    return {"place": place, "matched_by": how, "reached_by": reached, "pieces": union, "structure": structure}
+    # In arrival order: by stage, then as the paths met them.
+    rank = {i: n for n, i in enumerate(union)}
+    text_ids = sorted(texts, key=lambda i: (union[i].stage, rank[i]))
+    return {"place": place, "matched_by": how, "reached_by": reached, "pieces": union, "texts": text_ids,
+            "other_versions": list(versions.values()), "structure": structure}
 
 
 def generic(v: Vault, pid: str) -> str:
