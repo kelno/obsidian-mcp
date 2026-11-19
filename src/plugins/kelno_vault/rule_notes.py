@@ -250,22 +250,22 @@ def render_unshaped(lines: list[tuple[int, list[str], str]], shift: int) -> str:
 def render_unreached(places: list[str], unknown: str) -> str:
     """The result's `reached_by_no_path:` block, or its one line when it couldn't be told; "" when all is reached."""
     if unknown:
-        return (f"\n\nreached_by_no_path: not checked ({unknown}): whether an agent path reaches the rules this "
-                "write changed is unknown; `agent_path_reached_by` on their place tells.")
+        return (f"\n\nreached_by_no_path: not checked ({unknown}): `agent_path_reached_by` on each changed place "
+                "tells whether an agent path reaches it.")
     if not places:
         return ""
     shown = "\n".join(f"- {p}" for p in places)
     return ("\n\nreached_by_no_path: after this write, no agent path reaches these rules: the path tools followed "
-            "every way they know rules reach agents, and none leads here. Either nothing sends an agent here, or "
-            "something does by a way the path tools don't know; both need fixing:\n" + shown
-            + "\n- Nothing sends an agent here (you haven't pointed anything to it yet): add a pointer to it from a "
-              "rule the agents who need it already read, in one of the shapes in "
-              f"\"{conventions.RULE_WRITING}\" (`{conventions.RULES_NOTE}`). A link in no shape is a mention and "
-              "sends no one."
-            + "\n- Something does (you meant it to arrive by a hook, a loader, a tool's text, or a pointer the path "
-              "tools can't read yet): they "
-              f"must be taught it, as \"{conventions.RULE_PATHS}\" in the same note says."
-            + "\n`agent_path_reached_by` on a place shows what reaches its note or its area.")
+            "every way they know that rules reach agents, and none leads here. Either nothing sends an agent here, "
+            "or something does by a way the path tools don't follow; either way it needs fixing:\n" + shown
+            + "\nTo tell which, look for what is meant to send agents here: a pointer in a rule, a convention naming "
+              "a kind of note (such as `<folder>/<folder>.md`), a hook, an `@` import, a tool's text."
+            + "\n1. You find none, or only a link in none of the pointer shapes (a mention, which sends no one): add "
+              "a pointer from a rule the agents who need it already read (`agent_path` on their work shows what "
+              f"they read), in one of the shapes in \"{conventions.RULE_WRITING}\" (`{conventions.RULES_NOTE}`)."
+            + "\n2. You find one: the path tools must be taught that way, as "
+              f"\"{conventions.RULE_PATHS}\" in `{conventions.RULES_NOTE}` says. If that change isn't yours to make "
+              "in this session, tell the owner.")
 
 
 GUIDE = (
