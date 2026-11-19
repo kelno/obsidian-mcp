@@ -245,6 +245,18 @@ its retry contract, a read timeout never retried; native TEI uses `TEI_EMBED_BAT
 Why the size is fixed and there is still no aggregate deadline is the D5
 bullet under "Indexing decisions" below.
 
+### Queries go first (fork, 2026-11-19)
+
+A search's query embedding (`get_embedding(..., kind="query")`: `semantic_search`, `hybrid_search`, `ledger_search`) and the indexer's document slices go to the same provider. On the reference deployment's small CPU-only Ollama box, `semantic_search` and `hybrid_search` had a p90 of 10–12 s against a floor of 1–2 s: a query that arrived during an embed stage competed with every slice the stage kept sending. Now, while a query embedding is waiting for or running at the provider, the next document slice is not sent.
+
+- **How.** `get_embedding` counts a query from before its request until it ends, however it ends (`_QueryPriority`, a counter and an `asyncio.Event` set when the count is zero). Each provider's `embed_batch` calls `_let_queries_go_first(kind)` before every slice; for `kind="document"` it waits until no query is pending. This covers the notes' embed stage and the agent ledger's document embeds (the background queue and the sweep), which all go through `get_embeddings_batch`.
+- **Only the next slice waits.** A slice already sent is left alone: there is no way to cancel it at the provider, so a query that arrives during one still waits for it. That residual is the floor this cannot remove; only a smaller batch would, and the batch is not touched (next point).
+- **The slices are exactly what they were**: the same texts, grouped the same way, in the same order. A provider can return slightly different vectors for one text in a different batch, so the grouping is part of what a stored vector is. The gate changes when a slice is sent, nothing else (`tests/test_embed_query_priority.py`).
+- **Bounded.** A slice waits at most `QUERY_PRIORITY_MAX_WAIT_SECONDS` (20 s, a constant) and is then sent anyway, so overlapping queries cannot hold the indexer for ever: under a steady stream it still sends one slice per bound. The wait is outside each slice's own timeout (Ollama's per-slice `wait_for`, TEI's slice deadline), which still covers the request only.
+- **No deadlock.** Queries never wait at the gate; only document slices wait for queries. The embed stage holds no pooled connection across a provider call (`embed_note` ends its lookup transaction first), so the wait holds none either.
+- **Per event loop**, like `_SharedClient`: state left by another loop (pytest runs one per test) is dropped, so a count stranded by a dead loop cannot hold the next one's slices.
+- **What it costs the indexer.** The wait is spent inside the stage, so it counts toward `EMBED_TIME_BUDGET_SECONDS_PER_USER` and, in the worst case, adds up to the bound per slice to one note's time (the L4 arithmetic under the per-tenant budget). With searches a few seconds long and minutes apart, it is seconds per stage.
+
 ### TEI server identity and the embedding gate (#425)
 
 The rule: **the process exits only on positive evidence of a mismatch, and a
@@ -2672,7 +2684,7 @@ Accepted limitations (review findings declined, owner's review budget):
   exclusion sweep has no progress line.
 - **The re-tick note is global.** In multi-user mode one tenant's budget stop
   re-ticks every tenant; each tenant's stage still carries its own streak.
-- **One note can still hold `embed_pass_lock` for a long time** (L4 above; it was `index_pass_lock` until the stage locks split on 2026-11-09, which is what used to freeze index stages and `move_note` behind it): `MAX_CHUNKS_PER_NOTE` ÷ batch size × the per-request timeout. The 8.3 h figure assumes batch 1 at 30 s; a slow-CPU sizing (batch 2, 120 s) gives about 17 h of failing calls, or hours of successful ones. The stall signal below reports it.
+- **One note can still hold `embed_pass_lock` for a long time** (L4 above; it was `index_pass_lock` until the stage locks split on 2026-11-09, which is what used to freeze index stages and `move_note` behind it): `MAX_CHUNKS_PER_NOTE` ÷ batch size × the per-request timeout, plus up to `QUERY_PRIORITY_MAX_WAIT_SECONDS` per slice under a steady stream of searches ("Queries go first"). The 8.3 h figure assumes batch 1 at 30 s; a slow-CPU sizing (batch 2, 120 s) gives about 17 h of failing calls, or hours of successful ones. The stall signal below reports it.
 
 ### `/health` reports a stalled loop, not only a failing one (fork, 2026-11-01)
 

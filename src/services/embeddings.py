@@ -1573,6 +1573,9 @@ class OllamaProvider:
         size = settings.ollama_embed_batch_size
         results: list[list[float]] = []
         for start in range(0, len(texts), size):
+            # Outside the slice's `wait_for`: waiting for queries is not
+            # request time.
+            await _let_queries_go_first(kind)
             results.extend(
                 await asyncio.wait_for(
                     self._embed_inputs(texts[start : start + size]),
@@ -1668,6 +1671,7 @@ class OpenAIProvider:
         size = settings.openai_embed_batch_size
         for start in range(0, len(texts), size):
             sub = texts[start : start + size]
+            await _let_queries_go_first(kind)
             out.extend(await self._post(sub))
         return out
 
@@ -2003,8 +2007,110 @@ class TeiProvider:
         size = settings.tei_embed_batch_size
         out: list[list[float]] = []
         for start in range(0, len(texts), size):
+            # Outside the slice deadline: waiting for queries is not slice time.
+            await _let_queries_go_first(kind)
             out.extend(await self._post_slice(texts[start : start + size]))
         return out
+
+
+# ── Queries go first (fork, 2026-11-19) ─────────────────────────────────────
+#
+# A search's query embedding and the indexer's document batches go to the
+# same provider, and on a slow embedder (a CPU-only Ollama) a query that
+# arrived during an embed stage competed with every slice the stage kept
+# sending. So while a query embedding is waiting for or running at the
+# provider, a document slice is not sent: `embed_batch` waits before each
+# slice until no query is pending, then sends it unchanged.
+#
+# - **Only the next slice waits.** A slice already sent is not touched; there
+#   is no way to cancel it at the provider.
+# - **Nothing about the slices changes**: the same texts, in the same groups,
+#   in the same order. A provider can return slightly different vectors for
+#   one text in a different batch, so the grouping is part of what a stored
+#   vector is.
+# - **The wait is bounded** by `QUERY_PRIORITY_MAX_WAIT_SECONDS`, after which
+#   the slice goes anyway, so overlapping queries cannot hold the indexer back
+#   for ever: under a steady stream it still sends a slice per bound. The wait
+#   is outside each slice's own timeout, which still covers the request only.
+# - **Queries never wait here**, so the gate cannot deadlock: the indexer
+#   waits for queries, never the other way round.
+
+#: The longest one document slice waits for pending query embeddings before
+#: it is sent anyway. Longer than a query normally takes on a slow CPU
+#: embedder, waiting behind a slice already in flight included.
+QUERY_PRIORITY_MAX_WAIT_SECONDS = 20.0
+
+
+class _QueryPriority:
+    """The count of query embeddings waiting for or running at the provider,
+    and the event a document slice waits on until it is zero.
+
+    Keyed to the running event loop, like `_SharedClient`: an `asyncio.Event`
+    belongs to the loop that first waited on it, and pytest runs a loop per
+    test. State left by another loop is dropped, not reused."""
+
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._pending = 0
+        self._idle: asyncio.Event | None = None
+
+    def _current(self) -> asyncio.Event:
+        loop = asyncio.get_running_loop()
+        if self._idle is None or self._loop is not loop:
+            self._loop = loop
+            self._pending = 0
+            self._idle = asyncio.Event()
+            self._idle.set()
+        return self._idle
+
+    @property
+    def pending(self) -> int:
+        """Query embeddings pending on the running loop."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return 0
+        return self._pending if self._loop is loop else 0
+
+    def query_started(self) -> None:
+        idle = self._current()
+        self._pending += 1
+        idle.clear()
+
+    def query_finished(self) -> None:
+        if self._idle is None or self._loop is not asyncio.get_running_loop():
+            return  # counted on a loop whose state was dropped since
+        self._pending = max(0, self._pending - 1)
+        if self._pending == 0:
+            self._idle.set()
+
+    async def wait_until_idle(self, max_wait: float) -> float:
+        """Wait until no query is pending, at most `max_wait` seconds.
+        Returns the seconds waited; never raises for the bound."""
+        idle = self._current()
+        if idle.is_set():
+            return 0.0
+        start = time.monotonic()
+        try:
+            await asyncio.wait_for(idle.wait(), timeout=max_wait)
+        except TimeoutError:
+            logger.debug(
+                "Embedding: a document slice waited %.1f s for %d pending "
+                "query embedding(s) and is sent anyway",
+                max_wait,
+                self._pending,
+            )
+        return time.monotonic() - start
+
+
+_QUERY_PRIORITY = _QueryPriority()
+
+
+async def _let_queries_go_first(kind: EmbeddingKind) -> None:
+    """Before each document slice of `embed_batch`: wait, within the bound,
+    until no query embedding is pending. A query batch does not wait."""
+    if kind == "document":
+        await _QUERY_PRIORITY.wait_until_idle(QUERY_PRIORITY_MAX_WAIT_SECONDS)
 
 
 @lru_cache(maxsize=1)
@@ -2032,9 +2138,16 @@ def _with_instruction(text_input: str, kind: EmbeddingKind) -> str:
 
 
 async def get_embedding(text_input: str, *, kind: EmbeddingKind) -> list[float]:
-    return await get_provider().embed_one(
-        _with_instruction(text_input, kind), kind=kind
-    )
+    provider_input = _with_instruction(text_input, kind)
+    if kind != "query":
+        return await get_provider().embed_one(provider_input, kind=kind)
+    # Counted from before the request until it ends, however it ends, so the
+    # indexer's next slice waits for it (see `_QueryPriority`).
+    _QUERY_PRIORITY.query_started()
+    try:
+        return await get_provider().embed_one(provider_input, kind=kind)
+    finally:
+        _QUERY_PRIORITY.query_finished()
 
 
 async def get_embeddings_batch(
