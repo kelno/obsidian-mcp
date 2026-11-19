@@ -1,5 +1,6 @@
 import asyncio
 import enum
+import hashlib
 import json
 import logging
 import math
@@ -2214,13 +2215,23 @@ def _query_cache_key(
 ) -> tuple | None:
     """The cache key, or None (no caching) for a provider object that cannot
     be hashed, which only a test's stand-in is. The object itself, not its
-    `id`, so a key never outlives the provider it names."""
+    `id`, so a key never outlives the provider it names.
+
+    The input is held as its SHA-256, not its text: queries have no length
+    cap below the transport's, so a key holding the text would make an entry
+    cost the query's length (the adversarial review kept 64 MiB for 64
+    one-MiB queries, 2026-11-19). The caller's user id is in the key, so on a
+    multi-user deployment one tenant's hit (answered in microseconds rather
+    than a provider round trip) never tells another what was searched."""
     try:
         hash(provider)
     except TypeError:
         return None
+    from src.auth.session import current_user_id
+
     return (
-        provider_input,
+        hashlib.sha256(provider_input.encode("utf-8", "surrogatepass")).digest(),
+        current_user_id.get(),
         kind,
         provider,
         settings.embedding_provider,

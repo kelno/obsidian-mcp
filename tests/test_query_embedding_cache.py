@@ -240,3 +240,32 @@ async def test_the_ledger_query_vector_goes_through_the_cache(provider):
     # And a search of the same words shares the entry.
     await embeddings.get_embedding("what failed", kind="query")
     assert len(provider.calls) == 1
+
+
+async def test_each_user_has_their_own_entries(provider):
+    """A hit is fast enough to tell apart from a miss, so on a multi-user
+    deployment one tenant's search never answers another's (review, 2026-11-19)."""
+    from src.auth.session import current_user_id
+
+    token = current_user_id.set(1)
+    try:
+        await embeddings.get_embedding("q", kind="query")
+        await embeddings.get_embedding("q", kind="query")
+    finally:
+        current_user_id.reset(token)
+    token = current_user_id.set(2)
+    try:
+        await embeddings.get_embedding("q", kind="query")
+    finally:
+        current_user_id.reset(token)
+    assert len(provider.calls) == 2
+
+
+async def test_a_long_query_costs_its_vector_in_the_cache_not_its_text(provider):
+    """The key holds the input's SHA-256: a 1 MiB query adds no 1 MiB key."""
+    long = "x" * (1 << 20)
+    await embeddings.get_embedding(long, kind="query")
+    key = embeddings._query_cache_key(embeddings.get_provider(), long, "query")
+    assert not any(isinstance(part, str) and len(part) > 1000 for part in key)
+    await embeddings.get_embedding(long, kind="query")
+    assert len(provider.calls) == 1
