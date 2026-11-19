@@ -161,7 +161,7 @@ def test_agent_path_draws_a_path_with_texts_hashes_and_known(vault):
     assert order[4] == "note:_/agent/roles/Worker.md" and "note:_/agent/roles/Coordinator.md" not in order
     # The repo's area, as open_area serves it, then what its rules point to.
     work = [i for i in order if first.pieces[order.index(i)].stage == ap.STAGE_NAMES[ap.WORK]]
-    assert work == ["section:Areas/Repo/Repo.md#For agents", "note:Areas/Repo/Repo.md",
+    assert work == ["section:Areas/Repo/Repo.md#For agents", "open_area:Areas/Repo/Repo.md",
                     "section:_/agent/Vault conventions.md#Working on an area",
                     "tool:obsidian-mcp:open_area/instructions", "note:Areas/Repo/Repo notes.md"]
     # A pointer that says when comes later; a link that says neither when nor "read" is a mention, counted and
@@ -222,7 +222,7 @@ def test_mentions_are_grouped_by_rule_file_and_held_pieces_come_short(vault):
     # A call with known lists only what it brings: nothing here, every piece held.
     again = path(PathStart(typical=3), known={p.id: p.hash for p in first.pieces})
     assert not again.pieces and again.waiting == 0 and again.left_path is None
-    assert again.structure is None and any("first call" in n for n in again.notes)
+    assert again.structure is None and any("comes only with a call without known" in n for n in again.notes)
     reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", None, None))
     held = {p.id: p.hash for p in reached.pieces}
     again = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", held, None))
@@ -258,9 +258,10 @@ def test_a_result_whose_metadata_passes_the_budget_is_cut_down_and_every_text_ar
 
 
 def test_the_overview_stays_within_the_budget(vault, monkeypatch):
-    monkeypatch.setattr(apt, "PAGE_CHARS", 2_500)
+    # Small enough that every list and piece line must be cut; the rest (names, notes, not_followed) can't be.
+    monkeypatch.setattr(apt, "PAGE_CHARS", 2_700)
     over = path()
-    assert len(over.model_dump_json()) <= 2_500
+    assert len(over.model_dump_json()) <= 2_700
     assert any("cut short" in n for n in over.notes)
     assert any(line.startswith("… ") for t in over.typical for line in t.pieces)
 
@@ -406,7 +407,7 @@ def test_a_text_no_result_can_carry_comes_in_parts_with_read_from(vault, monkeyp
     held = {p.id: p.hash for p in first.pieces if p.id != worker.id}
     again = path(PathStart(typical=3), known=held)
     assert [p.id for p in again.pieces if p.status == "new"] == [worker.id]
-    assert not any("did not fit" in n for n in again.notes)
+    assert not any("not in this result" in n for n in again.notes)
     # Part by part, each within the budget, until the whole text, whose hash is the piece's.
     got, offset, calls = "", 0, 0
     while offset is not None:
@@ -451,7 +452,7 @@ def test_agent_path_without_start_gives_the_overview(vault):
     worker = result.typical[1]
     assert worker.pieces[0].startswith("1. file:C:/Users/me/.claude/CLAUDE.md")
     assert worker.pieces[-1].startswith(f"{len(worker.pieces)}. tool:obsidian-mcp:*")
-    assert any("when: Before working on one of the owner's areas" in line for line in worker.pieces)
+    assert any("moment: Before working on one of the owner's areas" in line for line in worker.pieces)
     # Nothing points to these on this vault (memory is read through its mirror's lines, not the note; Notes
     # kept is only mentioned).
     assert result.rule_files_no_path_reaches == [
@@ -661,9 +662,12 @@ def test_the_voice_bridges_texts_reach_the_relay_and_the_sessions_on_the_bridge(
     note = by_id["bridge:claude-voice#2"]
     assert note.moment == "about once an hour" and note.stage == ap.STAGE_NAMES[ap.LATER] and not note.always
     assert not any("voice bridge" in line for line in worker.structure.not_followed)
-    # A session the bridge didn't start, a claude.ai chat: no bridge.
-    for other in (4, 1):
-        assert not any("claude-voice" in i for i in ids(path(PathStart(typical=other))))
+    # A session the bridge didn't start: no bridge. A claude.ai chat has it among its connectors: the guide when
+    # it first calls the bridge, the tools when they load, no notes (those come under relayed messages).
+    assert not any("claude-voice" in i for i in ids(path(PathStart(typical=4))))
+    chat = {p.id: p for p in path(PathStart(typical=1)).pieces}
+    assert chat["guide:claude-voice"].moment == "when it first calls the bridge" and not chat["guide:claude-voice"].always
+    assert "tool:claude-voice:health" in chat and not any(i.startswith("bridge:") for i in chat)
     # The overview folds each server's tool texts into one line.
     over = path()
     relay_lines = next(t for t in over.typical if t.number == 2).pieces
@@ -1081,3 +1085,232 @@ def test_an_update_draws_again_only_the_paths_a_change_touches(drawing):
     area.write_text(area.read_text(encoding="utf-8") + "\nMore.\n", encoding="utf-8")
     m = apt.update_reach_map(None, served)
     assert 0 < m.redrawn < len(m.runs)
+
+
+# --- The fix batch of 2026-11-19 (the test bench's cold reads, "Open points" in the vault note) -------------
+
+
+def _write(vault, rel, text):
+    (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+    (vault / rel).write_text(text, encoding="utf-8")
+
+
+def _snapshot(vault, **changes):
+    _write(vault, f"{ap.SNAPSHOT_FOLDER}/PC.json", json.dumps({**SNAPSHOT, **changes}))
+
+
+def reached_by(place, known=None):
+    return asyncio.run(apt.agent_path_reached_by_impl(place, known, None))
+
+
+def test_work_area_takes_the_slug_or_tag_open_area_takes(vault):
+    _write(vault, "Areas/Repo/Repo.md", NOTES["Areas/Repo/Repo.md"].replace(
+        "---\ncode_project: true\n", "---\ncode_project: true\narea_tag: area/repo-work\n"))
+    for name in ("repo-work", "#area/repo-work", "area/repo-work", "Repo"):
+        result = path(PathStart(surface="claude-ai"), PathWork(area=name))
+        assert "section:Areas/Repo/Repo.md#For agents" in ids(result), name
+        assert not result.structure.broken_pointers, name
+    nope = path(PathStart(surface="claude-ai"), PathWork(area="no-such-area"))
+    assert nope.structure.broken_pointers[0]["target"] == "no-such-area"
+
+
+def test_a_folder_the_snapshot_holds_nothing_of_still_loads_what_every_folder_loads(vault):
+    result = path(PathStart(surface="claude-code", folder="Z:/elsewhere", role="worker"))
+    order = ids(result)
+    assert order[:2] == ["file:C:/Users/me/.claude/CLAUDE.md", "note:_/agent/Common-rules.md"]
+    assert not any(i.startswith("hook:SessionStart/") for i in order)  # its message there is unknown
+    assert any(line.startswith("the CLAUDE.md files of Z:/elsewhere and what the session-start hooks say there")
+               for line in result.structure.not_followed)
+
+
+def test_known_is_kept_by_piece_id_not_by_text(vault):
+    # Two pieces with the same text, both on the worker's path: holding one doesn't hold the other.
+    _write(vault, "_/agent/guides/coding-practices.md", NOTES["_/agent/Vault conventions.md"])
+    first = path(PathStart(typical=3))
+    by_id = {p.id: p for p in first.pieces}
+    code, conv = by_id["note:_/agent/guides/coding-practices.md"], by_id["note:_/agent/Vault conventions.md"]
+    assert code.hash == conv.hash
+    one = path(PathStart(typical=3), known={code.id: code.hash})
+    assert [p.status for p in one.pieces if p.id == conv.id] == ["new"]
+    assert code.id not in ids(one)
+    both = path(PathStart(typical=3), known={code.id: code.hash, conv.id: conv.hash})
+    assert conv.id not in ids(both) and code.id not in ids(both)
+
+
+def test_without_a_role_each_role_note_waits_on_its_role(vault):
+    result = path(PathStart(surface="claude-code", folder="D:/work/repo"))
+    by_id = {p.id: p for p in result.pieces}
+    worker, coordinator = by_id["note:_/agent/roles/Worker.md"], by_id["note:_/agent/roles/Coordinator.md"]
+    assert not worker.always and worker.moment == "if its role is Worker"
+    assert not coordinator.always and coordinator.moment == "if its role is Coordinator"
+    assert any(n.startswith("No role given") for n in result.notes)
+    picked = path(PathStart(surface="claude-code", folder="D:/work/repo", role="worker"))
+    assert {p.id: p for p in picked.pieces}["note:_/agent/roles/Worker.md"].always
+    assert not any(n.startswith("No role given") for n in picked.notes or [])
+
+
+def test_a_note_read_as_soon_as_a_waiting_piece_points_to_it_waits_on_that_moment(vault):
+    _write(vault, "_/agent/Vault conventions.md", NOTES["_/agent/Vault conventions.md"]
+           + "\nRead [[Notes/Some note]] for the details.\n")
+    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    some = by_id["note:Notes/Some note.md"]
+    assert not some.always and some.moment == "Before working on one of the owner's areas"
+    # The connector's guide is on every path: every agent on the connector calls get_vault_guide first.
+    assert "calls first" in by_id["guide:obsidian-mcp"].arrives
+
+
+def test_a_hook_message_holding_a_rule_sections_lines_brings_that_section_at_the_start(vault):
+    _write(vault, "Reference/Servers/PC/PC.md", "PC.\n\n## For agents\n\n- One suite at a time.\n")
+    folders = json.loads(json.dumps(SNAPSHOT["folders"]))
+    hook = folders["D:/work/repo"]["session_start"][0]
+    hook["text"] += ("\n\nThis session runs on PC. The rules for working on it, from the `## For agents` section of "
+                     "D:\\vault\\Reference\\Servers\\PC\\PC.md:\n- One suite at a time.")
+    _snapshot(vault, folders=folders)
+    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    rules = by_id["section:Reference/Servers/PC/PC.md#For agents"]
+    assert rules.always and rules.stage == ap.STAGE_NAMES[ap.START_READ]
+    assert rules.arrives == "copied into hook:SessionStart/area-start.py's message"
+    _write(vault, "Reference/Servers/PC/PC.md", "PC.\n\n## For agents\n\n- Two suites at a time.\n")
+    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    assert by_id["section:Reference/Servers/PC/PC.md#For agents"].arrives.endswith(
+        "(the copy differs from the section now)")
+
+
+def test_a_backward_question_with_known_says_how_to_get_who_reaches_the_place(vault):
+    again = reached_by("_/agent/roles/Worker.md", known={"note:_/agent/roles/Worker.md": "0123456789ab"})
+    assert again.reached_by is None
+    assert any("call once without it if you haven't had them" in n for n in again.notes)
+
+
+def test_pieces_come_in_the_order_of_their_stages(vault):
+    result = path(PathStart(typical=3))
+    stages = [list(ap.STAGE_NAMES.values()).index(p.stage) for p in result.pieces]
+    assert stages == sorted(stages)
+    # The area's pieces come before what waits on a moment (they were taken in after it).
+    order = ids(result)
+    assert order.index("open_area:Areas/Repo/Repo.md") < order.index("note:_/agent/Vault conventions.md")
+
+
+def test_memorys_mirrored_lines_are_followed_only_where_memory_loads(vault):
+    _write(vault, "_/agent/Common-rules.md", NOTES["_/agent/Common-rules.md"]
+           + "- Before saving anything to Claude's memory, read [[_/agent/Memory reference]].\n")
+    _write(vault, "_/agent/Memory reference.md", NOTES["_/agent/Memory reference.md"]
+           + "- At the start of every chat, read [[_/agent/Chat only]].\n")
+    _write(vault, "_/agent/Chat only.md", "For chats.\n")
+    worker = ids(path(PathStart(typical=3)))
+    assert "note:_/agent/Memory reference.md" in worker and "note:_/agent/Chat only.md" not in worker
+    assert "note:_/agent/Chat only.md" in ids(path(PathStart(surface="claude-ai")))
+
+
+def test_a_backward_question_keeps_the_places_own_id_in_its_chain(vault):
+    result = reached_by("Areas/Repo/Repo.md#For agents")
+    assert result.matched_by == "the place itself"
+    assert all(hit["via"][-1] == "section:Areas/Repo/Repo.md#For agents" for hit in result.reached_by)
+
+
+def test_a_bare_hook_id_is_reached_through_each_of_its_messages(vault):
+    _snapshot(vault, format=2, hook_messages={"hook:Stop/check.py": {"event": "Stop", "matcher": "", "messages": [
+        {"when": "at the end of a turn", "text": "First.", "hash": "a"},
+        {"when": "at the end of the first turn", "text": "Second.", "hash": "b"}]}})
+    result = reached_by("hook:Stop/check.py")
+    assert sorted(hit["via"][-1] for hit in result.reached_by) == ["hook:Stop/check.py#1", "hook:Stop/check.py#2"]
+    assert [hit["via"][-1] for hit in reached_by("hook:Stop/check.py#2").reached_by] == ["hook:Stop/check.py#2"]
+
+
+def test_what_a_backward_question_matched_says_whether_the_place_exists(vault):
+    assert reached_by("Notes/Some note.md").matched_by == "nothing: it exists, and no path reaches it or its area"
+    assert reached_by("Notes/Missing.md").matched_by == (
+        "nothing: it doesn't exist yet, and no path reaches it or its area")
+    assert reached_by("Areas/Repo/Repo.md#Current position").matched_by == "its note (it holds that section)"
+    assert reached_by("Areas/Repo/Repo.md#Nope").matched_by == "its note (the section isn't in it yet)"
+
+
+def test_the_main_note_as_open_area_serves_it_has_an_id_of_its_own(vault):
+    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    served = by_id["open_area:Areas/Repo/Repo.md"]
+    assert "note:Areas/Repo/Repo.md" not in by_id and "## For agents" not in served.text
+    assert served.text != NOTES["Areas/Repo/Repo.md"]
+
+
+def test_a_first_call_counts_its_withheld_texts_in_waiting(vault, monkeypatch):
+    monkeypatch.setattr(apt, "PAGE_CHARS", 25_000)
+    first = path(PathStart(typical=3))
+    withheld = sum(1 for p in first.pieces if p.text_withheld)
+    assert withheld and first.waiting == withheld
+    assert any(n.startswith(f"{withheld} texts are not in this result") for n in first.notes)
+    full = path(PathStart(surface="claude-ai"))
+    assert full.waiting is None or full.waiting == sum(1 for p in full.pieces if p.text_withheld)
+
+
+def test_the_result_names_a_typical_agent_as_the_call_does(vault):
+    result = path(PathStart(typical=3))
+    assert result.start["typical"] == 3 and "handwritten" not in result.start
+    assert not any(" when: " in line for t in path().typical for line in t.pieces)
+
+
+def test_a_structure_gives_every_check_made_an_empty_list_when_it_found_nothing(vault):
+    st = json.loads(path(PathStart(typical=3)).model_dump_json())["structure"]
+    assert st["skipped_imports"] == [] and st["import_warnings"] == [] and st["broken_pointers"] == []
+    assert st["unplaced_pointers"] == [] and st["not_followed"]
+    # The overview's facts across every area hold two checks only: the others aren't part of it.
+    across = json.loads(path().model_dump_json())["across_every_area"]
+    assert "skipped_imports" not in across and across["into_areas"] is not None
+
+
+def test_one_agents_path_lists_its_mentions_by_note(vault):
+    st = path(PathStart(typical=3)).structure
+    assert {"target": "Notes/Some note.md", "from": ["note:_/agent/Common-rules.md"]} in st.mentions
+    assert st.mentions_not_followed == len(st.mentions) + len(st.rule_file_mentions)
+    assert all(t.structure.mentions is None for t in path().typical)  # the overview keeps the count
+
+
+def test_into_areas_comes_with_a_sentence_on_what_it_is(vault):
+    _write(vault, "_/agent/Common-rules.md", NOTES["_/agent/Common-rules.md"]
+           + "- When the build breaks, read [[Areas/Repo/Repo notes]].\n")
+    result = path(PathStart(typical=3))
+    assert result.structure.into_areas and any(n.startswith("into_areas: ") for n in result.notes)
+    assert any(n.startswith("into_areas: ") for n in path().notes)
+
+
+def test_an_area_that_names_none_is_said_in_the_notes(vault):
+    result = path(PathStart(surface="claude-ai"), PathWork(area="no-such-area"))
+    assert any(n.startswith("work.area 'no-such-area' names no area") for n in result.notes)
+    assert not any(n.startswith("work.area") for n in path(PathStart(surface="claude-ai"), PathWork(area="Repo")).notes or [])
+
+
+def test_agent_paths_description_points_to_the_backward_question(vault):
+    source = " ".join(open(apt.__file__, encoding="utf-8").read().split())
+    assert "Who meets one rule, and the path up to it: `agent_path_reached_by`." in source
+
+
+def test_a_backward_question_reached_through_one_area_shows_that_area(vault):
+    for hit in reached_by("Areas/Repo/Not yet.md").reached_by:
+        assert "<the area" not in json.dumps(hit), hit
+        assert hit["first_arrives"].startswith("served by open_area on Repo (")
+
+
+def test_a_claude_md_below_the_start_folder_loads_when_the_session_works_there(vault):
+    folders = json.loads(json.dumps(SNAPSHOT["folders"]))
+    folders["D:/work/repo/sub"] = {"loads": folders["D:/work/repo"]["loads"] + [
+        {"id": "file:D:/work/repo/sub/CLAUDE.md", "exists": True,
+         "arrives": "loaded at the start by Claude Code (D:/work/repo/sub)"}], "session_start": []}
+    files = {**SNAPSHOT["files"], "file:D:/work/repo/sub/CLAUDE.md": {"text": "Sub rules.\n@more.md\n"},
+             "file:D:/work/repo/sub/more.md": {"text": "More sub rules.\n"}}
+    _snapshot(vault, folders=folders, files=files)
+    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    sub = by_id["file:D:/work/repo/sub/CLAUDE.md"]
+    assert not sub.always and sub.moment == "when it works on a file in D:/work/repo/sub"
+    assert sub.arrives == "loaded by Claude Code when it reads a file in D:/work/repo/sub"
+    more = by_id["file:D:/work/repo/sub/more.md"]  # its imports are expanded, waiting on the same moment
+    assert not more.always and more.moment == sub.moment
+    assert by_id["file:D:/work/repo/CLAUDE.md"].always  # the start folder's own is loaded at the start
+
+
+def test_a_rule_section_listed_after_its_note_read_whole_says_so(vault):
+    _write(vault, "_/agent/Common-rules.md", NOTES["_/agent/Common-rules.md"]
+           + "- When the build breaks, read [[Areas/Repo/Repo notes]].\n")
+    _write(vault, "Areas/Repo/Repo notes.md", "How the build works.\n\n## For agents\n\n- Ask first.\n")
+    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    assert "note:Areas/Repo/Repo notes.md" in by_id
+    assert by_id["section:Areas/Repo/Repo notes.md#For agents"].arrives.endswith(
+        "(its text is in note:Areas/Repo/Repo notes.md, read whole earlier on this path)")

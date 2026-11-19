@@ -47,8 +47,8 @@ class ReadFrom(BaseModel):
 
 
 class PathPiece(_OmitNone):
-    #: What it is: `note:<vault path>`, `section:<note path>#<heading>`, `file:<PC path>` (outside the vault),
-    #: `hook:<event>/<script>`, `memory:/<file>`, `tool:obsidian-mcp:<tool>`, `instructions:obsidian-mcp`,
+    #: What it is: `note:<vault path>`, `section:<note path>#<heading>`, `open_area:<main note path>` (the main
+    #: note as `open_area` serves it), `file:<PC path>` (outside the vault), `hook:<event>/<script>`, `memory:/<file>`, `tool:obsidian-mcp:<tool>`, `instructions:obsidian-mcp`,
     #: `guide:obsidian-mcp`.
     id: str
     #: When it arrives: loaded at the start, session-start hook, read at the start, at the first bridge
@@ -101,6 +101,9 @@ class PathStructure(_OmitNone):
     into_areas: list[dict] | None = None
     #: Links that are mentions, not pointers: counted, not followed.
     mentions_not_followed: int | None = None
+    #: On one agent's path, those to notes that aren't rule files, one entry per note (`{target, from: [...]}`),
+    #: the pieces linking to it; the line is in the text of the piece it comes from.
+    mentions: list[dict] | None = None
     #: Of those, the links to rule files: between rule notes, a link in none of the pointer shapes is a
     #: mention, not a pointer, so the rule file it names is not put on the path. One entry per rule file
     #: (`{target, from: [...]}`), the notes linking to it.
@@ -115,6 +118,7 @@ class PathStructure(_OmitNone):
     import_warnings: list[dict] | None = None
     #: What the path leaves out: what cannot be followed yet, and what isn't followed by design.
     not_followed: list[str] | None = None
+    #: An empty list is a check made that found nothing; a list left out isn't part of this structure.
     #: The lists above cut short to keep the result within its size budget, if any.
     cut: list[str] | None = None
 
@@ -142,7 +146,8 @@ class AgentPathResult(_OmitNone):
     #: Without `known`, every piece on the path; with `known`, only what this call brings (texts, pieces in
     #: parts, new private ones): the pieces you hold and those still waiting are left out.
     pieces: list[PathPiece] | None = None
-    #: With `known`: how many pieces' texts come in later calls (listed in your first call, not here).
+    #: How many pieces' texts come in later calls: those marked `text_withheld` here on a call without `known`;
+    #: with `known`, those listed in an earlier call and left out here.
     waiting: int | None = None
     #: With `known`: the pieces you hold that are no longer on the path.
     left_path: list[str] | None = None
@@ -161,7 +166,8 @@ class ReachedByResult(_OmitNone):
 
     error: str | None = None
     place: str | None = None
-    #: What was matched: the place itself, its note (a place that doesn't exist yet), or its area.
+    #: What was matched: the place itself; its note (a place no path holds: one that doesn't exist yet, or a part of
+    #: a note, the note saying whether it holds that section); its area; or nothing, saying whether the place exists.
     matched_by: str | None = None
     #: Each kind of agent with the chain that brings it there; "any area" or "any related folder" when every
     #: one reaches it the same way.
@@ -170,7 +176,7 @@ class ReachedByResult(_OmitNone):
     snapshot_made: str | None = None
     #: Every piece on those paths; with `known`, only what this call brings, as in `agent_path`.
     pieces: list[PathPiece] | None = None
-    #: With `known`: how many pieces' texts come in later calls.
+    #: How many pieces' texts come in later calls, as in `agent_path`.
     waiting: int | None = None
     #: With `known`: the pieces you hold that are on none of those paths any more.
     left_path: list[str] | None = None

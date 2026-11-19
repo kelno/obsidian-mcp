@@ -53,11 +53,18 @@ SNAPSHOT_FORMATS = (1, 2)
 #: The hand-written starting points: what each surface loads first, and the typical agents.
 STARTING_POINTS_PATH = "_/agent-paths/starting-points.toml"
 MEMORY_NOTE = "_/agent/Memory reference.md"
+#: The sections of `MEMORY_NOTE` that mirror Claude's memory: its lines, then its profile (`load_memory`).
+MEMORY_SECTIONS = ["Lines", "Profile"]
 AREAS_NOTE = "Areas/Areas.md"
 CONVENTIONS_NOTE = "_/agent/Vault conventions.md"
 WHERE_NOTE = "_/agent/Where agent instructions go.md"
 CODING_GUIDE = "_/agent/guides/coding-practices.md"
 ROLES_DIR = "_/agent/roles/"
+#: A main note as `open_area` serves it, without its For agents and Tasks sections: not the note's whole text, so not
+#: its id (a caller holding the whole note's hash would take one for the other). This, `note:` and `section:` name a
+#: vault file.
+OPEN_AREA_ID = "open_area:"
+VAULT_IDS = ("note:", "section:", OPEN_AREA_ID)
 #: The section of `WHERE_NOTE` holding the hand-written paths of the typical agents, numbered.
 HANDWRITTEN_HEADING = "Checking a rule against agent paths"
 #: The paragraph of that section listing what the tools leave out by design opens with these words [P277].
@@ -99,6 +106,8 @@ MD_LINK = re.compile(r"\[[^\]\n]*\]\(<?([^)\s<>]+?\.md)>?(?:#[^)\s]*)?\)")
 PLACEHOLDER = re.compile(r"<[^<>/`]+>")
 #: A rule section named in backticks in the pointing sentence ("read the `## For agents` section of …").
 NAMED_SECTION = re.compile(r"`##\s+([^`]+?)\s*`")
+#: A hook's message saying the lines that follow are a note's rule section ("from the `## For agents` section of …").
+COPIED_SECTION = re.compile(r"\bfrom the `##\s+([^`]+?)\s*` section of\b", re.I)
 IMPORT = re.compile(r"(?:^|\s)@((?:[A-Za-z]:)?[~./\\\w][^\s]*\.md)")
 
 
@@ -148,6 +157,19 @@ def without_sections(text: str, headings: list[str]) -> str:
 def frontmatter_flag(text: str, key: str) -> bool:
     m = re.match(r"^---\n(.*?)\n---", text, re.S)
     return bool(m and re.search(rf"^{key}:\s*true\s*$", m.group(1), re.M | re.I))
+
+
+#: An area's tag lives in its main note's `area_tag` frontmatter, `area/<slug>` (the Tasks plugin's areas).
+AREA_PREFIX = "area/"
+#: What names an area by its tag, as `open_area` takes it: the slug, `area/<slug>` or `#area/<slug>` (lower case).
+AREA_TAG_KEY = re.compile(r"#?(?:area/)?([a-z0-9]+(?:-[a-z0-9]+)*)")
+
+
+def area_tag(text: str) -> str | None:
+    """A main note's `area_tag` frontmatter value, quotes stripped; None without one."""
+    m = re.match(r"^---\n(.*?)\n---", text, re.S)
+    hit = m and re.search(r"^area_tag:\s*['\"]?([^'\"\s#]+)['\"]?\s*$", m.group(1), re.M)
+    return hit.group(1) if hit else None
 
 
 # --- PC paths ------------------------------------------------------------------------------------------------
@@ -207,6 +229,8 @@ class Snapshot:
     bridge: dict | None = None
     #: Whether the snapshot has the `bridge` key at all (a snapshot from before it says nothing either way).
     bridge_known: bool = False
+    #: Each folder's name as the snapshot spells it, by its key in `folders` (lower case).
+    folder_names: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def parse(cls, text: str) -> "Snapshot":
@@ -220,7 +244,8 @@ class Snapshot:
                    {k.lower(): v for k, v in data.get("files", {}).items()}, data.get("hooks", []),
                    data.get("relay_notes", []), data.get("relay_config", ""), data.get("hook_scripts") or {},
                    hook_messages if isinstance(hook_messages, dict) else None,
-                   data["bridge"] if isinstance(data.get("bridge"), dict) else None, "bridge" in data)
+                   data["bridge"] if isinstance(data.get("bridge"), dict) else None, "bridge" in data,
+                   {pc_norm(k).lower(): pc_norm(k) for k in data.get("folders", {})})
 
     def folder(self, folder: str) -> tuple[str, dict] | None:
         """The snapshot's entry for `folder`, or for the deepest folder above it that it holds."""
@@ -235,6 +260,17 @@ class Snapshot:
 
     def holds(self, folder: str) -> bool:
         return pc_norm(folder).lower() in self.folders
+
+
+#: How a CLAUDE.md file below the start folder arrives (`load_folder_claude_md`), followed by its folder.
+NESTED_LOAD = "loaded by Claude Code when it reads a file in"
+
+
+def folder_load(entry: dict) -> bool:
+    """Whether a snapshot entry is one of the folder's own CLAUDE.md files (or rules), not the user's."""
+    how = entry.get("arrives", "")
+    return how.startswith("loaded at the start by Claude Code (") and not how.startswith(
+        ("loaded at the start by Claude Code (user CLAUDE.md)", "loaded at the start by Claude Code (user rules)"))
 
 
 # --- the vault -----------------------------------------------------------------------------------------------
@@ -381,6 +417,9 @@ class Vault:
         return body
 
     def area(self, name_or_folder: str) -> dict | None:
+        """The area a name, folder, slug or tag names: its name in the list of areas, its main note's name, a related
+        folder (or one below it), or what `open_area` takes besides, its `area_tag` (`chronic-symptoms`,
+        `#area/chronic-symptoms`, `area/chronic-symptoms`)."""
         key = name_or_folder.replace("\\", "/").rstrip("/").lower()
         for a in self.areas:
             main_stem = posixpath.basename(a["main"])[:-3].lower() if a["main"] else ""
@@ -390,6 +429,12 @@ class Vault:
             for f in a["folders"]:
                 f = f.rstrip("/").lower()
                 if key == f or key.startswith(f + "/"):
+                    return a
+        tag = AREA_TAG_KEY.fullmatch(key)
+        if tag:  # only a slug or a tag reads the main notes, so a folder's path doesn't tie it to every one
+            wanted = AREA_PREFIX + tag.group(1)
+            for a in self.areas:
+                if a["main"] and area_tag(self.text(a["main"]) or "") == wanted:
                     return a
         return None
 
@@ -507,7 +552,13 @@ class PathBuilder:
         #: Imports the snapshot warns about (an import line next to another one, Q134), followed all the same.
         self.import_warnings: list[dict] = []
         self.not_followed: list[str] = []
+        #: The files Claude Code loads when it reads a file in a folder below the start folder, and their imports.
+        self.nested: set[str] = set()
         self.role_picked = False  # whether a line naming several role notes was narrowed to the start's role
+        #: Whether a line named several role notes and the start gave no role to pick one by.
+        self.role_unpicked = False
+        #: The role notes of the line being followed, when the start gives no role: vault path (lower) to its role.
+        self.role_choice: dict[str, str] = {}
 
     # --- queueing -----------------------------------------------------------------------------------------
     def push(self, piece: Piece) -> None:
@@ -530,9 +581,15 @@ class PathBuilder:
 
     # --- following pointers ------------------------------------------------------------------------------
     def follow(self, p: Piece) -> None:
-        if p.stage == LOADED and p.where.lower().endswith(".md"):
+        if (p.stage == LOADED or p.id in self.nested) and p.where.lower().endswith(".md"):
             self.follow_imports(p)  # Claude Code expands imports only in what it loads itself
-        for line in unfenced(p.text):
+        text = p.text
+        if p.id == f"note:{MEMORY_NOTE}":
+            # Its Lines and Profile mirror Claude's memory, which only claude.ai loads (`load_memory`): instructions to
+            # a claude.ai chat, not to whoever reads the mirror.
+            text = without_sections(text, MEMORY_SECTIONS)
+        for line in unfenced(text):
+            self.role_choice = {}
             if p.id.startswith("file:"):  # outside the vault (a repo's CLAUDE.md): its links into the vault
                 for target, pos in file_targets(line):
                     self.file_pointer(p, line, *sentence_at(line, pos), target)
@@ -574,6 +631,13 @@ class PathBuilder:
         """A line naming several role notes lets the session pick by its role (the session-start hook's line does):
         keep only this agent's role note when the start says which role it plays."""
         roles = [t for t in targets if (self.v.resolve(t[0]) or "").lower().startswith(ROLES_DIR.lower())]
+        self.role_choice = {}
+        if len(roles) >= 2 and not self.start.role:
+            # The start doesn't say which role it plays: each role note waits on its role, none is read whatever
+            # the conversation brings (`pointer`).
+            self.role_choice = {self.v.resolve(t[0]).lower(): posixpath.basename(self.v.resolve(t[0]))[:-3]
+                                for t in roles}
+            self.role_unpicked = True
         if len(roles) < 2 or not self.start.role:
             return targets
         mine = [t for t in roles
@@ -600,6 +664,8 @@ class PathBuilder:
                 path = posixpath.join(base, raw.replace("\\", "/"))
             piece = self.file_piece(pc_norm(path), LOADED if p.stage == LOADED else p.stage, f"imported by {p.id}",
                                     parent=p.id, via=f"@{raw}", always=p.always)
+            if p.id in self.nested:
+                self.nested.add(piece.id)
             warning = warned.get((p.id.lower(), piece.id.lower()))
             if warning:  # on the path, as the snapshot lists it, but the piece itself says it may not load
                 piece.arrives += f" (may not load: {warning})"
@@ -612,7 +678,7 @@ class PathBuilder:
         """The imports the snapshot says Claude Code skips in this start's folder, by (importing piece, `@` text):
         in a project's file, one resolving outside the session's folder waits for an approval the desktop app never
         asks for (the user's own `~/.claude/CLAUDE.md` is exempt)."""
-        found = self.snap.folder(self.start.folder or self.snap.home) if self.snap else None
+        found = self.user_folder()
         out = {}
         for e in (found[1].get("skipped_imports") or [] if found else []):
             if e.get("in") and e.get("import"):
@@ -624,7 +690,7 @@ class PathBuilder:
         """The snapshot's `warning` on an imported file, by (importing piece, imported piece): set when the import
         line sits next to another import, which made both fail in some tests (Q134). The file stays on the path, as
         the snapshot lists it loaded; its `arrives` and the structure carry the warning."""
-        found = self.snap.folder(self.start.folder or self.snap.home) if self.snap else None
+        found = self.user_folder()
         out = {}
         for e in (found[1].get("loads", []) if found else []):
             how = e.get("arrives", "")
@@ -653,11 +719,26 @@ class PathBuilder:
             if looks_like_note:
                 self.broken.append({"from": p.id, "target": target, "via": via})
             return
+        copied = COPIED_SECTION.search(sentence) if p.id.startswith("hook:") and heading is None else None
+        if copied and copied.group(1) in self.v.rule_headings:
+            # A hook's message holding a rule section's lines ("from the `## For agents` section of <note>:"): the
+            # agent has them when the message comes, whatever points to that section later.
+            body = self.v.section_of(r, copied.group(1))
+            if body:
+                kept = all(x.strip() in p.text for x in body.splitlines()[1:] if x.strip())
+                self.push(Piece(f"section:{r}#{copied.group(1)}", max(p.stage, START_READ),
+                                f"copied into {p.id}'s message" + ("" if kept else " (the copy differs from the "
+                                                                               "section now)"),
+                                self.v.where(r), body, via, "when met", p.id, p.always))
+                return
         if r.lower() == (self.piece_rel(p) or "").lower() and heading is None:
             return
         moment = shaped or ("when met" if reads_it(sentence, at) else "unplaced")
         reads = reads_it(sentence, at) or bool(re.match(r"^\s*[-*]\s+\[\[", line))  # a verb, or the guide index
         stage, always = self.placed(p, moment)
+        role = self.role_choice.get(r.lower())
+        if role and moment != "unplaced":  # one of several role notes, and the start gives no role (`pick_role`)
+            moment, stage, always = f"if its role is {role}", LATER, False
         arrives = f"pointed to by {p.id}"
         if self.v.is_rule_file(r):
             if moment == "unplaced" or (shaped is None and self.bound(p)):
@@ -750,12 +831,12 @@ class PathBuilder:
         return p.id.startswith(("note:", "section:", "memory:")) and not p.rules_only
 
     def piece_rel(self, p: Piece) -> str | None:
-        return p.id.split(":", 1)[1].split("#")[0] if p.id.startswith(("note:", "section:")) else None
+        return p.id.split(":", 1)[1].split("#")[0] if p.id.startswith(VAULT_IDS) else None
 
     def note_piece(self, r, stage, arrives, parent, via, moment, always) -> Piece:
         return Piece(f"note:{r}", stage, arrives, self.v.where(r), self.v.text(r) or "", via, moment, parent, always)
 
-    def file_piece(self, path: str, stage, arrives, parent=None, via=None, always=True) -> Piece:
+    def file_piece(self, path: str, stage, arrives, parent=None, via=None, always=True, moment=None) -> Piece:
         """A file Claude Code loads on the PC: a vault note read from the vault, any other file from the snapshot."""
         r = self.v.rel(path)
         if r is not None:
@@ -765,7 +846,7 @@ class PathBuilder:
         if text is None:
             self.broken.append({"from": parent, "target": path, "via": via})
             text = ""
-        return Piece(pid, stage, arrives, path, text, via, "when met" if via else None, parent, always)
+        return Piece(pid, stage, arrives, path, text, via, moment or ("when met" if via else None), parent, always)
 
     # --- the stages ----------------------------------------------------------------------------------------
     def build(self) -> "PathBuilder":
@@ -794,6 +875,21 @@ class PathBuilder:
             self.load_tools(server)
         self.drain()
         self.note_not_followed()
+        for pid in self.order:  # parents come first: a chain of them takes the moment from its head
+            p = self.pieces[pid]
+            if (not p.always and p.moment == "when met" and p.parent in self.pieces
+                    and self.pieces[p.parent].moment not in (None, "unplaced", "when met")):
+                # Read as soon as its pointer is met, in a piece that waits on a moment: it waits on that one.
+                p.moment = self.pieces[p.parent].moment
+        # The start's pieces are all taken in before the area's, so a piece met both ways keeps its first route
+        # (the moments, owner's question); the order shown is the stages' (stable within a stage).
+        self.order.sort(key=lambda i: self.pieces[i].stage)
+        seen = set()
+        for pid in self.order:
+            note = "note:" + pid.removeprefix("section:").split("#")[0]
+            if pid.startswith("section:") and note in seen:  # listed on its own as a rule section, already read
+                self.pieces[pid].arrives += f" (its text is in {note}, read whole earlier on this path)"
+            seen.add(pid)
         return self
 
     def pc_folder(self) -> tuple[str, dict] | None:
@@ -805,12 +901,24 @@ class PathBuilder:
         folder = self.start.folder or self.snap.home
         found = self.snap.folder(folder)
         if found is None:
-            self.not_followed.append(f"what Claude Code loads in {folder}: {self.snap.machine}'s snapshot holds "
-                                     "neither that folder nor one above it")
+            # What loads in every folder (the user CLAUDE.md, its imports, the user rules) is the home folder's; the
+            # folder's own CLAUDE.md files, and what the session-start hooks say there, can't be known.
+            found = self.snap.folder(self.snap.home)
+            self.not_followed.append(f"the CLAUDE.md files of {folder} and what the session-start hooks say there: "
+                                     f"{self.snap.machine}'s snapshot holds neither that folder nor one above it, so "
+                                     "only what Claude Code loads in every folder is on the path"
+                                     + (f", as it loads in {found[0]}" if found else ""))
         elif found[0].lower() != pc_norm(folder).lower():
             self.not_followed.append(f"CLAUDE.md files below {found[0]} and the hook messages in {folder}: "
                                      f"{self.snap.machine}'s snapshot holds only {found[0]}, so its are used")
         return found
+
+    def user_folder(self) -> tuple[str, dict] | None:
+        """The snapshot's entry to read what loads in every folder from (the user CLAUDE.md, its imports, the user
+        rules): this start's folder, or the home folder when the snapshot holds neither it nor one above it."""
+        if self.snap is None:
+            return None
+        return self.snap.folder(self.start.folder or self.snap.home) or self.snap.folder(self.snap.home)
 
     def load_user_claude_md(self) -> None:
         found = self.pc_folder()
@@ -822,7 +930,7 @@ class PathBuilder:
 
     def load_user_rules(self) -> None:
         """The files of `~/.claude/rules/`, which Claude Code loads at the start, after the user CLAUDE.md."""
-        found = self.snap.folder(self.start.folder or self.snap.home) if self.snap else None
+        found = self.user_folder()
         for entry in (found[1].get("loads", []) if found else []):
             if entry.get("arrives", "").startswith("loaded at the start by Claude Code (user rules)"):
                 self.load_entry(entry)
@@ -831,12 +939,23 @@ class PathBuilder:
         if not self.start.folder or self.snap is None:
             return
         found = self.snap.folder(self.start.folder)
+        loaded = set()
         for entry in (found[1].get("loads", []) if found else []):
-            how = entry.get("arrives", "")
-            if how.startswith("loaded at the start by Claude Code (") and not how.startswith(
-                    ("loaded at the start by Claude Code (user CLAUDE.md)",
-                     "loaded at the start by Claude Code (user rules)")):
+            if folder_load(entry):
                 self.load_entry(entry)
+                loaded.add(entry["id"].lower())
+        # A folder below the start folder that the snapshot holds (a repo inside the related folder): Claude Code
+        # loads its own CLAUDE.md files when it reads a file there, not at the start.
+        base = pc_norm(self.start.folder).lower()
+        for key in sorted(k for k in self.snap.folders if k.startswith(base.rstrip("/") + "/")):
+            sub = self.snap.folder_names.get(key, key)
+            for entry in self.snap.folders[key].get("loads", []):
+                if folder_load(entry) and entry["id"].lower() not in loaded and entry.get("exists") is not False:
+                    loaded.add(entry["id"].lower())
+                    piece = self.file_piece(self.entry_path(entry), LATER, f"{NESTED_LOAD} {sub}",
+                                            moment=f"when it works on a file in {sub}", always=False)
+                    self.nested.add(piece.id)  # its imports are expanded too
+                    self.push(piece)
 
     def load_entry(self, entry: dict) -> None:
         """One file the snapshot lists as loaded at the start. A file that isn't there loads nothing."""
@@ -897,9 +1016,10 @@ class PathBuilder:
         return self.start.surface == "claude-ai" and "relay_notes" in self.start.extras
 
     def on_bridge(self) -> bool:
-        """Whether this agent has the voice bridge connected: the relay, the Coordinator, and a Claude Code session
-        the bridge starts (for the relay or the Coordinator)."""
-        return self.relay() or (self.start.surface == "claude-code" and (
+        """Whether this agent has the voice bridge connected: every claude.ai chat (the bridge is one of the account's
+        connectors, and memory's lines tell a chat how to use it), the Coordinator, and a Claude Code session the
+        bridge starts (for the relay or the Coordinator)."""
+        return self.start.surface == "claude-ai" or (self.start.surface == "claude-code" and (
             self.start.started_by in ("relay", "coordinator") or (self.start.role or "").lower() == "coordinator"))
 
     def load_bridge(self) -> None:
@@ -929,7 +1049,7 @@ class PathBuilder:
             self.push(Piece(f"instructions:{BRIDGE_SERVER}", TOOLS, "handed to the client when it connects to the "
                             "bridge", where, text(b["instructions"]), rule=False))
         if text(b.get("guide")):
-            if claude_code:
+            if not self.relay():  # a chat or a session that may call the bridge: the guide waits for its first call
                 self.push(Piece(f"guide:{BRIDGE_SERVER}", LATER, "with its first result from the bridge (or its guide "
                                 "tool)", where, text(b["guide"]), None, "when it first calls the bridge", always=False,
                                 rule=False))
@@ -990,7 +1110,7 @@ class PathBuilder:
         if rules:
             self.push(Piece(f"section:{main}#For agents", WORK, how + " (for_agents)", self.v.where(main), rules))
         # Not a rule file, but the agent reads it: its pointers are followed and flagged as outside the rule files.
-        self.push(Piece(f"note:{main}", WORK, how + " (main_note_text, without For agents and Tasks)",
+        self.push(Piece(f"{OPEN_AREA_ID}{main}", WORK, how + " (main_note_text, without For agents and Tasks)",
                         self.v.where(main), without_sections(text, ["For agents", "Tasks"]), rules_only=True))
         conv = section(self.v.text(CONVENTIONS_NOTE) or "", "Working on an area")
         if conv:
@@ -1014,8 +1134,12 @@ class PathBuilder:
         self.push(Piece(f"instructions:{SERVER}", TOOLS, "handed to the client when it connects (claude.ai is "
                         "reported to drop them)", f"{SERVER}: the server instructions", served.instructions,
                         rule=False))
-        self.push(Piece(f"guide:{SERVER}", TOOLS, "returned by get_vault_guide, ahead of the vault's conventions "
-                        f"note ({CONVENTIONS_NOTE})", f"{SERVER}: get_vault_guide", served.guide, rule=False))
+        # On every path: every agent on the connector reads the guide first, as the server's instructions and its
+        # tool's first line say (the fork's decision "Agents read the guide": one that skips it is a bug to fix).
+        self.push(Piece(f"guide:{SERVER}", TOOLS, "returned by get_vault_guide, which an agent on the connector "
+                        "calls first (the server's instructions and the tool's first line say so), ahead of the "
+                        f"vault's conventions note ({CONVENTIONS_NOTE})", f"{SERVER}: get_vault_guide", served.guide,
+                        rule=False))
         for name, text in served.tools:
             self.push(Piece(f"tool:{SERVER}:{name}", TOOLS, how, f"{SERVER}: tools/list", text, rule=False))
 
@@ -1194,6 +1318,7 @@ def structure_of(b: PathBuilder) -> dict:
         "pointers_outside_rule_files": outside_rules(b),
         "into_areas": into_areas(b),
         "mentions_not_followed": len(b.mentions),
+        "mentions": [m for m in b.mentions if not m.get("rule_file")],
         "rule_file_mentions": [m for m in b.mentions if m.get("rule_file")],
         "broken_pointers": b.broken,
         "skipped_imports": b.skipped,
@@ -1207,7 +1332,7 @@ def outside_rules(b: PathBuilder) -> list[dict]:
     out = []
     for p in b.pieces.values():
         for parent in [p.parent, *p.also]:
-            if not parent or not parent.startswith("note:"):
+            if not parent or not parent.startswith(("note:", OPEN_AREA_ID)):
                 continue
             src = parent.split(":", 1)[1]
             if not b.v.is_rule_file(src) and p.id.startswith("note:") and b.v.is_rule_file(p.id.split(":", 1)[1]):
@@ -1222,13 +1347,13 @@ def into_areas(b: PathBuilder) -> list[dict]:
     out = []
     for p in b.pieces.values():
         for parent in [p.parent, *p.also]:
-            if not parent or not p.id.startswith(("note:", "section:")):
+            if not parent or not p.id.startswith(VAULT_IDS):
                 continue
             target = p.id.split(":", 1)[1].split("#")[0]
             to_area = b.v.area_of_note(target)
             if not to_area:
                 continue
-            src = parent.split(":", 1)[1].split("#")[0] if parent.startswith(("note:", "section:")) else None
+            src = parent.split(":", 1)[1].split("#")[0] if parent.startswith(VAULT_IDS) else None
             from_area = b.v.area_of_note(src) if src else None
             if from_area and from_area["name"] == to_area["name"]:
                 continue
@@ -1346,42 +1471,70 @@ def matches(place: str, pid: str) -> bool:
     return body.lower() == place.lower() or (("#" not in place) and body.lower().split("#")[0] == place.lower())
 
 
+def place_exists(v: Vault, place: str) -> bool | None:
+    """Whether a vault place exists: the note, and for `note.md#Heading` a heading of that name in it (any level).
+    None for a place outside the vault (a hook, a tool's text, memory)."""
+    if not place.startswith(("note:", "section:")) and re.match(r"^[a-z_]+:", place) and not re.match(
+            r"^[A-Za-z]:[\\/]", place):
+        return None
+    note, _, heading = place.removeprefix("note:").removeprefix("section:").partition("#")
+    r = v.lookup(note)
+    if r is None:
+        return False
+    return not heading or any(re.fullmatch(rf"#{{1,6}}\s+{re.escape(heading.strip())}\s*#*\s*", line)
+                              for line in unfenced(v.text(r) or ""))
+
+
 def reached_by(setup: Setup, place: str, runs: list | None = None) -> dict:
     """Who reaches `place`, over `runs` (`all_runs`, drawn here when not given)."""
     v = setup.vault
     runs = all_runs(setup) if runs is None else runs
     hits, how = [], "the place itself"
+    # A bare hook or bridge id names each of its messages: each one met is a hit of its own.
+    every = place.startswith(("hook:", "bridge:")) and "#" not in place
     for label, s, w, b in runs:
         ids = [i for i in b.order if matches(place, i)]
-        if ids:
-            hits.append((label, s, w, b, ids[0]))
-    if not hits:  # a place that doesn't exist yet: its note, then its area
+        for i in ids if every else ids[:1]:
+            hits.append((label, s, w, b, i))
+    if not hits:  # a place no path holds (one that doesn't exist yet, or a part of a note): its note, then its area
         note = place.removeprefix("note:").removeprefix("section:").split("#")[0]
         for label, s, w, b in runs:
             ids = [i for i in b.order if matches(note, i)]
             if ids:
                 hits.append((label, s, w, b, ids[0]))
-        how = "its note"
+        exists = place_exists(v, place)
+        how = "its note" + ("" if "#" not in place else " (it holds that section)" if exists
+                            else " (the section isn't in it yet)" if v.lookup(note) else "")
         if not hits:
             area = v.area_of_note(note)
-            how = f"its area ({area['name']})" if area else "nothing: no path reaches its note or its area"
+            told = "it exists" if exists else "it doesn't exist yet" if exists is False else None
+            reach = "it, its note or its area" if "#" in place else "it or its area"
+            how = (f"its area ({area['name']})" if area else
+                   f"nothing: {told}, and no path reaches {reach}" if told
+                   else "nothing: no path reaches its note or its area")
             if area:
                 for label, s, w, b in runs:
                     if w.area == area["name"] or (s.folder and v.area(s.folder) == area):
                         first = next((i for i in b.order if b.pieces[i].stage == WORK), b.order[0])
                         hits.append((label, s, w, b, first))
     groups: dict[tuple, list[str]] = {}
+    #: Each group's chains as they are: when they are all one (a single area), it shows that one, not a placeholder.
+    concrete: dict[tuple, set] = {}
     for label, s, w, b, pid in hits:
         c = chain(b, pid)
-        key = (s.surface, tuple(generic(v, x) for x in c), b.pieces[pid].always,
+        # The place itself keeps its own id: only the pieces leading to it stand for any area's.
+        key = (s.surface, tuple(x if x == pid else generic(v, x) for x in c), b.pieces[pid].always,
                re.sub(r" on .*? \(", " on <the area> (", b.pieces[c[0]].arrives))
         groups.setdefault(key, []).append(label)
+        concrete.setdefault(key, set()).add((tuple(c), b.pieces[c[0]].arrives))
     # Group by run kind, not by label: a typical agent's name may share the per-folder runs' prefix.
     typical_names = {t.name for t in setup.points.typical}
     chat_runs = {l for l, *_ in runs if l not in typical_names and l.startswith("a claude.ai chat working on")}
     worker_runs = {l for l, *_ in runs if l not in typical_names and l.startswith("a Claude Code worker in ")}
     reached = []
     for (surface, c, always, first), labels in groups.items():
+        if len(concrete[(surface, c, always, first)]) == 1:
+            (c, first), = concrete[(surface, c, always, first)]
         chats = [l for l in labels if l in chat_runs]
         workers = [l for l in labels if l in worker_runs]
         named = [l for l in labels if l not in chats and l not in workers]
@@ -1412,7 +1565,7 @@ def reached_by(setup: Setup, place: str, runs: list | None = None) -> dict:
 def generic(v: Vault, pid: str) -> str:
     """A piece id with the area's own part replaced, so paths through different areas group together."""
     body = pid.split(":", 1)[1] if ":" in pid else pid
-    area = v.area_of_note(body.split("#")[0]) if pid.startswith(("note:", "section:")) else None
+    area = v.area_of_note(body.split("#")[0]) if pid.startswith(VAULT_IDS) else None
     if area and area["main"] and body.split("#")[0] == area["main"]:
         return pid.replace(body.split("#")[0], "<the area's main note>")
     return pid

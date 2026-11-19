@@ -293,7 +293,7 @@ def _signed_reader(uid, signed: dict):
 def _chain_files(b: ap.PathBuilder, pid: str) -> tuple[str, ...]:
     files = []
     for x in ap.chain(b, pid):
-        if x.startswith(("note:", "section:")):
+        if x.startswith(ap.VAULT_IDS):
             files.append(x.split(":", 1)[1].split("#")[0])
         elif x.startswith("memory:"):
             files.append(ap.MEMORY_NOTE)
@@ -772,7 +772,7 @@ async def reached_after_write(uid, path: str, places: list[str], created: bool =
 def _piece(p: ap.Piece, known: dict | None) -> PathPiece:
     status = None if known is None else ("unchanged" if known.get(p.id) == p.hash
                                          else "changed" if p.id in known else "new")
-    path = p.id.split(":", 1)[1].split("#")[0] if p.id.startswith(("note:", "section:")) else None
+    path = p.id.split(":", 1)[1].split("#")[0] if p.id.startswith(ap.VAULT_IDS) else None
     moment = p.moment if p.moment and p.moment != "when met" else None
     if status == "unchanged":
         # The caller holds this piece from an earlier call: what places it on the path, and its hash, are
@@ -824,8 +824,8 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
         result.structure = None
         if hasattr(result, "reached_by"):
             result.reached_by = None
-        notes.append("The structure (and for a backward question, who reaches the place) came with your first "
-                     "call; call without known to see them again.")
+        notes.append("The structure (and for a backward question, who reaches the place) comes only with a call "
+                     "without known: call once without it if you haven't had them, or to see them again.")
     details = {id(o): _short_form(o) for _, o in due}
     used = len(result.model_dump_json())
     given: list[PathPiece] = []
@@ -865,22 +865,28 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
     if listing:
         result.pieces.sort(key=lambda o: order[id(o)])
 
+    def texts(n: int) -> str:
+        return f"{n} text is" if n == 1 else f"{n} texts are"
+
     def withheld_note() -> list[str]:
         lines = []
         if listing and count["waiting"]:
-            lines.append(f"{count['waiting']} texts are still to come (waiting): their pieces were in your first "
-                         "call. Call again with the same arguments, passing in known the hash of every piece whose "
-                         "text you now hold, and they come next with their details.")
-        n = sum(1 for o in result.pieces or [] if o.text_withheld)
+            lines.append(f"{texts(count['waiting'])} still to come (waiting): their pieces were in an earlier call. "
+                         "Call again with the same arguments, passing in known the hash of every piece whose text you "
+                         "now hold, and they come next with their details.")
+        n = withheld()
         if n:
-            lines.append(f"{n} texts did not fit in this result (text_withheld): those pieces come in short form. "
-                         "Call again with the same arguments, passing in known the hash of every piece whose text "
-                         "you now hold, and only what's new comes next, with these texts.")
+            lines.append(f"{texts(n)} not in this result (text_withheld, counted in waiting): those pieces come in "
+                         "short form. Call again with the same arguments, passing in known the hash of every piece "
+                         "whose text you now hold, and only what's new comes next, with these texts.")
         if count["in_parts"]:
-            lines.append(f"{count['in_parts']} texts are too long for the room in this result (text_in_parts): call "
+            lines.append(f"{texts(count['in_parts'])} too long for the room in this result (text_in_parts): call "
                          "again with the same arguments and read_from={id, offset: 0} for each; each part gives the "
                          "next offset.")
         return lines
+
+    def withheld() -> int:
+        return sum(1 for o in result.pieces or [] if o.text_withheld)
 
     def take_back(cap: int) -> None:
         while len(given) > 1 and len(result.model_dump_json()) > cap:
@@ -892,12 +898,12 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
                 count["waiting"] += 1
             else:
                 last.text_withheld = True
-            result.waiting = count["waiting"] if listing else None
+            result.waiting = count["waiting"] if listing else (withheld() or None)
             result.notes = (notes + withheld_note()) or None
 
     take_back(budget)
     _fit_metadata(result, notes, budget)
-    result.waiting = count["waiting"] if listing else None
+    result.waiting = count["waiting"] if listing else (withheld() or None)
     result.notes = (notes + withheld_note()) or None
     take_back(PAGE_CHARS)
 
@@ -916,8 +922,8 @@ def _fit_metadata(result, notes: list[str], cap: int) -> None:
         dropped += 1
     st = result.structure
     if st is not None:
-        for name in ("rule_file_mentions", "unplaced_pointers", "pointers_outside_rule_files", "into_areas",
-                     "broken_pointers", "skipped_imports", "import_warnings"):
+        for name in ("mentions", "rule_file_mentions", "unplaced_pointers", "pointers_outside_rule_files",
+                     "into_areas", "broken_pointers", "skipped_imports", "import_warnings"):
             items = getattr(st, name)
             while items and size() > cap:
                 items.pop()
@@ -1027,7 +1033,9 @@ def _left_path(known: dict | None, on_path) -> list[str] | None:
 
 
 def _clip_vias(items: list[dict] | None) -> list[dict] | None:
-    return [{**x, "via": _short(x["via"], _VIA_MAX)} if x.get("via") else x for x in items] if items else None
+    """The list with each line cut at `_VIA_MAX`; an empty list stays one (checked, nothing found)."""
+    return None if items is None else [{**x, "via": _short(x["via"], _VIA_MAX)} if x.get("via") else x
+                                       for x in items]
 
 
 def _grouped_mentions(ms: list[dict] | None) -> list[dict] | None:
@@ -1039,18 +1047,38 @@ def _grouped_mentions(ms: list[dict] | None) -> list[dict] | None:
         froms = out.setdefault(m["target"], [])
         if m["from"] not in froms:
             froms.append(m["from"])
-    return [{"target": t, "from": f} for t, f in out.items()] or None
+    return None if ms is None else [{"target": t, "from": f} for t, f in out.items()]
 
 
-def _structure(st: dict) -> PathStructure:
+def _structure(st: dict, mentions: bool = False) -> PathStructure:
+    """The structure as the result gives it: every check made, an empty list when it found nothing (a cold reader
+    couldn't tell a check left out from one that found nothing); `mentions` listed on one agent's path only."""
     return PathStructure(
         size=st.get("size"), unplaced_pointers=_clip_vias(st.get("unplaced_pointers")),
         pointers_outside_rule_files=_clip_vias(st.get("pointers_outside_rule_files")),
         into_areas=_clip_vias(st.get("into_areas")), mentions_not_followed=st.get("mentions_not_followed"),
+        mentions=_grouped_mentions(st.get("mentions")) if mentions else None,
         rule_file_mentions=_grouped_mentions(st.get("rule_file_mentions")),
         broken_pointers=_clip_vias(st.get("broken_pointers")),
-        skipped_imports=st.get("skipped_imports") or None, import_warnings=st.get("import_warnings") or None,
-        not_followed=st.get("not_followed") or None)
+        skipped_imports=st.get("skipped_imports"), import_warnings=st.get("import_warnings"),
+        not_followed=st.get("not_followed"))
+
+
+#: Said once with a structure listing `into_areas`: a cold reader took them for faults (test bench, 2026-11-19).
+_INTO_AREAS_NOTE = ("into_areas: pointers bringing one area's own pieces to agents outside it (most: a shared rule "
+                    "pointing to every folder note's `## For agents`); facts, not faults.")
+
+
+def _structure_notes(*structures) -> list[str]:
+    """The notes a result's structures call for: what `into_areas` is, when one lists any."""
+    return [_INTO_AREAS_NOTE] if any(st is not None and st.into_areas for st in structures) else []
+
+
+def _drop_empty(st: PathStructure) -> None:
+    """Leave out the structure's empty lists (the overview's typical agents, where room is short)."""
+    for name, value in list(vars(st).items()):
+        if value == []:
+            setattr(st, name, None)
 
 
 def _short(s: str | None, n: int) -> str:
@@ -1068,7 +1096,7 @@ def _overview_lines(b: ap.PathBuilder, known: dict | None) -> list[str]:
             continue
         status = "" if known is None else (" [unchanged]" if known.get(p.id) == p.hash
                                            else " [changed]" if p.id in known else " [new]")
-        when = "" if p.always else f"  when: {_short(p.moment, 90)}"
+        when = "" if p.always else f"  moment: {_short(p.moment, 90)}"
         lines.append(f"{len(lines) + 1}. {pid}  {p.chars:,} chars  #{p.hash}{status}{when}")
     for server, texts in tools.items():
         combined = ap.digest("".join(p.hash for p in texts))
@@ -1153,9 +1181,12 @@ def _path_result(kept: _Kept, start: PathStart | None, work: PathWork | None, kn
         # What every path leaves out by design is said once, across every area, rather than on each path.
         by_design = ap.by_design(setup.vault)
         for t in typical:
-            t.structure.not_followed = [x for x in t.structure.not_followed or [] if x != by_design] or None
+            t.structure.not_followed = [x for x in t.structure.not_followed or [] if x != by_design]
+        for t in typical:  # side by side, five structures: an empty list would only take room
+            _drop_empty(t.structure)
         across = _structure(ap.across_runs(runs))
         across.not_followed = [by_design]
+        notes += _structure_notes(across)
         result = AgentPathResult(typical=typical, rule_files_no_path_reaches=unreached,
                                  across_every_area=across, notes=notes, **common)
         _fit_overview(result)
@@ -1167,13 +1198,20 @@ def _path_result(kept: _Kept, start: PathStart | None, work: PathWork | None, kn
         # Nothing on this path offers a choice of role note (on claude.ai, no session-start hook does):
         # said, so a path drawn for a start that isn't a real case isn't taken for its answer (owner).
         notes.append(f"role: {s.role} changed nothing: no line on this path picks a role note.")
+    if b.role_unpicked:
+        notes.append("No role given: a line on this path names several role notes, so each waits on its role (its "
+                     "moment says which); pass start.role for that role's path.")
+    if w.area and any(x.get("from") == "work" for x in b.broken):
+        notes.append(f"work.area {w.area!r} names no area of {ap.AREAS_NOTE} (by its name, its main note's name, "
+                     "a related folder, its slug or its tag): the path goes on without one.")
     notes += _changed_hook_scripts(setup, b.order)
     pieces = [b.pieces[i] for i in b.order]
     out = [_piece(p, known) for p in pieces]
     result = AgentPathResult(
-        start={k: v for k, v in vars(s).items() if v}, work={k: v for k, v in vars(w).items() if v} or None,
+        start={("typical" if k == "handwritten" else k): v for k, v in vars(s).items() if v}, work={k: v for k, v in vars(w).items() if v} or None,
         pieces=out, left_path=_left_path(known, b.order),
-        structure=_structure(ap.structure_of(b)), notes=notes or None, **common)
+        structure=_structure(ap.structure_of(b), mentions=True), notes=notes or None, **common)
+    result.notes = (notes := notes + _structure_notes(result.structure)) or None
     if read_from is not None:
         return _part_of(result, pieces, out, read_from)
     _with_texts(result, pieces, out, notes, known)
@@ -1195,6 +1233,7 @@ def _reached_by_result(kept: _Kept, place: str, known: dict | None, machine: str
         place=r["place"], matched_by=r["matched_by"], reached_by=r["reached_by"],
         machine=snap.machine if snap else None, snapshot_made=snap.made if snap else None, pieces=out,
         left_path=_left_path(known, r["pieces"]), structure=_structure(r["structure"]), notes=notes or None)
+    result.notes = (notes := notes + _structure_notes(result.structure)) or None
     if read_from is not None:
         result.reached_by = None
         return _part_of(result, pieces, out, read_from)
@@ -1240,7 +1279,8 @@ async def agent_path(
 ) -> AgentPathResult:
     """What an agent of this setup meets, in order: every rule text on its path, with a hash.
 
-    Without `start`: the five typical agents side by side. `structure` lists facts to judge, not faults. Field
+    Without `start`: the five typical agents side by side. `structure` lists facts to judge, not faults. Who meets one
+    rule, and the path up to it: `agent_path_reached_by`. Field
     reference, for maintaining this tool: https://github.com/kelno/obsidian-mcp/blob/main/docs/architecture/agent-paths.md
     """
     return await agent_path_impl(start, work, known, read_from)
