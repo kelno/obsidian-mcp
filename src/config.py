@@ -600,9 +600,11 @@ class Settings(BaseSettings):
     # rows (#432, `tools._refresh_after_write`). On, upstream's behaviour. Off,
     # those rows wait for the next index pass, as before #432: a deployment
     # whose upstream task tools are all switched off (`SWITCHED_OFF` in
-    # `server.py`) reads them nowhere at once, and saves a gate and a refresh
-    # per note write. The fork's task rows (`fork_note_tasks`) are not
-    # concerned. See docs/architecture/indexing-and-embeddings.md.
+    # `server.py`) reads them nowhere at once, and saves the refresh on each
+    # task write and each edit to a note that may hold task lines (a gate
+    # scan decides that, on every write): duplicate work, since the next pass
+    # derives the note's tasks again. The fork's task rows
+    # (`fork_note_tasks`) are not concerned. See docs/architecture/indexing-and-embeddings.md.
     task_refresh_on_write: bool = True
     # The change feed (#351, `note_events`, design D9/D10). Retention runs in
     # the periodic tick's `finally`, never inside a pass. The age limit is a

@@ -1973,8 +1973,12 @@ fork's task tools') rows wait for the next pass, as before #432. Nothing a
 caller sees changes; only upstream's task tools (`list_tasks`, `task_agenda`,
 `complete_task`, `update_task`, `add_task`, `move_task`) read `note_tasks`,
 and the fork switches them all off, so a
-deployment that keeps them off spends a gate scan and a refresh per note
-write for nothing. Upstream's own task writers refresh through
+deployment that keeps them off spends, for nothing, a gate scan on every note
+write and a refresh on each task write and each edit to a note that may hold
+task lines. The refresh is duplicate work besides: it stamps
+`tasks_source_hash`, not `content_hash`, so the next pass sees the note
+changed and derives its tasks again, keeping the refreshed rows only when the
+refresh landed after it began reading (R4). Upstream's own task writers refresh through
 `_refresh_task_rows` directly and are not concerned.
 
 The pass is unchanged: R3/R4 cover every refreshing writer exactly as a task
