@@ -616,6 +616,55 @@ def test_what_hooks_say_at_other_events_is_on_claude_codes_paths(vault):
     assert all(hit["surface"] == "claude-code" for hit in reached.reached_by)
 
 
+def test_the_voice_bridges_texts_reach_the_relay_and_the_sessions_on_the_bridge(vault):
+    def entry(text):
+        return {"text": text, "hash": ap.digest(text)}
+
+    bridge = {"command": "claude-voice texts", "instructions": entry("The claude-voice bridge."),
+              "guide": entry("The bridge's guide."), "tools": [{"name": "health", **entry("Health check.")},
+                                                               {"name": "guide", **entry("The guide tool.")}],
+              "notes": [{"when": "under a message the relay sends into a session", **entry("[From the bridge]")},
+                        {"when": "about once an hour", **entry("[Name check: <session name>]")}]}
+    started = STARTING_POINTS.replace('role = "worker"\nhandwritten = 3', 'started_by = "relay"\nrole = "worker"\n'
+                                      'handwritten = 3')
+    (vault / ap.STARTING_POINTS_PATH).write_text(started + (
+        '\n[[typical]]\nname = "the voice relay"\nsurface = "claude-ai"\nextras = ["relay_notes"]\nhandwritten = 2\n'
+        '\n[[typical]]\nname = "a session changing the rules"\nsurface = "claude-code"\nfolder = "D:/work/repo"\n'
+        'role = "worker"\nhandwritten = 4\n'), encoding="utf-8")
+    snap = {**SNAPSHOT, "format": 2, "bridge": bridge}
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
+
+    # The relay: the guide with its first bridge result, the rest when the tools load; no notes.
+    relay = {p.id: p for p in path(PathStart(typical=2)).pieces}
+    assert relay["guide:claude-voice"].stage == ap.STAGE_NAMES[ap.BRIDGE] and relay["guide:claude-voice"].always
+    assert relay["tool:claude-voice:health"].stage == ap.STAGE_NAMES[ap.TOOLS]
+    assert "instructions:claude-voice" in relay and not any(i.startswith("bridge:") for i in relay)
+    # A session the relay started: the guide when it first calls the bridge, the notes at their moments.
+    worker = path(PathStart(typical=3))
+    by_id = {p.id: p for p in worker.pieces}
+    assert by_id["guide:claude-voice"].moment == "when it first calls the bridge" and not by_id["guide:claude-voice"].always
+    note = by_id["bridge:claude-voice#2"]
+    assert note.moment == "about once an hour" and note.stage == ap.STAGE_NAMES[ap.LATER] and not note.always
+    assert not any("voice bridge" in line for line in worker.structure.not_followed)
+    # A session the bridge didn't start, a claude.ai chat: no bridge.
+    for other in (4, 1):
+        assert not any("claude-voice" in i for i in ids(path(PathStart(typical=other))))
+    # The overview folds each server's tool texts into one line.
+    over = path()
+    relay_lines = next(t for t in over.typical if t.number == 2).pieces
+    assert any(line.split(". ", 1)[1].startswith("tool:claude-voice:* (3 texts") for line in relay_lines)
+    reached = asyncio.run(apt.agent_path_reached_by_impl("bridge:claude-voice", None, None))
+    assert {a for hit in reached.reached_by for a in hit["agents"]} == {"a Claude Code worker in a repo"}
+
+    # The command failed on the PC, or the bridge isn't there: said, never guessed.
+    for value, said in (({"command": "claude-voice texts", "error": "exit 1"}, "`claude-voice texts` failed on PC: exit 1"),
+                        (None, "PC's snapshot says the bridge isn't on that PC")):
+        (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps({**snap, "bridge": value}), encoding="utf-8")
+        result = path(PathStart(typical=3))
+        assert not any("claude-voice" in i for i in ids(result))
+        assert any(said in line for line in result.structure.not_followed)
+
+
 def test_docs_a_repos_claude_md_points_to_are_on_the_path_by_hash(vault):
     claude_md = ("Repo rules.\n"
                  "- Before changing the build, read [the build notes](docs/build.md#steps).\n"

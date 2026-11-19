@@ -456,21 +456,22 @@ def _short(s: str | None, n: int) -> str:
 
 
 def _overview_lines(b: ap.PathBuilder, known: dict | None) -> list[str]:
-    """One line per piece, the connector's tool texts as one, as the prototype's overview prints them."""
-    lines, tools = [], []
+    """One line per piece, each server's tool texts as one, as the prototype's overview prints them."""
+    lines, tools = [], {}
     for pid in b.order:
         p = b.pieces[pid]
         if p.stage == ap.TOOLS:
-            tools.append(p)
+            tools.setdefault(pid.split(":")[1], []).append(p)  # instructions:<server>, tool:<server>:<name>, …
             continue
         status = "" if known is None else (" [unchanged]" if known.get(p.id) == p.hash
                                            else " [changed]" if p.id in known else " [new]")
         when = "" if p.always else f"  when: {_short(p.moment, 90)}"
         lines.append(f"{len(lines) + 1}. {pid}  {p.chars:,} chars  #{p.hash}{status}{when}")
-    if tools:
-        combined = ap.digest("".join(p.hash for p in tools))
-        lines.append(f"{len(lines) + 1}. tool:{ap.SERVER}:* ({len(tools)} texts: instructions, guide, tools)  "
-                     f"{sum(p.chars for p in tools):,} chars  #{combined}")
+    for server, texts in tools.items():
+        combined = ap.digest("".join(p.hash for p in texts))
+        kinds = "instructions, guide, tools" if server == ap.SERVER else "instructions, tools"
+        lines.append(f"{len(lines) + 1}. tool:{server}:* ({len(texts)} texts: {kinds})  "
+                     f"{sum(p.chars for p in texts):,} chars  #{combined}")
     return lines
 
 

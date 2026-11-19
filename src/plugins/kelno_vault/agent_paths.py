@@ -60,6 +60,8 @@ ROLES_DIR = "_/agent/roles/"
 HANDWRITTEN_HEADING = "Checking a rule against agent paths"
 #: The server these tools run in, in tool piece ids (`tool:<server>:<tool>`).
 SERVER = "obsidian-mcp"
+#: The voice bridge, in its pieces' ids, its texts read from the PC's snapshot (`bridge`).
+BRIDGE_SERVER = "claude-voice"
 
 # Arrival stages, in the order things reach an agent.
 LOADED, HOOK, START_READ, BRIDGE, WORK, LATER, TOOLS = range(7)
@@ -193,6 +195,11 @@ class Snapshot:
     #: Optional: the `.md` docs inside a folder that a loaded file outside the vault points to, by `file:<path>`
     #: (lower case): `{path, hash, chars}`, without their text.
     docs: dict[str, dict] = field(default_factory=dict)
+    #: Optional: the voice bridge's own texts, from its `claude-voice texts` command: `{command, instructions,
+    #: guide, tools, notes}`, or `{command, error}` when the command failed; None when the bridge isn't on that PC.
+    bridge: dict | None = None
+    #: Whether the snapshot has the `bridge` key at all (a snapshot from before it says nothing either way).
+    bridge_known: bool = False
 
     @classmethod
     def parse(cls, text: str) -> "Snapshot":
@@ -206,7 +213,8 @@ class Snapshot:
                    {k.lower(): v for k, v in data.get("files", {}).items()}, data.get("hooks", []),
                    data.get("relay_notes", []), data.get("relay_config", ""), data.get("hook_scripts") or {},
                    hook_messages if isinstance(hook_messages, dict) else None,
-                   {k.lower(): v for k, v in (data.get("docs") or {}).items() if isinstance(v, dict)})
+                   {k.lower(): v for k, v in (data.get("docs") or {}).items() if isinstance(v, dict)},
+                   data["bridge"] if isinstance(data.get("bridge"), dict) else None, "bridge" in data)
 
     def folder(self, folder: str) -> tuple[str, dict] | None:
         """The snapshot's entry for `folder`, or for the deepest folder above it that it holds."""
@@ -717,6 +725,7 @@ class PathBuilder:
                 raise StartingPointsError(f"{STARTING_POINTS_PATH}: the surface {self.start.surface!r} loads "
                                           f"{load!r}, which this server does not know")
             loader()
+        self.load_bridge()
         for extra in self.start.extras:
             loader = getattr(self, f"load_{extra}", None)
             if loader is None:
@@ -829,6 +838,60 @@ class PathBuilder:
                                 scripts.get((event, script), script), m["text"], None, m.get("when") or "unplaced",
                                 always=False, rule=False))
 
+    def relay(self) -> bool:
+        """The voice relay: a claude.ai chat handed the relay's notes."""
+        return self.start.surface == "claude-ai" and "relay_notes" in self.start.extras
+
+    def on_bridge(self) -> bool:
+        """Whether this agent has the voice bridge connected: the relay, the Coordinator, and a Claude Code session
+        the bridge starts (for the relay or the Coordinator)."""
+        return self.relay() or (self.start.surface == "claude-code" and (
+            self.start.started_by in ("relay", "coordinator") or (self.start.role or "").lower() == "coordinator"))
+
+    def load_bridge(self) -> None:
+        """The voice bridge's own texts, as the PC's snapshot has them from `claude-voice texts` (`bridge`).
+
+        The relay gets the server instructions and tool texts when the bridge's tools load and the guide with its
+        first result from the bridge; a Claude Code session on the bridge gets the instructions and tools when they
+        load (deferred) and the guide when it first calls the bridge, and the bridge's notes under the messages it
+        relays to it, each at its `when`. None of them is a rule file: their links aren't followed."""
+        if not self.on_bridge() or self.snap is None or not self.snap.bridge_known:
+            return
+        b, machine = self.snap.bridge, self.snap.machine
+        if b is None:
+            self.not_followed.append(f"the voice bridge's texts: {machine}'s snapshot says the bridge isn't on that PC")
+            return
+        if b.get("error"):
+            self.not_followed.append(f"the voice bridge's texts: `{b.get('command')}` failed on {machine}: {b['error']}")
+            return
+        where = f"{BRIDGE_SERVER}: `{b.get('command') or 'claude-voice texts'}` on {machine}"
+
+        def text(entry) -> str:
+            return entry.get("text") or "" if isinstance(entry, dict) else ""
+
+        claude_code = self.start.surface == "claude-code"
+        tools_arrive = "when the tool is loaded (deferred in Claude Code)" if claude_code else STAGE_NAMES[TOOLS]
+        if text(b.get("instructions")):
+            self.push(Piece(f"instructions:{BRIDGE_SERVER}", TOOLS, "handed to the client when it connects to the "
+                            "bridge", where, text(b["instructions"]), rule=False))
+        if text(b.get("guide")):
+            if claude_code:
+                self.push(Piece(f"guide:{BRIDGE_SERVER}", LATER, "with its first result from the bridge (or its guide "
+                                "tool)", where, text(b["guide"]), None, "when it first calls the bridge", always=False,
+                                rule=False))
+            else:
+                self.push(Piece(f"guide:{BRIDGE_SERVER}", BRIDGE, "with the relay's first result from the bridge",
+                                where, text(b["guide"]), rule=False))
+        for t in b.get("tools") or []:
+            if isinstance(t, dict) and t.get("name") and text(t):
+                self.push(Piece(f"tool:{BRIDGE_SERVER}:{t['name']}", TOOLS, tools_arrive, where, text(t), rule=False))
+        if claude_code:  # the notes come under what the bridge relays to a session
+            for n, note in enumerate(b.get("notes") or [], 1):
+                if text(note):
+                    when = note.get("when") or "unplaced"
+                    self.push(Piece(f"bridge:{BRIDGE_SERVER}#{n}", LATER, f"from the bridge: {when}", where,
+                                    text(note), None, when, always=False, rule=False))
+
     def load_memory(self) -> None:
         text = self.v.text(MEMORY_NOTE) or ""
         lines = section(text, "Lines") or ""
@@ -910,7 +973,7 @@ class PathBuilder:
                 nf.append("hook messages at other events" + (f" ({', '.join(events)})" if events else "")
                           + ": they print only when their moment comes, in code")
             nf.append("what the Claude desktop app adds at a session's start (its own SessionStart context)")
-        if self.start.started_by in ("relay", "coordinator") or "relay_notes" in self.start.extras:
+        if self.on_bridge() and not (self.snap and self.snap.bridge_known):  # a snapshot from before `bridge`
             nf.append("the voice bridge's tool texts and guide, and its note under each relayed message (in its code)")
         if self.start.surface == "claude-ai":
             nf.append("claude.ai's own system prompt and memory instructions (not the owner's)")
@@ -1163,6 +1226,8 @@ def matches(place: str, pid: str) -> bool:
     body = pid.split(":", 1)[1] if ":" in pid else pid
     if pid.startswith("hook:"):  # `hook:<event>/<script>` also names each of its messages, `…#<n>`
         return place in (pid, body) or ("#" not in place and place in (pid.split("#")[0], body.split("#")[0]))
+    if pid.startswith("bridge:"):  # `bridge:claude-voice` also names each of its notes, `…#<n>`
+        return place in (pid, body, pid.split("#")[0])
     if pid.startswith(("tool:", "memory:", "guide:", "instructions:")):
         return pid == place or body == place
     return body.lower() == place.lower() or (("#" not in place) and body.lower().split("#")[0] == place.lower())
