@@ -30,7 +30,7 @@ from src.mcp_server.auth import current_permission
 from src.models.db import NoteMetadata, ForkNoteTask
 from src.services import embeddings as embeddings_service
 from src.services import indexer
-from src.services.fork_tasks import ops as task_ops
+from src.services.fork_tasks import ids as task_ids, ops as task_ops
 from src.services import vault as vault_service
 import _harness
 
@@ -296,3 +296,23 @@ async def test_with_the_agent_edit_stamp_the_reported_line_is_where_the_task_now
     assert on_disk[0] == "---" and on_disk[1].startswith("last_ai_edit: ") and on_disk[3] == done.text
     again = await tools.set_task_status_impl(done.path, done.line, done.text, done.content_hash, status="todo")
     assert again.line == 4 and again.error is None, again
+
+
+async def test_the_id_lookups_by_the_ids_a_write_touches(sessionmaker, vault, monkeypatch):
+    """The speed work's queries (tasks.md, "Speed"): a made-up id is looked up
+    by itself, and the id checks by the ids they touch, against the real index."""
+    write(vault, "other.md", "- [ ] old one 🆔 aaaaaa\n- [ ] waits ⛔ x_1\n- [x] done waiter ⛔ y_1 ✅ 2026-10-01\n")
+    write(vault, "n.md", "# N\n- [ ] renamed 🆔 x_1\n- [ ] free 🆔 y_1\n- [ ] like 🆔 xx1\n")
+    await indexer.index_vault(user_id=None)
+    monkeypatch.setattr(tools.settings, "tasks_always_id", True)
+    chars = iter("aaaaaa" "bbbbbb")
+    monkeypatch.setattr(task_ids.secrets, "choice", lambda alphabet: next(chars))
+    created = await tools.create_task_impl("new", path="n.md")
+    assert created.error is None and created.id == "bbbbbb", created
+    # An open task in another note waits for x_1: renaming it is refused.
+    refused = await tools.edit_task_impl(id="x_1", new_id="x2")
+    assert json.loads(refused.error.rsplit("\n", 1)[-1].removeprefix("MCP-REFUSAL "))["code"] == "invalid_argument"
+    assert "other.md:2" in refused.error
+    # Only a done task waits for y_1: the rename goes ahead.
+    renamed = await tools.edit_task_impl(id="y_1", new_id="y2")
+    assert renamed.error is None and renamed.id == "y2", renamed

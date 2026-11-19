@@ -42,6 +42,8 @@ matches nothing and is not a problem.
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from src.services.links import FULL_NOTE, scan_fences, split_lines as _offsets
@@ -143,8 +145,43 @@ def _frontmatter_length(text: str) -> tuple[int, bool]:
     return closing.end(), True
 
 
+#: The scans made in the current task tool call, by text (`one_call`); None outside one.
+_call_scans: ContextVar[dict[str, NoteScan] | None] = ContextVar("fork_tasks_call_scans", default=None)
+
+
+@contextmanager
+def one_call():
+    """Within it, a text already scanned is not scanned again.
+
+    A task write scans the same note's text up to ten times (finding the
+    task, the ids in the note, the read-back, the other lines' check, the
+    re-index, the ledger citations), each with a YAML parse of the
+    frontmatter. `scan_note` depends on the text alone and its result is
+    immutable, so within one tool call the first scan of a text answers the
+    others. Never shared between calls: a note's next call scans it afresh.
+    """
+    token = _call_scans.set({})
+    try:
+        yield
+    finally:
+        _call_scans.reset(token)
+
+
 def scan_note(text: str) -> NoteScan:
-    """Classify every line of a note (raw text, frontmatter included)."""
+    """Classify every line of a note (raw text, frontmatter included).
+
+    Inside `one_call`, a text scanned before in the call is answered from then.
+    """
+    scans = _call_scans.get()
+    if scans is None:
+        return _scan_note(text)
+    found = scans.get(text)
+    if found is None:
+        found = scans[text] = _scan_note(text)
+    return found
+
+
+def _scan_note(text: str) -> NoteScan:
     offsets = _offsets(text)
     frontmatter_end, frontmatter_defective = _frontmatter_length(text)
     fences = scan_fences(text, context=FULL_NOTE)

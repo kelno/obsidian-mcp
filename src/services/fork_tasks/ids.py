@@ -19,16 +19,21 @@ from src.services.fork_tasks import format as tf
 ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 ID_LENGTH = 6
 #: Attempts before giving up; with 36**6 ids this is never reached in practice.
-_MAX_ATTEMPTS = 100
+MAX_ATTEMPTS = 100
+
+
+def no_free_id() -> TaskOpError:
+    """The refusal when no free id could be made."""
+    return TaskOpError("concurrent_write", "no free task id could be made. Nothing was written; call again.")
 
 
 def new_id(taken: set[str]) -> str:
     """A random id that is not in `taken` (compared case-sensitively, as the plugin does)."""
-    for _ in range(_MAX_ATTEMPTS):
+    for _ in range(MAX_ATTEMPTS):
         candidate = "".join(secrets.choice(ID_ALPHABET) for _ in range(ID_LENGTH))
         if candidate not in taken and not candidate.isdigit():
             return candidate
-    raise TaskOpError("concurrent_write", "no free task id could be made. Nothing was written; call again.")
+    raise no_free_id()
 
 
 def lines_with_id(text: str, path: str, task_id: str, settings: TasksSettings,

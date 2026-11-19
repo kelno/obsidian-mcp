@@ -9785,6 +9785,7 @@ from src.services.fork_tasks import format as _tf, index as _task_index, ops as 
 from src.services import ledger_citations as _ledger_citations, ledger_tasks as _ledger_tasks  # noqa: E402
 from src.services.fork_tasks import ids as _task_ids, query as _tq  # noqa: E402
 from dataclasses import replace as _dc_replace  # noqa: E402
+from src.services.fork_tasks import scan as _task_scan  # noqa: E402
 from src.services.fork_tasks.scan import split_lines as _task_split_lines  # noqa: E402
 from src.services.fork_tasks.settings import TasksSettingsError, read_settings as _read_task_settings  # noqa: E402
 
@@ -9812,8 +9813,38 @@ def _task_failed(result_cls, outcome: BodyOutcome):
     return result
 
 
+#: Within one task write (`_one_task_call`): `{uid: (settings, registry, today)}`; None outside one.
+_task_call_context: ContextVar[dict | None] = ContextVar("task_call_context", default=None)
+
+
+def _one_task_call(fn):
+    """One task tool call reads the Tasks settings once and scans each text once.
+
+    The write tools reach `_task_context` up to four times and scan the same
+    note up to ten times; within the call the first answer stands for the
+    others (`fork_tasks.scan.one_call`). A refusal is not kept: the next read
+    refuses the same way.
+    """
+    @wraps(fn)
+    async def wrapper(*args, **kwargs):
+        token = _task_call_context.set({})
+        try:
+            with _task_scan.one_call():
+                return await fn(*args, **kwargs)
+        finally:
+            _task_call_context.reset(token)
+
+    return wrapper
+
+
 async def _task_context(uid: int | None):
-    """`(settings, registry, today)` for this caller, or `TaskOpError`."""
+    """`(settings, registry, today)` for this caller, or `TaskOpError`.
+
+    Read once per task write (`_one_task_call`), on every call otherwise.
+    """
+    memo = _task_call_context.get()
+    if memo is not None and uid in memo:
+        return memo[uid]
     try:
         root = _vault_root(uid)
         task_settings = await asyncio.to_thread(
@@ -9827,6 +9858,8 @@ async def _task_context(uid: int | None):
         ) from None
     registry = _tf.StatusRegistry.from_settings(task_settings)
     today = _task_ops.owner_today(settings.tasks_timezone)
+    if memo is not None:
+        memo[uid] = (task_settings, registry, today)
     return task_settings, registry, today
 
 
@@ -9845,22 +9878,31 @@ async def _area_index(uid: int | None) -> _tq.AreaIndex:
     return _tq.AreaIndex.from_rows([(r.file_path, r.frontmatter) for r in rows])
 
 
-async def _task_ids_in_index(uid: int | None, exclude_path: str) -> list:
-    """`[("path:line", id, depends_on), …]`: every indexed task of the
+async def _task_ids_in_index(uid: int | None, exclude_path: str, task_settings, registry,
+                             needles: set[str] | None = None) -> list:
+    """`[("path:line", id, depends_on, done), …]`: every indexed task of the
     caller's notes but `exclude_path` (whose current text the caller reads
-    itself) that carries 🆔 or ⛔."""
+    itself) that carries 🆔 or ⛔.
+
+    With `needles`, only the tasks whose line holds one of those ids, which
+    takes in every task carrying one or waiting for one: the database filters
+    the lines, so the thousands of other tasks with an id are not parsed."""
     from sqlalchemy import or_, select
 
     from src.models.db import ForkNoteTask, NoteMetadata
 
-    task_settings, registry, _today = await _task_context(uid)
+    if needles is not None and not needles:
+        return []
+    where = [_note_owner_predicate(uid), ForkNoteTask.kind == "task",
+             or_(ForkNoteTask.line.contains("🆔"), ForkNoteTask.line.contains("⛔")),
+             NoteMetadata.file_path != exclude_path]
+    if needles is not None:
+        where.append(or_(*[ForkNoteTask.line.contains(n, autoescape=True) for n in sorted(needles)]))
     async with async_session() as session:
         rows = (await session.execute(
             select(NoteMetadata.file_path, ForkNoteTask.line_number, ForkNoteTask.line)
             .join(NoteMetadata, NoteMetadata.id == ForkNoteTask.note_id)
-            .where(_note_owner_predicate(uid), ForkNoteTask.kind == "task",
-                   or_(ForkNoteTask.line.contains("🆔"), ForkNoteTask.line.contains("⛔")),
-                   NoteMetadata.file_path != exclude_path)
+            .where(*where)
         )).all()
     out = []
     for row in rows:
@@ -9881,17 +9923,42 @@ async def _check_task_ids(uid, before, after, path: str, note_text: str, task_se
     new_deps = set(after.depends_on) - set(before.depends_on if before is not None else ())
     if not (id_changed or new_deps):
         return notes
-    links = await _task_ids_in_index(uid, path)
+    # `check_task_ids` looks other tasks up by the ids this write sets, drops
+    # or adds, except for the walk looking for a cycle, which follows any
+    # chain: other notes' tasks naming those ids are enough without one.
+    new_id = bool(after.id) and (before is None or after.id != before.id)
+    walks = bool(after.id) and not after.is_done and bool(set(after.depends_on) if new_id else new_deps)
+    needles = None if walks else {after.id, before.id if before is not None else "", *new_deps} - {""}
+    links = await _task_ids_in_index(uid, path, task_settings, registry, needles)
     links += _task_ops.task_links_in_note(note_text, path, task_settings, registry, except_line=except_line)
     return _task_ops.check_task_ids(before, after, links) + notes
 
 
-async def _taken_task_ids(uid, path: str, note_text: str, task_settings, registry) -> set[str]:
-    """Every id the caller's vault already uses: other notes from the index,
-    this note from the text just read. A new id must not be among them."""
-    links = await _task_ids_in_index(uid, path)
-    links += _task_ops.task_links_in_note(note_text, path, task_settings, registry)
-    return {link[1] for link in links if link[1]}
+class _TaskIdMaker:
+    """New ids no task of the caller's vault uses: this note's from the text
+    just read, other notes' looked up in the index for each id drawn (one
+    small query), rather than listing and parsing every id the vault holds.
+    Nothing is read until an id is asked for."""
+
+    def __init__(self, uid, path: str, note_text: str, task_settings, registry):
+        self.uid, self.path, self.note_text = uid, path, note_text
+        self.task_settings, self.registry = task_settings, registry
+        self.written: set[str] = set()
+
+    def add(self, task_id: str) -> None:
+        """`task_id` is taken from now on (one this call is writing)."""
+        self.written.add(task_id)
+
+    async def new(self) -> str:
+        taken = {link[1] for link in _task_ops.task_links_in_note(
+            self.note_text, self.path, self.task_settings, self.registry) if link[1]} | self.written
+        for _ in range(_task_ids.MAX_ATTEMPTS):
+            candidate = _task_ids.new_id(taken)
+            if not any(link[1] == candidate for link in await _task_ids_in_index(
+                    self.uid, self.path, self.task_settings, self.registry, {candidate})):
+                return candidate
+            taken.add(candidate)
+        raise _task_ids.no_free_id()
 
 
 async def _task_paths_with_id(uid, task_id: str, task_settings, registry) -> list[str]:
@@ -10746,6 +10813,7 @@ def _task_refused(exc: "_task_ops.TaskOpError") -> TaskWriteResult:
     refusal_result=_task_write_refusal,
     write_class=True,
 )
+@_one_task_call
 async def create_task_impl(
     description: str,
     path: str | None = None,
@@ -10821,8 +10889,8 @@ async def create_task_impl(
                 return _task_failed(TaskWriteResult, err)
         if settings.tasks_always_id and not task.id:
             try:
-                task = _dc_replace(task, id=_task_ids.new_id(
-                    await _taken_task_ids(uid, target.rel, old_text, task_settings, registry)))
+                task = _dc_replace(task, id=await _TaskIdMaker(
+                    uid, target.rel, old_text, task_settings, registry).new())
             except _task_ops.TaskOpError as exc:
                 return _task_refused(exc)
             new_line = _tf.to_file_line(task)
@@ -10891,6 +10959,7 @@ async def _existing_task(tool, uid, target, path, line, expected_line, expected_
     refusal_result=_task_write_refusal,
     write_class=True,
 )
+@_one_task_call
 async def edit_task_impl(
     path: str | None = None,
     line: int | None = None,
@@ -10949,8 +11018,7 @@ async def edit_task_impl(
             return _task_failed(TaskWriteResult, err)
         try:
             if settings.tasks_always_id and not old.id and new_id is None:
-                new_id = _task_ids.new_id(await _taken_task_ids(uid, target.rel, located.text, task_settings,
-                                                                registry))
+                new_id = await _TaskIdMaker(uid, target.rel, located.text, task_settings, registry).new()
             area_tags = None
             if areas is not None:
                 areas_index = await _area_index(uid)
@@ -11012,6 +11080,7 @@ def _with_notes(result: TaskWriteResult, notes: list[str]) -> TaskWriteResult:
     refusal_result=_task_write_refusal,
     write_class=True,
 )
+@_one_task_call
 async def set_task_status_impl(
     path: str | None = None,
     line: int | None = None,
@@ -11073,18 +11142,18 @@ async def set_task_status_impl(
                 # task still to do, and the done line gets a new one (owner,
                 # 2026-11-16; the plugin writes the next occurrence with none).
                 # Otherwise the task keeps its own, or gets one if it has none.
-                taken = await _taken_task_ids(uid, target.rel, located.text, task_settings, registry)
+                ids = _TaskIdMaker(uid, target.rel, located.text, task_settings, registry)
                 own = located.task.id or None
                 if change.next_index is not None:
-                    own = own or _task_ids.new_id(taken)
-                    taken.add(own)
+                    own = own or await ids.new()
+                    ids.add(own)
                 for i, t in enumerate(result):
                     if change.next_index is not None:
-                        t = _dc_replace(t, id=own if i == change.next_index else _task_ids.new_id(taken))
+                        t = _dc_replace(t, id=own if i == change.next_index else await ids.new())
                     elif not t.id:
-                        own = own or _task_ids.new_id(taken)
+                        own = own or await ids.new()
                         t = _dc_replace(t, id=own)
-                    taken.add(t.id)
+                    ids.add(t.id)
                     result[i] = t
             if settings.tasks_block_id:
                 others = _task_ops.note_block_ids(located.text, (line,))

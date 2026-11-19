@@ -85,11 +85,15 @@ def vault(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tools, "_area_index", areas)
 
-    async def indexed_tasks(uid, exclude_path):
-        # The fake index: other notes' tasks with an id or dependencies, `(ref, id, depends_on)`.
+    async def indexed_tasks(uid, exclude_path, task_settings, registry, needles=None):
+        # The fake index: other notes' tasks with an id or dependencies, `(ref, id, depends_on)`;
+        # with `needles`, those carrying or naming one of them, as the line filter keeps them.
         rows = [(ref, i, (), False) for i, refs in INDEXED_IDS.items() for ref in refs]
         rows += [r if len(r) == 4 else (*r, False) for r in INDEXED_DEPS]
-        return [r for r in rows if not r[0].startswith(exclude_path + ":")]
+        rows = [r for r in rows if not r[0].startswith(exclude_path + ":")]
+        if needles is not None:
+            rows = [r for r in rows if r[1] in needles or set(r[2]) & set(needles)]
+        return rows
 
     monkeypatch.setattr(tools, "_task_ids_in_index", indexed_tasks, raising=False)
     INDEXED_IDS.clear()
