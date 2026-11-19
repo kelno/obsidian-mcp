@@ -490,6 +490,7 @@ def test_between_rule_notes_only_the_conventions_pointer_shapes_are_followed(vau
         "- Read [[_/agent/Notes kept]] first.\n"
         "- Whenever stuck, read [[_/agent/roles/Relay]].\n"
         "- See [[Areas/Repo/Repo#For agents|Repo's rules]].\n"
+        "- [[#Tasks]]: see [[_/agent/roles/Relay]].\n"
         "- The index's shape, as code: `[[_/agent/Memory reference]]: when`.\n"
         "```\n[[_/agent/Memory reference]]\n```\n"
         "- Old copies sit beside it, such as `Reference/Old/KDO~20261022-153000.md`.\n"
@@ -513,7 +514,7 @@ def test_between_rule_notes_only_the_conventions_pointer_shapes_are_followed(vau
     assert {m["target"] for m in result.structure.rule_file_mentions} == {
         "_/agent/roles/Worker.md", "_/agent/Notes kept.md", "_/agent/roles/Relay.md", "_/agent/Memory reference.md",
         "Areas/Repo/Repo.md#For agents"}
-    assert result.structure.mentions_not_followed == 5
+    assert result.structure.mentions_not_followed == 6  # Relay twice: an index line led by `[[#Tasks]]` too
     # A path to nothing is reported, but for a Syncthing version's name (outside the vault).
     assert {b["target"] for b in result.structure.broken_pointers} == {
         "_/agent/Renamed.md", "_/agent/Gone.md", "_/agent/Missing"}

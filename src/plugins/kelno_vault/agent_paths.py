@@ -804,7 +804,8 @@ def pointer_moment(line: str, sentence: str, target: str | None = None) -> str |
     s = re.sub(r"\s*\[[PQFC]\d+(?:,\s*[PQFC]\d+)*\]", "", s)  # ledger refs aren't part of a moment
     index = INDEX_SHAPE.match(s)
     leading = re.match(r"^\[\[([^\]|#]+)", s)
-    if index and target is not None and leading.group(1).strip().rstrip("\\").casefold() != target.strip().casefold():
+    lead_note = leading.group(1).strip().rstrip("\\").casefold() if leading else None  # None: `[[#Heading]]`
+    if index and target is not None and lead_note != target.strip().casefold():
         index = None  # another link on an index line isn't the note the line is about
     if index:  # the guide index's shape: the guide, then when to read it
         return re.split(r"(?<=[a-z\)])\.(?:\s|$)|\s\|\s", index.group(1))[0].strip().rstrip(".")
