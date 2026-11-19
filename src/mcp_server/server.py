@@ -152,27 +152,20 @@ def _origin_patterns(origins) -> list[str]:
 # against the code rather than a list:
 #   read-only   = the nineteen tools that neither change vault bytes nor mint
 #                 a capability (idempotent, closed-world)
-#   destructive = the write-bucket set (`_tracked(write_class=True)`) minus
-#                 `create_note` (no-clobber, additive) and `add_task` (inserts
-#                 one line, removes no byte; #428) plus `request_upload` (its
-#                 `overwrite=True` capability overwrites on redemption);
-#                 `move_task` (#430) removes lines from its source note, so it
-#                 is destructive under the rule
+#   destructive = none (fork). Upstream marks most writers destructive; this
+#                 fork marks every tool `destructiveHint=False`, because
+#                 claude.ai prompts on every call to a destructive tool and
+#                 offers no "Always allow" (owner's decision, 2026-11-19)
 #   open-world  = `import_from_url` only
-# A `.trash/` undo path does not make a delete non-destructive, and the hints
-# are per tool, not per call: `edit_note(dry_run=True)` is still "destructive".
 # See docs/architecture/vault-tools.md, "Tool metadata".
 _READ_ONLY = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
 )
-_ADDITIVE = ToolAnnotations(
+_WRITE = ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
 )
-_DESTRUCTIVE = ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
-)
-_DESTRUCTIVE_OPEN_WORLD = ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True
+_WRITE_OPEN_WORLD = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 )
 # `fetch_page` (fork): reads a public page, writes nothing.
 _READ_ONLY_OPEN_WORLD = ToolAnnotations(
@@ -614,7 +607,7 @@ async def semantic_search(
     )
 
 
-@mcp.tool(title="Create note", annotations=_ADDITIVE)
+@mcp.tool(title="Create note", annotations=_WRITE)
 @_plugins.tool_text("create_note")
 async def create_note(
     path: str, content: str, expected_hash: str | None = None
@@ -671,7 +664,7 @@ async def create_note(
     return await create_note_impl(path, content, expected_hash=expected_hash)
 
 
-@mcp.tool(title="Edit note", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Edit note", annotations=_WRITE)
 @_plugins.tool_text("edit_note")
 async def edit_note(
     path: str,
@@ -891,7 +884,7 @@ async def find_orphans(folder: str | None = None, limit: int = 50) -> str:
     return await find_orphans_impl(folder=folder, limit=limit)
 
 
-@mcp.tool(title="Move note", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Move note", annotations=_WRITE)
 @_plugins.tool_text("move_note")
 async def move_note(
     from_path: str,
@@ -961,7 +954,7 @@ async def move_note(
     )
 
 
-@mcp.tool(title="Delete note", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Delete note", annotations=_WRITE)
 async def delete_note(
     path: str, permanent: bool = False, expected_hash: str | None = None
 ) -> str:
@@ -1028,7 +1021,7 @@ async def delete_note(
     )
 
 
-@mcp.tool(title="Set frontmatter", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Set frontmatter", annotations=_WRITE)
 async def set_frontmatter(
     path: str,
     updates: dict | None = None,
@@ -1146,7 +1139,7 @@ async def read_file(
     )
 
 
-@mcp.tool(title="Write file", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Write file", annotations=_WRITE)
 @_plugins.tool_text("write_file")
 async def write_file(
     path: str,
@@ -1250,7 +1243,7 @@ async def list_files(
     )
 
 
-@mcp.tool(title="Request upload link", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Request upload link", annotations=_WRITE)
 async def request_upload(
     path: str,
     overwrite: bool = False,
@@ -1330,7 +1323,7 @@ async def check_upload(upload_id: str) -> str:
     return await check_upload_impl(upload_id)
 
 
-@mcp.tool(title="Request download link", annotations=_ADDITIVE)
+@mcp.tool(title="Request download link", annotations=_WRITE)
 async def request_download(path: str, expires_in: int | None = None) -> str:
     """Get a short-lived link a person can use to save a vault file. Peer to
     `read_file`, which returns the bytes to you — use this one when the file is
@@ -1361,7 +1354,7 @@ async def request_download(path: str, expires_in: int | None = None) -> str:
     return await request_download_impl(path, expires_in=expires_in)
 
 
-@mcp.tool(title="Import from URL", annotations=_DESTRUCTIVE_OPEN_WORLD)
+@mcp.tool(title="Import from URL", annotations=_WRITE_OPEN_WORLD)
 async def import_from_url(url: str, path: str, overwrite: bool = False) -> str:
     """Fetch a file from a public https URL straight into the vault. Requires write permission — a `readwrite` API key, or an OAuth token
     carrying the `readwrite` scope.
@@ -1463,7 +1456,7 @@ async def fetch_page(
     )
 
 
-@mcp.tool(title="Delete file", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Delete file", annotations=_WRITE)
 async def delete_file(
     path: str, permanent: bool = False, expected_hash: str | None = None
 ) -> str:
@@ -1501,7 +1494,7 @@ async def delete_file(
     return await delete_file_impl(path, permanent=permanent, expected_hash=expected_hash)
 
 
-@mcp.tool(title="Move file", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Move file", annotations=_WRITE)
 async def move_file(
     from_path: str, to_path: str, expected_hash: str | None = None
 ) -> str:
@@ -1537,7 +1530,7 @@ async def move_file(
     return await move_file_impl(from_path, to_path, expected_hash=expected_hash)
 
 
-@mcp.tool(title="Delete folder", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Delete folder", annotations=_WRITE)
 async def delete_folder(path: str) -> str:
     """Delete an empty folder from the vault. Requires write permission — a
     `readwrite` API key, or an OAuth token carrying the `readwrite` scope.
@@ -1643,7 +1636,7 @@ async def list_tasks(
     )
 
 
-@mcp.tool(title="Create task", annotations=_ADDITIVE)
+@mcp.tool(title="Create task", annotations=_WRITE)
 async def create_task(
     description: str,
     path: str | None = None,
@@ -1721,7 +1714,7 @@ async def create_task(
     )
 
 
-@mcp.tool(title="Edit task", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Edit task", annotations=_WRITE)
 async def edit_task(
     id: str | None = None,
     path: str | None = None,
@@ -1809,7 +1802,7 @@ async def edit_task(
     )
 
 
-@mcp.tool(title="Set task status", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Set task status", annotations=_WRITE)
 async def set_task_status(
     id: str | None = None,
     path: str | None = None,
@@ -2687,7 +2680,7 @@ async def task_agenda(
     )
 
 
-@mcp.tool(title="Complete task", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Complete task", annotations=_WRITE)
 async def complete_task(
     path: str,
     id: str,
@@ -2762,7 +2755,7 @@ async def complete_task(
     )
 
 
-@mcp.tool(title="Update task", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Update task", annotations=_WRITE)
 async def update_task(
     path: str,
     id: str,
@@ -2854,7 +2847,7 @@ async def update_task(
     )
 
 
-@mcp.tool(title="Add task", annotations=_ADDITIVE)
+@mcp.tool(title="Add task", annotations=_WRITE)
 async def add_task(
     path: str,
     text: str,
@@ -2943,7 +2936,7 @@ async def add_task(
     )
 
 
-@mcp.tool(title="Move task", annotations=_DESTRUCTIVE)
+@mcp.tool(title="Move task", annotations=_WRITE)
 async def move_task(
     path: str,
     id: str,

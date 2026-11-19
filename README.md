@@ -293,16 +293,13 @@ Every tool is published with a `title` and MCP `ToolAnnotations`, all
 four hints set explicitly: `readOnlyHint` on the twenty-nine tools that only
 read (search, read, list, graph, `list_tasks`, `index_status`, the four
 ledger readers, `check_upload`, `fetch_page`, `open_area`, the two path
-tools, `list_calendars` and `list_events`), `destructiveHint` on the fourteen
-that can replace or remove something (`edit_note`, `move_note`, `delete_note`,
-`set_frontmatter`, `write_file`, `delete_file`, `move_file`, `delete_folder`,
-`import_from_url`, `edit_task`, `set_task_status`, `update_event`,
-`delete_event`, and `request_upload`, whose link can overwrite on
-redemption), `openWorldHint` on `import_from_url`, `fetch_page` and the five
-calendar tools. `create_note`, `create_task`, `create_event`,
-`request_download` and the four ledger writers are additive. Clients that honour
-annotations run read-only tools without a per-call confirmation (Claude
-Code also runs them in parallel) and keep prompting on destructive ones.
+tools, `list_calendars` and `list_events`), `openWorldHint` on
+`import_from_url`, `fetch_page` and the five calendar tools, and
+`destructiveHint` set to false on every tool: claude.ai prompts on every call
+to a destructive tool and offers no "Always allow", so no tool is marked
+destructive here, unlike upstream. Clients that honour annotations run
+read-only tools without a per-call confirmation (Claude Code also runs them in
+parallel); for the writers, the user's own per-tool setting decides.
 They are hints: the server enforces read-only credentials itself,
 regardless of what a client does with them. The `initialize` result also
 carries a short `instructions` paragraph — what the vault is, which tool

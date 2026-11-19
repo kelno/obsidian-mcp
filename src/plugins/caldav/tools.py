@@ -864,16 +864,16 @@ async def delete_event(
     return await delete_event_impl(event=event, occurrence=occurrence, all_occurrences=all_occurrences)
 
 
-def _tool(fn, title: str, logged: tuple[str, ...], result_type: type, *, writes: bool,
-          destructive: bool = False) -> plugins.PluginTool:
+def _tool(fn, title: str, logged: tuple[str, ...], result_type: type, *, writes: bool) -> plugins.PluginTool:
     """A tool as the core registers it. `logged`: the arguments its usage row keeps (never titles or notes).
 
-    Hints as the core's (#343): all four set; open-world, since the calendar server is outside the vault.
+    Hints as the core's (#343): all four set; open-world, since the calendar server is outside the vault; never
+    destructive, like every tool of the fork (vault-tools.md, "Tool metadata").
     """
     return plugins.PluginTool(
         name=fn.__name__, fn=fn, title=title, logged_args=logged, result_type=result_type,
         refusal_result=lambda message: result_type(error=message), write_class=writes,
-        annotations=ToolAnnotations(readOnlyHint=not writes, destructiveHint=destructive, idempotentHint=not writes,
+        annotations=ToolAnnotations(readOnlyHint=not writes, destructiveHint=False, idempotentHint=not writes,
                                     openWorldHint=True))
 
 
@@ -881,8 +881,6 @@ TOOLS = (
     _tool(list_calendars, "List calendars", (), CalendarListResult, writes=False),
     _tool(list_events, "List events", ("start", "end", "calendar", "limit"), EventListResult, writes=False),
     _tool(create_event, "Create event", ("calendar", "start", "end"), EventWriteResult, writes=True),
-    _tool(update_event, "Update event", ("event", "occurrence", "all_occurrences"), EventWriteResult, writes=True,
-          destructive=True),
-    _tool(delete_event, "Delete event", ("event", "occurrence", "all_occurrences"), EventWriteResult, writes=True,
-          destructive=True),
+    _tool(update_event, "Update event", ("event", "occurrence", "all_occurrences"), EventWriteResult, writes=True),
+    _tool(delete_event, "Delete event", ("event", "occurrence", "all_occurrences"), EventWriteResult, writes=True),
 )

@@ -603,9 +603,10 @@ def test_registration_order_titles_and_annotations():
     listed = {t.name: t for t in server.mcp._tool_manager.list_tools()}
     assert listed["task_agenda"].title == "Task agenda"
     assert listed["task_agenda"].annotations == server._READ_ONLY
-    assert listed["complete_task"].annotations == server._DESTRUCTIVE
-    assert listed["update_task"].annotations == server._DESTRUCTIVE
-    assert listed["add_task"].annotations == server._ADDITIVE
+    # Fork: no tool is destructive (vault-tools.md, "Tool metadata").
+    assert listed["complete_task"].annotations == server._WRITE
+    assert listed["update_task"].annotations == server._WRITE
+    assert listed["add_task"].annotations == server._WRITE
 
 
 def test_every_new_refusal_code_is_produced_by_the_wiring():

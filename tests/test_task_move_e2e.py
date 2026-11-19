@@ -1372,14 +1372,14 @@ def test_a_two_note_move_takes_exactly_one_write_token(world, write_burst):
 # ── the published surface (D17, D18) ────────────────────────────────────────
 
 
-def test_move_task_is_registered_last_destructive_with_its_contract_first():
+def test_move_task_is_registered_last_with_its_contract_first():
     from src.mcp_server import server
 
     listed = {t.name: t for t in server.mcp._tool_manager.list_tools()}
     names = list(listed)
     assert names[-2:] == ["add_task", "move_task"]
     tool = listed["move_task"]
-    assert tool.title == "Move task" and tool.annotations == server._DESTRUCTIVE
+    assert tool.title == "Move task" and tool.annotations == server._WRITE  # fork: no tool is destructive
     text = " ".join(tool.description.split())
     assert len(tool.description) <= 4000
     for needle in ("readwrite", "`to_expected_hash`", "top-level, unquoted",

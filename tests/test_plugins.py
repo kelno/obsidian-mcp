@@ -528,6 +528,8 @@ def test_every_plugin_tool_has_a_distinct_title_and_four_explicit_hints():
             assert isinstance(spec.annotations, ToolAnnotations), spec.name
             for hint in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
                 assert isinstance(getattr(spec.annotations, hint), bool), (spec.name, hint)
+            # Fork: no tool is destructive (vault-tools.md, "Tool metadata").
+            assert spec.annotations.destructiveHint is False, spec.name
             assert spec.annotations.readOnlyHint is not spec.write_class, spec.name
 
 

@@ -552,11 +552,11 @@ def test_the_registry_is_the_write_bucket_plus_request_upload():
     assert tool_permissions.WRITE_REQUIRED_TOOLS == tools.production_write_bucket_tools() | {"request_upload"}
 
 
-def test_the_registry_is_the_destructive_set_plus_the_additive_writers():
-    destructive = {t["name"] for t in oracle()["tools"] if t["annotations"]["destructiveHint"]}
-    # Fork: its additive writers (a task line added; ledger writes keep every version).
-    fork_additive = {"create_task", "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit"}
-    assert tool_permissions.WRITE_REQUIRED_TOOLS == destructive | {"create_note", "add_task"} | fork_additive
+def test_the_registry_is_the_writers_but_request_download():
+    # Fork: no tool is marked destructive (vault-tools.md, "Tool metadata"), so
+    # the registry reconciles with the tools not marked read-only instead.
+    writers = {t["name"] for t in oracle()["tools"] if not t["annotations"]["readOnlyHint"]}
+    assert tool_permissions.WRITE_REQUIRED_TOOLS == writers - {"request_download"}
     assert "request_download" not in tool_permissions.WRITE_REQUIRED_TOOLS
     assert "check_upload" not in tool_permissions.WRITE_REQUIRED_TOOLS
     registered = {t.name for t in mcp._tool_manager.list_tools()}

@@ -110,16 +110,12 @@ READ_TOOLS = frozenset({
 })
 #: Fork: `fetch_page` reads a third party's page: read-only, open-world.
 FORK_OPEN_READS = frozenset({"fetch_page"})
-#: Fork: its write-bucket tools, and those of them that remove no byte (a task
-#: line added; ledger writes keep every previous version).
+#: Fork: its write-bucket tools.
 FORK_WRITERS = frozenset({
     "move_file", "delete_folder", "create_task", "edit_task", "set_task_status",
     "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit",
 })
-FORK_ADDITIVE = frozenset({"create_task", "ledger_add", "ledger_update", "ledger_digest_edit", "ledger_topic_edit"})
-#: The task write tools (#428 D15): in the write bucket; `add_task` is
-#: additive (it removes no byte), the others destructive (`move_task`, #430,
-#: removes lines from its source note).
+#: The task write tools (#428 D15, `move_task` #430): in the write bucket.
 TASK_WRITE_TOOLS = ("complete_task", "update_task", "add_task", "move_task")
 RESTRUCTURED_WRITE_TOOLS = ("edit_note", "move_note", "set_frontmatter")
 # The refusal statement is qualified in every description that makes one: the
@@ -261,25 +257,18 @@ def test_the_write_bucket_set_is_the_production_one():
     assert len(w) == 12 + len(FORK_WRITERS)
 
 
-def test_destructive_is_the_write_bucket_minus_the_additive_writers_plus_request_upload():
-    """#428 D15: `add_task` joins `create_note` as an additive writer — it
-    inserts one line and removes no byte."""
+def test_no_tool_is_destructive():
+    """Fork (owner's decision, 2026-11-19): upstream marks most writers
+    destructive; claude.ai then prompts on every call and offers no "Always
+    allow", so the fork marks none. A resync that brings a destructive mark
+    back fails here."""
     w = tools.production_write_bucket_tools()
-    assert _set(lambda a: a.destructiveHint) == (w - {"create_note", "add_task"} - FORK_ADDITIVE) | {"request_upload"}
-    assert _set(lambda a: a.destructiveHint) == {
-        "edit_note", "move_note", "delete_note", "set_frontmatter", "write_file",
-        "delete_file", "import_from_url", "complete_task", "update_task", "move_task",
-        "request_upload",
-        "move_file", "delete_folder", "edit_task", "set_task_status",  # fork
-    }
+    assert _set(lambda a: a.destructiveHint) == frozenset()
     assert _set(lambda a: not a.readOnlyHint) == w | {"request_upload", "request_download"}
     assert _set(lambda a: a.openWorldHint) == {"import_from_url"} | FORK_OPEN_READS
     assert _set(lambda a: a.idempotentHint) == _set(lambda a: a.readOnlyHint)
-    for name in ("create_note", "add_task", "request_download", *sorted(FORK_ADDITIVE)):
-        a = registered(name).annotations
-        assert (a.readOnlyHint, a.destructiveHint) == (False, False), name
     a = registered("import_from_url").annotations
-    assert (a.destructiveHint, a.openWorldHint) == (True, True)
+    assert (a.readOnlyHint, a.destructiveHint, a.openWorldHint) == (False, False, True)
 
 
 def test_a_test_probe_cannot_pollute_the_write_bucket_set():

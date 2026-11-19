@@ -36,6 +36,7 @@ This fork follows `maxkuminov/obsidian-mcp`. What is specific here:
 - The agent ledger is primary data: backed up, never rebuilt from the vault, deletes refused by the database. ([agent ledger](docs/architecture/agent-ledger.md))
 - A plugin never fails a write, and never touches what the caller kept. ([plugins](docs/architecture/plugins.md))
 - Agents read the guide: `get_vault_guide` is the agent's manual, and an agent that skips it is a bug to fix (in the guide's description or the client's setup), not a case to design around. claude.ai shows an agent only about the first 80 characters of a tool's description until it searches its tools, so every tool's first line stands on its own, and the guide's says to read it first. ([vault tools](docs/architecture/vault-tools.md))
+- No tool is marked destructive: claude.ai's card for a destructive tool never offers "Always allow" (owner). A resync that brings upstream's marks back stops at `tests/test_issue_343_tool_metadata.py`. ([vault tools](docs/architecture/vault-tools.md), "Tool metadata")
 - A tool's description is at most 4,000 characters as served with the deployment's plugins loaded, their text included. A new tool, or one switched on, gets a `FORK.md` row.
 
 | Note | Read it before you touch |

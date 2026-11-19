@@ -2224,7 +2224,7 @@ def production_write_bucket_tools() -> frozenset[str]:
 
     This is the write-bucket set as the code defines it, derived for
     `tests/test_issue_343_tool_metadata.py`, which reconciles the published
-    `destructiveHint` annotations against it rather than against a list kept
+    `readOnlyHint` annotations against it rather than against a list kept
     in the test. Only callables that are attributes of *this* module and whose
     `__module__` is this module count — `functools.wraps` copies the
     implementation's module onto the wrapper — so a probe a test module

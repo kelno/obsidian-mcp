@@ -37,9 +37,26 @@ worst case (not read-only, destructive, open-world), which is how a
 | shape | readOnly | destructive | idempotent | openWorld | tools |
 | --- | --- | --- | --- | --- | --- |
 | `_READ_ONLY` | true | false | true | false | `keyword_search`, `semantic_search`, `read_note`, `list_notes`, `get_tags`, `get_recent`, `get_vault_guide`, `read_file`, `list_files`, `get_backlinks`, `get_links`, `get_neighborhood`, `find_related`, `find_orphans`, `check_upload`, `list_tasks` (#350), `get_changes` (#351), `hybrid_search` (#354), `task_agenda` (#428) |
-| `_ADDITIVE` | false | false | false | false | `create_note` (no-clobber), `request_download` (mints a capability, destroys nothing), `add_task` (#428: inserts one line, removes no byte) |
-| `_DESTRUCTIVE` | false | true | false | false | `edit_note`, `move_note`, `delete_note`, `set_frontmatter`, `write_file`, `delete_file`, `request_upload`, `complete_task` and `update_task` (#428), `move_task` (#430: removes lines from its source note) |
-| `_DESTRUCTIVE_OPEN_WORLD` | false | true | false | true | `import_from_url` |
+| `_READ_ONLY_OPEN_WORLD` | true | false | true | true | `fetch_page` (fork) |
+| `_WRITE` | false | false | false | false | every other core tool but `import_from_url`: the note, file and task writers, `request_upload`, `request_download`; the ledger writers' `_LEDGER_WRITE` and the calendar plugin's writers carry the same hints (the plugin's open-world) |
+| `_WRITE_OPEN_WORLD` | false | false | false | true | `import_from_url` |
+
+**No tool is destructive (fork; owner's decision, 2026-11-19).** Upstream
+marks most writers `destructiveHint=true` (`edit_note`, `move_note`,
+`delete_note`, `set_frontmatter`, `write_file`, `delete_file`,
+`request_upload`, `import_from_url`, its task writers). claude.ai prompts on
+every call to a destructive tool and its card offers only "Allow once", never
+"Always allow": Anthropic's connector checklist says the hints "determine
+auto-permissions in Claude… destructive tools always prompt". The owner wants
+every tool open, approved once with "Always allow" like any other, so the
+fork marks none, its own writers (`move_file`, `delete_folder`, the task and
+ledger writers, the calendar plugin's tools) included. Before the 2026-11-13
+resync brought #343 in, the fork's vault tools carried no hints at all, and
+that resync took upstream's destructive marks without putting them to the
+owner. `tests/test_issue_343_tool_metadata.py` fails if a destructive mark
+comes back, so a resync that brings one in has to stop there. This departs
+from upstream's requirement in `openspec/specs/mcp-request-routing/spec.md`
+(the `destructiveHint=true` row and its scenarios), left as upstream wrote it.
 
 **Annotations are hints; `_tracked` enforces.** Nothing server-side reads them.
 `_tracked` resolves the vault root and runs every admission gate before a body
@@ -53,12 +70,8 @@ treat annotations as untrusted unless the server is trusted.
 (`_tracked(write_class=True)`, twelve tools since #430, equal to the `write`
 class of `concurrency.TOOL_CLASSES`):
 
-- destructive = `(W − {create_note, add_task}) ∪ {request_upload}` —
-  `create_note` only ever adds a file, and `add_task` (#428) only ever inserts
-  a line (its plan is verified to change no pre-existing line); `request_upload(overwrite=True)` mints a capability that
-  overwrites an existing file when a person redeems it, and the tool call is
-  what authorises that (owner decision, 2026-10-28);
 - not read-only = `W ∪ {request_upload, request_download}`;
+- destructive = none (above);
 - open-world = `{import_from_url}`, the only tool whose arguments name
   something outside the vault that the server then goes and fetches.
   `semantic_search` — and `hybrid_search` (#354), which makes the same
@@ -72,7 +85,7 @@ class of `concurrency.TOOL_CLASSES`):
   but a wrong `true` lets a client re-run a write silently while a wrong
   `false` costs one confirmation, so the hint is set in the safe direction.
 
-`tests/test_issue_343_tool_metadata.py` asserts all four equalities against
+`tests/test_issue_343_tool_metadata.py` asserts these equalities against
 `tools.production_write_bucket_tools()`, which enumerates the `_tracked`
 wrappers that are attributes of `src.mcp_server.tools` with that module as
 their `__module__`. It is deliberately **not** a set the decorator appends to:
@@ -80,10 +93,6 @@ their `__module__`. It is deliberately **not** a set the decorator appends to:
 decorate probes with `_tracked(write_class=True)` at import, so such a set
 would depend on collection order. The test decorates both kinds of probe
 itself and asserts the derived set does not move.
-
-Hints are per tool, not per call: `edit_note(dry_run=True)` and
-`write_file(overwrite=False)` are "destructive" because the tool is. A
-`.trash/` undo path does not make a delete non-destructive.
 
 **Server instructions.** `FastMCP(instructions=SERVER_INSTRUCTIONS)`, one
 constant in `server.py`, ≤ 2,000 characters, its first paragraph ≤ 512 because
@@ -2708,9 +2717,10 @@ entries keep their order; `move_task` (#430) is appended after `add_task`, so
 the first 32 keep theirs. The counts: 33 tools; 19 read-only (`task_agenda`
 added by #428); 13 names in `WRITE_REQUIRED_TOOLS`; 12 in the write bucket; a
 read-only grant lists 20; `CLASS_MAPPING_VERSION` 7. `complete_task`,
-`update_task` and `move_task` are `_DESTRUCTIVE`, `add_task` is `_ADDITIVE`,
-and the destructive rule is `(W − {create_note, add_task}) ∪
-{request_upload}`. Each description is at most 4,000 characters and leads
+`update_task` and `move_task` were `_DESTRUCTIVE`, `add_task` `_ADDITIVE`,
+under the destructive rule `(W − {create_note, add_task}) ∪
+{request_upload}`; in the fork all four are `_WRITE` since 2026-11-19 ("Tool
+metadata"). Each description is at most 4,000 characters and leads
 with its contract. `SERVER_INSTRUCTIONS` keeps its 512-character lead
 byte-identical and names the six task tools in one sentence, within the
 2,000-character cap.

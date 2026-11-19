@@ -13,7 +13,7 @@ it (the #343 probe-pollution lesson). It must equal the write bucket
 (`_tracked(write_class=True)`) plus `request_upload`, whose write charge is
 taken at `PUT /transfer/upload` redemption rather than at the call;
 `tests/test_issue_358_scoped_tools_list.py` reconciles it with the bucket, the
-destructive annotations, the in-body `_require_write` call sites and the
+read-only annotations, the in-body `_require_write` call sites and the
 refusals actually produced.
 
 **This module imports nothing from the MCP SDK, directly or transitively** —
