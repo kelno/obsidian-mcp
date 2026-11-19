@@ -319,51 +319,12 @@ def _listings(server):
     return [r for r in server.requests if r.method == "PROPFIND" and r.headers.get("depth") == "1"]
 
 
-async def test_the_calendar_list_is_reused_for_two_minutes(monkeypatch, owner_events):
-    await call("list_calendars")()
-    assert (await call("list_events")(start="2026-11-16", end="2026-11-22")).error is None
-    assert (await call("update_event")(event=f"{SHARED}/dentist.ics", summary="Dentist (moved)")).error is None
-    assert len(_listings(owner_events)) == 1
-    monkeypatch.setattr(caldav_client, "CALENDARS_MAX_AGE_SECONDS", -1.0)   # two minutes later
-    await call("list_events")()
-    assert len(_listings(owner_events)) == 2
-
-
-async def test_list_calendars_always_asks_the_server(server):
+async def test_every_call_asks_the_server_for_the_calendars(server):
+    """Not kept between calls: a calendar made in the owner's app a moment ago is there at once."""
     await call("list_calendars")()
     server.add_calendar("rdv", "RDV")
-    result = await call("list_calendars")()
-    assert "RDV" in [c.name for c in result.calendars]
+    assert (await call("list_events")(calendar="RDV")).error is None
     assert len(_listings(server)) == 2
-
-
-async def test_every_refusal_about_a_calendar_comes_from_a_fresh_list(server):
-    """A calendar made in the owner's app a minute ago is found; one that is not there is refused as before."""
-    await call("list_calendars")()
-    server.add_calendar("rdv", "RDV")
-    created = await call("create_event")(summary="Checkup", start="2026-11-20T10:00", calendar="RDV")
-    assert created.error is None and created.event.calendar == "RDV"
-    assert len(_listings(server)) == 2
-    missing = await call("list_events")(calendar="Nowhere")
-    assert code(missing) == "not_found" and "RDV" in missing.error
-    assert len(_listings(server)) == 3
-    server.calendars["rdv"].writable = False
-    # Made read-only meanwhile: the kept list still says writable, so the server's 403 answers (the same
-    # code), and drops the list; the next call is refused from a fresh one.
-    refused = await call("create_event")(summary="Checkup 2", start="2026-11-21T10:00", calendar="RDV")
-    assert code(refused) == "calendar_read_only" and len(_listings(server)) == 3
-    again = await call("create_event")(summary="Checkup 2", start="2026-11-21T10:00", calendar="RDV")
-    assert code(again) == "calendar_read_only" and "read-only for this login" in again.error
-    assert len(_listings(server)) == 4
-
-
-async def test_a_failed_request_drops_the_kept_calendar_list(owner_events):
-    await call("list_calendars")()
-    owner_events.failing_calendars = {SHARED}
-    assert (await call("list_events")()).notes
-    owner_events.failing_calendars = set()
-    await call("list_events")()
-    assert len(_listings(owner_events)) == 2
 
 
 def _multigets(server):

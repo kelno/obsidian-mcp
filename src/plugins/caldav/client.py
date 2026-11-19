@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
-import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from urllib.parse import quote, unquote, urljoin, urlsplit
@@ -50,14 +49,6 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 # Discovered calendar homes, per (CALDAV_URL, CALDAV_USERNAME): the home never
 # moves while the server runs, so the two discovery requests run once.
 _HOMES: dict[tuple[str, str], str] = {}
-
-#: How long a calendar list is reused by the calls that only work within it (`recent_calendars`).
-CALENDARS_MAX_AGE_SECONDS = 120.0
-
-# The calendar list last fetched, per (CALDAV_URL, CALDAV_USERNAME), with when (`time.monotonic`).
-# Dropped whenever a request fails, so an error (a calendar gone, a right withdrawn) is never
-# followed by another call working from the same list.
-_CALENDARS: dict[tuple[str, str], tuple[float, list["CalendarInfo"]]] = {}
 
 # The repeat rule of each repeating event `list_events` read, per (login, href), with the ETag of
 # the version it was read from (None: no rule of its own to show). An ETag names one version of an
@@ -109,10 +100,8 @@ def _session(cfg: CalDavSettings, login: tuple[str, str]) -> _Session:
 
 
 def forget_server_state() -> None:
-    """Drop the discovered calendar homes, the calendar lists, the kept repeat rules and the sessions
-    (tests; a changed setting)."""
+    """Drop the discovered calendar homes, the kept repeat rules and the sessions (tests; a changed setting)."""
     _HOMES.clear()
-    _CALENDARS.clear()
     RULES.clear()
     _SESSIONS.clear()
 
@@ -243,16 +232,6 @@ class Client:
                 error, `calendar_not_configured` for a refused login or a redirect, and the codes
                 of `_status_error` for the rest.
         """
-        try:
-            return await self._checked(method, path, body=body, headers=headers, ok=ok, what=what,
-                                       event_write=event_write)
-        except CalDavError:
-            # A calendar gone or a right withdrawn shows as an error: the next call asks for the list again.
-            _CALENDARS.pop(self._login, None)
-            raise
-
-    async def _checked(self, method: str, path: str, *, body: bytes | None, headers: dict[str, str] | None,
-                       ok: tuple[int, ...], what: str, event_write: bool) -> _Reply:
         session = self._session
         assert session is not None
         url = self._url(path)
@@ -320,16 +299,8 @@ class Client:
         _HOMES[self._login] = home
         return home
 
-    def recent_calendars(self) -> list[CalendarInfo] | None:
-        """The calendar list `calendars` fetched in the last `CALENDARS_MAX_AGE_SECONDS`, if any."""
-        kept = _CALENDARS.get(self._login)
-        if kept is None or time.monotonic() - kept[0] > CALENDARS_MAX_AGE_SECONDS:
-            return None
-        return list(kept[1])
-
     async def calendars(self) -> list[CalendarInfo]:
-        """The calendars in the login's home (shared ones included), task lists marked: always
-        asked of the server, and kept for `recent_calendars`."""
+        """The calendars in the login's home (shared ones included), task lists marked."""
         home = await self.home()
         body = _propfind((D, "resourcetype"), (D, "displayname"), (D, "current-user-privilege-set"),
                          (C, "supported-calendar-component-set"), (C, "calendar-description"),
@@ -361,7 +332,6 @@ class Client:
             found.append(CalendarInfo(id=cal_id, href=path, name=name, writable=writable,
                                       events=not components or "VEVENT" in components, color=color,
                                       description=description))
-        _CALENDARS[self._login] = (time.monotonic(), list(found))
         return found
 
     # ── Events ──────────────────────────────────────────────────────────

@@ -6,8 +6,8 @@ draw on the write budget and need write permission like the note writers.
 
 Each call reads the settings (`config`), uses the login's session with the
 CalDAV server (`client`, shared by every call and opened at startup by
-`keep_warm`), lists the calendars this login sees (or reuses the list of the
-last two minutes, never for a refusal: `_choose`), keeps those
+`keep_warm`), lists the calendars this login sees (asked of the server on
+every call: see docs/architecture/calendar.md), keeps those
 `CALDAV_CALENDARS` names (all when unset), and works on those only: an event
 id naming another calendar is refused before any request reaches it.
 
@@ -26,9 +26,8 @@ import datetime as dt
 import logging
 import re
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated, TypeVar
+from typing import Annotated
 from urllib.parse import unquote
 
 from mcp.types import ToolAnnotations
@@ -133,9 +132,8 @@ async def keep_warm(cfg: config.CalDavSettings) -> None:
 
     The server's restart would otherwise cost the first calendar call its logins (some 18 s
     measured on the owner's Nextcloud). Each round lists the calendars (`list_calendars`'
-    request, which also refreshes the calendar list the other calls reuse); a failure is
-    logged by its refusal code only and the next round tries again. The sessions close when
-    the task is cancelled, at shutdown.
+    request); a failure is logged by its refusal code only and the next round tries again.
+    The sessions close when the task is cancelled, at shutdown.
     """
     try:
         while True:
@@ -157,9 +155,6 @@ class _View:
     calendars: list[client.CalendarInfo]
     default: client.CalendarInfo | None
     notes: list[str]
-
-
-_Chosen = TypeVar("_Chosen")
 
 
 def _names(calendars) -> str:
@@ -211,22 +206,6 @@ def _view(found: list[client.CalendarInfo], wanted: list[str]) -> _View:
 
 async def _open_view(dav: client.Client, cfg: config.CalDavSettings) -> _View:
     return _view(await dav.calendars(), cfg.calendars)
-
-
-async def _choose(dav: client.Client, cfg: config.CalDavSettings, pick: Callable[[_View], _Chosen]) \
-        -> tuple[_View, _Chosen]:
-    """The view and `pick(view)`, from the calendar list of the last two minutes when there is one
-    (`client.CALENDARS_MAX_AGE_SECONDS`, a request saved) and `pick` accepts it; else, and whenever
-    `pick` refuses, from the list asked of the server now, so every refusal comes from a fresh list."""
-    recent = dav.recent_calendars()
-    if recent is not None:
-        view = _view(recent, cfg.calendars)
-        try:
-            return view, pick(view)
-        except _Refusal:
-            pass
-    view = await _open_view(dav, cfg)
-    return view, pick(view)
 
 
 def _pick(view: _View, given: str) -> client.CalendarInfo:
@@ -447,8 +426,8 @@ async def list_events_impl(start: str | None = None, end: str | None = None, cal
         span = _range(start, end, tz)
         begin, finish = span.begin, span.finish
         async with client.Client(cfg) as dav:
-            _, chosen = await _choose(
-                dav, cfg, lambda view: [_pick(view, calendar)] if calendar is not None else view.calendars)
+            view = await _open_view(dav, cfg)
+            chosen = [_pick(view, calendar)] if calendar is not None else view.calendars
             per_calendar = await asyncio.gather(*(_calendar_events(dav, c, begin, finish, tz) for c in chosen),
                                                 return_exceptions=True)
         failed = [(cal, exc) for cal, exc in zip(chosen, per_calendar) if isinstance(exc, BaseException)]
@@ -536,20 +515,17 @@ async def create_event_impl(summary: str, start: str, end: str | None = None, ca
         first = ical.parse_moment(start, tz, "start")
         stored_end = ical.end_exclusive(first, ical.parse_moment(end, tz, "end") if end is not None else None)
         rule = ical.parse_repeat(repeat, first, tz) if repeat is not None and repeat.strip() else None
-        def choose_target(view: _View) -> client.CalendarInfo:
+        async with client.Client(cfg) as dav:
+            view = await _open_view(dav, cfg)
             if calendar is not None:
-                chosen = _pick(view, calendar)
+                target = _pick(view, calendar)
             elif view.default is not None:
-                chosen = view.default
+                target = view.default
             else:
                 raise _Refusal("invalid_argument", "No calendar was named and none takes new events by default: "
                                "give `calendar`. Writable calendars: "
                                f"{_names([c for c in view.calendars if c.writable is not False])}.")
-            _writable(view, chosen)
-            return chosen
-
-        async with client.Client(cfg) as dav:
-            _, target = await _choose(dav, cfg, choose_target)
+            _writable(view, target)
             twin = await _duplicate(dav, target, title, first, stored_end, tz)
             if twin is not None:
                 raise _Refusal("duplicate_event", f"{target.name!r} already has {_said(twin)} (event {twin.event}); "
@@ -613,12 +589,9 @@ class _Target:
 
 
 async def _read_target(dav: client.Client, cfg: config.CalDavSettings, cal_id: str, name: str) -> _Target:
-    def locate(view: _View) -> tuple[client.CalendarInfo, str]:
-        found = _locate(view, cal_id, name)
-        _writable(view, found[0])
-        return found
-
-    view, (calendar, href) = await _choose(dav, cfg, locate)
+    view = await _open_view(dav, cfg)
+    calendar, href = _locate(view, cal_id, name)
+    _writable(view, calendar)
     obj = await dav.get(href)
     try:
         stored = ical.parse_calendar(obj.data)
