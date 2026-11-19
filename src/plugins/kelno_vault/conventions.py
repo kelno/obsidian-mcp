@@ -21,6 +21,8 @@ RULE_REFS = "Ledger refs on rules"
 RULE_REFS_UNDER = "Working principles"
 #: In `RULES_NOTE`: the heading of how a rule is written, the pointer shapes among it.
 RULE_WRITING = "How to write an instruction"
+#: In `RULES_NOTE`: the heading of checking a rule against the agent paths, teaching the path tools a new way in.
+RULE_PATHS = "Checking a rule against agent paths"
 
 
 def see_below(section: str) -> str:

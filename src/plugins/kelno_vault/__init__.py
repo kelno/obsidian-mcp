@@ -14,11 +14,11 @@ the lines a note write adds or changes: a task line written by hand is refused (
 repeating the note's name is dropped (`title_heading`), then bare-name
 wikilinks get the note's full path (`link_paths`), in that order so the link
 report's line numbers are the written note's; last, a change to a rule note
-whose lines gain no proposal ref is pointed out, and so is a link to another
-rule note in none of the pointer shapes (`rule_notes`, on the text as
-written; what a rule file is, the notes and the `## For agents` sections,
-comes from a note in the vault, `rule_files`). A note write, or a move's
-destination, inside an area's folder when the caller hasn't called
+whose lines gain no proposal ref is pointed out, and so are a link to another
+rule note in none of the pointer shapes and a rule no agent path then reaches
+(`rule_notes`, on the text as written; what a rule file is, the notes and the
+`## For agents` sections, comes from a note in the vault, `rule_files`). A
+note write, or a move's destination, inside an area's folder when the caller hasn't called
 `open_area` for that area in the last hour is pointed out too
 (`area_opened`, `area_not_opened:`, ledger F89). The vault-specific behaviours
 still in the core, and the order they move here in, are in
@@ -56,8 +56,9 @@ _WRITER_TEXT = (
     "is refused (`task_line_by_hand`): use the task tools. A first heading repeating the note's name is dropped "
     "(`title_heading_removed:`). A bare-name wikilink one note has gets its full path (`links_rewritten:`; an "
     "ambiguous or unknown one `links_flagged:`), so `content_hash` is of what was written. A rule-note change none "
-    "of whose lines gains a new proposal ref is flagged (`rule_change_unlogged:`), and a link in its lines to "
-    "another rule note in none of the pointer shapes (`pointer_or_mention:`). A write in an area's folder "
+    "of whose lines gains a new proposal ref is flagged (`rule_change_unlogged:`), a link in its lines to "
+    "another rule note in none of the pointer shapes (`pointer_or_mention:`), and a rule no agent path then "
+    "reaches (`reached_by_no_path:`). A write in an area's folder "
     "with no `open_area` call for it in the last hour is flagged (`area_not_opened:`)."
 )
 
@@ -70,7 +71,7 @@ _CREATE_NOTE_NAME_TEXT = (
 _WRITE_FILE_TEXT = (
     "On a `.md`, this vault's checks run as in `create_note` (`task_line_by_hand`, `note_name_date` and "
     "`note_name:` for a new note, `title_heading_removed:`, `links_rewritten:`, `links_flagged:`, "
-    "`rule_change_unlogged:`, `pointer_or_mention:`, `area_not_opened:`)."
+    "`rule_change_unlogged:`, `pointer_or_mention:`, `reached_by_no_path:`, `area_not_opened:`)."
 )
 
 _MOVE_NOTE_TEXT = "The name is checked as in `create_note`."
@@ -158,7 +159,8 @@ async def _rewrite(write: plugins.NoteWrite) -> plugins.Rewrite:
         links = links_failure or (
             link_paths.render(link_paths.shifted(links_report, shift), dry_run=dry_run) if links_report else "")
         rules = rule_check.failure or (rule_notes.render(rule_check.unlogged, shift)
-                                       + rule_notes.render_unshaped(rule_check.unshaped, shift))
+                                       + rule_notes.render_unshaped(rule_check.unshaped, shift)
+                                       + rule_notes.render_unreached(rule_check.unreached, rule_check.reach_unknown))
         return (rules + title_heading.render(removed, dry_run=dry_run) + links
                 + area_opened.render(unopened, dry_run=dry_run))
 

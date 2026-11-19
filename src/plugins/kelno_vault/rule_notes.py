@@ -14,6 +14,11 @@ A second nudge (`pointer_or_mention:`): a rule line the write adds or changes
 that links to another rule note in none of the pointer shapes the vault sets
 (`agent_paths.pointer_moment`, ledger P259) is read by the path tools as a
 mention, which sends no agent to read the note; the result asks which it is.
+
+A third (`reached_by_no_path:`): a write that creates a rule note, or adds or changes rule lines (the lines the
+first nudge looks at, whatever their refs), is checked against the agent paths on the vault as it is after the
+write; a rule note or section no path reaches is pointed out (`agent_path_tools.reached_after_write`, what the
+path tools count as reached). When that can't be told, the result says so in one line.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ import logging
 from collections import Counter
 from dataclasses import dataclass, field
 
-from src.plugins.kelno_vault import agent_paths, conventions, rule_files
+from src.plugins.kelno_vault import agent_path_tools, agent_paths, conventions, rule_files
 from src.services import ledger_citations
 from src.services.note_lines import frontmatter_lines
 
@@ -41,6 +46,10 @@ class RuleCheck:
     unlogged: list[tuple[int, str]] = field(default_factory=list)
     #: Rule lines added or changed linking to another rule note in none of the pointer shapes: (line, links, text).
     unshaped: list[tuple[int, list[str], str]] = field(default_factory=list)
+    #: The rule note or sections the write creates or changes that no agent path reaches.
+    unreached: list[str] = field(default_factory=list)
+    #: Why whether a path reaches them could not be told; "" when it was.
+    reach_unknown: str = ""
     #: A result block when the definition of a rule file could not be read, so nothing was checked.
     failure: str = ""
 
@@ -69,6 +78,31 @@ def _unlogged(path: str, old: str | None, new: str, definition: rule_files.RuleF
     if not numbers:
         return []
     return [(numbers[n - 1] + 1, line) for n, line in ledger_citations.rule_lines_unlogged(old_part, new_part)]
+
+
+def _places(path: str, old: str | None, new: str, definition: rule_files.RuleFiles) -> list[str]:
+    """The rule places a write creates or changes: `note:<path>` for a rule note created or given a line it didn't
+    have, `section:<path>#<heading>` for each rule section given one (`rule_lines_added`: the lines
+    `rule_change_unlogged` looks at, before their proposal refs count)."""
+    norm = path.replace("\\", "/").lstrip("/")
+    lines = _lines(new)
+    if definition.is_rule_file(path):
+        if old is None or ledger_citations.rule_lines_added(old, new, skip_leading=frontmatter_lines(lines)):
+            return [f"note:{norm}"]
+        return []
+    if not definition.sections:
+        return []
+    old_part, _ = _rule_part(old, definition)
+    new_part, numbers = _rule_part(new, definition)
+    changed = {numbers[n - 1] for n, _ in ledger_citations.rule_lines_added(old_part, new_part)} if numbers else set()
+    spelled = {h.casefold(): h for h in definition.sections}
+    out = []
+    for first, end in rule_files.section_ranges(lines, definition.sections, frontmatter_lines(lines)):
+        heading = rule_files.heading_text(lines[first - 1])
+        place = f"section:{norm}#{spelled.get(heading.casefold(), heading)}"
+        if place not in out and any(first <= i < end for i in changed):
+            out.append(place)
+    return out
 
 
 def _changed_rule_lines(path: str, old: str | None, new: str, definition: rule_files.RuleFiles) -> list[int]:
@@ -170,6 +204,16 @@ async def check(path: str, old: str | None, new: str, user_id) -> RuleCheck:
         out.unshaped = await asyncio.to_thread(_unshaped, path, old, new, definition)
     except Exception:  # noqa: BLE001 — a nudge never fails the write it follows
         logger.debug("pointer_or_mention could not be computed for %s", path, exc_info=True)
+    try:
+        places = await asyncio.to_thread(_places, path, old, new, definition)
+        if places:
+            reached = await agent_path_tools.reached_after_write(user_id, path, new, places)
+            out.unreached = [p for p in places if p not in reached]
+    except agent_path_tools.ReachUnknown as exc:
+        out.reach_unknown = str(exc)
+    except Exception as exc:  # noqa: BLE001 — a nudge never fails the write it follows; the result says so
+        logger.debug("reached_by_no_path could not be computed for %s", path, exc_info=True)
+        out.reach_unknown = f"an error ({type(exc).__name__})"
     return out
 
 
@@ -203,6 +247,27 @@ def render_unshaped(lines: list[tuple[int, list[str], str]], shift: int) -> str:
               f"shapes in \"{conventions.RULE_WRITING}\" (`{conventions.RULES_NOTE}`).")
 
 
+def render_unreached(places: list[str], unknown: str) -> str:
+    """The result's `reached_by_no_path:` block, or its one line when it couldn't be told; "" when all is reached."""
+    if unknown:
+        return (f"\n\nreached_by_no_path: not checked ({unknown}): whether an agent path reaches the rules this "
+                "write changed is unknown; `agent_path_reached_by` on their place tells.")
+    if not places:
+        return ""
+    shown = "\n".join(f"- {p}" for p in places)
+    return ("\n\nreached_by_no_path: after this write, no agent path reaches these rules: the path tools followed "
+            "every way they know rules reach agents, and none leads here. Either nothing sends an agent here, or "
+            "something does by a way the path tools don't know; both need fixing:\n" + shown
+            + "\n- Nothing sends an agent here (you haven't pointed anything to it yet): add a pointer to it from a "
+              "rule the agents who need it already read, in one of the shapes in "
+              f"\"{conventions.RULE_WRITING}\" (`{conventions.RULES_NOTE}`). A link in no shape is a mention and "
+              "sends no one."
+            + "\n- Something does (you meant it to arrive by a hook, a loader, a tool's text, or a pointer the path "
+              "tools can't read yet): they "
+              f"must be taught it, as \"{conventions.RULE_PATHS}\" in the same note says."
+            + "\n`agent_path_reached_by` on a place shows what reaches its note or its area.")
+
+
 GUIDE = (
     "## Agent rules (this server)\n\n"
     f"This vault's rules for agents are the rule files `{rule_files.RULE_FILES_PATH}` lists: whole notes, such as "
@@ -213,5 +278,8 @@ GUIDE = (
     "or changes rule lines with none of them carrying a new proposal ref gets `rule_change_unlogged:` in its "
     "result, with those lines and what to do. One whose added or changed rule lines link to another rule note in "
     f"none of the pointer shapes (\"{conventions.RULE_WRITING}\" in `{conventions.RULES_NOTE}`) gets "
-    "`pointer_or_mention:`, asking which each link is: the agent path tools read such a link as a mention."
+    "`pointer_or_mention:`, asking which each link is: the agent path tools read such a link as a mention. One "
+    "that creates a rule note, or adds or changes rule lines, where no agent path then reaches that note or "
+    "section gets `reached_by_no_path:`, saying how to tell its two causes apart; when that can't be checked, "
+    "one line says so."
 )

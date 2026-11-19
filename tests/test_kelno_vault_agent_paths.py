@@ -13,6 +13,7 @@ import json
 import pytest
 
 from src.auth.session import current_user_id
+from src.mcp_server.auth import current_permission
 from src.mcp_server import tools
 from src.plugins.kelno_vault import agent_path_tools as apt
 from src.plugins.kelno_vault import agent_paths as ap
@@ -704,3 +705,133 @@ def test_docs_a_repos_claude_md_points_to_are_on_the_path_by_hash(vault):
     assert not again.pieces
     refused = asyncio.run(apt.agent_path_impl(PathStart(typical=3), None, None, ReadFrom(id=build.id)))
     assert "read it on the PC" in refused.error
+
+
+# ── reached_by_no_path: a rule write no path reaches ─────────────────
+
+
+@pytest.fixture
+def writing(vault, monkeypatch):
+    """The vault above, written through the note tools with this vault's plugin loaded."""
+    from src import plugins
+
+    monkeypatch.setattr(plugins, "active", lambda: plugins.load(("kelno_vault",)))
+    monkeypatch.setattr(tools.settings, "write_precondition_required", False)
+
+    async def no_log(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(tools, "_log_usage", no_log)
+    permission = current_permission.set("readwrite")
+    yield vault
+    current_permission.reset(permission)
+
+
+def reached(path_, text, places):
+    return asyncio.run(apt.reached_after_write(None, path_, text, places))
+
+
+def test_reached_after_write_is_what_the_overview_counts_as_reached(vault):
+    every = ap.every_rule_file(apt._setup(None, None, asyncio.run(apt._served(None))).vault)
+    unreached = set(path().rule_files_no_path_reaches)
+    common = (vault / "_/agent/Common-rules.md").read_text(encoding="utf-8")
+    assert reached("_/agent/Common-rules.md", common, every) == set(every) - unreached
+
+
+def test_reached_after_write_reads_the_vault_as_the_write_leaves_it(vault):
+    common = (vault / "_/agent/Common-rules.md").read_text(encoding="utf-8")
+    kept = ["note:_/agent/Notes kept.md"]
+    assert reached("_/agent/Common-rules.md", common, kept) == set()
+    pointed = common + "- When keeping notes, read [[_/agent/Notes kept]].\n"
+    assert reached("_/agent/Common-rules.md", pointed, kept) == set(kept)
+    # A note the write creates is in the vault the paths are drawn from; a place is matched whatever its case.
+    assert reached("_/agent/Brand new.md", "- A rule.\n", ["note:_/agent/Brand new.md"]) == set()
+    assert reached("_/agent/Notes kept.md", "Kept.\n", ["note:_/agent/notes KEPT.md"]) == set()
+    assert reached("_/agent/Common-rules.md", common, ["note:_/agent/common-RULES.md"]) == {
+        "note:_/agent/common-RULES.md"}
+
+
+def test_reached_after_write_stops_at_the_first_path_reaching_the_place(vault, monkeypatch):
+    drawn = []
+    real = ap.run
+    monkeypatch.setattr(ap, "run", lambda *a: drawn.append(1) or real(*a))
+    common = (vault / "_/agent/Common-rules.md").read_text(encoding="utf-8")
+    assert reached("_/agent/Common-rules.md", common, ["note:_/agent/Common-rules.md"])
+    assert len(drawn) == 1
+
+
+def test_a_full_draw_is_kept_until_something_it_read_changes(vault, monkeypatch):
+    drawn = []
+    real = ap.run
+    monkeypatch.setattr(ap, "run", lambda *a: drawn.append(1) or real(*a))
+    orphan = ["note:_/agent/Orphan.md"]
+    (vault / "_/agent/Orphan.md").write_text("- One.\n", encoding="utf-8")
+    assert reached("_/agent/Orphan.md", "- One.\n", orphan) == set()
+    full = len(drawn)
+    assert full > 2
+    # The note no path reaches isn't read by any path: writing it again draws nothing.
+    assert reached("_/agent/Orphan.md", "- One, reworded.\n", orphan) == set()
+    assert len(drawn) == full
+    # A note a path read changed: everything is drawn again.
+    (vault / "_/agent/roles/Worker.md").write_text("Worker rules, changed.\n", encoding="utf-8")
+    assert reached("_/agent/Orphan.md", "- One, again.\n", orphan) == set()
+    assert len(drawn) == 2 * full
+    # So is a new file in the vault.
+    (vault / "Notes/Other.md").write_text("x\n", encoding="utf-8")
+    assert reached("_/agent/Orphan.md", "- One, again.\n", orphan) == set()
+    assert len(drawn) == 3 * full
+    # And a write that points to the note from a rule on a path reaches it.
+    common = (vault / "_/agent/Common-rules.md").read_text(encoding="utf-8")
+    pointed = common + "- When alone, read [[_/agent/Orphan]].\n"
+    assert reached("_/agent/Common-rules.md", pointed, orphan) == set(orphan)
+
+
+def test_reached_after_write_says_when_it_cannot_tell(vault, monkeypatch):
+    common = (vault / "_/agent/Common-rules.md").read_text(encoding="utf-8")
+    monkeypatch.setattr(apt, "REACH_BUDGET_SECONDS", -1.0)
+    with pytest.raises(apt.ReachUnknown, match="took over"):
+        reached("_/agent/Orphan.md", "- One.\n", ["note:_/agent/Orphan.md"])
+    monkeypatch.setattr(apt, "REACH_BUDGET_SECONDS", 5.0)
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").unlink()
+    with pytest.raises(apt.ReachUnknown, match="no PC has written a snapshot"):
+        reached("_/agent/Common-rules.md", common, ["note:_/agent/Common-rules.md"])
+    (vault / ap.STARTING_POINTS_PATH).unlink()
+    with pytest.raises(apt.ReachUnknown, match="starting points"):
+        reached("_/agent/Common-rules.md", common, ["note:_/agent/Common-rules.md"])
+
+
+def test_a_rule_write_no_path_reaches_says_so_and_how_to_tell_why(writing):
+    created = asyncio.run(tools.create_note_impl("_/agent/Orphan.md", "- A rule. [P1]\n"))
+    assert (writing / "_/agent/Orphan.md").exists()
+    assert "reached_by_no_path: after this write, no agent path reaches these rules" in created
+    block = created.split("reached_by_no_path:")[1]
+    assert "\n- note:_/agent/Orphan.md\n" in block
+    assert "both need fixing" in block
+    assert '"How to write an instruction" (`_/agent/Where agent instructions go.md`)' in block
+    assert '"Checking a rule against agent paths" in the same note' in block
+    # A rule some path reaches says nothing; nor does a write changing no rule line.
+    common = asyncio.run(tools.edit_note_impl("_/agent/Common-rules.md", "- A new line. [P2]", append=True))
+    assert "reached_by_no_path" not in common
+    plain = asyncio.run(tools.create_note_impl("Notes/Plain.md", "- Not a rule.\n"))
+    assert "reached_by_no_path" not in plain
+
+
+def test_a_rule_section_is_checked_by_its_own_place(writing):
+    # The area's For agents section is reached (opening the area serves it); the same section in a note
+    # nothing points to isn't, and the note's other lines don't count.
+    area = asyncio.run(tools.edit_note_impl("Areas/Repo/Repo.md", "\n- Mind the build. [P3]\n",
+                                            section="For agents"))
+    assert "reached_by_no_path" not in area
+    outside = asyncio.run(tools.edit_note_impl("Notes/Some note.md", "More text.\n", append=True))
+    assert "reached_by_no_path" not in outside
+    added = asyncio.run(tools.edit_note_impl("Notes/Some note.md", "\n## For agents\n\n- Be kind. [P3]\n",
+                                             append=True))
+    assert "\n- section:Notes/Some note.md#For agents\n" in added.split("reached_by_no_path:")[1]
+
+
+def test_a_rule_write_says_in_one_line_when_reach_cannot_be_checked(writing):
+    (writing / ap.STARTING_POINTS_PATH).unlink()
+    result = asyncio.run(tools.edit_note_impl("_/agent/Common-rules.md", "- A new line. [P2]", append=True))
+    line = result.split("reached_by_no_path:")[1].split("\n\n")[0]
+    assert line.startswith(" not checked (The starting points") and "\n" not in line
+    assert "agent_path_reached_by" in line
