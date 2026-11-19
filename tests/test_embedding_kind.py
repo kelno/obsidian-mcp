@@ -158,11 +158,15 @@ async def test_the_prewarm_and_the_startup_warm_up_embed_queries(monkeypatch):
     monkeypatch.setattr(settings, "embedding_provider", "ollama")
     await main._warm_embedding_model()
     assert inputs and inputs[-1][0] == "query"
+    # Never answered from the query cache: each warm-up reaches the provider.
+    await main._warm_embedding_model()
+    assert [k for k, _ in inputs] == ["query", "query"]
 
     calls = []
 
-    async def fake_get_embedding(text, *, kind):
+    async def fake_get_embedding(text, *, kind, use_cache=True):
         calls.append(kind)
+        assert use_cache is False
         return [0.0]
 
     monkeypatch.setattr(embeddings, "get_embedding", fake_get_embedding)

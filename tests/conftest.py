@@ -563,12 +563,15 @@ def _embedding_plaintext_override(request):
 @pytest.fixture(autouse=True)
 def _reset_provider_cache():
     """Clear the cached provider singleton between tests so changes to
-    `settings.embedding_provider` propagate."""
+    `settings.embedding_provider` propagate, and the query-embedding cache,
+    so one test's fake vectors never answer another's query."""
     from src.services import embeddings
 
     embeddings.get_provider.cache_clear()
+    embeddings.clear_query_embedding_cache()
     yield
     embeddings.get_provider.cache_clear()
+    embeddings.clear_query_embedding_cache()
 
 
 @pytest.fixture(autouse=True)

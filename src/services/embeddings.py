@@ -5,6 +5,8 @@ import logging
 import math
 import re
 import time
+from array import array
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Callable, Literal, Protocol
@@ -25,6 +27,7 @@ from src.services.index_state import (
     KEY_EMBEDDING_FINGERPRINT,
     FingerprintStatus,
     acquire_generation_lock,
+    active_embedding_model,
     compare_fingerprint,
     embedding_fingerprint,
     get_state,
@@ -2137,17 +2140,129 @@ def _with_instruction(text_input: str, kind: EmbeddingKind) -> str:
     return text_input
 
 
-async def get_embedding(text_input: str, *, kind: EmbeddingKind) -> list[float]:
+# ── The query-embedding cache (fork, 2026-11-19) ────────────────────────────
+#
+# A query's vector is a function of the provider input and of what serves it,
+# never of the vault, so a repeated query (an agent searching the same words
+# again, `hybrid_search` after `semantic_search`) is answered from memory. The
+# key is everything that decides the vector: the exact provider input after
+# `_with_instruction`, the kind, the provider object and its name, the active
+# model, the endpoint URL and the dimensions. None of those change while the
+# process runs, so an entry is never stale; the key holds them anyway, so an
+# entry can only ever answer the request it was made for.
+#
+# - Queries only: a document embedding never reads or fills it.
+# - Errors are never cached: an entry is written only after the provider
+#   answered, so a failure, a timeout or a cancellation leaves nothing.
+# - Every hit is a fresh list, so no caller can change a cached vector.
+# - The warm-ups bypass it (`use_cache=False`): their point is the request.
+
+#: Query embeddings kept, least recently used dropped first. At 1,024
+#: dimensions an entry is about 8 KiB stored as doubles, so about 2 MiB.
+QUERY_EMBEDDING_CACHE_ENTRIES = 256
+
+
+class _QueryEmbeddingCache:
+    """A bounded LRU of query vectors. Stored as `array("d")` when every
+    element is a Python float (exact: a float is a double), else as a tuple;
+    a hit returns a new list either way."""
+
+    def __init__(self, max_entries: int) -> None:
+        self.max_entries = max_entries
+        self._entries: OrderedDict[tuple, array | tuple] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def get(self, key: tuple) -> list[float] | None:
+        stored = self._entries.get(key)
+        if stored is None:
+            return None
+        self._entries.move_to_end(key)
+        return list(stored)
+
+    def put(self, key: tuple, vector: list[float]) -> None:
+        if not isinstance(vector, list) or self.max_entries <= 0:
+            return
+        if all(type(element) is float for element in vector):
+            stored: array | tuple = array("d", vector)
+        else:
+            stored = tuple(vector)
+        self._entries[key] = stored
+        self._entries.move_to_end(key)
+        while len(self._entries) > self.max_entries:
+            self._entries.popitem(last=False)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+
+_QUERY_EMBEDDING_CACHE = _QueryEmbeddingCache(QUERY_EMBEDDING_CACHE_ENTRIES)
+
+
+def _provider_endpoint() -> str:
+    """The active provider's endpoint URL, as configured."""
+    if settings.embedding_provider == "openai":
+        return settings.openai_base_url
+    if settings.embedding_provider == "tei":
+        return settings.tei_url
+    return settings.ollama_url
+
+
+def _query_cache_key(
+    provider: EmbeddingProvider, provider_input: str, kind: EmbeddingKind
+) -> tuple | None:
+    """The cache key, or None (no caching) for a provider object that cannot
+    be hashed, which only a test's stand-in is. The object itself, not its
+    `id`, so a key never outlives the provider it names."""
+    try:
+        hash(provider)
+    except TypeError:
+        return None
+    return (
+        provider_input,
+        kind,
+        provider,
+        settings.embedding_provider,
+        active_embedding_model(),
+        _provider_endpoint(),
+        settings.embedding_dimensions,
+    )
+
+
+def clear_query_embedding_cache() -> None:
+    """Drop every cached query embedding (tests)."""
+    _QUERY_EMBEDDING_CACHE.clear()
+
+
+async def get_embedding(
+    text_input: str, *, kind: EmbeddingKind, use_cache: bool = True
+) -> list[float]:
+    """`text_input`'s vector. A query is answered from the query-embedding
+    cache when it holds one, and counts as pending for the indexer's slices
+    while it is at the provider. `use_cache=False` always asks the provider
+    and stores nothing (the warm-ups)."""
     provider_input = _with_instruction(text_input, kind)
+    provider = get_provider()
     if kind != "query":
-        return await get_provider().embed_one(provider_input, kind=kind)
+        return await provider.embed_one(provider_input, kind=kind)
+    key = _query_cache_key(provider, provider_input, kind) if use_cache else None
+    # The provider's name, model and endpoint do not change while the process
+    # runs, so the key needs no other invalidation.
+    if key is not None:
+        cached = _QUERY_EMBEDDING_CACHE.get(key)
+        if cached is not None:
+            return cached
     # Counted from before the request until it ends, however it ends, so the
     # indexer's next slice waits for it (see `_QueryPriority`).
     _QUERY_PRIORITY.query_started()
     try:
-        return await get_provider().embed_one(provider_input, kind=kind)
+        vector = await provider.embed_one(provider_input, kind=kind)
     finally:
         _QUERY_PRIORITY.query_finished()
+    if key is not None:
+        _QUERY_EMBEDDING_CACHE.put(key, vector)
+    return vector
 
 
 async def get_embeddings_batch(

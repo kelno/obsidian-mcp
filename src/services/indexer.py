@@ -9003,7 +9003,9 @@ async def _prewarm_once() -> tuple[float | None, float | None]:
         from src.services.embeddings import get_embedding
 
         start = time.monotonic()
-        await get_embedding("warmup", kind="query")
+        # Never from the query cache: a hit would send nothing, and the
+        # request is what keeps the model loaded.
+        await get_embedding("warmup", kind="query", use_cache=False)
         embed_ms = (time.monotonic() - start) * 1000
 
     async with async_session() as session:

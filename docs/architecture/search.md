@@ -1285,7 +1285,7 @@ the four. A single whole-call `duration_ms` could not separate the
 two independent cold paths — provider eviction and HNSW page cache — so the
 last regression had to be diagnosed with hand-run probes against the live DB.
 
-`embed_ms` includes any wait behind an indexer slice already at the provider. The indexer's *next* slice waits for the query (fork, 2026-11-19; [indexing and embeddings](indexing-and-embeddings.md), "Queries go first").
+`embed_ms` includes any wait behind an indexer slice already at the provider. The indexer's *next* slice waits for the query (fork, 2026-11-19; [indexing and embeddings](indexing-and-embeddings.md), "Queries go first"). A query embedded earlier in the process is answered from the query-embedding cache with no provider request, so its `embed_ms` is about 0 ("The query-embedding cache", same note); the vector, and so the ranking, is the one the provider returned for it.
 
 **`usage_logs.tool` must hold the name the tool is registered under.**
 `_tracked`'s first argument is that name, and FastMCP takes it from the

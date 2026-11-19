@@ -549,8 +549,9 @@ async def _warm_embedding_model() -> None:
         from src.services.embeddings import get_embedding
 
         # Through the shared layer, as a query: it warms the path a search
-        # takes, query instruction included (heading-chunks D7).
-        await get_embedding("warmup", kind="query")
+        # takes, query instruction included (heading-chunks D7). Never from
+        # the query cache: the request is the point.
+        await get_embedding("warmup", kind="query", use_cache=False)
         logging.getLogger(__name__).info(
             "Embedding model warm-up complete (keep_alive=%s)",
             settings.ollama_keep_alive,
