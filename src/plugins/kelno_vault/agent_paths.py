@@ -267,11 +267,11 @@ class Vault:
     """
 
     def __init__(self, paths: list[str], read: Callable[[str], str | None], rule_files, areas: list,
-                 pc_vault: str | None):
+                 pc_vault: str | None, trace: "Trace | None" = None):
         self._read, self._texts = read, {}
         self._matches: dict[re.Pattern, list[str]] = {}
-        #: Set by a caller drawing one path at a time (`Trace`); None otherwise.
-        self.trace: Trace | None = None
+        #: Set by a caller drawing one path at a time (`Trace`), from the start for what the setup looks up.
+        self.trace: Trace | None = trace
         self.by_rel: dict[str, str] = {}
         self.by_stem: dict[str, list[str]] = {}
         for r in sorted(paths):

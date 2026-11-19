@@ -782,16 +782,15 @@ def test_a_write_is_answered_from_the_map_without_drawing(drawing, monkeypatch):
 def test_a_change_since_the_map_is_weighed_by_what_it_could_reach(drawing):
     (drawing / "_/agent/Orphan.md").write_text("- One.\n", encoding="utf-8")
     draw_now()
-    # A note on the path changed without naming the place: the answers stand.
-    (drawing / "_/agent/roles/Coordinator.md").write_text("Coordinator rules, changed.\n", encoding="utf-8")
-    common = drawing / "_/agent/Common-rules.md"
-    common.write_text(common.read_text(encoding="utf-8") + "- Mind the time.\n", encoding="utf-8")
+    # A note no path reads changed: the answers stand.
+    (drawing / "Notes/Other.md").write_text("Mind [[_/agent/Orphan]].\n", encoding="utf-8")
     assert reached("_/agent/Orphan.md", ["note:_/agent/Orphan.md"]) == set()
-    # A place reached by a chain that didn't change stays reached.
-    assert reached("_/agent/roles/Worker.md", ["note:_/agent/roles/Worker.md"]) == {"note:_/agent/roles/Worker.md"}
-    # A changed note that now names the place may point to it: not guessed.
+    # A note on a path changed: a place reached by a chain that didn't change stays reached; one that wasn't
+    # reached isn't guessed, as the changed note may now point to it, or to a note that does.
+    common = drawing / "_/agent/Common-rules.md"
     common.write_text(common.read_text(encoding="utf-8") + "- When alone, read [[_/agent/Orphan]].\n",
                       encoding="utf-8")
+    assert reached("_/agent/roles/Worker.md", ["note:_/agent/roles/Worker.md"]) == {"note:_/agent/roles/Worker.md"}
     with pytest.raises(apt.ReachUnknown, match="being drawn again"):
         reached("_/agent/Orphan.md", ["note:_/agent/Orphan.md"])
     # Drawn again, the map has it.
@@ -802,14 +801,34 @@ def test_a_change_since_the_map_is_weighed_by_what_it_could_reach(drawing):
 def test_a_new_note_a_path_looked_for_or_a_note_a_path_reads_is_not_guessed(drawing):
     common = drawing / "_/agent/Common-rules.md"
     common.write_text(common.read_text(encoding="utf-8") + "- When lost, read [[_/agent/Lost]].\n", encoding="utf-8")
+    areas = drawing / ap.AREAS_NOTE
+    areas.write_text(areas.read_text(encoding="utf-8") + "| New | | [[Areas/New/New\\|New]] |\n", encoding="utf-8")
     draw_now()
+    for created in (True, False):  # a note the map didn't have is new, whether or not this write creates it
+        with pytest.raises(apt.ReachUnknown, match="being drawn again"):
+            reached("_/agent/Lost.md", ["note:_/agent/Lost.md"], created=created)
+    # An area's main note the list of areas names, created after the map.
     with pytest.raises(apt.ReachUnknown, match="being drawn again"):
-        reached("_/agent/Lost.md", ["note:_/agent/Lost.md"], created=True)
+        reached("Areas/New/New.md", ["section:Areas/New/New.md#For agents"], created=True)
     # A rule section new in a note some path reads (the area's main note, opened for its sections).
     with pytest.raises(apt.ReachUnknown, match="being drawn again"):
         reached("Areas/Repo/Repo.md", ["section:Areas/Repo/Repo.md#Other rules"])
     # A change to what the setup reads: every path may change.
     (drawing / ap.STARTING_POINTS_PATH).write_text(STARTING_POINTS + "\n# changed\n", encoding="utf-8")
+    with pytest.raises(apt.ReachUnknown, match="being drawn again"):
+        reached("_/agent/Common-rules.md", ["note:_/agent/Common-rules.md"])
+
+
+def test_a_snapshots_made_counts_only_when_several_compete(drawing):
+    snap = drawing / f"{ap.SNAPSHOT_FOLDER}/PC.json"
+    draw_now()
+    snap.write_text(json.dumps({**SNAPSHOT, "made": "2026-11-19T10:00:00+01:00"}), encoding="utf-8")
+    assert reached("_/agent/Common-rules.md", ["note:_/agent/Common-rules.md"])
+    other = drawing / f"{ap.SNAPSHOT_FOLDER}/PC2.json"
+    other.write_text(json.dumps({**SNAPSHOT, "machine": "PC2"}), encoding="utf-8")
+    draw_now()
+    other.write_text(json.dumps({**SNAPSHOT, "machine": "PC2", "made": "2026-11-20T10:00:00+01:00"}),
+                     encoding="utf-8")
     with pytest.raises(apt.ReachUnknown, match="being drawn again"):
         reached("_/agent/Common-rules.md", ["note:_/agent/Common-rules.md"])
 
@@ -826,6 +845,11 @@ async def test_the_map_is_drawn_first_then_again_after_a_write_to_a_note_on_a_pa
     await apt.reached_after_write(None, "_/agent/Common-rules.md", ["note:_/agent/Common-rules.md"])
     await d._task
     assert d.map is not first
+    # A write with no rule place to a note the map read draws it again too.
+    second = d.map
+    apt.warm_reach_map(None, "Areas/Repo/Repo.md")
+    await d._task
+    assert d.map is not second
     # Requests while a draw waits or runs make one more draw, not one each.
     drawn = []
     real = apt.draw_reach_map
@@ -885,6 +909,7 @@ def test_a_rule_section_is_checked_by_its_own_place(writing):
     area = asyncio.run(tools.edit_note_impl("Areas/Repo/Repo.md", "\n- Mind the build. [P3]\n",
                                             section="For agents"))
     assert "reached_by_no_path" not in area
+    draw_now()  # as the background does after a write to a note on a path
     lonely = asyncio.run(tools.create_note_impl("Notes/Lonely.md", "Text.\n"))
     outside = asyncio.run(tools.edit_note_impl("Notes/Lonely.md", "More text.\n", append=True))
     assert "reached_by_no_path" not in lonely + outside

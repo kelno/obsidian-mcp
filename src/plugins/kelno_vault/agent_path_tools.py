@@ -22,7 +22,7 @@ import os
 import posixpath
 import time
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated
 
 from mcp.types import ToolAnnotations
@@ -143,7 +143,7 @@ async def _served(uid) -> ap.ServedTexts:
                           open_area_instructions="\n".join(OPEN_AREA_INSTRUCTIONS))
 
 
-def _setup(uid, machine: str | None, served: ap.ServedTexts, read=None) -> ap.Setup:
+def _setup(uid, machine: str | None, served: ap.ServedTexts, read=None, trace: ap.Trace | None = None) -> ap.Setup:
     notes: list[str] = []
     paths = _vault_files(uid)
     read = read or _reader(uid)
@@ -166,7 +166,7 @@ def _setup(uid, machine: str | None, served: ap.ServedTexts, read=None) -> ap.Se
         notes.append(f"The list of areas ({ap.AREAS_NOTE}) could not be read ({exc}): no area joins a path.")
         areas = []
     snapshot = _snapshot(paths, read, machine, notes)
-    vault = ap.Vault(paths, read, rule_files, areas, snapshot.vault if snapshot else None)
+    vault = ap.Vault(paths, read, rule_files, areas, snapshot.vault if snapshot else None, trace)
     return ap.Setup(vault, points, snapshot, served, notes)
 
 
@@ -215,6 +215,10 @@ class ReachMap:
     #: How long the drawing took, and the drawing process's peak memory (KiB; 0 where it can't be read).
     seconds: float = 0.0
     peak_kib: int = 0
+    #: What the setup looked up (the areas' main notes).
+    setup_trace: ap.Trace = field(default_factory=ap.Trace)
+    #: The snapshots whose `made` counts: with several, it chooses the one the paths are drawn from.
+    keep_made: frozenset[str] = frozenset()
 
 
 def _stat(uid, path: str) -> tuple[int, int] | None:
@@ -225,11 +229,12 @@ def _stat(uid, path: str) -> tuple[int, int] | None:
     return st.st_mtime_ns, st.st_size
 
 
-def _content(path: str, text: str | None) -> str | None:
-    """A file's digest for the map: a snapshot's leaves out `made`, rewritten at every session's start on the PC."""
+def _content(path: str, text: str | None, keep_made: bool = False) -> str | None:
+    """A file's digest for the map: a snapshot's leaves out `made`, rewritten at every session's start on the PC,
+    unless `keep_made` (with several snapshots, `made` chooses one)."""
     if text is None:
         return None
-    if posixpath.dirname(path) == ap.SNAPSHOT_FOLDER and path.endswith(".json"):
+    if not keep_made and _is_snapshot(path):
         try:
             data = json.loads(text)
             data.pop("made", None)
@@ -237,6 +242,10 @@ def _content(path: str, text: str | None) -> str | None:
         except ValueError:
             pass
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _is_snapshot(path: str) -> bool:
+    return posixpath.dirname(path) == ap.SNAPSHOT_FOLDER and path.endswith(".json")
 
 
 def _signed_reader(uid, signed: dict):
@@ -266,13 +275,18 @@ def draw_reach_map(uid, served: ap.ServedTexts) -> ReachMap | str:
     began = time.monotonic()
     signed: dict[str, tuple | None] = {}
     read = _signed_reader(uid, signed)
+    setup_trace = ap.Trace()
     try:
-        setup = _setup(uid, None, served, read)
+        setup = _setup(uid, None, served, read, setup_trace)
     except (_SetupError, ap.StartingPointsError) as exc:
         return str(exc)
     if setup.snapshot is None:
         return f"no PC has written a snapshot to {ap.SNAPSHOT_FOLDER}/, so what Claude Code loads is unknown"
     read(_rule_files.RULE_FILES_PATH)  # read by `_setup` outside `read`: its signature joins the setup's
+    snapshots = [p for p in signed if _is_snapshot(p) and signed[p] is not None]
+    keep_made = frozenset(snapshots) if len(snapshots) > 1 else frozenset()
+    for p in keep_made:
+        signed[p] = (signed[p][0], _content(p, _reader(uid)(p), True))
     setup_inputs = frozenset(signed)
     v, runs = setup.vault, []
     for _label, s, w in ap.run_starts(setup):
@@ -288,7 +302,7 @@ def draw_reach_map(uid, served: ap.ServedTexts) -> ReachMap | str:
     except (ImportError, OSError):
         peak = 0
     return ReachMap(dict(v.by_rel), signed, setup_inputs, frozenset(ap.registered_hook_scripts(setup)), tuple(runs),
-                    round(time.monotonic() - began, 1), peak)
+                    round(time.monotonic() - began, 1), peak, setup_trace, keep_made)
 
 
 def _draw_in_helper(root: str, served: ap.ServedTexts) -> ReachMap | str:
@@ -381,20 +395,15 @@ def _drawer(uid) -> _Drawer:
     return _DRAWERS.setdefault(root, _Drawer(root))
 
 
-def warm_reach_map(uid) -> None:
-    """Start the first drawing of the vault's paths, if none is under way: a rule write then finds it ready."""
+def warm_reach_map(uid, path: str) -> None:
+    """On a note write with no rule place: start the first drawing of the vault's paths, if none is under way, so
+    a rule write finds it ready; after a write to a note the map read, draw it again."""
     d = _drawer(uid)
-    if d.map is None and (d._task is None or d._task.done()) and not d.failure:
+    if d.map is None:
+        if (d._task is None or d._task.done()) and not d.failure:
+            d.request(uid)
+    elif path.replace("\\", "/").lstrip("/") in d.map.inputs:
         d.request(uid)
-
-
-def _mentions(text: str, path: str) -> bool:
-    """Whether `text` could point to the note at `path`: it names the note, or holds a path pattern matching it.
-    A pointer always does one or the other; text that does neither can't send an agent there."""
-    if posixpath.basename(path).removesuffix(".md").casefold() in text.casefold():
-        return True
-    return any((pattern := ap.note_pattern(m.group(0).strip("`"))) is not None and pattern.fullmatch(path)
-               for m in ap.INLINE_CODE.finditer(text))
 
 
 _REDRAWING = "the agent paths are being drawn again after changes to notes they read"
@@ -411,14 +420,17 @@ def _answer(uid, m: ReachMap, path: str, created: bool, places: list[str]) -> tu
         st = _stat(uid, p)
         if before is None or st is None:
             return (before is None) != (st is None)
-        return st != before[0] and _content(p, read(p)) != before[1]
+        return st != before[0] and _content(p, read(p), p in m.keep_made) != before[1]
 
-    moved = {p for p in m.inputs if p != written and changed(p)}
-    touched = any(written.lower() in r.trace.texts or (created and r.trace.new_file_counts(written))
-                  for r in m.runs)
-    stale = bool(moved) or touched
-    if moved & m.setup_inputs:
+    known = written.lower() in m.by_lower
+    moved = {p.lower() for p in m.inputs if p.lower() != written.lower() and changed(p)}
+    if moved & {p.lower() for p in m.setup_inputs}:
         raise ReachUnknown(_REDRAWING)
+    # A note the map didn't have counts as new, whether or not this write creates it.
+    new = created or not known
+    touched = (any(written.lower() in r.trace.texts or (new and r.trace.new_file_counts(written)) for r in m.runs)
+               or (new and m.setup_trace.new_file_counts(written)))
+    stale = bool(moved) or touched
     found = set()
     for place in places:
         kind, rest = place.split(":", 1)
@@ -426,12 +438,14 @@ def _answer(uid, m: ReachMap, path: str, created: bool, places: list[str]) -> tu
         pid = f"{kind}:{m.by_lower.get(note.lower(), note)}{sep}{heading}"
         # Reached when a path reached it by a chain none of whose notes changed since; the written note is the
         # place's own, and a note's own text never cuts the way to it.
-        if pid in m.registered or any(pid in r.reached and not set(r.reached[pid]) & moved for r in m.runs):
+        if pid in m.registered or any(pid in r.reached and not {f.lower() for f in r.reached[pid]} & moved
+                                      for r in m.runs):
             found.add(place)
             continue
-        # Not reached then. Still not, unless this write is to a note some path reads (a new rule section in a
-        # note opened for its sections, say), or a note changed since now names this one.
-        if touched or any(_mentions(read(p) or "", written) for p in moved):
+        # Not reached then. Still not, unless this write is to a note some path reads or looked for (a new rule
+        # section in a note opened for its sections, say), or a note some path read changed since: it may now
+        # point here, or to a note that does.
+        if touched or moved:
             raise ReachUnknown(_REDRAWING)
     return found, stale
 

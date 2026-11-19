@@ -214,7 +214,7 @@ async def check(path: str, old: str | None, new: str, user_id) -> RuleCheck:
             reached = await agent_path_tools.reached_after_write(user_id, path, places, created=old is None)
             out.unreached = [p for p in places if p not in reached]
         else:
-            agent_path_tools.warm_reach_map(user_id)  # so the first rule write after a start finds the map
+            agent_path_tools.warm_reach_map(user_id, path)
     except agent_path_tools.ReachUnknown as exc:
         out.reach_unknown = str(exc)
     except Exception as exc:  # noqa: BLE001 — a nudge never fails the write it follows; the result says so
