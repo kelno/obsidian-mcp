@@ -932,3 +932,32 @@ def test_a_rule_write_says_in_one_line_when_reach_cannot_be_checked(writing):
     line = result.split("reached_by_no_path:")[1].split("\n\n")[0]
     assert line.startswith(" not checked (the agent paths are being drawn again") and "\n" not in line
     assert line.endswith("`agent_path_reached_by` on each changed place tells whether an agent path reaches it.")
+
+
+def test_a_repos_links_to_its_docs_follow_the_pointer_shapes(vault):
+    """P259 extended to a repo's CLAUDE.md: the index's shape takes a Markdown link or a backticked path, and a
+    link in none of the shapes (a reading verb, a table row) is a mention."""
+    claude_md = ("Repo rules.\n"
+                 "- [parser.md](docs/parser.md): any change to the parser, its grammar or its errors\n"
+                 "- [search.md, Private folders](docs/search.md#private-folders): `PRIVATE`, `include_private`\n"
+                 "- `NOTES.md`: when a decision is made. Keep it short.\n"
+                 "- [index.md](docs/index.md): when touching [other.md](docs/other.md)\n"
+                 "Read [verb.md](docs/verb.md) first.\n"
+                 "| Note | Read it before you touch |\n| --- | --- |\n"
+                 "| [table.md](docs/table.md) | the tables |\n")
+    doc = {"hash": "bbbbbbbbbbbb", "chars": 10}
+    names = ("docs/parser.md", "docs/search.md", "NOTES.md", "docs/index.md", "docs/other.md", "docs/verb.md",
+             "docs/table.md")
+    snap = {**SNAPSHOT, "format": 2,
+            "files": {**SNAPSHOT["files"], "file:D:/work/repo/CLAUDE.md": {"text": claude_md}},
+            "docs": {f"file:D:/work/repo/{d}": {**doc, "path": f"D:/work/repo/{d}"} for d in names}}
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
+
+    result = path(PathStart(typical=3))
+    moments = {p.id.removeprefix("file:D:/work/repo/"): p.moment for p in result.pieces
+               if p.id.startswith("file:D:/work/repo/") and p.id != "file:D:/work/repo/CLAUDE.md"}
+    # The other link on an index line, a reading verb and a table row are mentions, not on the path.
+    assert moments == {"docs/parser.md": "any change to the parser, its grammar or its errors",
+                       "docs/search.md": "`PRIVATE`, `include_private`",
+                       "NOTES.md": "when a decision is made",
+                       "docs/index.md": "when touching [other.md](docs/other.md)"}

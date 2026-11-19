@@ -39,13 +39,13 @@ This fork follows `maxkuminov/obsidian-mcp`. What is specific here:
 - No tool is marked destructive: claude.ai's card for a destructive tool never offers "Always allow" (owner). A resync that brings upstream's marks back stops at `tests/test_issue_343_tool_metadata.py`. ([vault tools](docs/architecture/vault-tools.md), "Tool metadata")
 - A tool's description is at most 4,000 characters as served with the deployment's plugins loaded, their text included. A new tool, or one switched on, gets a `FORK.md` row.
 
-| Note | Read it before you touch |
-| --- | --- |
-| [tasks.md](docs/architecture/tasks.md) | the fork's four task tools, `src/services/fork_tasks/`, `fork_note_tasks` / migration 1001, any Tasks plugin upgrade |
-| [plugins.md](docs/architecture/plugins.md) | `src/plugins/`, the `PLUGINS` setting, the plugin calls in the note writers, moving a vault-specific behaviour out of the core |
-| [calendar.md](docs/architecture/calendar.md) | the `caldav` plugin (`src/plugins/caldav/`): the five calendar tools, the `CALDAV_*` settings, the CalDAV client, the iCalendar handling |
-| [agent-ledger.md](docs/architecture/agent-ledger.md) | the `ledger_*` tools, tables and migrations 1002 and 1004, `scripts/ledger_import.py` / `ledger_export.py` |
-| [open-area.md](docs/architecture/open-area.md) | `open_area` and the area index (`kelno_vault`) |
-| [agent-paths.md](docs/architecture/agent-paths.md) | `agent_path`, `agent_path_reached_by` (`kelno_vault`) |
-| [search.md](docs/architecture/search.md), "Private folders" | `PRIVATE_FOLDER_NAMES`, `include_private` |
-| [vault-tools.md](docs/architecture/vault-tools.md), "The agent-edit stamp" | `src/services/ai_edit_stamp.py`, `LAST_AI_EDIT_FIELD`, `ARCHIVE_FOLDER` |
+The fork's own architecture notes, each with what to read it before touching:
+
+- [tasks.md](docs/architecture/tasks.md): the fork's four task tools, `src/services/fork_tasks/`, `fork_note_tasks` / migration 1001, any Tasks plugin upgrade
+- [plugins.md](docs/architecture/plugins.md): `src/plugins/`, the `PLUGINS` setting, the plugin calls in the note writers, moving a vault-specific behaviour out of the core
+- [calendar.md](docs/architecture/calendar.md): the `caldav` plugin (`src/plugins/caldav/`), its five calendar tools, the `CALDAV_*` settings, the CalDAV client, the iCalendar handling
+- [agent-ledger.md](docs/architecture/agent-ledger.md): the `ledger_*` tools, tables and migrations 1002 and 1004, `scripts/ledger_import.py` / `ledger_export.py`
+- [open-area.md](docs/architecture/open-area.md): `open_area` and the area index (`kelno_vault`)
+- [agent-paths.md](docs/architecture/agent-paths.md): `agent_path`, `agent_path_reached_by` (`kelno_vault`)
+
+Two of upstream's notes, in `CLAUDE.md`'s list, have a section that is the fork's: [search.md](docs/architecture/search.md), "Private folders" (`PRIVATE_FOLDER_NAMES`, `include_private`), and [vault-tools.md](docs/architecture/vault-tools.md), "The agent-edit stamp" (`src/services/ai_edit_stamp.py`, `LAST_AI_EDIT_FIELD`, `ARCHIVE_FOLDER`).

@@ -79,9 +79,11 @@ STAGE_NAMES = {
 # instruction" in WHERE_NOTE [P259]: its bullet or sentence opens with one of these words (anything before the first
 # word that isn't a letter is ignored, so a bold label in front doesn't pass), or it takes the guide index's shape,
 # `[[note]]: when to read it`. The moment is that opening, up to the first : ; , full stop or table cell.
+# The same shapes hold for a repo's `CLAUDE.md` or `AGENTS.md` pointing to its own docs, where the index's link is
+# a Markdown link or a backticked path (`[x.md](docs/x.md): when to read it`).
 POINTER_LEAD = re.compile(r"^((?:at the start|while|when|before)\b(?:[^:;,.|]|\|(?!\s))*)", re.I)
 NOT_LETTERS = re.compile(r"^[\W\d_]+")
-INDEX_SHAPE = re.compile(r"^\[\[[^\]]+\]\]:\s*(.+)")
+INDEX_SHAPE = re.compile(r"^(\[\[[^\]]+\]\]|\[[^\]\n]*\]\([^)\s]+\)|`[^`\n]+`):\s*(.+)")
 INLINE_CODE = re.compile(r"`[^`\n]*`")
 WIKILINK = re.compile(r"\[\[([^\]|#]+?)\\?(#[^\]|]*?)?\\?(?:\|[^\]]*)?\]\]")
 BACKTICK_MD = re.compile(r"`([^`\n]+?\.md)`")
@@ -519,8 +521,8 @@ class PathBuilder:
         """A pointer in a file outside the vault (a repo's `CLAUDE.md`) to a doc, by a backticked path or a
         Markdown link: resolved against the pointing file's folder, then the session folder's root, as the PC's
         snapshot resolves it, its text taken from the snapshot's `files`. A path into the vault is a vault pointer.
-        The vault's moment rules hold; a repo's files aren't written under the vault's pointer convention, so a
-        reading verb aimed at the link counts as it does in a hook's message."""
+        A link to a doc follows the vault's pointer convention [P259, P270]: only its shapes make a pointer, the index's
+        link being a Markdown link or a backticked path; any other link is a mention."""
         t = target.strip().replace("\\", "/")
         if t.startswith(("~", "@")) or PLACEHOLDER.search(t) or "*" in t or (":" in t and not re.fullmatch(r"[A-Za-z]:/[^:]*", t)):
             return  # a home-folder path, an import, a kind of file or a command (`git show main:CLAUDE.md`)
@@ -538,7 +540,7 @@ class PathBuilder:
         if any(c.lower() == own for c in candidates):
             return
         via = line.strip()
-        moment = pointer_moment(via, sentence, t) or ("when met" if reads_it(sentence, at) else "unplaced")
+        moment = pointer_moment(via, sentence, t) or "unplaced"
         snap = self.snap
         path = next((c for c in candidates if snap and (snap.file_text(c) is not None or snap.doc(c))), None)
         if moment == "unplaced":
@@ -1106,12 +1108,10 @@ def pointer_moment(line: str, sentence: str, target: str | None = None) -> str |
     s = re.sub(r"^\s*(?:>\s*)*(?:[-*]|\d+\.)?\s*", "", line).strip()  # quote or callout marks, then a bullet
     s = re.sub(r"\s*\[[PQFC]\d+(?:,\s*[PQFC]\d+)*\]", "", s)  # ledger refs aren't part of a moment
     index = INDEX_SHAPE.match(s)
-    leading = re.match(r"^\[\[([^\]|#]+)", s)
-    lead_note = leading.group(1).strip().rstrip("\\").casefold() if leading else None  # None: `[[#Heading]]`
-    if index and target is not None and lead_note != target.strip().casefold():
+    if index and target is not None and index_target(index.group(1)) != index_target(target):
         index = None  # another link on an index line isn't the note the line is about
     if index:  # the guide index's shape: the guide, then when to read it
-        return re.split(r"(?<=[a-z\)])\.(?:\s|$)|\s\|\s", index.group(1))[0].strip().rstrip(".")
+        return re.split(r"(?<=[a-z\)])\.(?:\s|$)|\s\|\s", index.group(2))[0].strip().rstrip(".")
     candidates = [sentence]
     if re.match(r"^\s*(?:>\s*)*(?:[-*]|\d+\.)\s", line):  # a bullet's opening covers the whole bullet
         candidates.insert(0, s)
@@ -1123,6 +1123,18 @@ def pointer_moment(line: str, sentence: str, target: str | None = None) -> str |
                 m = m[: m.rfind("(")].strip()
             return m
     return None
+
+
+def index_target(link: str) -> str | None:
+    """What an index line's leading link names, to compare with a pointer's target: a wikilink's note (None for
+    `[[#Heading]]`), a Markdown link's path or a backticked path, without an anchor, case ignored. Anything else
+    (a pointer's target as found) is taken as the path itself."""
+    m = re.match(r"^\[\[([^\]|#]*)", link)
+    if m:
+        return m.group(1).strip().rstrip("\\").casefold() or None
+    m = re.match(r"^\[[^\]\n]*\]\(<?([^)\s<>]+?)>?\)$", link) or re.match(r"^`([^`\n]+)`$", link)
+    path = m.group(1) if m else link
+    return path.split("#")[0].strip().replace("\\", "/").casefold() or None
 
 
 def moment_of(line: str, sentence: str, at: int = 0) -> str:

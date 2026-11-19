@@ -16,7 +16,7 @@ This repo is published on GitHub: anything host-specific (paths, secrets, hostna
 
 ## Key decisions
 
-The reasons behind the code live in `docs/architecture/`, one note per area (table below). **Read the area's note before changing it, and update it in the same change.** These are the decisions an agent is most likely to undo by "fixing" them:
+The reasons behind the code live in `docs/architecture/`, one note per area (list below). **Read the area's note before changing it, and update it in the same change.** These are the decisions an agent is most likely to undo by "fixing" them:
 
 - Panel and OAuth passwords: hash and verify truncate the UTF-8 encoding at 72 bytes and reject NUL bytes, so existing hashes stay valid; don't "fix" the truncation. ([control panel](docs/architecture/control-panel.md))
 - `--workers 1` is part of the contract: rate limits, concurrency admission and the body-memory budget live in the worker's memory, and a second worker multiplies every rate. ([rate limits](docs/architecture/rate-limits.md))
@@ -32,19 +32,19 @@ The reasons behind the code live in `docs/architecture/`, one note per area (tab
 
 ## Architecture notes
 
-| Note | Read it before you touch |
-| --- | --- |
-| [schema-and-migrations.md](docs/architecture/schema-and-migrations.md) | any alembic migration; `alembic check` is the cheap gate, not the whole gate |
-| [oauth-and-grants.md](docs/architecture/oauth-and-grants.md) | `src/oauth/`, the consent page, anything minting, rotating or revoking a token |
-| [vault-roots-and-tenancy.md](docs/architecture/vault-roots-and-tenancy.md) | `APIKeyMiddleware`, `_vault_root`, owner predicates, publication confirmation, the vault-root overlap guard |
-| [vault-tools.md](docs/architecture/vault-tools.md) | any note or file tool: frontmatter, symlinks, anchored writes, published file permissions, section addressing, size caps; upstream's task tools |
-| [file-transfer.md](docs/architecture/file-transfer.md) | `src/transfer/`, `src/services/vault_fs.py`, the publish gate, SSRF policy |
-| [search.md](docs/architecture/search.md) | the search tools and every `SET LOCAL` they issue, the reranker, `scripts/search_eval/` |
-| [indexing-and-embeddings.md](docs/architecture/indexing-and-embeddings.md) | the indexer and embed loops, chunking, tsvector writers, providers, `/health`'s indexer status, task derivation |
-| [security-event-logging.md](docs/architecture/security-event-logging.md) | `src/logging_setup.py`, `src/services/security_events.py`, any call site that logs a refusal |
-| [rate-limits.md](docs/architecture/rate-limits.md) | rate limits, concurrency admission, the body-memory budget, the pool budget, the gate order in `_tracked`, proxy trust, key creation and daily limits, and every setting for them |
-| [usage-attribution.md](docs/architecture/usage-attribution.md) | `usage_logs`, `_log_usage`, actor columns, tool-body outcomes |
-| [control-panel.md](docs/architecture/control-panel.md) | panel templates and CSP, flash messages, admin guards, passwords, native OIDC's invariants, the Danger zone |
-| [native-oidc.md](docs/native-oidc.md) | the OIDC login and its settings (operator guide) |
+Each note, then what to read it before touching:
+
+- [schema-and-migrations.md](docs/architecture/schema-and-migrations.md): any alembic migration
+- [oauth-and-grants.md](docs/architecture/oauth-and-grants.md): `src/oauth/`, the consent page, anything minting, rotating or revoking a token
+- [vault-roots-and-tenancy.md](docs/architecture/vault-roots-and-tenancy.md): `APIKeyMiddleware`, `_vault_root`, owner predicates, publication confirmation, the vault-root overlap guard
+- [vault-tools.md](docs/architecture/vault-tools.md): any note or file tool (frontmatter, symlinks, anchored writes, published file permissions, section addressing, size caps), upstream's task tools
+- [file-transfer.md](docs/architecture/file-transfer.md): `src/transfer/`, `src/services/vault_fs.py`, the publish gate, SSRF policy
+- [search.md](docs/architecture/search.md): the search tools and every `SET LOCAL` they issue, the reranker, `scripts/search_eval/`
+- [indexing-and-embeddings.md](docs/architecture/indexing-and-embeddings.md): the indexer and embed loops, chunking, tsvector writers, providers, `/health`'s indexer status, task derivation
+- [security-event-logging.md](docs/architecture/security-event-logging.md): `src/logging_setup.py`, `src/services/security_events.py`, any call site that logs a refusal
+- [rate-limits.md](docs/architecture/rate-limits.md): rate limits, concurrency admission, the body-memory budget, the pool budget, the gate order in `_tracked`, proxy trust, key creation and daily limits, and every setting for them
+- [usage-attribution.md](docs/architecture/usage-attribution.md): `usage_logs`, `_log_usage`, actor columns, tool-body outcomes
+- [control-panel.md](docs/architecture/control-panel.md): panel templates and CSP, flash messages, admin guards, passwords, native OIDC's invariants, the Danger zone
+- [native-oidc.md](docs/native-oidc.md): the OIDC login and its settings (an operator guide)
 
 Formal requirements live in `openspec/specs/`; the change history and its reasoning in `openspec/changes/archive/`.
