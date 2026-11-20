@@ -20,6 +20,7 @@ import logging
 import multiprocessing
 import os
 import posixpath
+import re
 import threading
 import time
 from concurrent.futures.process import BrokenProcessPool
@@ -1125,14 +1126,50 @@ def _one_part(result, p: ap.Piece, o: PathPiece, offset: int) -> None:
            else "That was the last part; its hash is the whole text's.")]
 
 
-def _part_of(result, pieces: list[ap.Piece], out: list[PathPiece], read_from: ReadFrom):
-    """The call asked for one part of one text: that piece alone, without the rest of the result."""
+def _part_of(result, pieces: list[ap.Piece], out: list[PathPiece], read_from: ReadFrom,
+             lined: set[str] | None = None):
+    """The call asked for one part of one text: that piece alone, without the rest of the result. A
+    `tool:<server>:*` line's id gives its texts whole instead, `offset` counting texts (Agent paths, 2026-11-20:
+    read_from refused the id the line showed, and the line named none of its members); `lined`, when given, is
+    the ids the lines were made from, so the texts are those the line counts."""
+    group = _TOOL_GROUP.fullmatch(read_from.id)
+    if group:
+        members = [(p, o) for p, o in zip(pieces, out) if ap.tool_text(p) and p.id.split(":")[1] == group[1]
+                   and (lined is None or p.id in lined)]
+        if not members:
+            raise _SetupError(f"read_from.id {read_from.id!r}: no tool texts of {group[1]} on this path.")
+        result.structure = result.left_path = None
+        _group_texts(result, members, read_from.id, read_from.offset)
+        return result
     hit = next(((p, o) for p, o in zip(pieces, out) if p.id == read_from.id), None)
     if hit is None:
         raise _SetupError(f"read_from.id {read_from.id!r} is not on this path.")
     result.structure = result.left_path = None
     _one_part(result, hit[0], hit[1], read_from.offset)
     return result
+
+
+#: The id of one server's tool texts as one line (`_piece_lines`).
+_TOOL_GROUP = re.compile(r"tool:([^:*]+):\*")
+
+
+def _group_texts(result, members: list[tuple[ap.Piece, PathPiece]], gid: str, offset: int) -> None:
+    """Make `result` carry the texts of `members` whole, from the `offset`-th, as many as fit (at least one)."""
+    if offset >= len(members):
+        raise _SetupError(f"read_from.offset {offset} is past the last text of {gid} ({len(members)} texts).")
+    result.pieces = []
+    for p, o in members[offset:]:
+        o.text = p.text
+        result.pieces.append(o)
+        if len(result.pieces) > 1 and len(result.model_dump_json()) > PAGE_CHARS - _NOTES_RESERVE:
+            result.pieces.pop()
+            o.text = None
+            break
+    end = offset + len(result.pieces)
+    result.notes = (result.notes or []) + [
+        f"{gid}: texts {offset + 1} to {end} of {len(members)}, each whole. "
+        + (f"Next: read_from={{id: {json.dumps(gid, ensure_ascii=False)}, offset: {end}}}." if end < len(members)
+           else "That was the last of them.")]
 
 
 def _changed_hook_scripts(setup: ap.Setup, piece_ids) -> list[str]:
@@ -1437,7 +1474,8 @@ def _reached_by_result(kept: _Kept, place: str, known: dict | None, machine: str
     result.notes = notes or None
     if read_from is not None:  # any piece on those paths, not only those listed with their text
         result.reached_by = result.other_pieces = None
-        return _part_of(result, every, [_grouped(_piece(p, known), p, r["met"]) for p in every], read_from)
+        return _part_of(result, every, [_grouped(_piece(p, known), p, r["met"]) for p in every], read_from,
+                        lined={p.id for p in every if p.id not in held})
     if known is None:
         _trim_structure(result, pieces, notes)
     _with_texts(result, pieces, out, notes, known, fill_order=r["fill_order"])
@@ -1550,7 +1588,8 @@ async def agent_path_reached_by_impl(place: str, known: dict | None, machine: st
 #: Said with `other_pieces`: the result models' comments aren't served, and a writer asked how to read a line's text
 #: (Agent paths, 2026-11-20).
 _OTHER_PIECES_NOTE = ("other_pieces: every other piece on those paths, one line each; read any of them with the same "
-                      "arguments and read_from={id, offset: 0}.")
+                      "arguments and read_from={id, offset: 0}; a tool:<server>:* line gives its texts whole, as "
+                      "many as fit, offset counting texts.")
 
 
 #: Said when a piece has another text on another path (test bench, 2026-11-20: an area-start hook's messages, one

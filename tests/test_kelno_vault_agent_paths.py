@@ -1478,6 +1478,38 @@ def test_reached_by_gives_texts_up_to_the_place_and_every_other_piece_as_a_line(
     assert again.other_pieces is None and again.structure is None and not again.pieces
 
 
+def test_read_from_on_a_servers_tool_line_gives_its_texts_whole_page_by_page(vault, monkeypatch):
+    # Agent paths, 2026-11-20: read_from refused the `tool:<server>:*` id the line showed, and the line named none
+    # of its members.
+    place = "_/agent/roles/Worker.md"
+    result = reached_by(place)
+    (line,) = [x for x in result.other_pieces if x.startswith("tool:obsidian-mcp:* (")]
+    count = int(line.split("(")[1].split(" ")[0])
+    combined = line.split("#")[1].split(" ")[0]
+    assert any("tool:<server>:* line gives its texts whole" in n for n in result.notes)
+    monkeypatch.setattr(apt, "PAGE_CHARS", 20_000)
+    got, offset, calls = [], 0, 0
+    while offset is not None:
+        page = asyncio.run(apt.agent_path_reached_by_impl(place, None, None,
+                                                          ReadFrom(id="tool:obsidian-mcp:*", offset=offset)))
+        assert page.error is None and page.structure is None and page.reached_by is None
+        assert page.pieces and all(p.text is not None and p.text_offset is None for p in page.pieces)
+        assert len(page.pieces) == 1 or len(page.model_dump_json()) <= 20_000
+        got += page.pieces
+        assert f"texts {offset + 1} to {len(got)} of {count}" in page.notes[-1]
+        offset = len(got) if "Next: read_from=" in page.notes[-1] else None
+        calls += 1
+    assert len(got) == count and calls > 1 and len({p.id for p in got}) == count
+    assert all(ap.digest(p.text) == p.hash for p in got)
+    assert ap.digest("".join(p.hash for p in got)) == combined  # the line's texts, in its order
+    # Past the last text, or a server with no texts on these paths, is refused.
+    past = asyncio.run(apt.agent_path_reached_by_impl(place, None, None,
+                                                      ReadFrom(id="tool:obsidian-mcp:*", offset=count)))
+    assert past.error and "past the last text" in past.error
+    none = asyncio.run(apt.agent_path_reached_by_impl(place, None, None, ReadFrom(id="tool:nope:*")))
+    assert none.error and "no tool texts of nope" in none.error
+
+
 def test_the_structure_is_cut_first_when_that_lets_the_texts_fit(vault):
     from src.plugins.kelno_vault.agent_path_result import PathStructure, ReachedByResult
 
