@@ -195,4 +195,6 @@ plugin = plugins.Plugin(
     },
     guide_text="\n\n".join((task_lines.GUIDE, rule_notes.GUIDE, note_names.GUIDE, _LINKS_GUIDE,
                            _TITLE_HEADING_GUIDE, _OPEN_AREA_GUIDE)),
+    # Ends the path tools' helper process with the server (`agent_path_tools.helper_lifespan`).
+    startup=agent_path_tools.helper_lifespan,
 )

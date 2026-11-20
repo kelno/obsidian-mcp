@@ -660,6 +660,37 @@ def _drop_helper() -> None:
         _HELPER = None
 
 
+_HELPER_STOP_SECONDS = 3.0
+
+
+def stop_helper() -> None:
+    """End the helper process, a drawing under way included: asked to stop, then terminated if it is still
+    running after `_HELPER_STOP_SECONDS` (a whole drawing takes about a minute on the server). The executor's own
+    shutdown waits for the work under way; the server's shutdown can't."""
+    global _HELPER
+    helper, _HELPER = _HELPER, None
+    if helper is None:
+        return
+    # Its worker processes, read before the shutdown forgets them: the executor has no public list (Python 3.14's
+    # `terminate_workers` would do this).
+    workers = list((getattr(helper, "_processes", None) or {}).values())
+    helper.shutdown(wait=False, cancel_futures=True)
+    for p in workers:
+        p.join(_HELPER_STOP_SECONDS)
+        if p.is_alive():
+            p.terminate()
+            p.join(_HELPER_STOP_SECONDS)
+
+
+async def helper_lifespan() -> None:
+    """The plugin's `startup` task: it waits while the server serves, and at shutdown, when the lifespan cancels
+    it, ends the helper process, so it never outlives the server's worker."""
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await asyncio.to_thread(stop_helper)
+
+
 class _Drawer:
     """The reach map of one vault root, drawn again after changes: one draw at a time, a burst of requests one
     draw, `REDRAW_AFTER_SECONDS` after the last of them (at once for the first)."""

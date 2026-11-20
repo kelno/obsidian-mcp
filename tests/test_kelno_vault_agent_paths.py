@@ -1614,3 +1614,39 @@ def test_a_line_in_a_waiting_piece_says_after_which_moment(vault):
     kept = by_id["note:_/agent/Notes kept.md"]
     (m,) = [m for m in kept.moments if m.piece == "note:_/agent/guides/coding-practices.md"]
     assert m.moment == "When the tests fail" and m.after == guide.moments[0].moment == "any code work"
+
+
+# --- The helper process ends with the server ------------------------------------------------------------------
+
+
+def test_the_helper_process_ends_when_the_server_shuts_down(monkeypatch):
+    import time as _time
+
+    from src.plugins.kelno_vault import plugin
+
+    import concurrent.futures
+    import multiprocessing
+
+    # A helper as `_helper` starts it, without its initializer, which imports the server's code in the child.
+    helper = concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
+    monkeypatch.setattr(apt, "_HELPER", helper)
+    monkeypatch.setattr(apt, "_HELPER_STOP_SECONDS", 0.5)
+    assert plugin.startup is apt.helper_lifespan
+    assert helper.submit(os.getpid).result(timeout=120) != os.getpid()
+    busy = helper.submit(_time.sleep, 60)  # a drawing under way
+    (worker,) = helper._processes.values()
+
+    async def serve_then_stop():
+        task = asyncio.create_task(plugin.startup())
+        await asyncio.sleep(0.1)
+        assert not task.done()  # it waits while the server serves
+        task.cancel()
+        await asyncio.wait([task], timeout=5.0)  # as `plugins.stop_background` gives it
+        return task
+
+    assert not busy.done()
+    started = _time.monotonic()
+    task = asyncio.run(serve_then_stop())
+    assert task.cancelled() and _time.monotonic() - started < 5.0
+    assert not worker.is_alive() and apt._HELPER is None
+    apt.stop_helper()  # nothing left to stop
