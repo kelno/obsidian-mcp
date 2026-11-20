@@ -75,7 +75,7 @@ class PathPiece(_OmitNone):
     #: `guide:obsidian-mcp`.
     id: str
     #: When it arrives: loaded at the start, session-start hook, read at the start, at the first bridge
-    #: result, when the work's area is opened, when its moment comes, when the connector's tools load.
+    #: result, when the work's area is opened, when the connector's tools load, when its moment comes.
     stage: str
     #: How it arrives first, in words: what loads it or points to it. Left out, with `where`, `chars` and the
     #: moments' lines, for a piece you hold (`unchanged`) and one whose text comes later (`text_withheld`): the
@@ -83,6 +83,10 @@ class PathPiece(_OmitNone):
     arrives: str | None = None
     #: False when it arrives only if one of its moments comes (`moments`).
     always: bool
+    #: On a backward question: the groups (`reached_by`'s `group`) whose agents have it on their path.
+    groups: list[int] | None = None
+    #: On a backward question: where a group meets it at another stage than `stage`, `{groups, stage, always}`.
+    other_stages: list[dict] | None = None
     #: Where it lives: a path on the PC, a vault path, or this server.
     where: str | None = None
     chars: int | None = None
@@ -112,9 +116,9 @@ class PathPiece(_OmitNone):
 class PathStructure(_OmitNone):
     #: Characters and pieces: always on the path, arriving only when their moment comes, and tool texts.
     size: dict[str, int] | None = None
-    #: Pointers whose line doesn't say when to read the note.
+    #: Pointers whose line doesn't say when to read the note; those alike but for `from` as one, `from` a list.
     unplaced_pointers: list[dict] | None = None
-    #: Rule files reached through a pointer outside every rule file.
+    #: Rule files reached through a pointer outside every rule file; `from` a list, as above.
     pointers_outside_rule_files: list[dict] | None = None
     #: Pointers into an area's local pieces from a shared one, or from one area's local pieces into another's: one
     #: entry per piece reached and kind, `{to, kind, from: [...]}`.
@@ -128,7 +132,7 @@ class PathStructure(_OmitNone):
     #: mention, not a pointer, so the rule file it names is not put on the path. One entry per rule file
     #: (`{target, from: [...]}`), the notes linking to it.
     rule_file_mentions: list[dict] | None = None
-    #: Links and vault paths to nothing found.
+    #: Links and vault paths to nothing found; `from` a list, as above.
     broken_pointers: list[dict] | None = None
     #: Imports Claude Code doesn't load (`{from, import, target, why}`): one in a project's file resolving outside
     #: the session's folder waits for an approval the desktop app never asks for, so its file is not on the path.
@@ -190,8 +194,9 @@ class ReachedByResult(_OmitNone):
     #: What was matched: the place itself; its note (a place no path holds: one that doesn't exist yet, or a part of
     #: a note, the note saying whether it holds that section); its area; or nothing, saying whether the place exists.
     matched_by: str | None = None
-    #: Each kind of agent with the chain that brings it there (`via`) and every piece pointing to the place
-    #: (`pointed_to_by`); "any area" or "any related folder" when every one reaches it the same way.
+    #: Each group of agents (`group`, numbered) with the chain that brings it there (`via`) and every piece on
+    #: those agents' paths pointing to the place (`pointed_to_by`); "a claude.ai chat working on any area" or "a
+    #: Claude Code worker in any related folder" when every one reaches it the same way.
     reached_by: list[dict] | None = None
     machine: str | None = None
     snapshot_made: str | None = None
@@ -202,8 +207,9 @@ class ReachedByResult(_OmitNone):
     #: what this call brings, as in `agent_path`.
     pieces: list[PathPiece] | None = None
     #: Every other piece on those paths, one line each: `<id>  <chars> chars  #<hash>`, `moment: <moments>` for one
-    #: waiting on a moment; each server's tool texts as one line. Any of them can be read with
-    #: `read_from: {id, offset: 0}`. Left out of a call with `known`, as the structure is.
+    #: waiting on a moment, `(groups …)` when not every group has it; each server's tool texts as one line; then a
+    #: line per piece with other versions of its text. Any of them can be read with `read_from: {id, offset: 0}`.
+    #: Left out of a call with `known`, as the structure is.
     other_pieces: list[str] | None = None
     #: How many pieces' texts come in later calls, as in `agent_path`.
     waiting: int | None = None

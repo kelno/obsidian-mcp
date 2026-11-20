@@ -1769,14 +1769,40 @@ def reached_by(setup: Setup, place: str, runs: list | None = None) -> dict:
     worker_runs = {l for l, *_ in runs if l not in typical_names and l.startswith("a Claude Code worker in ")}
     reached = []
     #: The pieces whose text the question needs (owner, 2026-11-19, round 3): each group's chain, the place
-    #: included, with every piece pointing to the place, and the start pieces every agent of the group meets.
+    #: included, with every piece pointing to the place, what arrives in the same result as the place, and the start
+    #: pieces every agent of the group meets.
     texts: dict[str, Piece] = {}
-    for key, ms in members.items():
+    #: The order their texts fill a page (round 4, cold read 2026-11-20: the first page filled with distant start
+    #: pieces and withheld the place): the place, what arrives with it, the pointers and the chain nearest the place
+    #: first, then the start pieces; within each, the order the paths met them.
+    rank: dict[str, tuple] = {}
+
+    def take(i: str, b: PathBuilder, r: tuple) -> None:
+        texts.setdefault(i, b.pieces[i])
+        rank[i] = min(rank.get(i, r), r)
+
+    for n, ((surface, c, always, first), labels) in enumerate(groups.items(), 1):
+        key = (surface, c, always, first)
+        ms = members[key]
         # A group reached through several areas: its first run's chain stands for the others (the rest of those
         # areas' pieces come as lines).
-        for b, pid, c in ms if len(concrete[key]) == 1 else ms[:1]:
-            for i in [*c, *(src for _, src, _ in b.pieces[pid].arrivals if src in b.pieces)]:
-                texts.setdefault(i, b.pieces[i])
+        used = ms if len(concrete[key]) == 1 else ms[:1]
+        pointers: list[str] = []
+        for b, pid, cc in used:
+            take(pid, b, (0, 0))
+            for d, i in enumerate(reversed(cc[:-1]), 1):
+                take(i, b, (2, d))
+            for _, src, _ in b.pieces[pid].arrivals:
+                if src in b.pieces:
+                    take(src, b, (2, 1))
+                    if src not in pointers:
+                        pointers.append(src)
+            if b.pieces[pid].stage == WORK:
+                # What open_area serves comes in one result: the rest of it is in front of the agent when the place
+                # applies (test bench, 2026-11-20: on Dog's main note, "Working on an area" came as a line).
+                for i in b.order:
+                    if b.pieces[i].stage == WORK and b.pieces[i].always:
+                        take(i, b, (1, 0))
         shared = None
         for b, _, _ in ms:
             mine = {(i, b.pieces[i].hash) for i in b.order if b.pieces[i].stage <= START_READ}
@@ -1784,48 +1810,124 @@ def reached_by(setup: Setup, place: str, runs: list | None = None) -> dict:
         b0 = ms[0][0]
         for i in b0.order:
             if (i, b0.pieces[i].hash) in shared:
-                texts.setdefault(i, b0.pieces[i])
-    for (surface, c, always, first), labels in groups.items():
-        b, pid, _ = members[(surface, c, always, first)][0]
-        pointers = [src for _, src, _ in b.pieces[pid].arrivals if src in b.pieces]
-        if len(concrete[(surface, c, always, first)]) == 1:
-            (c, first), = concrete[(surface, c, always, first)]
+                take(i, b0, (3, 0))
+        if len(concrete[key]) == 1:
+            (c, first), = concrete[key]
         chats = [l for l in labels if l in chat_runs]
         workers = [l for l in labels if l in worker_runs]
         named = [l for l in labels if l not in chats and l not in workers]
         if chats and set(chats) == chat_runs:
-            named.append("a claude.ai chat, any area")
+            named.append(ANY_AREA_CHAT)
         else:
             named += chats
         if workers and set(workers) == worker_runs:
-            named.append("a Claude Code worker, any related folder")
+            named.append(ANY_FOLDER_WORKER)
         else:
             named += workers
-        reached.append({"agents": named, "surface": surface, "via": list(c), "always": always, "first_arrives": first,
-                        "pointed_to_by": pointers})
+        reached.append({"group": n, "agents": named, "surface": surface, "via": list(c), "always": always,
+                        "first_arrives": first, "pointed_to_by": pointers})
+    #: Which groups have each piece on their paths, and the stage and `always` each meets it at (its first run
+    #: holding it): a start piece of one group can wait on a moment in another's (test bench, 2026-11-20: Personal
+    #: agent showed "read at the start" beside the Claude Code group).
+    met: dict[str, dict[int, tuple[int, bool]]] = {}
+    for n, key in enumerate(groups, 1):
+        for b, _, _ in members[key]:
+            for i in b.order:
+                met.setdefault(i, {}).setdefault(n, (b.pieces[i].stage, b.pieces[i].always))
     # Every piece on those paths, once; a piece whose text is given is the one its group meets. A piece with
     # another text on another path (an area-start hook's message names the area) keeps each other version, with
-    # the first agent meeting it (test bench, 2026-11-20: one id stood for different texts).
+    # the agents meeting it (test bench, 2026-11-20: one id stood for different texts; round 4: 24 lines for one
+    # hook, now one).
     union: dict[str, Piece] = {}
-    versions: dict[tuple[str, str], tuple[Piece, str]] = {}
+    versions: dict[str, dict] = {}
     for label, _, _, b, _ in hits:
         for i in b.order:
             union.setdefault(i, texts.get(i, b.pieces[i]))
             if b.pieces[i].hash != union[i].hash:
-                versions.setdefault((i, b.pieces[i].hash), (b.pieces[i], label))
+                e = versions.setdefault(i, {"id": i, "hashes": set(), "agents": []})
+                e["hashes"].add(b.pieces[i].hash)
+                if label not in e["agents"]:
+                    e["agents"].append(label)
     # The facts on those paths, each pointer once; what can't be followed, each line once.
     hit_runs = [(label, s, w, b) for label, s, w, b, _ in hits]
     structure = across_runs(hit_runs)
-    structure["not_followed"] = list(dict.fromkeys(x for *_, b in hit_runs for x in b.not_followed))
+    structure["not_followed"] = folded_not_followed(dict.fromkeys(x for *_, b in hit_runs for x in b.not_followed))
     for key, attr in (("skipped_imports", "skipped"), ("import_warnings", "import_warnings")):
         structure[key] = []
         for *_, b in hit_runs:
             structure[key] += [e for e in getattr(b, attr) if e not in structure[key]]
+    section_of = None
+    if how == "its note (it holds that section)":
+        # A section place: the section's text is the place, its note a line (round 4, cold read 2026-11-20: a
+        # section of a 21,000-character note came as the whole note, with no marker).
+        note_id = hits[0][4]
+        heading = place.split("#", 1)[1].strip()
+        body = heading_section(union[note_id].text, heading)
+        if body is not None and note_id in texts:
+            note = texts.pop(note_id)
+            part = Piece(id=f"section:{note_id.split(':', 1)[1]}#{heading}", stage=note.stage,
+                         arrives=f"in {note_id}, which is {note.arrives}", where=note.where, text=body,
+                         via=note.via, moment=note.moment, parent=note.parent, always=note.always,
+                         arrivals=note.arrivals, moments=note.moments)
+            texts[part.id] = part
+            rank[part.id] = rank.pop(note_id)
+            union = {(part.id if i == note_id else i): (part if i == note_id else p) for i, p in union.items()}
+            union[note_id] = note
+            met[part.id] = met[note_id]
+            section_of = note_id
+            how += ": the section is the place, its text given; its note's text is a line in other_pieces"
     # In arrival order: by stage, then as the paths met them.
-    rank = {i: n for n, i in enumerate(union)}
-    text_ids = sorted(texts, key=lambda i: (union[i].stage, rank[i]))
+    seen = {i: n for n, i in enumerate(union)}
+    text_ids = sorted(texts, key=lambda i: (union[i].stage, seen[i]))
+    fill = sorted(texts, key=lambda i: (rank[i], union[i].stage, seen[i]))
     return {"place": place, "matched_by": how, "reached_by": reached, "pieces": union, "texts": text_ids,
-            "other_versions": list(versions.values()), "structure": structure}
+            "fill_order": fill, "met": met, "section_of": section_of,
+            "other_versions": [{**e, "hashes": sorted(e["hashes"])} for e in versions.values()],
+            "structure": structure}
+
+
+#: The names standing for every per-area chat or per-folder worker run, as their labels read.
+ANY_AREA_CHAT = "a claude.ai chat working on any area"
+ANY_FOLDER_WORKER = "a Claude Code worker in any related folder"
+
+
+def heading_section(text: str, heading: str) -> str | None:
+    """A section's text at any heading level, its heading included, up to the next heading of the same level or
+    higher, outside fences (a place `note.md#Heading` names a heading at any level, as `place_exists` reads it)."""
+    out, level, fence = [], 0, False
+    for line in text.splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+        m = None if fence else re.match(r"^(#{1,6})\s+(.*?)\s*#*\s*$", line)
+        if m and level and len(m.group(1)) <= level:
+            break
+        if m and not level and m.group(2) == heading:
+            level = len(m.group(1))
+        if level:
+            out.append(line)
+    return "\n".join(out) if out else None
+
+
+#: A `not_followed` line for an area whose main note has no `## For agents` (`load_work`), and the one line they
+#: fold into on a backward question over many areas (round 4: 22 lines on the owner's vault).
+NO_FOR_AGENTS = re.compile(r"^(.+)'s `## For agents`: its main note, .+, has none, so open_area serves none; "
+                           r"nothing is left out$")
+
+
+def folded_not_followed(lines) -> list[str]:
+    lines = list(lines)
+    areas = [m.group(1) for m in map(NO_FOR_AGENTS.match, lines) if m]
+    if len(areas) < 2:
+        return lines
+    out, done = [], False
+    for x in lines:
+        if not NO_FOR_AGENTS.match(x):
+            out.append(x)
+        elif not done:
+            out.append(f"These areas' main notes have no `## For agents`, so open_area serves none; nothing is left "
+                       f"out: {', '.join(areas)}")
+            done = True
+    return out
 
 
 def generic(v: Vault, pid: str) -> str:

@@ -484,7 +484,7 @@ def test_reached_by_names_the_agents_and_chains_reaching_a_place(vault):
     assert result.error is None and result.matched_by == "the place itself"
     (hit,) = result.reached_by
     # Grouped by run kind: the typical worker keeps its own name beside the per-folder runs.
-    assert hit["agents"] == ["a Claude Code worker in a repo", "a Claude Code worker, any related folder"]
+    assert hit["agents"] == ["a Claude Code worker in a repo", "a Claude Code worker in any related folder"]
     assert hit["via"] == ["hook:SessionStart/area-start.py", "note:_/agent/roles/Worker.md"]
     assert "note:_/agent/roles/Worker.md" in {p.id for p in result.pieces}
 
@@ -1428,7 +1428,7 @@ def test_a_start_in_a_folder_the_snapshot_doesnt_hold_still_gets_the_session_sta
     assert "in D:/work/repo, with this folder's path" in hook.arrives
     assert by_id["note:_/agent/roles/Worker.md"].always
     # A start folder no area lists is said as the start's, not as a work.area naming nothing.
-    assert {"from": "start.folder", "target": "D:/work/elsewhere",
+    assert {"from": ["start.folder"], "target": "D:/work/elsewhere",
             "via": f"no area in {ap.AREAS_NOTE} lists it"} in result.structure.broken_pointers
     assert not any(n.startswith("work.area") for n in result.notes or [])
 
@@ -1491,7 +1491,7 @@ def test_the_structure_is_cut_first_when_that_lets_the_texts_fit(vault):
     apt._trim_structure(fits, [big], notes)
     assert fits.structure.cut == ["into_areas"] and 0 < len(fits.structure.into_areas) < 400
     assert len(fits.model_dump_json()) + 60_010 <= apt.PAGE_CHARS - apt._NOTES_RESERVE
-    assert notes and notes[0].startswith("Some lists of structure are cut short to leave room for the texts")
+    assert notes and notes[0].startswith(apt._CUT_NOTE)
     # Texts that can't fit anyway come over several calls: the structure stays whole.
     huge = ap.Piece("note:huge.md", ap.LOADED, "loaded", "huge.md", "x" * 90_000)
     whole, notes = result(400), []
@@ -1559,7 +1559,8 @@ def test_a_piece_with_another_text_on_another_path_is_a_line_of_its_own(vault):
     hook = next(p for p in result.pieces if p.id == "hook:SessionStart/area-start.py")
     assert "another folder" not in hook.text
     lines = [line for line in result.other_pieces if line.startswith("hook:SessionStart/area-start.py  ")]
-    assert len(lines) == 1 and lines[0].endswith("(another version, on a Claude Code worker in D:/work/other's path)")
+    assert lines == [("hook:SessionStart/area-start.py  1 other version of its text, on the paths of a Claude Code "
+                      "worker in D:/work/other")]
     assert any(n.startswith("Some pieces have another text on other paths") for n in result.notes)
 
 
@@ -1651,3 +1652,122 @@ def test_the_helper_process_ends_when_the_server_shuts_down(monkeypatch):
     assert task.cancelled() and _time.monotonic() - started < 5.0
     assert not worker.is_alive() and apt._HELPER is None
     apt.stop_helper()  # nothing left to stop
+
+
+# --- Round 4: the cold read of reached_by and the test bench's retest (Agent paths, 2026-11-20) -------------------
+
+
+def test_a_backward_question_fills_its_page_from_the_place_out(vault):
+    from src.plugins.kelno_vault.agent_path_result import ReachedByResult
+
+    start = ap.Piece("note:start.md", ap.LOADED, "loaded", "start.md", "s" * 60_000)
+    place = ap.Piece("note:place.md", ap.LATER, "later", "place.md", "p" * 30_000, None, "when x", always=False)
+    pieces = [start, place]
+    out = [apt._piece(p, None) for p in pieces]
+    result = ReachedByResult(place="x", pieces=out)
+    apt._with_texts(result, pieces, out, [], None, fill_order=["note:place.md", "note:start.md"])
+    # Listed in path order, filled from the place out: the distant start piece waits, not the place.
+    assert [o.id for o in result.pieces] == ["note:start.md", "note:place.md"]
+    assert [o.text is not None for o in result.pieces] == [False, True]
+
+
+def test_a_section_place_gives_the_section_as_the_place_and_its_note_as_a_line(vault):
+    _write(vault, "_/agent/roles/Worker.md",
+           "Worker rules.\n\n## Landing\n\nAsk first.\n\n### Detail\n\nMore.\n\n## Other\n\nElse.\n")
+    result = reached_by("_/agent/roles/Worker.md#Landing")
+    assert result.matched_by.startswith("its note (it holds that section): the section is the place")
+    by_id = {p.id: p for p in result.pieces}
+    part = by_id["section:_/agent/roles/Worker.md#Landing"]
+    # The section, to the next heading of its level, at any level.
+    assert part.text == "## Landing\n\nAsk first.\n\n### Detail\n\nMore.\n"
+    assert part.hash == ap.digest(part.text) and part.arrives.startswith("in note:_/agent/roles/Worker.md, which is ")
+    assert "note:_/agent/roles/Worker.md" not in by_id
+    (line,) = [x for x in result.other_pieces if x.startswith("note:_/agent/roles/Worker.md  ")]
+    assert line.endswith("(the place's note: the place is its section, given in pieces)")
+    whole = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md#Landing", None, None,
+                                                        ReadFrom(id="note:_/agent/roles/Worker.md")))
+    assert whole.pieces[0].text.startswith("Worker rules.")
+    # A heading not in the note yet: the whole note, as before.
+    assert "note:_/agent/roles/Worker.md" in ids(reached_by("_/agent/roles/Worker.md#Not yet"))
+    assert ap.heading_section("# A\n\n## B\n\nb\n\n# C\n", "B") == "## B\n\nb\n"
+    assert ap.heading_section("```\n## B\n```\n", "B") is None
+
+
+def test_reached_by_tags_each_piece_with_the_groups_that_have_it(vault):
+    _write(vault, "_/agent/Memory reference.md", NOTES["_/agent/Memory reference.md"]
+           + "- Before writing a rule, read [[_/agent/Common-rules|Common-rules]].\n")
+    result = reached_by("_/agent/Common-rules.md")
+    groups = {g["group"]: g for g in result.reached_by}
+    assert sorted(groups) == list(range(1, len(groups) + 1))
+    chat = next(n for n, g in groups.items() if g["surface"] == "claude-ai")
+    code = next(n for n, g in groups.items() if g["surface"] == "claude-code")
+    # Two lines of memory point to it: one piece pointing, said once.
+    assert groups[chat]["pointed_to_by"] == ["memory:/preferences.md"]
+    by_id = {p.id: p for p in result.pieces}
+    assert by_id["file:C:/Users/me/.claude/CLAUDE.md"].groups == [code]
+    assert by_id["memory:/preferences.md"].groups == [chat]
+    # Read at the start in a chat, loaded at the start in Claude Code: the other group's stage is said.
+    common = by_id["note:_/agent/Common-rules.md"]
+    assert common.groups == sorted([chat, code])
+    (other,) = common.other_stages
+    shown, then = common.stage, other["stage"]
+    assert {shown, then} == {ap.STAGE_NAMES[ap.LOADED], ap.STAGE_NAMES[ap.START_READ]} and other["always"]
+    assert other["groups"] == [code if shown == ap.STAGE_NAMES[ap.START_READ] else chat]
+    assert apt._GROUPS_NOTE in result.notes and all(n in result.notes for n in apt._FIELD_NOTES)
+    again = reached_by("_/agent/Common-rules.md", known={p.id: p.hash for p in result.pieces})
+    assert not any(n in (again.notes or []) for n in apt._FIELD_NOTES)
+
+
+def test_what_open_area_serves_with_the_place_comes_with_its_text(vault):
+    with_text = ids(reached_by("Areas/Repo/Repo.md"))
+    # In front of the agent when the place applies: the rest of open_area's one result.
+    assert {"note:_/agent/Working on an area.md", "tool:obsidian-mcp:open_area/instructions"} <= set(with_text)
+
+
+def test_no_tool_text_comes_while_a_rule_piece_waits(vault):
+    from src.plugins.kelno_vault.agent_path_result import AgentPathResult
+
+    first = ap.Piece("note:a1.md", ap.LOADED, "loaded", "a1.md", "a" * 30_000)
+    held = ap.Piece("note:a2.md", ap.LOADED, "loaded", "a2.md", "b" * 60_000)
+    tool = ap.Piece("tool:obsidian-mcp:x", ap.TOOLS, "when the tools load", "this server", "t" * 1_000)
+    pieces = [first, held, tool]
+    out = [apt._piece(p, None) for p in pieces]
+    result = AgentPathResult(pieces=out)
+    apt._with_texts(result, pieces, out, [], None)
+    assert [o.text is not None for o in result.pieces] == [True, False, False]
+
+
+def test_the_field_notes_come_with_a_first_call(vault):
+    first = path(PathStart(typical=3))
+    assert all(n in first.notes for n in apt._FIELD_NOTES)
+    again = path(PathStart(typical=3), known={p.id: p.hash for p in first.pieces})
+    assert not any(n in (again.notes or []) for n in apt._FIELD_NOTES)
+
+
+def test_pointers_alike_but_for_where_they_come_from_are_one_entry():
+    items = [{"from": f"open_area:Areas/A{i}/A{i}.md", "to": "note:_/agent/x.md", "via": "> When here, read x."}
+             for i in range(3)] + [{"from": "note:y.md", "to": "note:_/agent/x.md", "via": "other"}]
+    assert apt._grouped_from(items) == [
+        {"from": [f"open_area:Areas/A{i}/A{i}.md" for i in range(3)], "to": "note:_/agent/x.md",
+         "via": "> When here, read x."},
+        {"from": ["note:y.md"], "to": "note:_/agent/x.md", "via": "other"}]
+    assert apt._grouped_from(None) is None and apt._grouped_from([]) == []
+    none = [f"{a}'s `## For agents`: its main note, Areas/{a}/{a}.md, has none, so open_area serves none; nothing is "
+            "left out" for a in ("Dog", "Mail")]
+    assert ap.folded_not_followed(["first", *none, "last"]) == [
+        "first", ("These areas' main notes have no `## For agents`, so open_area serves none; nothing is left out: "
+                  "Dog, Mail"), "last"]
+    assert ap.folded_not_followed(none[:1]) == none[:1]
+    assert apt._who(["a Claude Code worker in A", "the Coordinator", "a Claude Code worker in B",
+                     "a claude.ai chat working on X"]) == (
+        "Claude Code workers in A, B; the Coordinator; a claude.ai chat working on X")
+
+
+def test_one_note_says_which_structure_lists_are_cut():
+    from src.plugins.kelno_vault.agent_path_result import PathStructure
+
+    notes, st = ["x"], PathStructure(cut=["into_areas"])
+    apt._note_cut(notes, st)
+    st.cut = ["into_areas", "mentions"]
+    apt._note_cut(notes, st)
+    assert notes == ["x", f"{apt._CUT_NOTE} (into_areas, mentions)."]
