@@ -62,8 +62,13 @@ class Ref:
         return f"{self.letter}{self.number}"
 
 
-def _masked(text: str) -> str:
-    """`text` with code (fenced blocks, inline spans) blanked out, same length."""
+def _masked(text: str, *, keep_fenced: bool = False) -> str:
+    """`text` with code (fenced blocks, inline spans) blanked out, same length.
+
+    `keep_fenced` keeps the lines inside a fenced block (their inline spans
+    still blanked), blanking only the fence lines themselves: for the rule
+    check, which reads refs on fenced lines (`_rule_rows`).
+    """
     out = []
     fence: str | None = None
     for line in _LINE_RE.findall(text):
@@ -73,6 +78,9 @@ def _masked(text: str) -> str:
             if (match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence)
                     and not match.group(2).strip()):
                 fence = None
+            elif keep_fenced:
+                out.append(_CODE_SPAN_RE.sub(lambda m: " " * len(m.group(0)), line))
+                continue
             out.append(" " * len(stripped) + line[len(stripped):])
             continue
         if match:
@@ -214,11 +222,17 @@ def sql_ref_pattern(ref: Ref) -> str:
 
 
 def _rule_rows(text: str | None) -> list[tuple[int, str, set]]:
-    """`[(0-based line number, line, the proposal refs it cites in brackets)]`, refs read in the note's fence context."""
+    """`[(0-based line number, line, the proposal refs it cites in brackets)]`.
+
+    Unlike every other reader here, a ref on a line inside a fenced block
+    counts: rule notes carry rules in code, such as the `//` comment lines of
+    a hooks block, cited there like any rule line (ledger F78). A ref in
+    inline code stays an example.
+    """
     if text is None:
         return []
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    masked = _masked(text).split("\n")
+    masked = _masked(text, keep_fenced=True).split("\n")
     return [(i, line, {r for _, r in _bracketed_found(m) if r.letter == "P"})
             for i, (line, m) in enumerate(zip(text.split("\n"), masked))]
 
@@ -253,8 +267,8 @@ def rule_lines_unlogged(old: str | None, new: str, *, skip_leading: int = 0) -> 
 
     `[(line number, text)]` of those lines. Empty when there are none, or
     when at least one of them cites in brackets a proposal (`P`) the lines
-    the write removed did not cite: the change carries its proposal. Refs are
-    read in the note's own fence context, as everywhere else.
+    the write removed did not cite: the change carries its proposal. Refs on
+    lines inside a fenced block count here, unlike everywhere else (`_rule_rows`).
     """
     from collections import Counter
 

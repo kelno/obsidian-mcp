@@ -188,6 +188,25 @@ def test_rule_lines_unlogged():
     assert lc.rule_lines_unlogged("- Rule one. [P35]\n", "- Rule one.\n") == []
 
 
+def test_rule_lines_unlogged_reads_refs_on_fenced_lines():
+    """F78: rules written as `//` comment lines in a fenced hooks block carry their refs there."""
+    old = "Hooks:\n\n```jsonc\n// Refuse direct edits. [P105]\n\"env\": {}\n```\n"
+    # A `//` line gaining a new ref.
+    new = "Hooks:\n\n```jsonc\n// Refuse direct edits. [P105]\n// Read the guide first. [P253]\n\"env\": {}\n```\n"
+    assert lc.rule_lines_unlogged(old, new) == []
+    # A ref added inside an existing bracket.
+    new = "Hooks:\n\n```jsonc\n// Refuse direct edits, and say why. [P105, P127]\n\"env\": {}\n```\n"
+    assert lc.rule_lines_unlogged(old, new) == []
+    # A fenced line reworded with no new ref is still a rule change.
+    new = "Hooks:\n\n```jsonc\n// Refuse direct edits, and say why. [P105]\n\"env\": {}\n```\n"
+    assert lc.rule_lines_unlogged(old, new) == [(4, "// Refuse direct edits, and say why. [P105]")]
+    # A ref in inline code on a fenced line stays an example.
+    new = "Hooks:\n\n```jsonc\n// Refuse direct edits, see `[P253]`. [P105]\n\"env\": {}\n```\n"
+    assert lc.rule_lines_unlogged(old, new) == [(4, "// Refuse direct edits, see `[P253]`. [P105]")]
+    # Every other reader still takes a fenced ref as an example.
+    assert lc.bracketed(new) == []
+
+
 # ── Rule cases (C) are cited like every other kind ───────────────────────────
 
 @pytest.mark.parametrize("text,cited", [

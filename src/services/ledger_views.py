@@ -151,7 +151,7 @@ async def _edit_topic(session: AsyncSession, uid: int | None, *, action: str, sl
             raise invalid("a topic's kind is system (a part of the system) or surface (where Claude runs).",
                           allowed=[{"name": k} for k in db.LEDGER_TOPIC_KINDS])
         description = one_line(description, "description", TOPIC_DESCRIPTION_MAX)
-        area_tag = ledger.resolve_area(await ledger.area_index(session, uid), area) if area else None
+        area_tag = await ledger.resolve_area(session, uid, area) if area else None
         if into is not None or expected_revision is not None:
             raise invalid("create takes slug, kind, description and optionally area.")
         exists = (await session.execute(select(LedgerTopic).where(
@@ -193,8 +193,7 @@ async def _edit_topic(session: AsyncSession, uid: int | None, *, action: str, sl
             changed |= kind != topic.kind
             topic.kind = kind
         if area is not None:
-            new_area = None if area.strip() in ("", "none") else ledger.resolve_area(
-                await ledger.area_index(session, uid), area)
+            new_area = None if area.strip() in ("", "none") else await ledger.resolve_area(session, uid, area)
             changed |= new_area != topic.area_tag
             topic.area_tag = new_area
         if into is not None:

@@ -38,6 +38,7 @@ from src.plugins.kelno_vault import areas_index as _areas_index
 from src.plugins.kelno_vault import rule_files as _rule_files
 from src.plugins.kelno_vault.area_result import AreaTask, OpenAreaResult
 from src.services import open_note_url as _open_note_url, private_folders
+from src.services.fork_tasks import area_lookup as _area_lookup
 from src.services.tool_outcomes import body_refusal as _body_refusal
 from src.services.vault import parse_frontmatter, read_bytes
 
@@ -383,6 +384,13 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
                 f"{folder} is listed under several areas ({', '.join(sorted(tied))}) in "
                 f"{AREAS_INDEX_PATH}: ask the owner which one it belongs to, then call open_area(area=…)."])
         row, matched_folder = hits[0]
+        if row.main_note is not None and row.main_note.casefold() not in declared:
+            # The list of areas is read from disk, the declarations from the lagging index (ledger F50).
+            try:
+                areas = await _area_lookup.refreshed(areas, uid)
+            except OSError:
+                notes.append("Notes changed in the last hour could not be read from disk to find a new main note.")
+            declared = {path.casefold(): (tag, path, description) for tag, path, description in areas.described()}
         if row.main_note is None or row.main_note.casefold() not in declared:
             why = ("it has no main note yet" if row.main_note is None
                    else f"its main note {row.main_note} declares no area_tag")
@@ -396,7 +404,7 @@ async def open_area_impl(area: str | None = None, folder: str | None = None) -> 
         tag, main_note, description = declared[row.main_note.casefold()]
     else:
         try:
-            tag = areas.lookup(area)
+            tag, areas = await _area_lookup.resolve(areas, area, uid)
         except _tq.QueryError as exc:
             return _open_area_failed(f"{exc}.", "not_found")
         _tag, main_note, description = next(d for d in areas.described() if d[0] == tag)

@@ -45,6 +45,10 @@ class QueryError(ValueError):
     """A filter, date or area the tools cannot apply as the plugin would."""
 
 
+class UnknownArea(QueryError):
+    """No main note declares the area: `area_lookup` then reads notes just changed on disk."""
+
+
 @dataclass(frozen=True)
 class Entry:
     path: str
@@ -328,6 +332,16 @@ class AreaIndex:
 
     @classmethod
     def from_rows(cls, rows) -> "AreaIndex":
+        return cls(cls._declarations_from(rows))
+
+    def with_rows(self, rows) -> "AreaIndex":
+        """This index with `rows` read again (newer copies of notes it holds, or notes it lacks)."""
+        fresh = self._declarations_from(rows)
+        paths = {d.path for d in fresh}
+        return AreaIndex([d for d in self._declarations if d.path not in paths] + fresh)
+
+    @staticmethod
+    def _declarations_from(rows) -> list[_Declaration]:
         out = []
         for path, frontmatter in rows:
             value = (frontmatter or {}).get("area_tag")
@@ -338,7 +352,7 @@ class AreaIndex:
             description = description.strip().splitlines()[0][:AREA_DESCRIPTION_MAX] if (
                 isinstance(description, str) and description.strip()) else None
             out.append(_Declaration(path, value if isinstance(value, str) else repr(value), valid, description))
-        return cls(out)
+        return out
 
     def known(self) -> list[str]:
         return sorted({d.tag for d in self._declarations if d.valid})
@@ -362,7 +376,7 @@ class AreaIndex:
         tags = {d.tag for d in hits}
         if not tags:
             known = ", ".join(self.known()) or "none declared"
-            raise QueryError(f"unknown area {name!r}; areas declared by an area_tag: {known}")
+            raise UnknownArea(f"unknown area {name!r}; areas declared by an area_tag: {known}")
         if len(tags) > 1 or len(hits) > 1:
             where = ", ".join(sorted(d.path for d in hits))
             raise QueryError(f"area {name!r} is ambiguous: declared by {where}")

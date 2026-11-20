@@ -78,9 +78,30 @@ def test_ambiguous_and_unknown_names_are_flagged_not_rewritten():
     assert text == "[[Champignons]] and [[Not yet]] and [[Areas/Gone|g]]"
     assert report.ambiguous == [(1, "[[Champignons]]", ["Archive/Areas/Champignons/Champignons.md",
                                                         "Areas/Champignons/Champignons.md"])]
-    assert [r[1] for r in report.unresolved] == ["[[Not yet]]", "[[Areas/Gone|g]]"]
+    assert [r[1] for r in report.unknown_names] == ["[[Not yet]]"]
+    assert [r[1] for r in report.unresolved] == ["[[Areas/Gone|g]]"]
     out = lp.render(report)
     assert "links_flagged:" in out and "names several notes" in out and "still to create" in out
+
+
+def test_a_full_path_the_index_lacks_is_looked_up_on_disk():
+    """F86: the index lags the disk, so a note created moments ago is looked for on disk before being flagged."""
+    asked = []
+
+    def on_disk(target):
+        asked.append(target)
+        return target == "Areas/New/New"
+
+    text = "[[Areas/New/New|New]] and [[Areas/Gone|g]] and [[Areas/Areas|Areas]] and [[Just made]]"
+    _text, report = lp.rewrite(None, text, lp.NoteIndex(NOTES), on_disk)
+    assert [r[1] for r in report.unresolved] == ["[[Areas/Gone|g]]"]
+    # Only flagged full paths are looked up: an indexed one and a bare name cost no file lookup.
+    assert asked == ["Areas/New/New", "Areas/Gone"]
+    # A bare name can't be looked up on disk: its flag says it may not be indexed yet and asks for the full path.
+    assert [r[1] for r in report.unknown_names] == ["[[Just made]]"]
+    out = lp.render(report)
+    assert "[[Just made]] names no indexed note" in out and "may not be indexed yet: write its full path" in out
+    assert "[[Areas/New/New|New]]" not in out
 
 
 def test_a_path_in_code_after_a_link_is_flagged():
@@ -115,7 +136,7 @@ def test_line_endings_and_indentation_do_not_make_a_line_new():
 
 def test_names_match_as_obsidian_lowercases_and_case_twins_are_ambiguous():
     _text, report = run("[[Strasse]]", notes=["S/Straße.md"])
-    assert report.unresolved and not report.rewritten
+    assert report.unknown_names and not report.rewritten
     _text, report = run("[[Note]]", notes=["A/Note.md", "A/note.md"])
     assert report.ambiguous
 

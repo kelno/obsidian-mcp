@@ -43,6 +43,7 @@ from src.plugins.kelno_vault import (
     task_lines,
     title_heading,
 )
+from src.services import vault
 from src.services.filters import apply_note_filters
 
 logger = logging.getLogger(__name__)
@@ -85,9 +86,9 @@ _LINKS_GUIDE = (
     "exactly one note has that name, archived notes counted (display text kept, or the text Obsidian showed added "
     "when there was none), on the lines you add or change only, checkbox lines left alone, and list it under "
     "`links_rewritten:`; the reported `content_hash` is of what was written, not what you sent. A name several "
-    "notes share, or none has, a full path to no note, and a path in code formatting after a link are left as you "
-    "wrote them and listed under `links_flagged:`: write the full path of the note you mean. A write is never "
-    "refused for a link."
+    "notes share, or none has (a note made in the last few minutes may not be indexed yet), a full path to no note "
+    "on disk, and a path in code formatting after a link are left as you wrote them and listed under "
+    "`links_flagged:`: write the full path of the note you mean. A write is never refused for a link."
 )
 
 
@@ -113,7 +114,16 @@ async def _full_path_links(write: plugins.NoteWrite, new: str) -> tuple[str, lin
             paths = (await session.execute(
                 apply_note_filters(select(NoteMetadata.file_path), user_id=write.user_id))).scalars().all()
         index = link_paths.NoteIndex([*paths, write.path])
-        rewritten, report = await asyncio.to_thread(link_paths.rewrite, write.old, new, index)
+
+        def on_disk(target: str) -> bool:
+            """Whether the note a full-path link names is a visible file in the caller's vault."""
+            note = target if target.lower().endswith(".md") else target + ".md"
+            try:
+                return vault.validate_visible_path(note, user_id=write.user_id).is_file()
+            except (ValueError, OSError):
+                return False                          # outside the vault, hidden or unreadable: no note there
+
+        rewritten, report = await asyncio.to_thread(link_paths.rewrite, write.old, new, index, on_disk)
         return rewritten, report, ""
     except Exception as exc:  # noqa: BLE001 — the write goes ahead unchanged; the result says so
         # debug, not warning: a caller drives this path (the D18 permit rule); the result tells the caller.

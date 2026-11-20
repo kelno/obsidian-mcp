@@ -2236,8 +2236,10 @@ async def ledger_update(
     Nothing is deleted; close an entry with `status`. A duplicate is
     superseded by the older entry. `dismissed` is the owner's call only:
     never set it on your own judgment. Correct your own mistake by updating,
-    with a reason. Summary-view lines citing the entry get flagged: check
-    each one (`ledger_digest_edit`). A refusal names every problem at once
+    with a reason. A change to what the entry says flags the summary-view
+    lines citing it (filing or linking it flags none: topics, area,
+    related, seen, origin, observed_on, a case's rules): check each one
+    (`ledger_digest_edit`). A refusal names every problem at once
     (`problems`). The result shows the entries your text cites as they stand
     now (`cites`) and, after a change to what the entry says, what cites it
     (`cited_by`: entries, vault tasks, notes): check each. A case gains or

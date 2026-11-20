@@ -14,7 +14,8 @@ write adds or changes only:
   (`Areas`, or `Areas > Heading`), so it reads the same. An embed gets no
   display text (on an embed it would mean something else);
 - nothing else. A bare name naming several notes, or none, is flagged (the
-  latter may be a note still to create), and so is a full path naming no note;
+  latter may be a note still to create, or one too new for the index), and so
+  is a full path naming no note, indexed or on disk;
   an embed of a file that is not a note (`![[photo.png]]`) is left alone. A
   path in code formatting right after a link (`` [[X/X|X]] (`X/X.md`) ``)
   repeats what the link holds and is flagged, never changed.
@@ -38,6 +39,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from src.services.links import FULL_NOTE, mask_code
@@ -59,11 +61,12 @@ MAX_LISTED = 30
 class LinkReport:
     rewritten: list[tuple[int, str, str]] = field(default_factory=list)   # (line, old, new)
     ambiguous: list[tuple[int, str, list[str]]] = field(default_factory=list)  # (line, link, candidate paths)
-    unresolved: list[tuple[int, str]] = field(default_factory=list)
+    unresolved: list[tuple[int, str]] = field(default_factory=list)       # a full path to no note, on disk either
+    unknown_names: list[tuple[int, str]] = field(default_factory=list)    # a bare name no indexed note has
     path_after: list[tuple[int, str]] = field(default_factory=list)       # (line, code span)
 
     def __bool__(self) -> bool:
-        return bool(self.rewritten or self.ambiguous or self.unresolved or self.path_after)
+        return bool(self.rewritten or self.ambiguous or self.unresolved or self.unknown_names or self.path_after)
 
 
 class NoteIndex:
@@ -173,11 +176,17 @@ def needs_check(old: str | None, new: str) -> bool:
 _CHECKBOX_RE = re.compile(r"^[ \t]*(?:>[ \t]?)*[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+\[.\]")
 
 
-def rewrite(old: str | None, new: str, index: NoteIndex) -> tuple[str, LinkReport]:
+def rewrite(old: str | None, new: str, index: NoteIndex,
+            on_disk: Callable[[str], bool] | None = None) -> tuple[str, LinkReport]:
     """`new` with its bare-name links given full paths, on changed lines only, and the report.
 
     Checkbox lines are never rewritten: a task's line is changed by the task
     tools only, and the task check compares lines the same way.
+
+    `index` comes from the search index, which lags the disk by minutes, so a
+    note created moments ago is missing from it (ledger F86). `on_disk` takes
+    a full-path target and says whether its note is on disk: asked only for a
+    full path the index doesn't have, so a clean write costs no file lookup.
     """
     report = LinkReport()
     if "[[" not in new:
@@ -214,7 +223,8 @@ def rewrite(old: str | None, new: str, index: NoteIndex) -> tuple[str, LinkRepor
             if after and ("/" in after.group("code") or after.group("code").lower().endswith(".md")):
                 report.path_after.append((i + 1, f"`{after.group('code')}`"))
             if "/" in name:
-                if _is_note_target(os.path.basename(name), index) and not index.has_path(name):
+                if (_is_note_target(os.path.basename(name), index) and not index.has_path(name)
+                        and not (on_disk and on_disk(name))):
                     report.unresolved.append((i + 1, raw))
                 continue
             if not _is_note_target(name, index):
@@ -225,7 +235,7 @@ def rewrite(old: str | None, new: str, index: NoteIndex) -> tuple[str, LinkRepor
                 if candidates:
                     report.ambiguous.append((i + 1, raw, candidates))
                 else:
-                    report.unresolved.append((i + 1, raw))
+                    report.unknown_names.append((i + 1, raw))
                 continue
             path = candidates[0][:-3]
             link = ("!" if embed else "") + "[[" + path + (f"#{anchor}" if anchor is not None else "")
@@ -254,6 +264,7 @@ def shifted(report: LinkReport, by: int) -> LinkReport:
         rewritten=[(n + by, a, b) for n, a, b in report.rewritten],
         ambiguous=[(n + by, a, c) for n, a, c in report.ambiguous],
         unresolved=[(n + by, a) for n, a in report.unresolved],
+        unknown_names=[(n + by, a) for n, a in report.unknown_names],
         path_after=[(n + by, a) for n, a in report.path_after],
     )
 
@@ -275,7 +286,7 @@ def render(report: LinkReport, *, dry_run: bool = False) -> str:
             "(they show the same text in Obsidian):\n"
             + listed(report.rewritten, lambda r: f"- line {r[0]}: {r[1]} → {r[2]}"))
     flags = ([("ambiguous", r) for r in report.ambiguous] + [("unresolved", r) for r in report.unresolved]
-             + [("path_after", r) for r in report.path_after])
+             + [("unknown_name", r) for r in report.unknown_names] + [("path_after", r) for r in report.path_after])
     if flags:
         def flag(item):
             kind, r = item
@@ -284,6 +295,10 @@ def render(report: LinkReport, *, dry_run: bool = False) -> str:
                         + (", …" if len(r[2]) > 5 else "") + "): write the full path of the one you mean.")
             if kind == "unresolved":
                 return f"- line {r[0]}: {r[1]} names no note (fine if it is a note still to create)."
+            if kind == "unknown_name":
+                # Only the index is searched for a bare name, and it lags the disk by minutes.
+                return (f"- line {r[0]}: {r[1]} names no indexed note (fine if it is a note still to create; a "
+                        "note made in the last few minutes may not be indexed yet: write its full path).")
             return (f"- line {r[0]}: {r[1]}, in code formatting after a link, repeats a path the link already "
                     "holds: drop it.")
         parts.append("links_flagged: left as written, check each:\n" + listed(flags, flag))

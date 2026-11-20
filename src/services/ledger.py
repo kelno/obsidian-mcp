@@ -50,7 +50,7 @@ from src.models.db import (
     NoteMetadata,
 )
 from src.services import timing
-from src.services.fork_tasks import ops as task_ops, query as task_query
+from src.services.fork_tasks import area_lookup, ops as task_ops, query as task_query
 from src.services.ledger_tasks import CASE_REFS_SHOWN, case_when
 
 # ── Limits ───────────────────────────────────────────────────────────────────
@@ -84,6 +84,18 @@ KIND_FIELDS: dict[str, dict[str, int]] = {
         "sources": 4000,
     },
 }
+#: Changes to what an entry says, as `update` names them in its `changed` list. A seen, topic, area,
+#: related, origin, observed_on or case-rule change only files or links the entry: what cites it holds
+#: as it did, so it flags no summary-view line (ledger F17) and lists no dependants.
+CONTENT_CHANGES = frozenset(("title", "body", "status", "handled_account", "superseded_by",
+                             *(f for fs in KIND_FIELDS.values() for f in fs)))
+
+
+def is_content_change(change: str) -> bool:
+    """Whether one of `update`'s `changed` items (`body (appended)`, `topic +x`) changes what the entry says."""
+    return change.split(" ", 1)[0] in CONTENT_CHANGES
+
+
 REQUIRED_FIELDS = {
     "quirk": ("certainty",), "feedback": ("subtype",), "proposal": ("target", "proposed_text"),
     "case": ("outcome", "expected", "expected_by"),
@@ -329,10 +341,15 @@ def areas_allowed(index: task_query.AreaIndex) -> list[dict]:
     return [{"name": tag, "description": desc, "main_note": path} for tag, path, desc in index.described()]
 
 
-def resolve_area(index: task_query.AreaIndex, name: str) -> str:
-    """`area/<slug>` for a slug, tag or main note name; refused with the list otherwise."""
+async def resolve_area(session: AsyncSession, uid: int | None, name: str) -> str:
+    """`area/<slug>` for a slug, tag or main note name; refused with the list otherwise.
+
+    A main note the index doesn't have yet is read from disk (`area_lookup`, ledger F50).
+    """
+    index = await area_index(session, uid)
     try:
-        return index.lookup(name)
+        return await area_lookup.lookup(
+            index, name, uid, workaround="leave the area out meanwhile and set it with ledger_update once it is indexed")
     except task_query.QueryError as exc:
         raise invalid(f"{exc}. Nothing was written.", allowed=areas_allowed(index)) from None
 
@@ -943,7 +960,7 @@ async def build_filters(session: AsyncSession, uid: int | None, *, kinds=None, a
         if area.strip().lower() == "none":
             f.no_area = True
         else:
-            f.area = resolve_area(await area_index(session, uid), area)
+            f.area = await resolve_area(session, uid, area)
             f.area_topics = dict((await session.execute(
                 select(LedgerTopic.id, LedgerTopic.slug).where(
                     _owner(LedgerTopic, uid), LedgerTopic.area_tag == f.area, LedgerTopic.status == "active")
@@ -1057,7 +1074,7 @@ async def add_entry(
 
     area_tag = None
     with problems.check("area"):
-        area_tag = resolve_area(await area_index(session, uid), area) if area else None
+        area_tag = await resolve_area(session, uid, area) if area else None
     if kind_ok and not problems.failed("area", "origin"):
         with problems.check("status"):
             if status is None:
@@ -1353,7 +1370,7 @@ async def _update_entry(
                     changed.append(name)
     if area is not None:
         with problems.check("area"):
-            new_area = None if area.strip() in ("", "none") else resolve_area(await area_index(session, uid), area)
+            new_area = None if area.strip() in ("", "none") else await resolve_area(session, uid, area)
             if new_area != entry.area_tag:
                 entry.area_tag = new_area
                 changed.append("area")
@@ -1460,8 +1477,9 @@ async def _update_entry(
         entry.revision += 1
         entry.updated_at = func.now()
         entry.content_hash = content_hash(embed_text(entry))
-        citing = await lines_citing(session, [entry.id])
-        flagged = await flag_lines(session, uid, citing, f"{entry.ref} changed: {reason}", who, author)
+        if any(is_content_change(c) for c in changed):
+            citing = await lines_citing(session, [entry.id])
+            flagged = await flag_lines(session, uid, citing, f"{entry.ref} changed: {reason}", who, author)
     flagged += await flag_lines(
         session, uid, [i for i in challenged if i not in {f.line_id for f in flagged}],
         f"{entry.ref} says it contradicts this line: {reason}", who, author)

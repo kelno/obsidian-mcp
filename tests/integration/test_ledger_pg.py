@@ -304,6 +304,7 @@ async def test_add_numbers_refs_refuses_unknowns_and_returns_similar(ctx):
     assert {a["name"] for a in unknown.allowed} == {"area/agent-personnel", "area/home"}
     assert next(a for a in unknown.allowed if a["name"] == "area/agent-personnel")["description"] == \
         "How agents are set up."
+    assert "were read from disk too" in str(unknown.error) and "ledger_update once it is indexed" in str(unknown.error)
     wrong_field = await tools.ledger_add_impl("quirk", "x", details={"certainty": "tested", "subtype": "friction"})
     assert code(wrong_field) == "invalid_argument" and "certainty_note" in str(wrong_field.allowed)
     no_topic = await tools.ledger_add_impl("quirk", "x", topics=["voice"], details={"certainty": "tested"})
@@ -450,7 +451,16 @@ async def test_views_cite_entries_and_are_flagged_when_one_changes(ctx):
     assert f"no (Q1; newest {newest}) [line" in view.markdown
     line = next(l for l in view.lines if l["row"] == "Images")
 
-    up = await tools.ledger_update_impl(ref=q1.ref, expected_revision=1, reason="images work now", status="stale")
+    # F17: filing or linking the entry (a topic, its area, a related entry) changes nothing a line says: no flag.
+    await tools.ledger_topic_edit_impl("create", "voice", "needed", kind="surface", description="Voice")
+    filed = await tools.ledger_update_impl(ref=q1.ref, expected_revision=1, reason="file it", topics_add=["voice"],
+                                           area="agent-personnel", related=[q2.ref])
+    assert filed.error is None and set(filed.changed) == {"topic +voice", "area", f"related +{q2.ref}"}
+    assert not filed.flagged_lines
+    assert (await tools.ledger_digest_impl("claude-surfaces")).lines_under_review == 0
+
+    # A change to what it says still flags every line citing it.
+    up = await tools.ledger_update_impl(ref=q1.ref, expected_revision=2, reason="images work now", status="stale")
     assert [f.line for f in up.flagged_lines] == [line["line"]]
     flagged = await tools.ledger_digest_impl("claude-surfaces", with_ids=True)
     assert flagged.lines_under_review == 1 and "under review: Q1 changed: images work now" in flagged.markdown
@@ -1269,6 +1279,17 @@ async def test_open_area_by_folder(sessionmaker, ctx, monkeypatch):
     assert village.found is True and village.area is None and village.name == "Village"
     assert "no main note yet" in village.notes[0]
 
+    # F50: a new area's row and main note, written minutes ago, the main note not indexed yet: read from disk.
+    areas_note = ctx / "Areas" / "Areas.md"
+    areas_note.write_text(areas_note.read_text(encoding="utf-8")
+                          + "| New area | `D:\\work\\new-repo` | [[projects/New area/New area\\|New area]] |\n",
+                          encoding="utf-8")
+    (ctx / "projects" / "New area").mkdir(parents=True)
+    (ctx / "projects" / "New area" / "New area.md").write_text("---\narea_tag: area/new-area\n---\nBody\n",
+                                                               encoding="utf-8")
+    fresh = await open_area_impl(folder="D:\\work\\new-repo")
+    assert fresh.found is True and fresh.area == "area/new-area", fresh
+
     monkeypatch.setattr(tools.settings, "archive_folder", "projects")
     archived = await open_area_impl(area="home")
     assert archived.archived is True and archived.notes[0].startswith("This area is archived")
@@ -1540,7 +1561,12 @@ async def test_note_writers_give_bare_name_links_their_full_path(sessionmaker, c
     created = await tools.create_note_impl("links.md", "See [[Home]] and [[Nowhere]].\n")
     assert created.startswith("Created note") and "links_rewritten:" in created
     assert "- line 1: [[Home]] → [[projects/Home/Home|Home]]" in created
-    assert "[[Nowhere]] names no note" in created
+    assert "[[Nowhere]] names no indexed note" in created
+    # F86: a note on disk the index doesn't have yet is not flagged; a full path to nothing still is.
+    (ctx / "projects" / "Fresh").mkdir(parents=True)
+    (ctx / "projects" / "Fresh" / "Fresh.md").write_text("Just made\n", encoding="utf-8")
+    fresh = await tools.create_note_impl("fresh-links.md", "[[projects/Fresh/Fresh|Fresh]] [[projects/Gone/Gone|g]]\n")
+    assert "[[projects/Gone/Gone|g]] names no note" in fresh and "Fresh|Fresh]] names" not in fresh
     assert (ctx / "links.md").read_text(encoding="utf-8").startswith("See [[projects/Home/Home|Home]]")
 
     (ctx / "kept.md").write_text("Old [[Home]] stays.\n", encoding="utf-8")
@@ -1999,3 +2025,26 @@ async def test_a_refused_search_sends_nothing_to_the_provider(ctx, monkeypatch):
     assert code(result) == "invalid_argument"
     await asyncio.sleep(0)
     assert calls == []
+
+
+# ── A new area's main note, on disk before the index has it (F50) ─────────────
+
+async def test_a_main_note_the_index_lacks_is_read_from_disk(ctx):
+    (ctx / "projects" / "New area").mkdir(parents=True)
+    (ctx / "projects" / "New area" / "New area.md").write_text(
+        "---\narea_tag: area/new-area\ndescription: Just made.\n---\nBody\n", encoding="utf-8")
+    # Not indexed (the fixture's index holds two areas): the ledger and the task tools read it from disk.
+    added = await add_quirk("Seen in a new area", area="new-area")
+    assert (await tools.ledger_get_impl([added.ref])).entries[0].area == "area/new-area"
+    (ctx / "t.md").write_text("Tasks\n", encoding="utf-8")
+    created = await tools.create_task_impl("First step", path="t.md", areas=["New area"])
+    assert created.error is None, created.error
+    assert "#area/new-area" in created.text
+    listed = await tools.fork_list_tasks_impl(area="new-area")
+    assert listed.error is None and "tags include #area/new-area" in listed.query
+    opened = await kelno_open_area.open_area_impl(area="new-area")
+    assert opened.found and opened.main_note == "projects/New area/New area.md"
+
+    # Still unknown: the refusal says the disk was read too, and the tool's way around a lagging index.
+    refused = await tools.create_task_impl("Second step", path="t.md", areas=["newer-area"])
+    assert "were read from disk too" in refused.error and "areas=[] and write #area/<slug>" in refused.error

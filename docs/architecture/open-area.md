@@ -6,7 +6,7 @@ An agent starting work in an area, or answering a question about one, used to ma
 
 ## Input
 
-- `area`: a slug, a tag (`#area/x`) or the main note's name, resolved like `list_tasks(area=…)` (`task_query.AreaIndex.lookup`): an area is a note whose frontmatter declares `area_tag`.
+- `area`: a slug, a tag (`#area/x`) or the main note's name, resolved like `list_tasks(area=…)` (`area_lookup.resolve`, a main note just written read from disk: "Areas" in [tasks](tasks.md); with `folder`, a row whose main note the index doesn't declare reads it from disk the same way, `area_lookup.refreshed`, before saying it declares no `area_tag`): an area is a note whose frontmatter declares `area_tag`.
 - `folder`: an absolute path outside the vault (a repo, a working directory). Resolved through the vault's list of areas (`AREAS_INDEX_PATH`, a constant of the plugin: `Areas/Areas.md`; until 2026-11-13 a core setting, a leftover value is ignored): a Markdown table whose "Related folders" column lists absolute paths in code spans and whose "Vault folder" column links the main note. Paths compare case-insensitively with `\` and `/` alike, and a subfolder of a listed folder matches (the deepest listed folder wins). The list is the only link between a folder and an area: repos never point into the vault.
 
 Exactly one of the two. A folder no row lists: `found: false` and a note to ask the owner which area it belongs to. A folder listed under two areas at the same depth: `found: false`, naming both. A row whose area has no main note yet (or whose note declares no `area_tag`): `found: true` with the row's name and folders, and a note.

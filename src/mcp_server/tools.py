@@ -9786,7 +9786,7 @@ from src.mcp_server.task_result import (  # noqa: E402
 )
 from src.services.fork_tasks import format as _tf, index as _task_index, ops as _task_ops  # noqa: E402
 from src.services import ledger_citations as _ledger_citations, ledger_tasks as _ledger_tasks  # noqa: E402
-from src.services.fork_tasks import ids as _task_ids, query as _tq  # noqa: E402
+from src.services.fork_tasks import area_lookup as _area_lookup, ids as _task_ids, query as _tq  # noqa: E402
 from dataclasses import replace as _dc_replace  # noqa: E402
 from src.services.fork_tasks import scan as _task_scan  # noqa: E402
 from src.services.fork_tasks.scan import split_lines as _task_split_lines  # noqa: E402
@@ -9864,6 +9864,12 @@ async def _task_context(uid: int | None):
     if memo is not None:
         memo[uid] = (task_settings, registry, today)
     return task_settings, registry, today
+
+
+#: What a task write can do while the index hasn't caught up with a new area's main note. Not `areas=[]`
+#: for edit_task: it removes every area tag, the one just written in the description included.
+_CREATE_AREA_TAG_WORKAROUND = "pass areas=[] and write #area/<slug> in the description meanwhile"
+_EDIT_AREA_TAG_WORKAROUND = "leave areas out and write #area/<slug> in the description meanwhile"
 
 
 async def _area_index(uid: int | None) -> _tq.AreaIndex:
@@ -10484,7 +10490,8 @@ async def fork_list_tasks_impl(
         overlaps: list[str] = []
         if area is not None:
             areas_index = await _area_index(uid)
-            resolved = areas_index.lookup(area)
+            resolved = await _area_lookup.lookup(
+                areas_index, area, uid, workaround="pass tags=[\"#area/<slug>\"] instead of area meanwhile")
             area_tag = "#" + resolved
             overlaps = areas_index.overlapping(resolved)
         lines = _tq.query_lines(
@@ -10852,7 +10859,8 @@ async def create_task_impl(
         task_settings, registry, today = await _task_context(uid)
         areas_index = await _area_index(uid)
         if areas is not None:
-            area_tags = [areas_index.lookup(a) for a in areas]
+            area_tags = [await _area_lookup.lookup(areas_index, a, uid, workaround=_CREATE_AREA_TAG_WORKAROUND)
+                         for a in areas]
         else:
             inferred = areas_index.area_for_path(path)
             area_tags = [inferred] if inferred else []
@@ -11025,7 +11033,8 @@ async def edit_task_impl(
             area_tags = None
             if areas is not None:
                 areas_index = await _area_index(uid)
-                area_tags = [areas_index.lookup(a) for a in areas]
+                area_tags = [await _area_lookup.lookup(areas_index, a, uid, workaround=_EDIT_AREA_TAG_WORKAROUND)
+                             for a in areas]
             updated = _task_ops.apply_fields(
                 old, today=today,
                 description=_task_ops.with_area_tags(
@@ -11804,7 +11813,7 @@ async def ledger_update_impl(
                                    or ("status" in changed and entry.status == "handled")) else None]
     cites = await _ledger_cites(uid, entry.ref, written, notes)
     dependants = None
-    if any(_ledger_is_content_change(c) for c in changed):
+    if any(_ledger.is_content_change(c) for c in changed):
         dependants = await _ledger_dependants(uid, entry, notes, include_private)
     if any(c.startswith("body") for c in changed) and "title" not in changed:
         notes.append(f"Does the title still hold? It reads: \"{entry.title}\". If not, change it (title=…).")
@@ -11817,19 +11826,10 @@ async def ledger_update_impl(
                              view_url=_ledger_view.link(await _ledger_view_claims(), entry.ref))
 
 
-#: Changes to what an entry says. A pure seen, topic, area, related, origin
-#: or observed_on change leaves what cites it as true as it was.
-_LEDGER_CONTENT_CHANGES = ("title", "body", "status", "handled_account", "superseded_by",
-                           *(f for fs in _ledger.KIND_FIELDS.values() for f in fs))
-
 #: How many of each kind of dependant `ledger_update` lists.
 LEDGER_DEPENDANTS_MAX = 20
 #: How many candidate notes it reads from disk to find bracketed citations.
 LEDGER_DEPENDANT_NOTES_READ_MAX = 200
-
-
-def _ledger_is_content_change(change: str) -> bool:
-    return change.split(" ", 1)[0] in _LEDGER_CONTENT_CHANGES
 
 
 async def _ledger_cites(uid, own_ref: str, texts, notes: list[str]) -> list[dict] | None:
