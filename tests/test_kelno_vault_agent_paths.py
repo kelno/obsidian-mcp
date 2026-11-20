@@ -697,6 +697,56 @@ def test_the_voice_bridges_texts_reach_the_relay_and_the_sessions_on_the_bridge(
         assert any(said in line for line in result.structure.not_followed)
 
 
+def test_what_comes_with_the_bridges_guide_besides_it_is_placed_where_it_arrives(vault):
+    # P311: the note on the guide, the relay notes' opening and the line for one the bridge can't read were on no
+    # path (`claude-voice texts` didn't print them).
+    def entry(text, when=None):
+        return {"text": text, "hash": ap.digest(text), **({"when": when} if when else {})}
+
+    note_when = "with the guide, when the conversation's first call to the bridge isn't to guide"
+    unread_when = "in place of one of the owner's notes for relays that the bridge can't read"
+    bridge = {"command": "claude-voice texts", "instructions": entry("The claude-voice bridge."),
+              "guide": entry("The bridge's guide."), "tools": [{"name": "health", **entry("Health check.")}],
+              "notes": [{"when": "under a message the relay sends into a session", **entry("[From the bridge]")}],
+              "relay": {"guide_note": entry("No need to call guide.", note_when),
+                        "opening": entry("The owner's notes for you as the relay.", "before the owner's notes"),
+                        "unread": entry("The bridge couldn't read this note (<path>).", unread_when)}}
+    started = STARTING_POINTS.replace('role = "worker"\nhandwritten = 3', 'started_by = "relay"\nrole = "worker"\n'
+                                      'handwritten = 3')
+    (vault / ap.STARTING_POINTS_PATH).write_text(started + (
+        '\n[[typical]]\nname = "the voice relay"\nsurface = "claude-ai"\nextras = ["relay_notes"]\n'
+        'handwritten = 2\n'), encoding="utf-8")
+    snap = {**SNAPSHOT, "format": 2, "bridge": bridge}
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
+
+    # The relay: the opening before its notes, always; the note on the guide and the unread line at their moments.
+    relay = path(PathStart(typical=2))
+    by_id = {p.id: p for p in relay.pieces}
+    order = [p.id for p in relay.pieces]
+    opening = by_id["bridge:claude-voice#opening"]
+    assert opening.stage == ap.STAGE_NAMES[ap.BRIDGE] and opening.always
+    assert order.index("bridge:claude-voice#opening") < order.index("note:_/agent/roles/Relay.md")
+    for pid, when in (("bridge:claude-voice#guide_note", note_when), ("bridge:claude-voice#unread", unread_when)):
+        assert by_id[pid].stage == ap.STAGE_NAMES[ap.BRIDGE] and not by_id[pid].always
+        assert moments(by_id[pid]) == [when]
+    # A session on the bridge and a claude.ai chat: the note on the guide waits on its moment, as the guide does;
+    # the relay's own texts aren't theirs.
+    for n in (3, 1):
+        mine = {p.id: p for p in path(PathStart(typical=n)).pieces}
+        assert moments(mine["bridge:claude-voice#guide_note"]) == [note_when]
+        assert mine["bridge:claude-voice#guide_note"].stage == mine["guide:claude-voice"].stage
+        assert "bridge:claude-voice#opening" not in mine and "bridge:claude-voice#unread" not in mine
+    # The backward question finds each one by its id.
+    reached = asyncio.run(apt.agent_path_reached_by_impl("bridge:claude-voice#opening", None, None))
+    assert {a for hit in reached.reached_by for a in hit["agents"]} == {"the voice relay"}
+    # Without relay notes, no opening and no unread line; a snapshot without `relay` gives none of the three.
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps({**snap, "relay_notes": []}), encoding="utf-8")
+    assert not {"bridge:claude-voice#opening", "bridge:claude-voice#unread"} & set(ids(path(PathStart(typical=2))))
+    old = {**snap, "bridge": {k: v for k, v in bridge.items() if k != "relay"}}
+    (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(old), encoding="utf-8")
+    assert not any(i.startswith("bridge:claude-voice#") and not i[-1].isdigit() for i in ids(path(PathStart(typical=2))))
+
+
 def test_in_a_repo_the_tools_stop_at_what_claude_code_loads(vault):
     """P277: a repo's links to its own docs put nothing on the path, in a pointer shape or not, and count as no
     mention; a link into the vault is still a vault pointer. Every path says what is left out by design, in the

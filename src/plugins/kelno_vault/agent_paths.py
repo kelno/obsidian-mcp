@@ -1190,7 +1190,10 @@ class PathBuilder:
         The relay gets the server instructions and tool texts when the bridge's tools load and the guide with its
         first result from the bridge; a Claude Code session on the bridge gets the instructions and tools when they
         load (deferred) and the guide when it first calls the bridge, and the bridge's notes under the messages it
-        relays to it, each at its `when`. None of them is a rule file: their links aren't followed."""
+        relays to it, each at its `when`. What comes with the guide besides it (`relay`, P311): the note on the guide
+        wherever the guide is, waiting on its `when` (only a first call other than guide gets it), and for the relay
+        the opening of its notes, with them, and the line standing for one the bridge can't read, at its `when`. None
+        of them is a rule file: their links aren't followed."""
         if not self.on_bridge() or self.snap is None or not self.snap.bridge_known:
             return
         b, machine = self.snap.bridge, self.snap.machine
@@ -1210,6 +1213,24 @@ class PathBuilder:
         if text(b.get("instructions")):
             self.push(Piece(f"instructions:{BRIDGE_SERVER}", TOOLS, "handed to the client when it connects to the "
                             "bridge", where, text(b["instructions"]), rule=False))
+        # What comes with the guide besides it (P311): the note on the guide, before it in the result, on every path
+        # with the guide; the opening of the relay's notes and the line for one the bridge can't read, the relay's.
+        relay = b.get("relay") if isinstance(b.get("relay"), dict) else {}
+        guide_note = relay.get("guide_note") or {}
+        if text(guide_note) and text(b.get("guide")):
+            stage = BRIDGE if self.relay() else LATER
+            self.push(Piece(f"bridge:{BRIDGE_SERVER}#guide_note", stage, "with the guide, before it in the result, "
+                            f"from the bridge: {guide_note.get('when') or 'unplaced'}", where, text(guide_note), None,
+                            guide_note.get("when") or "unplaced", always=False, rule=False))
+        if self.relay() and self.snap.relay_notes:
+            opening, unread = relay.get("opening") or {}, relay.get("unread") or {}
+            if text(opening):
+                self.push(Piece(f"bridge:{BRIDGE_SERVER}#opening", BRIDGE, "with the relay's first result from the "
+                                "bridge, before the owner's notes for relays", where, text(opening), rule=False))
+            if text(unread):
+                self.push(Piece(f"bridge:{BRIDGE_SERVER}#unread", BRIDGE, "from the bridge: "
+                                f"{unread.get('when') or 'unplaced'}", where, text(unread), None,
+                                unread.get("when") or "unplaced", always=False, rule=False))
         if text(b.get("guide")):
             if not self.relay():  # a chat or a session that may call the bridge: the guide waits for its first call
                 self.push(Piece(f"guide:{BRIDGE_SERVER}", LATER, "with its first result from the bridge (or its guide "
