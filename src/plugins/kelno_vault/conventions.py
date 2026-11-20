@@ -9,6 +9,9 @@ sections means changing it here too.
 
 #: The vault's conventions note (also the note `get_vault_guide` serves after the plugin's sections).
 CONVENTIONS_NOTE = "_/agent/Vault conventions.md"
+#: The vault note saying where a new note, or a moved one, goes (out of the conventions note, read at its
+#: moment: ledger F111); named in `create_note`'s and `move_note`'s descriptions.
+FILING_NOTE = "_/agent/Where notes go.md"
 #: The note on writing the vault's rules for agents.
 RULES_NOTE = "_/agent/Where agent instructions go.md"
 

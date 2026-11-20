@@ -69,10 +69,11 @@ OPEN_AREA_ENTRIES_MAX = 40
 OPEN_AREA_TASKS_MAX = 30
 #: The section of the main note left out: the open tasks come from every note instead.
 OPEN_AREA_TASKS_HEADING = "Tasks"
-#: The section of the vault guide note (`VAULT_GUIDE_NOTE`) holding the conventions for working on any
-#: area; read at each call, its text never copied here. The vault's `_/Outside dependencies.md`
-#: records that this plugin depends on the heading's name.
-OPEN_AREA_CONVENTIONS_HEADING = "Working on an area"
+#: The vault note holding the conventions for working on any area, served whole as `area_conventions`;
+#: read at each call, its text never copied here. A note of its own, out of the vault guide note, so
+#: `get_vault_guide` doesn't bring it a second time (ledger F111). The vault's `_/Outside dependencies.md`
+#: records that this plugin depends on its path.
+OPEN_AREA_CONVENTIONS_NOTE = "_/agent/Working on an area.md"
 #: The conventions are cut past this many characters.
 OPEN_AREA_CONVENTIONS_MAX_CHARS = 8000
 #: The area's rules for agents (its main note's `## For agents` section) are cut past this many characters.
@@ -88,6 +89,8 @@ OPEN_AREA_INSTRUCTIONS = (
     "Starting a piece of work here likely to span several conversations (a design, a decision, a plan or a "
     "proposal): give it a work note. The rules are under \"Work notes\" in area_conventions; the template "
     "_/agent/templates/Work note.md is a starting point to copy and adapt.",
+    "If you haven't read get_vault_guide in this conversation, read it before your next vault call: opening an "
+    "area may come before it, nothing else.",
 )
 
 
@@ -184,26 +187,25 @@ async def _open_area_rules(text_: str, path: str, uid, notes: list[str]) -> tupl
 
 
 async def _open_area_conventions(uid, notes: list[str]) -> str | None:
-    """The `## Working on an area` section of the vault guide note, read now; None with a note when it can't be."""
-    path, heading = settings.vault_guide_note, OPEN_AREA_CONVENTIONS_HEADING
+    """The note `OPEN_AREA_CONVENTIONS_NOTE`, without its frontmatter, read now; None with a note when it can't be."""
+    path = OPEN_AREA_CONVENTIONS_NOTE
     missing = "so the vault's conventions for working on an area are not included"
     try:
         text_ = await asyncio.to_thread(_read_vault_text, path, uid)
     except FileNotFoundError:
-        notes.append(f"The vault guide note {path} was not found, {missing}.")
+        notes.append(f"The note {path} was not found, {missing}.")
         return None
     except (ValueError, OSError) as exc:
-        notes.append(f"The vault guide note {path} could not be read ({type(exc).__name__}), {missing}.")
+        notes.append(f"The note {path} could not be read ({type(exc).__name__}), {missing}.")
         return None
-    body = _areas_index.section_body(_areas_index.strip_frontmatter(text_), heading)
-    if body is None or not body.strip():
-        why = "has no" if body is None else "has an empty"
-        notes.append(f"The vault guide note {path} {why} \"## {heading}\" section, {missing}.")
+    body = _areas_index.strip_frontmatter(text_)
+    if not body.strip():
+        notes.append(f"The note {path} is empty, {missing}.")
         return None
     body = body.strip("\n") + "\n"
     if len(body) > OPEN_AREA_CONVENTIONS_MAX_CHARS:
         notes.append(f"The conventions for working on an area are cut at {OPEN_AREA_CONVENTIONS_MAX_CHARS:,} of "
-                     f"{len(body):,} characters: read_note(\"{path}\", section=\"{heading}\") has the rest.")
+                     f"{len(body):,} characters: read_note(\"{path}\") has the rest.")
         body = body[:OPEN_AREA_CONVENTIONS_MAX_CHARS]
     return body
 
@@ -439,7 +441,8 @@ async def open_area(
 
     Read-only. Call it first when you start work in an area or answer a
     question about one, and when a session works in a folder outside the
-    vault (`folder`), to find its area. One call returns the area's tag and
+    vault (`folder`), to find its area; it may come before
+    `get_vault_guide`. One call returns the area's tag and
     description, `code_project: true` when the area is worked as a code
     project (its main note's frontmatter flag; what that means is the
     paragraph "Where code work starts" at the top of
@@ -447,9 +450,9 @@ async def open_area(
     for agents (`for_agents`, its main note's
     `## For agents` section: the rules for working in this area; follow
     them; absent when the area has none), the vault's conventions for
-    working on any area (`area_conventions`, the "Working on an area"
-    section of the vault's conventions note, read at each call; follow
-    them), its main note's text (`## Current position` and the rest; without
+    working on any area (`area_conventions`, the vault's note
+    `_/agent/Working on an area.md`, read at each call; follow them), its
+    main note's text (`## Current position` and the rest; without
     its For agents and Tasks sections), its related folders
     outside the vault, a `map` of its folder (each note's one-line
     `description`, each subfolder's note count and folder-note description,

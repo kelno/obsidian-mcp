@@ -1491,7 +1491,7 @@
     "openWorldHint": false,
     "readOnlyHint": true
    },
-   "description": "Read first, before other tools: how to use these tools, and this vault's rules.\n\n    Returns a two-part guide for working with this Obsidian vault:\n\n    1. **Obsidian primer** — generic syntax (wikilinks, embeds, block refs,\n       heading refs, tags, frontmatter, callouts, comments, highlights,\n       math, mermaid, footnotes, tasks, plugin literals).\n    2. **Vault-specific conventions** — folder structure, naming rules,\n       frontmatter requirements, and tag taxonomy, from the note the vault\n       owner keeps them in (`CLAUDE.md` at the vault root unless the server\n       is set to another). If that note is absent, the response includes\n       instructions for creating one.\n    ",
+   "description": "Vault rules and tool how-to: read first, unless a tool says it may go before.\n\n    Returns a two-part guide for working with this Obsidian vault:\n\n    1. **Obsidian primer** — generic syntax (wikilinks, embeds, block refs,\n       heading refs, tags, frontmatter, callouts, comments, highlights,\n       math, mermaid, footnotes, tasks, plugin literals).\n    2. **Vault-specific conventions** — folder structure, naming rules,\n       frontmatter requirements, and tag taxonomy, from the note the vault\n       owner keeps them in (`CLAUDE.md` at the vault root unless the server\n       is set to another). If that note is absent, the response includes\n       instructions for creating one.\n    ",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {},

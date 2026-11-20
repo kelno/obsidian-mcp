@@ -745,7 +745,7 @@ async def edit_note(
 
 @mcp.tool(title="Vault guide", annotations=_READ_ONLY)
 async def get_vault_guide() -> str:
-    """Read first, before other tools: how to use these tools, and this vault's rules.
+    """Vault rules and tool how-to: read first, unless a tool says it may go before.
 
     Returns a two-part guide for working with this Obsidian vault:
 

@@ -57,6 +57,9 @@ MEMORY_NOTE = "_/agent/Memory reference.md"
 MEMORY_SECTIONS = ["Lines", "Profile"]
 AREAS_NOTE = "Areas/Areas.md"
 CONVENTIONS_NOTE = "_/agent/Vault conventions.md"
+#: The note `open_area` serves whole as `area_conventions` (open_area.py's `OPEN_AREA_CONVENTIONS_NOTE`; not
+#: imported, since this engine runs without the server's modules).
+AREA_CONVENTIONS_NOTE = "_/agent/Working on an area.md"
 WHERE_NOTE = "_/agent/Where agent instructions go.md"
 CODING_GUIDE = "_/agent/guides/coding-practices.md"
 ROLES_DIR = "_/agent/roles/"
@@ -1249,7 +1252,7 @@ class PathBuilder:
 
     def load_work(self) -> None:
         """What `open_area` serves, read from the files: the area's `## For agents`, its main note without that
-        section and its Tasks, Vault conventions' "Working on an area", coding-practices for a code project, and
+        section and its Tasks, the note `AREA_CONVENTIONS_NOTE`, coding-practices for a code project, and
         the tool's own instruction lines as served."""
         name, asked = self.work.area, "work.area"
         home = self.snap.home if self.snap else None
@@ -1275,10 +1278,10 @@ class PathBuilder:
         # Not a rule file, but the agent reads it: its pointers are followed and flagged as outside the rule files.
         self.push(Piece(f"{OPEN_AREA_ID}{main}", WORK, how + " (main_note_text, without For agents and Tasks)",
                         self.v.where(main), without_sections(text, ["For agents", "Tasks"]), rules_only=True))
-        conv = section(self.v.text(CONVENTIONS_NOTE) or "", "Working on an area")
+        conv = self.v.text(AREA_CONVENTIONS_NOTE)
         if conv:
-            self.push(Piece(f"section:{CONVENTIONS_NOTE}#Working on an area", WORK, how + " (area_conventions)",
-                            self.v.where(CONVENTIONS_NOTE), conv))
+            self.push(Piece(f"note:{AREA_CONVENTIONS_NOTE}", WORK, how + " (area_conventions)",
+                            self.v.where(AREA_CONVENTIONS_NOTE), conv))
         if frontmatter_flag(text, "code_project"):
             self.push(self.note_piece(CODING_GUIDE, WORK, how + " (code_project: true)", None,
                                       "code_project: true in the main note's frontmatter", "when met", True))
@@ -1297,10 +1300,11 @@ class PathBuilder:
         self.push(Piece(f"instructions:{SERVER}", TOOLS, "handed to the client when it connects (claude.ai is "
                         "reported to drop them)", f"{SERVER}: the server instructions", served.instructions,
                         rule=False))
-        # On every path: every agent on the connector reads the guide first, as the server's instructions and its
-        # tool's first line say (the fork's decision "Agents read the guide": one that skips it is a bug to fix).
+        # On every path: every agent on the connector reads the guide first, as its tool's first line says ("read
+        # first, unless a tool says it may go before": open_area may) (the fork's decision "Agents read the guide":
+        # one that skips it is a bug to fix).
         self.push(Piece(f"guide:{SERVER}", TOOLS, "returned by get_vault_guide, which an agent on the connector "
-                        "calls first (the server's instructions and the tool's first line say so), ahead of the "
+                        "calls first (the tool's first line says so; open_area may come before it), ahead of the "
                         f"vault's conventions note ({served.guide_note})", f"{SERVER}: get_vault_guide", served.guide,
                         rule=False))
         # The conventions note comes in the same result, after the guide's own part: on the path as the guide is.

@@ -796,7 +796,7 @@ The value is note text: `src/services/note_description.py` keeps only a string (
 
 ## Agents read the guide (fork, owner's design assumption)
 
-`get_vault_guide` is the agent's manual. An agent that skips it is a bug to fix (in the guide's description or the client's setup), not a case to design around. claude.ai shows an agent only about the first 80 characters of a tool's description until it searches its tools, so every tool's first line stands on its own, and the guide's says to read it first.
+`get_vault_guide` is the agent's manual. An agent that skips it is a bug to fix (in the guide's description or the client's setup), not a case to design around. claude.ai shows an agent only about the first 80 characters of a tool's description until it searches its tools, so every tool's first line stands on its own, and the guide's says to read it first, unless a tool says it may go before (`open_area`, in the vault's plugin).
 
 ## The guide note (fork, 2026-11-15)
 

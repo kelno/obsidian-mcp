@@ -378,7 +378,7 @@ def test_this_vaults_plugin_describes_its_rule_on_every_writer():
     assert loaded.guide_text.startswith("## Task lines (this server)")
     assert "## Agent rules (this server)" in loaded.guide_text and "_/agent/" in loaded.guide_text
     assert "## Links (this server)" in loaded.guide_text and "## Titles (this server)" in loaded.guide_text
-    assert "## Opening an area (this server)" in loaded.guide_text and "Working on an area" in loaded.guide_text
+    assert "## Opening an area (this server)" in loaded.guide_text and "Working on an area.md" in loaded.guide_text
     assert loaded.check is not None
 
 

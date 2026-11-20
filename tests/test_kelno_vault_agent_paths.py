@@ -89,6 +89,7 @@ NOTES = {
         "- [[_/agent/guides/coding-practices|coding-practices]]: any code work.\n"
         "- The owner keeps [[_/agent/Notes kept]] beside these.\n"),
     "_/agent/Vault conventions.md": "Conventions.\n\n## Working on an area\n\n- Start with open_area.\n",
+    "_/agent/Working on an area.md": "- Keep the Current position current.\n",
     "_/agent/Notes kept.md": "Kept.\n",
     "_/agent/Memory reference.md": (
         "Mirror.\n\n## Lines\n\n- At the start of every chat, read [[_/agent/Common-rules|Common-rules]].\n"),
@@ -168,7 +169,7 @@ def test_agent_path_draws_a_path_with_texts_hashes_and_known(vault):
     # coding-practices, met earlier behind the guide index's moment, is on the path from the opening of an area
     # worked as a code project, whatever comes: it arrives there.
     assert work == ["section:Areas/Repo/Repo.md#For agents", "open_area:Areas/Repo/Repo.md",
-                    "section:_/agent/Vault conventions.md#Working on an area",
+                    "note:_/agent/Working on an area.md",
                     "note:_/agent/guides/coding-practices.md",
                     "tool:obsidian-mcp:open_area/instructions", "note:Areas/Repo/Repo notes.md"]
     # A pointer that says when comes later; a link that says neither when nor "read" is a mention, counted and

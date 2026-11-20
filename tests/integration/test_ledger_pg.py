@@ -1245,10 +1245,13 @@ async def test_open_area_gathers_the_note_folders_entries_and_tasks(sessionmaker
     assert set(refs) == {f"plans.md:{first.line}", f"plans.md:{later.line}", f"Secret (private)/s.md:{secret.line}"}
     hidden = next(t for t in result.tasks if t.ref.startswith("Secret"))
     assert hidden.text is None and hidden.status == "TODO"
-    assert len(result.instructions) == 3 and "#when" in result.instructions[0]
+    assert len(result.instructions) == 4 and "#when" in result.instructions[0]
     assert "Current position" in result.instructions[1]
     assert "_/agent/templates/Work note.md" in result.instructions[2]
     assert '"Work notes" in area_conventions' in result.instructions[2]
+    # Opening an area may come before get_vault_guide (the vault's session-start hook calls it first): the result
+    # says to read the guide next (ledger F111).
+    assert "get_vault_guide" in result.instructions[3] and "before your next vault call" in result.instructions[3]
     assert result.archived is None and result.tasks_total is None
     assert not any("carries #next" in n for n in result.notes or [])
 
@@ -1306,26 +1309,27 @@ async def test_open_area_caps_tasks_and_points_to_list_tasks(sessionmaker, ctx, 
     assert any('list_tasks(area="area/home")' in n for n in result.notes)
 
 
-async def test_open_area_carries_the_vault_guide_notes_area_section(sessionmaker, ctx, monkeypatch):
+async def test_open_area_carries_the_working_on_an_area_note(sessionmaker, ctx, monkeypatch):
     await _open_area_vault(sessionmaker, ctx)
     missing = await open_area_impl(area="home")
     assert missing.error is None and missing.area_conventions is None
-    assert any("CLAUDE.md was not found" in n and "conventions for working on an area" in n for n in missing.notes)
+    assert any("Working on an area.md was not found" in n and "conventions for working on an area" in n
+               for n in missing.notes)
 
-    monkeypatch.setattr(settings, "vault_guide_note", "_/agent/Vault conventions.md")
-    guide = ctx / "_" / "agent" / "Vault conventions.md"
-    guide.parent.mkdir(parents=True)
-    guide.write_text("---\ndescription: x\n---\n# Intro\n\n## Changes\n\n- other\n", encoding="utf-8")
-    no_section = await open_area_impl(area="home")
-    assert no_section.error is None and no_section.area_conventions is None
-    assert any('Vault conventions.md has no "## Working on an area" section' in n for n in no_section.notes)
+    conventions = ctx / "_" / "agent" / "Working on an area.md"
+    conventions.parent.mkdir(parents=True)
+    conventions.write_text("---\ndescription: x\n---\n\n", encoding="utf-8")
+    empty = await open_area_impl(area="home")
+    assert empty.error is None and empty.area_conventions is None
+    assert any("Working on an area.md is empty" in n for n in empty.notes)
 
-    guide.write_text("---\ndescription: x\n---\nIntro.\n\n## Working on an area\n\n- Start with open_area.\n\n"
-                     "## Changes\n\n- other\n", encoding="utf-8")
+    # The whole note, its frontmatter left out; the vault guide note plays no part.
+    conventions.write_text("---\ndescription: x\n---\nFor any agent.\n\n- Keep the Current position.\n",
+                           encoding="utf-8")
     first = await open_area_impl(area="home")
-    assert first.area_conventions == "- Start with open_area.\n"
-    assert not any("Working on an area" in n or "guide note" in n for n in first.notes or [])
-    guide.write_text("## Working on an area\n\n- Edited.\n", encoding="utf-8")
+    assert first.area_conventions == "For any agent.\n\n- Keep the Current position.\n"
+    assert not any("Working on an area" in n for n in first.notes or [])
+    conventions.write_text("- Edited.\n", encoding="utf-8")
     assert (await open_area_impl(area="home")).area_conventions == "- Edited.\n"     # read at each call
     village = await open_area_impl(folder="D:\\work\\village")
     assert village.area_conventions == "- Edited.\n" and "no main note yet" in village.notes[0]
@@ -1333,7 +1337,8 @@ async def test_open_area_carries_the_vault_guide_notes_area_section(sessionmaker
     monkeypatch.setattr(kelno_open_area, "OPEN_AREA_CONVENTIONS_MAX_CHARS", 3)
     cut = await open_area_impl(area="home")
     assert cut.area_conventions == "- E"
-    assert any("cut at 3 of 10 characters" in n and 'section="Working on an area"' in n for n in cut.notes)
+    assert any("cut at 3 of 10 characters" in n and 'read_note("_/agent/Working on an area.md")' in n
+               for n in cut.notes)
 
 
 async def _indexed(sessionmaker, path, frontmatter):

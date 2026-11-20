@@ -65,7 +65,7 @@ _WRITER_TEXT = (
 _CREATE_NOTE_NAME_TEXT = (
     "A new note's name is checked against its folder's `note_names` setting: in a dated folder, one not starting "
     "with the date the note is about is refused with `note_name_date`; in an undated one, a dated name is flagged "
-    "(`note_name:`)."
+    f"(`note_name:`). Where a new note goes: `{conventions.FILING_NOTE}`."
 )
 
 _WRITE_FILE_TEXT = (
@@ -74,7 +74,7 @@ _WRITE_FILE_TEXT = (
     "`rule_change_unlogged:`, `pointer_or_mention:`, `reached_by_no_path:`, `area_not_opened:`)."
 )
 
-_MOVE_NOTE_TEXT = "The name is checked as in `create_note`."
+_MOVE_NOTE_TEXT = f"The name is checked as in `create_note`. Where a note goes: `{conventions.FILING_NOTE}`."
 
 _EDIT_NOTE_TEXT = "Vault checks as in `create_note`: a task line written by hand is refused."
 
@@ -136,10 +136,10 @@ _TITLE_HEADING_GUIDE = (
 
 _OPEN_AREA_GUIDE = (
     "## Opening an area (this server)\n\n"
-    "`open_area` opens one of the vault's areas in one call; when to call it is in the "
-    f"\"{open_area.OPEN_AREA_CONVENTIONS_HEADING}\" section of the vault's conventions note, below. Its result "
-    "carries the area's own rules for agents (`for_agents`, its main note's `## For agents` section) and the "
-    f"\"{open_area.OPEN_AREA_CONVENTIONS_HEADING}\" section (`area_conventions`, read at each call, so it is "
+    "`open_area` opens one of the vault's areas in one call: call it before working on an area (the vault's "
+    "conventions note, below, says so too); it may come before `get_vault_guide`. Its result carries the area's own "
+    "rules for agents (`for_agents`, its main note's `## For agents` section) and the conventions for working on "
+    f"any area (`area_conventions`, the note `{open_area.OPEN_AREA_CONVENTIONS_NOTE}`, read at each call, so it is "
     "current): follow both while you work in the area. Its description says what else it returns.\n\n"
     + area_opened.GUIDE
 )
