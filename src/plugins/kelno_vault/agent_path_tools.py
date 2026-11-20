@@ -873,7 +873,9 @@ def _lines(p: ap.Piece) -> list[PieceLine] | None:
         line = direct.get(src, e["line"]) if e["through"] else e["line"]
         if line:
             line = " ".join(line.split()) if not ap.stands_alone(e["moment"]) else _window(line, e["moment"], p.id)
-        x = PieceLine(piece=src, line=line, when=e["moment"])
+        # A line with no moment of its own holds whenever its piece is read: no `when`, as in the short form (Agent
+        # paths, 2026-11-21: "when met" read as a condition beside an every_time piece).
+        x = PieceLine(piece=src, line=line, when=None if e["moment"] == "when met" else e["moment"])
         if x not in out:
             out.append(x)
     return out or None
@@ -911,7 +913,7 @@ def _no_lines(lines: list[PieceLine] | None) -> list[PieceLine] | None:
     choosing it"); the lines come with the piece's details (owner: the short form stays short)."""
     if not lines:
         return lines
-    return [x if not ap.stands_alone(x.when) else x.model_copy(update={"line": None}) for x in lines]
+    return [x if x.when and not ap.stands_alone(x.when) else x.model_copy(update={"line": None}) for x in lines]
 
 
 _DETAILS = ("every_time", "where", "chars")
@@ -1470,8 +1472,10 @@ def _typical_path(label: str, s: ap.Start, b: ap.PathBuilder, known: dict | None
     size = st["size"]
     return TypicalPath(
         number=s.number, name=label,
-        every_time=(f"{size['always_chars']:,} characters in {size['always_pieces']} pieces, and "
-                    f"{size['tool_text_chars']:,} in {size['tool_texts']} tool texts"),
+        # The tool texts aren't all in front of the agent from the start: Claude Code defers them, and claude.ai
+        # shows a description's first line until the chat searches its tools (Agent paths, 2026-11-21).
+        every_time=(f"{size['always_chars']:,} characters in {size['always_pieces']} pieces every time, plus up to "
+                    f"{size['tool_text_chars']:,} in {size['tool_texts']} tool texts as tools are loaded"),
         pieces=_overview_lines(b, known), structure=_structure(st))
 
 
@@ -1582,7 +1586,7 @@ _VERSIONS_NOTE = ("Some pieces have another text on other paths (an area-start h
 #: 2026-11-20: `always`, `placed` and `after` were guessed; round 5 replaced them).
 _FIELD_NOTE = ("every_time: the piece is on the path whatever the conversation brings, and this is what brings it; "
                "when: it arrives only when one of these moments comes; lines: each line pointing to it, the piece it "
-               "sits in and the moment it gives.")
+               "sits in and the moment it gives (none: it holds whenever that piece is read).")
 
 
 #: Said with a backward question's groups (round 4, cold read 2026-11-20: which agent has which piece was guessed).

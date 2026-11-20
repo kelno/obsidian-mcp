@@ -58,9 +58,9 @@ class PieceLine(_OmitNone):
     #: that doesn't read right without it.
     line: str | None = None
     #: When the line says to read it: its opening (At the start, While, When, Before) or the guide index's "when to
-    #: read it"; "when met" for a line that says to read it with no moment (outside the rule notes); "unplaced"
-    #: when such a line doesn't say.
-    when: str
+    #: read it"; "unplaced" for a line outside the rule notes that doesn't say to read it. None for a line that says
+    #: to read it with no moment of its own (an import, a hook's "read …"): it holds whenever its piece is read.
+    when: str | None = None
 
 
 class PathPiece(_OmitNone):

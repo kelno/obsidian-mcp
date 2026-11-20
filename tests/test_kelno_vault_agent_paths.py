@@ -470,7 +470,8 @@ def test_agent_path_refuses_a_start_without_surface_or_typical_agent(vault):
 def test_agent_path_without_start_gives_the_overview(vault):
     result = path()
     assert [t.number for t in result.typical] == [1, 2]
-    assert all(t.every_time.endswith("tool texts") and " characters in " in t.every_time for t in result.typical)
+    assert all(" pieces every time, plus up to " in t.every_time and t.every_time.endswith(" tool texts as tools are "
+               "loaded") for t in result.typical)
     worker = result.typical[1]
     assert worker.pieces[0].startswith("1. file:C:/Users/me/.claude/CLAUDE.md")
     # The tool texts as one line, where they load: before the pieces waiting on a moment.
@@ -1651,8 +1652,9 @@ def test_the_arrival_that_places_a_piece_comes_first(vault):
     rules = by_id["section:Areas/Repo/Repo.md#For agents"]
     first = rules.lines[0]
     assert (first.when, first.piece) == ("when the area is opened", "tool:obsidian-mcp:open_area")
+    # A line with no moment of its own (a hook's "read …") holds whenever its piece is read: no `when`.
     worker = by_id["note:_/agent/roles/Worker.md"]
-    assert worker.lines[0].piece == "hook:SessionStart/area-start.py"
+    assert worker.lines[0].piece == "hook:SessionStart/area-start.py" and worker.lines[0].when is None
 
 
 def test_a_line_in_a_waiting_piece_says_after_which_moment(vault):
