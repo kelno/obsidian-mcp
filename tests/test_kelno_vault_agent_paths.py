@@ -69,14 +69,12 @@ tools = ["obsidian-mcp"]
 [[typical]]
 name = "a claude.ai chat"
 surface = "claude-ai"
-handwritten = 1
 
 [[typical]]
 name = "a Claude Code worker in a repo"
 surface = "claude-code"
 folder = "D:/work/repo"
 role = "worker"
-handwritten = 3
 """
 
 NOTES = {
@@ -143,7 +141,22 @@ def path(start=None, work=None, known=None):
 
 
 def moments(piece):
-    return [m.moment for m in piece.moments or []]
+    """A piece's moments: those that bring it when it waits on one, else those its pointing lines give (round 5)."""
+    return piece.when or [x.when for x in piece.lines or []]
+
+
+def always(piece):
+    """On the path whatever the conversation brings (round 5: `every_time`, what brings it)."""
+    return piece.every_time is not None
+
+
+def drawn(start, work=None) -> dict:
+    """The engine's pieces for a start, from the kept drawing (their stage, `always`, `arrives` and moments' details,
+    which the result no longer shows since round 5)."""
+    path(start, work)  # draws, or brings the kept drawing up to date
+    (k,) = apt._KEPT.values()
+    w = ap.Work(work.area, work.kind) if work else ap.Work()
+    return k.run_for(apt._start_of(start, k.setup.points), w).pieces
 
 
 def ids(result):
@@ -156,7 +169,7 @@ def test_hash_is_the_first_12_hex_digits_of_sha256_of_the_text_as_the_pc_reads_i
 
 
 def test_agent_path_draws_a_path_with_texts_hashes_and_known(vault):
-    first = path(PathStart(typical=3))
+    first = path(PathStart(typical=2))
     assert first.error is None and first.machine == "PC" and first.snapshot_made == SNAPSHOT["made"]
     order = ids(first)
     # What Claude Code loads, then the hook, then the role note it names for a worker only.
@@ -165,23 +178,23 @@ def test_agent_path_draws_a_path_with_texts_hashes_and_known(vault):
     assert order[3] == "hook:SessionStart/area-start.py" and "hook:SessionStart/quiet.py" not in order
     assert order[4] == "note:_/agent/roles/Worker.md" and "note:_/agent/roles/Coordinator.md" not in order
     # The repo's area, as open_area serves it, then what its rules point to.
-    work = [i for i in order if first.pieces[order.index(i)].stage == ap.STAGE_NAMES[ap.WORK]]
+    eng = drawn(PathStart(typical=2))
+    work = [i for i in order if eng[i].stage == ap.WORK]
     # coding-practices, met earlier behind the guide index's moment, is on the path from the opening of an area
     # worked as a code project, whatever comes: it arrives there.
     assert work == ["section:Areas/Repo/Repo.md#For agents", "open_area:Areas/Repo/Repo.md",
                     "note:_/agent/Working on an area.md",
                     "note:_/agent/guides/coding-practices.md",
                     "tool:obsidian-mcp:open_area/instructions", "note:Areas/Repo/Repo notes.md"]
-    # A pointer that says when comes later; a link that says neither when nor "read" is a mention, counted and
-    # not followed, a rule file's listed by name [P250].
+    # A pointer that says when comes later; a link that says neither when nor "read" is a mention, not followed
+    # [P250] (round 5: no longer listed).
     by_id = {p.id: p for p in first.pieces}
     assert moments(by_id["note:_/agent/Vault conventions.md"]) == ["Before working on one of the owner's areas"]
     assert "note:_/agent/Notes kept.md" not in by_id and "note:Notes/Some note.md" not in by_id
-    assert first.structure.mentions_not_followed == 2
-    assert [m["target"] for m in first.structure.rule_file_mentions] == ["_/agent/Notes kept.md"]
+    assert first.structure.model_dump(exclude_none=True).keys() <= {"size", "not_followed"}  # faults only
     # One copy, with the guide index's moment (code_project brings it with no line).
     assert moments(by_id["note:_/agent/guides/coding-practices.md"]) == ["when the area is opened", "any code work"]
-    assert by_id["note:_/agent/guides/coding-practices.md"].always
+    assert always(by_id["note:_/agent/guides/coding-practices.md"])
     # This server's texts as served come last.
     assert {"instructions:obsidian-mcp", "guide:obsidian-mcp", "tool:obsidian-mcp:read_note"} <= set(order)
     served = dict(asyncio.run(apt._served(None)).tools)
@@ -192,18 +205,18 @@ def test_agent_path_draws_a_path_with_texts_hashes_and_known(vault):
     for p in first.pieces:
         assert p.status is None and (p.text is None) == bool(p.text_withheld)
         assert p.text is None or (p.hash == ap.digest(p.text) and p.chars == len(p.text))
-    assert all(p.text is not None for p in first.pieces if p.stage != ap.STAGE_NAMES[ap.TOOLS])
+    assert all(p.text is not None for p in first.pieces if not ap.tool_text(eng[p.id]))
     assert any("PreToolUse" in line for line in first.structure.not_followed)
 
     known = {p.id: p.hash for p in first.pieces}
-    again = path(PathStart(typical=3), known=known)
+    again = path(PathStart(typical=2), known=known)
     assert not again.pieces and again.waiting == 0  # held pieces aren't listed again
     assert again.left_path is None
-    gone = path(PathStart(typical=3), known={**known, "note:_/agent/Old rule.md": "0123456789ab"})
+    gone = path(PathStart(typical=2), known={**known, "note:_/agent/Old rule.md": "0123456789ab"})
     assert gone.left_path == ["note:_/agent/Old rule.md"]
 
     (vault / "_/agent/roles/Worker.md").write_text("Worker rules, changed.\n", encoding="utf-8")
-    changed = path(PathStart(typical=3), known=known)
+    changed = path(PathStart(typical=2), known=known)
     worker = next(p for p in changed.pieces if p.id == "note:_/agent/roles/Worker.md")
     assert worker.status == "changed" and worker.text == "Worker rules, changed.\n"
     assert [p.id for p in changed.pieces if p.text is not None] == ["note:_/agent/roles/Worker.md"]
@@ -224,12 +237,10 @@ def test_the_relay_role_adds_the_relays_notes(vault):
     assert not any("changed nothing" in n for n in result.notes or [])
 
 
-def test_mentions_are_grouped_by_rule_file_and_held_pieces_come_short(vault):
-    first = path(PathStart(typical=3))
-    assert first.structure.rule_file_mentions == [
-        {"target": "_/agent/Notes kept.md", "from": ["note:_/agent/Common-rules.md"]}]
+def test_held_pieces_come_short(vault):
+    first = path(PathStart(typical=2))
     # A call with known lists only what it brings: nothing here, every piece held.
-    again = path(PathStart(typical=3), known={p.id: p.hash for p in first.pieces})
+    again = path(PathStart(typical=2), known={p.id: p.hash for p in first.pieces})
     assert not again.pieces and again.waiting == 0 and again.left_path is None
     assert again.structure is None and any("comes only with a call without known" in n for n in again.notes)
     reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", None, None))
@@ -240,18 +251,19 @@ def test_mentions_are_grouped_by_rule_file_and_held_pieces_come_short(vault):
 
 def test_a_result_whose_metadata_passes_the_budget_is_cut_down_and_every_text_arrives(vault, monkeypatch):
     monkeypatch.setattr(apt, "PAGE_CHARS", 12_000)
-    first = path(PathStart(typical=3))
+    first = path(PathStart(typical=2))
     assert len(first.model_dump_json()) <= 12_000
     # Pieces whose text waits come in short form; those with a text carry their details.
     waiting = [p for p in first.pieces if p.text_withheld]
-    assert waiting and all(p.arrives is None and p.where is None and p.hash for p in waiting)
-    assert all(p.arrives and p.where for p in first.pieces if p.text is not None)
+    assert waiting and all(p.where is None and p.chars is None and p.every_time is None and p.hash for p in waiting)
+    assert all(p.where and p.chars is not None and (p.every_time or p.when) for p in first.pieces
+               if p.text is not None)
     assert any("short form" in n for n in first.notes)
     # Passing what it now holds, the caller gets the rest: every text arrives within a few calls.
     # (A text too long for one result is read in parts: counted as held here.)
     held, rounds = {}, 0
     while rounds < 30:
-        r = path(PathStart(typical=3), known=held or None)
+        r = path(PathStart(typical=2), known=held or None)
         assert len(r.model_dump_json()) <= 12_000
         held |= {p.id: p.hash for p in r.pieces if p.text is not None or p.text_in_parts}
         rounds += 1
@@ -262,7 +274,7 @@ def test_a_result_whose_metadata_passes_the_budget_is_cut_down_and_every_text_ar
             break
     assert rounds < 30
     monkeypatch.setattr(apt, "PAGE_CHARS", 400_000)
-    full = path(PathStart(typical=3))
+    full = path(PathStart(typical=2))
     assert set(held) == {p.id for p in full.pieces if not p.private}
 
 
@@ -282,10 +294,10 @@ def test_a_hook_script_changed_since_the_snapshot_is_said(vault):
     snap = {**SNAPSHOT, "format": 2, "hook_scripts": {f"note:{script}": ap.digest("print('hello')\n"),
                                                       "file:C:/elsewhere/other.py": None}}
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
-    same = path(PathStart(typical=3))
+    same = path(PathStart(typical=2))
     assert same.error is None and not any("changed since the snapshot" in n for n in same.notes or [])
     (vault / script).write_text("print('changed')\n", encoding="utf-8")
-    changed = path(PathStart(typical=3))
+    changed = path(PathStart(typical=2))
     assert any(n.startswith(f"{script} changed since the snapshot") and "hook:SessionStart/area-start.py" in n
                and "agent-paths-snapshot.py run" in n and "ask the owner" in n for n in changed.notes)
     reached = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", None, None))
@@ -316,17 +328,17 @@ def test_user_rules_load_at_the_start_and_a_skipped_import_is_a_structural_fact(
     (vault / ap.STARTING_POINTS_PATH).write_text(STARTING_POINTS.replace(
         '"user_claude_md", "folder_claude_md"', '"user_claude_md", "user_rules", "folder_claude_md"'), encoding="utf-8")
 
-    first = path(PathStart(typical=3))
+    first = path(PathStart(typical=2))
     assert first.error is None
     by_id = {p.id: p for p in first.pieces}
     # The rules file comes first; the missing user CLAUDE.md is nothing.
     assert ids(first)[:3] == ["file:C:/Users/me/.claude/rules/mine.md", "file:D:/work/repo/CLAUDE.md",
                               "file:D:/work/repo/CLAUDE.fork.md"]
     mine = by_id["file:C:/Users/me/.claude/rules/mine.md"]
-    assert mine.arrives == rules and mine.text == "My rules.\n" and "file:C:/Users/me/.claude/CLAUDE.md" not in by_id
+    assert mine.every_time == rules and mine.text == "My rules.\n" and "file:C:/Users/me/.claude/CLAUDE.md" not in by_id
     assert not first.structure.broken_pointers
     # The import in the folder loads; the one outside it is a fact, and the role note it names isn't loaded by it.
-    assert by_id["file:D:/work/repo/CLAUDE.fork.md"].arrives == "imported by file:D:/work/repo/CLAUDE.md"
+    assert by_id["file:D:/work/repo/CLAUDE.fork.md"].every_time == "imported by file:D:/work/repo/CLAUDE.md"
     assert first.structure.skipped_imports == [{
         "from": "file:D:/work/repo/CLAUDE.md", "import": "@D:/vault/_/agent/roles/Coordinator.md",
         "target": "note:_/agent/roles/Coordinator.md", "why": "outside the session's folder"}]
@@ -359,7 +371,7 @@ def test_an_import_the_snapshot_warns_about_stays_on_the_path_and_its_warning_is
     assert home.error is None
     assert ids(home)[:2] == [user, "note:_/agent/Common-rules.md"] and "note:_/agent/roles/Worker.md" in ids(home)
     # The piece itself says it may not load, not only the structure.
-    assert {p.id: p.arrives for p in home.pieces}["note:_/agent/Common-rules.md"] == (
+    assert {p.id: p.every_time for p in home.pieces}["note:_/agent/Common-rules.md"] == (
         f"imported by {user} (may not load: {warn})")
     assert home.structure.import_warnings == [
         {"from": user, "import": "@D:/vault/_/agent/Common-rules.md", "target": "note:_/agent/Common-rules.md",
@@ -374,7 +386,7 @@ def test_an_import_the_snapshot_warns_about_stays_on_the_path_and_its_warning_is
 
 def test_a_snapshot_in_an_unknown_format_is_left_out_with_a_note(vault):
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps({**SNAPSHOT, "format": 3}), encoding="utf-8")
-    result = path(PathStart(typical=3))
+    result = path(PathStart(typical=2))
     assert result.machine is None and any("format 3" in n for n in result.notes)
 
 
@@ -394,12 +406,12 @@ def test_a_folder_the_snapshot_does_not_hold_uses_the_one_above_and_says_so(vaul
 
 def test_texts_past_the_budget_are_withheld_and_come_with_the_next_call(vault, monkeypatch):
     monkeypatch.setattr(apt, "PAGE_CHARS", 25_000)
-    first = path(PathStart(typical=3))
+    first = path(PathStart(typical=2))
     assert len(first.model_dump_json()) <= 25_000
     withheld = [p for p in first.pieces if p.text_withheld]
     assert withheld and any("text_withheld" in n for n in first.notes)
     held = {p.id: p.hash for p in first.pieces if p.text is not None}
-    second = path(PathStart(typical=3), known=held)
+    second = path(PathStart(typical=2), known=held)
     got = {p.id for p in second.pieces if p.text is not None}
     assert got and got <= {p.id for p in withheld}
 
@@ -408,19 +420,19 @@ def test_a_text_no_result_can_carry_comes_in_parts_with_read_from(vault, monkeyp
     monkeypatch.setattr(apt, "PAGE_CHARS", 25_000)
     long_text = "Worker rules, é. " * 2_000
     (vault / "_/agent/roles/Worker.md").write_text(long_text, encoding="utf-8")
-    first = path(PathStart(typical=3))
+    first = path(PathStart(typical=2))
     worker = next(p for p in first.pieces if p.id == "note:_/agent/roles/Worker.md")
     assert worker.text_in_parts is True and worker.text is None and not worker.text_withheld
     assert any("text_in_parts" in n and "read_from" in n for n in first.notes)
     # Holding every other text, the next call still doesn't promise it.
     held = {p.id: p.hash for p in first.pieces if p.id != worker.id}
-    again = path(PathStart(typical=3), known=held)
+    again = path(PathStart(typical=2), known=held)
     assert [p.id for p in again.pieces if p.status == "new"] == [worker.id]
     assert not any("not in this result" in n for n in again.notes)
     # Part by part, each within the budget, until the whole text, whose hash is the piece's.
     got, offset, calls = "", 0, 0
     while offset is not None:
-        part = asyncio.run(apt.agent_path_impl(PathStart(typical=3), None, None,
+        part = asyncio.run(apt.agent_path_impl(PathStart(typical=2), None, None,
                                                ReadFrom(id=worker.id, offset=offset)))
         assert part.error is None and len(part.model_dump_json()) <= 25_000
         assert [p.id for p in part.pieces] == [worker.id] and part.structure is None
@@ -431,9 +443,9 @@ def test_a_text_no_result_can_carry_comes_in_parts_with_read_from(vault, monkeyp
     assert got == long_text and ap.digest(got) == worker.hash and calls > 1
     assert "last part" in part.notes[-1]
     # A piece not on the path, or an offset past the end, is refused.
-    off = asyncio.run(apt.agent_path_impl(PathStart(typical=3), None, None, ReadFrom(id="note:Nope.md")))
+    off = asyncio.run(apt.agent_path_impl(PathStart(typical=2), None, None, ReadFrom(id="note:Nope.md")))
     assert "not on this path" in off.error
-    past = asyncio.run(apt.agent_path_impl(PathStart(typical=3), None, None,
+    past = asyncio.run(apt.agent_path_impl(PathStart(typical=2), None, None,
                                            ReadFrom(id=worker.id, offset=len(long_text) + 1)))
     assert "past the end" in past.error
 
@@ -444,26 +456,27 @@ def test_a_note_in_a_private_folder_keeps_its_text(vault, monkeypatch):
         NOTES["Areas/Repo/Repo.md"].replace("before changing the build.", "before changing the build.\n"
                                             "- Read [[Areas/Repo/Secret (private)/Plan]] before a release."),
         encoding="utf-8")
-    result = path(PathStart(typical=3))
+    result = path(PathStart(typical=2))
     plan = next(p for p in result.pieces if p.id == "note:Areas/Repo/Secret (private)/Plan.md")
     assert plan.private is True and plan.text is None and plan.hash == ap.digest("Private plan.\n")
 
 
 def test_agent_path_refuses_a_start_without_surface_or_typical_agent(vault):
     assert "start needs a surface" in path(PathStart(folder="D:/work/repo")).error
-    assert "give it alone" in path(PathStart(typical=3, surface="claude-ai")).error
+    assert "give it alone" in path(PathStart(typical=2, surface="claude-ai")).error
     assert "No typical agent 9" in path(PathStart(typical=9)).error
 
 
 def test_agent_path_without_start_gives_the_overview(vault):
     result = path()
-    assert [t.number for t in result.typical] == [1, 3]
+    assert [t.number for t in result.typical] == [1, 2]
+    assert all(t.every_time.endswith("tool texts") and " characters in " in t.every_time for t in result.typical)
     worker = result.typical[1]
     assert worker.pieces[0].startswith("1. file:C:/Users/me/.claude/CLAUDE.md")
     # The tool texts as one line, where they load: before the pieces waiting on a moment.
     tools_at = next(i for i, line in enumerate(worker.pieces) if line.startswith(f"{i + 1}. tool:obsidian-mcp:*"))
-    assert "moment: " not in worker.pieces[tools_at - 1] and "moment: " in worker.pieces[-1]
-    assert any("moment: Before working on one of the owner's areas" in line for line in worker.pieces)
+    assert "when: " not in worker.pieces[tools_at - 1] and "when: " in worker.pieces[-1]
+    assert any("when: Before working on one of the owner's areas" in line for line in worker.pieces)
     # Nothing points to these on this vault (memory is read through its mirror's lines, not the note; Notes
     # kept is only mentioned).
     assert result.rule_files_no_path_reaches == [
@@ -499,7 +512,7 @@ def test_reached_by_refuses_an_unknown_machine(vault):
 
 def test_without_a_snapshot_the_pc_side_is_said_to_be_missing(vault):
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").unlink()
-    result = path(PathStart(typical=3))
+    result = path(PathStart(typical=2))
     assert result.machine is None and not any(i.startswith(("file:", "hook:")) for i in ids(result))
     assert any("no PC has written a snapshot" in line for line in result.structure.not_followed)
 
@@ -528,32 +541,27 @@ def test_between_rule_notes_only_the_conventions_pointer_shapes_are_followed(vau
     by_id = {p.id: p for p in result.pieces}
     assert moments(by_id["note:_/agent/Vault conventions.md"])[0] == "When working on one of the owner's areas"
     coordinator = by_id["note:_/agent/roles/Coordinator.md"]
-    assert moments(coordinator)[0] == "While the setup is on trial" and coordinator.always
+    assert moments(coordinator)[0] == "While the setup is on trial" and always(coordinator)
     # The index's moment, cut at a table cell, for its leading link only.
     assert moments(by_id["note:_/agent/guides/coding-practices.md"])[0] == "any code work"
     # A bold title that is a sentence of its own: the next sentence opens the pointer.
     assert moments(by_id["note:_/agent/Where agent instructions go.md"])[0] == "When you merge"
     # A bold label in front, a bare "read", another opening word, a second link on an index line, a rule section's
-    # link in no shape: mentions, not on the path. A link written as code isn't a link at all.
+    # link in no shape: mentions, not on the path (round 5: no longer listed). A link written as code isn't a link.
     for gone in ("note:_/agent/roles/Worker.md", "note:_/agent/Notes kept.md", "note:_/agent/roles/Relay.md",
                  "note:_/agent/Memory reference.md", "section:Areas/Repo/Repo.md#For agents"):
         assert gone not in by_id
-    assert {m["target"] for m in result.structure.rule_file_mentions} == {
-        "_/agent/roles/Worker.md", "_/agent/Notes kept.md", "_/agent/roles/Relay.md", "_/agent/Memory reference.md",
-        "Areas/Repo/Repo.md#For agents"}
-    assert result.structure.mentions_not_followed == 6  # Relay twice: an index line led by `[[#Tasks]]` too
     # A path to nothing is reported, but for a Syncthing version's name (outside the vault).
     assert {b["target"] for b in result.structure.broken_pointers} == {
         "_/agent/Renamed.md", "_/agent/Gone.md", "_/agent/Missing"}
     # A hook's message isn't written under the convention: its plain "Read the vault note …" still points.
-    assert "note:_/agent/roles/Worker.md" in ids(path(PathStart(typical=3)))
+    assert "note:_/agent/roles/Worker.md" in ids(path(PathStart(typical=2)))
 
 
 def test_a_backticked_path_naming_a_kind_of_note_reaches_every_match(vault):
     # P261, P262: a vault path with <placeholder> segments names a kind of note; every match is reached, with the
     # line's moment. When the sentence names a rule section, each match's section is the piece, and only notes
     # that have one count.
-    before = path(PathStart(surface="claude-ai")).structure.mentions_not_followed
     (vault / "_/agent/Vault conventions.md").write_text(
         "Conventions.\n\n## Folder notes\n\n"
         "A folder note is `<folder>/<folder>.md`: one line per subfolder.\n"
@@ -574,9 +582,10 @@ def test_a_backticked_path_naming_a_kind_of_note_reaches_every_match(vault):
     result = path(PathStart(surface="claude-ai"))
     by_id = {p.id: p for p in result.pieces}
     inbox = by_id["section:Inbox/Inbox.md#For agents"]
-    assert moments(inbox) == ["Before filing into a folder or changing it"] and not inbox.always
-    assert inbox.stage == ap.STAGE_NAMES[ap.LATER] and inbox.text == "## For agents\n\n- File by date."
-    assert "matching `<folder>/<folder>.md`" in inbox.arrives
+    assert moments(inbox) == ["Before filing into a folder or changing it"] and not always(inbox)
+    eng = drawn(PathStart(surface="claude-ai"))
+    assert eng[inbox.id].stage == ap.LATER and inbox.text == "## For agents\n\n- File by date."
+    assert "matching `<folder>/<folder>.md`" in eng[inbox.id].arrives
     # Every folder note's For agents section, at any depth, the area's main note's too; a folder note without
     # one brings nothing, and the folder notes aren't read whole.
     assert {"section:Areas/Repo/Repo.md#For agents", "section:Reference/Servers/box/box.md#For agents"} <= set(by_id)
@@ -586,8 +595,7 @@ def test_a_backticked_path_naming_a_kind_of_note_reaches_every_match(vault):
         assert moments(by_id[f"note:Reference/Servers/{machine}/{machine}.md"]) == [
             "Before reaching another machine (SSH, a deploy)"]  # its whole condition, up to "read"
     assert "note:Reference/Servers/pi/old/old.md" not in by_id
-    # The line that only says what a folder note is points to nothing: one mention, not one per match.
-    assert result.structure.mentions_not_followed == before + 1
+    # The line that only says what a folder note is points to nothing: no match is on the path through it.
 
     reached = asyncio.run(apt.agent_path_reached_by_impl("Inbox/Inbox.md", None, None))
     # The note itself is on no path: its rule section is (test bench, 2026-11-19: "the place itself").
@@ -624,11 +632,12 @@ def test_what_hooks_say_at_other_events_is_on_claude_codes_paths(vault):
         "hook:PostToolUse/quiet.py": {"event": "PostToolUse", "matcher": "", "messages": []}}}
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
 
-    result = path(PathStart(typical=3))
+    result = path(PathStart(typical=2))
     by_id = {p.id: p for p in result.pieces}
     guard = by_id["hook:PreToolUse/guard.py#1"]
-    assert moments(guard) == [when] and not guard.always and guard.stage == ap.STAGE_NAMES[ap.LATER]
-    assert guard.where == "D:/vault/_/claude-code-hooks/guard.py" and guard.arrives.startswith(
+    eng = drawn(PathStart(typical=2))[guard.id]
+    assert moments(guard) == [when] and not always(guard) and eng.stage == ap.LATER
+    assert guard.where == "D:/vault/_/claude-code-hooks/guard.py" and eng.arrives.startswith(
         "PreToolUse hook (matcher Bash): ")
     assert guard.hash == ap.digest(guard.text) and "hook:PreToolUse/guard.py#2" in by_id
     assert not any(i.startswith(("hook:PostToolUse/", "hook:UserPromptSubmit/")) for i in by_id)
@@ -654,36 +663,36 @@ def test_the_voice_bridges_texts_reach_the_relay_and_the_sessions_on_the_bridge(
                                                                {"name": "guide", **entry("The guide tool.")}],
               "notes": [{"when": "under a message the relay sends into a session", **entry("[From the bridge]")},
                         {"when": "about once an hour", **entry("[Name check: <session name>]")}]}
-    started = STARTING_POINTS.replace('role = "worker"\nhandwritten = 3', 'started_by = "relay"\nrole = "worker"\n'
-                                      'handwritten = 3')
+    started = STARTING_POINTS.replace('role = "worker"\n', 'started_by = "relay"\nrole = "worker"\n')
     (vault / ap.STARTING_POINTS_PATH).write_text(started + (
-        '\n[[typical]]\nname = "the voice relay"\nsurface = "claude-ai"\nextras = ["relay_notes"]\nhandwritten = 2\n'
+        '\n[[typical]]\nname = "the voice relay"\nsurface = "claude-ai"\nextras = ["relay_notes"]\n'
         '\n[[typical]]\nname = "a session changing the rules"\nsurface = "claude-code"\nfolder = "D:/work/repo"\n'
-        'role = "worker"\nhandwritten = 4\n'), encoding="utf-8")
+        'role = "worker"\n'), encoding="utf-8")
     snap = {**SNAPSHOT, "format": 2, "bridge": bridge}
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
 
     # The relay: the guide with its first bridge result, the rest when the tools load; no notes.
-    relay = {p.id: p for p in path(PathStart(typical=2)).pieces}
-    assert relay["guide:claude-voice"].stage == ap.STAGE_NAMES[ap.BRIDGE] and relay["guide:claude-voice"].always
-    assert relay["tool:claude-voice:health"].stage == ap.STAGE_NAMES[ap.TOOLS]
+    relay = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    assert relay["guide:claude-voice"].every_time == "with the relay's first result from the bridge"
+    assert relay["tool:claude-voice:health"].every_time == ap.STAGE_NAMES[ap.TOOLS]
     assert "instructions:claude-voice" in relay and not any(i.startswith("bridge:") for i in relay)
     # A session the relay started: the guide when it first calls the bridge, the notes at their moments.
-    worker = path(PathStart(typical=3))
+    worker = path(PathStart(typical=2))
     by_id = {p.id: p for p in worker.pieces}
-    assert moments(by_id["guide:claude-voice"]) == ["when it first calls the bridge"] and not by_id["guide:claude-voice"].always
+    assert moments(by_id["guide:claude-voice"]) == ["when it first calls the bridge"] and not always(by_id["guide:claude-voice"])
     note = by_id["bridge:claude-voice#2"]
-    assert moments(note) == ["about once an hour"] and note.stage == ap.STAGE_NAMES[ap.LATER] and not note.always
+    assert moments(note) == ["about once an hour"] and not always(note)
+    assert drawn(PathStart(typical=2))[note.id].stage == ap.LATER
     assert not any("voice bridge" in line for line in worker.structure.not_followed)
     # A session the bridge didn't start: no bridge. A claude.ai chat has it among its connectors: the guide when
     # it first calls the bridge, the tools when they load, no notes (those come under relayed messages).
     assert not any("claude-voice" in i for i in ids(path(PathStart(typical=4))))
     chat = {p.id: p for p in path(PathStart(typical=1)).pieces}
-    assert moments(chat["guide:claude-voice"]) == ["when it first calls the bridge"] and not chat["guide:claude-voice"].always
+    assert moments(chat["guide:claude-voice"]) == ["when it first calls the bridge"] and not always(chat["guide:claude-voice"])
     assert "tool:claude-voice:health" in chat and not any(i.startswith("bridge:") for i in chat)
     # The overview folds each server's tool texts into one line.
     over = path()
-    relay_lines = next(t for t in over.typical if t.number == 2).pieces
+    relay_lines = next(t for t in over.typical if t.number == 3).pieces
     assert any(line.split(". ", 1)[1].startswith("tool:claude-voice:* (3 texts") for line in relay_lines)
     reached = asyncio.run(apt.agent_path_reached_by_impl("bridge:claude-voice", None, None))
     assert {a for hit in reached.reached_by for a in hit["agents"]} == {"a Claude Code worker in a repo"}
@@ -692,7 +701,7 @@ def test_the_voice_bridges_texts_reach_the_relay_and_the_sessions_on_the_bridge(
     for value, said in (({"command": "claude-voice texts", "error": "exit 1"}, "`claude-voice texts` failed on PC: exit 1"),
                         (None, "PC's snapshot says the bridge isn't on that PC")):
         (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps({**snap, "bridge": value}), encoding="utf-8")
-        result = path(PathStart(typical=3))
+        result = path(PathStart(typical=2))
         assert not any("claude-voice" in i for i in ids(result))
         assert any(said in line for line in result.structure.not_followed)
 
@@ -711,40 +720,40 @@ def test_what_comes_with_the_bridges_guide_besides_it_is_placed_where_it_arrives
               "relay": {"guide_note": entry("No need to call guide.", note_when),
                         "opening": entry("The owner's notes for you as the relay.", "before the owner's notes"),
                         "unread": entry("The bridge couldn't read this note (<path>).", unread_when)}}
-    started = STARTING_POINTS.replace('role = "worker"\nhandwritten = 3', 'started_by = "relay"\nrole = "worker"\n'
-                                      'handwritten = 3')
+    started = STARTING_POINTS.replace('role = "worker"\n', 'started_by = "relay"\nrole = "worker"\n')
     (vault / ap.STARTING_POINTS_PATH).write_text(started + (
-        '\n[[typical]]\nname = "the voice relay"\nsurface = "claude-ai"\nextras = ["relay_notes"]\n'
-        'handwritten = 2\n'), encoding="utf-8")
+        '\n[[typical]]\nname = "the voice relay"\nsurface = "claude-ai"\nextras = ["relay_notes"]\n'), encoding="utf-8")
     snap = {**SNAPSHOT, "format": 2, "bridge": bridge}
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
 
     # The relay: the opening before its notes, always; the note on the guide and the unread line at their moments.
-    relay = path(PathStart(typical=2))
+    relay = path(PathStart(typical=3))
     by_id = {p.id: p for p in relay.pieces}
     order = [p.id for p in relay.pieces]
     opening = by_id["bridge:claude-voice#opening"]
-    assert opening.stage == ap.STAGE_NAMES[ap.BRIDGE] and opening.always
+    eng = drawn(PathStart(typical=3))
+    assert eng[opening.id].stage == ap.BRIDGE and always(opening)
     assert order.index("bridge:claude-voice#opening") < order.index("note:_/agent/roles/Relay.md")
     for pid, when in (("bridge:claude-voice#guide_note", note_when), ("bridge:claude-voice#unread", unread_when)):
-        assert by_id[pid].stage == ap.STAGE_NAMES[ap.BRIDGE] and not by_id[pid].always
+        assert eng[pid].stage == ap.BRIDGE and not always(by_id[pid])
         assert moments(by_id[pid]) == [when]
     # A session on the bridge and a claude.ai chat: the note on the guide waits on its moment, as the guide does;
     # the relay's own texts aren't theirs.
-    for n in (3, 1):
+    for n in (2, 1):
         mine = {p.id: p for p in path(PathStart(typical=n)).pieces}
         assert moments(mine["bridge:claude-voice#guide_note"]) == [note_when]
-        assert mine["bridge:claude-voice#guide_note"].stage == mine["guide:claude-voice"].stage
+        eng = drawn(PathStart(typical=n))
+        assert eng["bridge:claude-voice#guide_note"].stage == eng["guide:claude-voice"].stage
         assert "bridge:claude-voice#opening" not in mine and "bridge:claude-voice#unread" not in mine
     # The backward question finds each one by its id.
     reached = asyncio.run(apt.agent_path_reached_by_impl("bridge:claude-voice#opening", None, None))
     assert {a for hit in reached.reached_by for a in hit["agents"]} == {"the voice relay"}
     # Without relay notes, no opening and no unread line; a snapshot without `relay` gives none of the three.
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps({**snap, "relay_notes": []}), encoding="utf-8")
-    assert not {"bridge:claude-voice#opening", "bridge:claude-voice#unread"} & set(ids(path(PathStart(typical=2))))
+    assert not {"bridge:claude-voice#opening", "bridge:claude-voice#unread"} & set(ids(path(PathStart(typical=3))))
     old = {**snap, "bridge": {k: v for k, v in bridge.items() if k != "relay"}}
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(old), encoding="utf-8")
-    assert not any(i.startswith("bridge:claude-voice#") and not i[-1].isdigit() for i in ids(path(PathStart(typical=2))))
+    assert not any(i.startswith("bridge:claude-voice#") and not i[-1].isdigit() for i in ids(path(PathStart(typical=3))))
 
 
 def test_in_a_repo_the_tools_stop_at_what_claude_code_loads(vault):
@@ -764,34 +773,24 @@ def test_in_a_repo_the_tools_stop_at_what_claude_code_loads(vault):
             "docs": {"file:D:/work/repo/docs/parser.md": {"path": "D:/work/repo/docs/parser.md", "hash": "a" * 12,
                                                           "chars": 10}}}
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps(snap), encoding="utf-8")
-    plain = path(PathStart(typical=3))
+    plain = path(PathStart(typical=2))
     (vault / f"{ap.SNAPSHOT_FOLDER}/PC.json").write_text(json.dumps({**snap, "files": SNAPSHOT["files"]}),
                                                          encoding="utf-8")
-    before = path(PathStart(typical=3)).structure.mentions_not_followed
-
     result = plain
     repo = [i for i in ids(result) if i.startswith("file:D:/work/repo/")]
     assert repo == ["file:D:/work/repo/CLAUDE.md"]
-    assert result.structure.mentions_not_followed == before
     coding = next(p for p in result.pieces if p.id == "note:_/agent/guides/coding-practices.md")
-    assert "file:D:/work/repo/CLAUDE.md" in [m.piece for m in coding.moments]
-    by_design = [line for line in result.structure.not_followed if line.startswith("The tools don't follow, by design:")]
-    assert by_design == ["The tools don't follow, by design: in a repo, anything beyond what Claude Code loads "
-                         "there. When one of these matters, point to it from a rule file the tools follow."]
+    assert "file:D:/work/repo/CLAUDE.md" in [x.piece for x in coding.lines]
 
 
-def test_the_overview_says_what_is_left_out_by_design_once(vault):
+def test_what_is_left_out_by_design_is_said_once_in_both_descriptions(vault):
+    # Round 5: it was a line of every path's not_followed, read from the vault's Where agent instructions go.
+    assert apt.BY_DESIGN.startswith("What the path tools don't follow, by design:")
+    assert apt.BY_DESIGN in apt.agent_path.__doc__ and apt.BY_DESIGN in apt.agent_path_reached_by.__doc__
     over = path()
-    assert not any(line.startswith(ap.BY_DESIGN_OPENING) for t in over.typical
-                   for line in t.structure.not_followed or [])
-    assert [line for line in over.across_every_area.not_followed if line.startswith(ap.BY_DESIGN_OPENING)]
-
-
-def test_without_the_vaults_by_design_paragraph_not_followed_says_it_is_missing(vault):
-    (vault / ap.WHERE_NOTE).write_text("## Checking a rule against agent paths\n\n1. A chat.\n", encoding="utf-8")
-    nf = path(PathStart(typical=3)).structure.not_followed
-    assert any(line.startswith("what the tools leave out by design:") and ap.BY_DESIGN_OPENING in line
-               for line in nf)
+    lines = [x for t in over.typical for x in t.structure.not_followed or []] + list(
+        over.across_every_area.not_followed or []) + list(path(PathStart(typical=2)).structure.not_followed or [])
+    assert not any("by design" in x for x in lines)
 
 
 # ── reached_by_no_path: a rule write no path reaches ─────────────────
@@ -1015,25 +1014,10 @@ def test_a_rule_write_says_in_one_line_when_reach_cannot_be_checked(writing):
     assert line.endswith("`agent_path_reached_by` on each changed place tells whether an agent path reaches it.")
 
 
-def test_into_areas_names_shared_and_local_pieces(vault):
-    """`into_areas` speaks of shared and local pieces, keeping "trunk" for its sense in Common-rules (P276)."""
-    common = vault / "_/agent/Common-rules.md"
-    common.write_text(common.read_text(encoding="utf-8") + "- When the build breaks, read [[Areas/Repo/Repo notes]].\n",
-                      encoding="utf-8")
-    st = path(PathStart(typical=1)).structure
-    # One entry per piece reached, with every piece pointing to it (test bench, 2026-11-20).
-    assert {"to": "note:Areas/Repo/Repo notes.md", "kind": "shared into local",
-            "from": ["note:_/agent/Common-rules.md"]} in st.into_areas
-    source = open(ap.__file__, encoding="utf-8").read()
-    assert "local into another local" in source and "leaf into another leaf" not in source
-
-
-# ── The kept drawing: brought up to date, the same as drawn afresh ───
-
 
 def _all_answers():
     """Every kind of call, as JSON: the overview, each typical agent, a work path, two backward questions."""
-    calls = [path(), path(PathStart(typical=1)), path(PathStart(typical=3)),
+    calls = [path(), path(PathStart(typical=1)), path(PathStart(typical=2)),
              path(PathStart(surface="claude-ai"), PathWork(area="Repo")),
              asyncio.run(apt.agent_path_reached_by_impl("_/agent/Common-rules.md", None, None)),
              asyncio.run(apt.agent_path_reached_by_impl("Areas/Repo/Repo.md#For agents", None, None))]
@@ -1190,14 +1174,14 @@ def test_a_folder_the_snapshot_holds_nothing_of_still_loads_what_every_folder_lo
 def test_known_is_kept_by_piece_id_not_by_text(vault):
     # Two pieces with the same text, both on the worker's path: holding one doesn't hold the other.
     _write(vault, "_/agent/guides/coding-practices.md", NOTES["_/agent/Vault conventions.md"])
-    first = path(PathStart(typical=3))
+    first = path(PathStart(typical=2))
     by_id = {p.id: p for p in first.pieces}
     code, conv = by_id["note:_/agent/guides/coding-practices.md"], by_id["note:_/agent/Vault conventions.md"]
     assert code.hash == conv.hash
-    one = path(PathStart(typical=3), known={code.id: code.hash})
+    one = path(PathStart(typical=2), known={code.id: code.hash})
     assert [p.status for p in one.pieces if p.id == conv.id] == ["new"]
     assert code.id not in ids(one)
-    both = path(PathStart(typical=3), known={code.id: code.hash, conv.id: conv.hash})
+    both = path(PathStart(typical=2), known={code.id: code.hash, conv.id: conv.hash})
     assert conv.id not in ids(both) and code.id not in ids(both)
 
 
@@ -1205,25 +1189,28 @@ def test_without_a_role_each_role_note_waits_on_its_role(vault):
     result = path(PathStart(surface="claude-code", folder="D:/work/repo"))
     by_id = {p.id: p for p in result.pieces}
     worker, coordinator = by_id["note:_/agent/roles/Worker.md"], by_id["note:_/agent/roles/Coordinator.md"]
-    assert not worker.always and moments(worker) == ["if its role is Worker"]
-    assert not coordinator.always and moments(coordinator) == ["if its role is Coordinator"]
+    assert not always(worker) and moments(worker) == ["if its role is Worker"]
+    assert not always(coordinator) and moments(coordinator) == ["if its role is Coordinator"]
     assert any(n.startswith("No role given") for n in result.notes)
     picked = path(PathStart(surface="claude-code", folder="D:/work/repo", role="worker"))
-    assert {p.id: p for p in picked.pieces}["note:_/agent/roles/Worker.md"].always
+    assert always({p.id: p for p in picked.pieces}["note:_/agent/roles/Worker.md"])
     assert not any(n.startswith("No role given") for n in picked.notes or [])
 
 
 def test_a_note_read_as_soon_as_a_waiting_piece_points_to_it_waits_on_that_moment(vault):
     _write(vault, "_/agent/Vault conventions.md", NOTES["_/agent/Vault conventions.md"]
            + "\n## Details\n\nRead [[Notes/Some note]] for the details.\n")
-    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    by_id = {p.id: p for p in path(PathStart(typical=2)).pieces}
     some = by_id["note:Notes/Some note.md"]
-    assert not some.always and moments(some) == ["Before working on one of the owner's areas"]
-    # The moment is Common-rules' line, through Vault conventions, which reads it as soon as it is met.
-    assert some.moments[0].piece == "note:_/agent/Common-rules.md"
-    assert some.moments[0].through == ["note:_/agent/Vault conventions.md"]
+    assert not always(some) and moments(some) == ["Before working on one of the owner's areas"]
+    # Its line is Vault conventions', which reads it as soon as it is met: the moment is Common-rules' line, through
+    # Vault conventions (round 5: the result shows the line, the engine keeps the way through).
+    assert [x.piece for x in some.lines] == ["note:_/agent/Vault conventions.md"]
+    eng = drawn(PathStart(typical=2))
+    assert eng[some.id].moments[0]["piece"] == "note:_/agent/Common-rules.md"
+    assert eng[some.id].moments[0]["through"] == ["note:_/agent/Vault conventions.md"]
     # The connector's guide is on every path: every agent on the connector calls get_vault_guide first.
-    assert "calls first" in by_id["guide:obsidian-mcp"].arrives
+    assert "calls first" in by_id["guide:obsidian-mcp"].every_time
 
 
 def test_a_hook_message_holding_a_rule_sections_lines_brings_that_section_at_the_start(vault):
@@ -1233,13 +1220,13 @@ def test_a_hook_message_holding_a_rule_sections_lines_brings_that_section_at_the
     hook["text"] += ("\n\nThis session runs on PC. The rules for working on it, from the `## For agents` section of "
                      "D:\\vault\\Reference\\Servers\\PC\\PC.md:\n- One suite at a time.")
     _snapshot(vault, folders=folders)
-    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    by_id = {p.id: p for p in path(PathStart(typical=2)).pieces}
     rules = by_id["section:Reference/Servers/PC/PC.md#For agents"]
-    assert rules.always and rules.stage == ap.STAGE_NAMES[ap.START_READ]
-    assert rules.arrives == "copied into hook:SessionStart/area-start.py's message"
+    assert always(rules) and drawn(PathStart(typical=2))[rules.id].stage == ap.START_READ
+    assert rules.every_time == "copied into hook:SessionStart/area-start.py's message"
     _write(vault, "Reference/Servers/PC/PC.md", "PC.\n\n## For agents\n\n- Two suites at a time.\n")
-    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
-    assert by_id["section:Reference/Servers/PC/PC.md#For agents"].arrives.endswith(
+    by_id = {p.id: p for p in path(PathStart(typical=2)).pieces}
+    assert by_id["section:Reference/Servers/PC/PC.md#For agents"].every_time.endswith(
         "(the copy differs from the section now)")
 
 
@@ -1250,8 +1237,9 @@ def test_a_backward_question_with_known_says_how_to_get_who_reaches_the_place(va
 
 
 def test_pieces_come_in_the_order_of_their_stages(vault):
-    result = path(PathStart(typical=3))
-    stages = [list(ap.STAGE_NAMES.values()).index(p.stage) for p in result.pieces]
+    result = path(PathStart(typical=2))
+    eng = drawn(PathStart(typical=2))
+    stages = [eng[p.id].stage for p in result.pieces]
     assert stages == sorted(stages)
     # The area's pieces come before what waits on a moment (they were taken in after it).
     order = ids(result)
@@ -1264,7 +1252,7 @@ def test_memorys_mirrored_lines_are_followed_only_where_memory_loads(vault):
     _write(vault, "_/agent/Memory reference.md", NOTES["_/agent/Memory reference.md"]
            + "- At the start of every chat, read [[_/agent/Chat only]].\n")
     _write(vault, "_/agent/Chat only.md", "For chats.\n")
-    worker = ids(path(PathStart(typical=3)))
+    worker = ids(path(PathStart(typical=2)))
     assert "note:_/agent/Memory reference.md" in worker and "note:_/agent/Chat only.md" not in worker
     assert "note:_/agent/Chat only.md" in ids(path(PathStart(surface="claude-ai")))
 
@@ -1293,7 +1281,7 @@ def test_what_a_backward_question_matched_says_whether_the_place_exists(vault):
 
 
 def test_the_main_note_as_open_area_serves_it_has_an_id_of_its_own(vault):
-    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    by_id = {p.id: p for p in path(PathStart(typical=2)).pieces}
     served = by_id["open_area:Areas/Repo/Repo.md"]
     assert "note:Areas/Repo/Repo.md" not in by_id and "## For agents" not in served.text
     assert served.text != NOTES["Areas/Repo/Repo.md"]
@@ -1301,7 +1289,7 @@ def test_the_main_note_as_open_area_serves_it_has_an_id_of_its_own(vault):
 
 def test_a_first_call_counts_its_withheld_texts_in_waiting(vault, monkeypatch):
     monkeypatch.setattr(apt, "PAGE_CHARS", 25_000)
-    first = path(PathStart(typical=3))
+    first = path(PathStart(typical=2))
     withheld = sum(1 for p in first.pieces if p.text_withheld)
     assert withheld and first.waiting == withheld
     assert any(n.startswith(f"{withheld} texts are not in this result") for n in first.notes)
@@ -1310,50 +1298,26 @@ def test_a_first_call_counts_its_withheld_texts_in_waiting(vault, monkeypatch):
 
 
 def test_the_result_names_a_typical_agent_as_the_call_does(vault):
-    result = path(PathStart(typical=3))
-    assert result.start["typical"] == 3 and "handwritten" not in result.start
-    assert not any(" when: " in line for t in path().typical for line in t.pieces)
+    result = path(PathStart(typical=2))
+    assert result.start["typical"] == 2 and "number" not in result.start
+    # Round 5: a waiting piece's line says `when:`, as its field does (it said `moment:` while the field was named so).
+    lines = [line for t in path().typical for line in t.pieces]
+    assert any(" when: " in line for line in lines) and not any(" moment: " in line for line in lines)
 
 
-def test_a_structure_gives_every_check_made_an_empty_list_when_it_found_nothing(vault):
-    st = json.loads(path(PathStart(typical=3)).model_dump_json())["structure"]
-    assert st["skipped_imports"] == [] and st["import_warnings"] == [] and st["broken_pointers"] == []
-    assert st["unplaced_pointers"] == [] and st["not_followed"]
-    # The overview's facts across every area hold two checks only: the others aren't part of it.
+def test_a_structure_lists_faults_only_when_there_are_any(vault):
+    # Round 5: an empty list, and into_areas and the mention lists, are gone.
+    st = json.loads(path(PathStart(typical=2)).model_dump_json())["structure"]
+    assert set(st) <= {"size", "not_followed"} and st["not_followed"]
     across = json.loads(path().model_dump_json())["across_every_area"]
-    assert "skipped_imports" not in across and across["into_areas"] is not None
+    assert set(across) <= {"pointers_outside_rule_files"}
 
-
-def test_one_agents_path_lists_its_mentions_by_note(vault):
-    st = path(PathStart(typical=3)).structure
-    assert {"target": "Notes/Some note.md", "from": ["note:_/agent/Common-rules.md"]} in st.mentions
-    assert st.mentions_not_followed == len(st.mentions) + len(st.rule_file_mentions)
-    assert all(t.structure.mentions is None for t in path().typical)  # the overview keeps the count
-
-
-def test_into_areas_comes_with_a_sentence_on_what_it_is(vault):
-    _write(vault, "_/agent/Common-rules.md", NOTES["_/agent/Common-rules.md"]
-           + "- When the build breaks, read [[Areas/Repo/Repo notes]].\n")
-    result = path(PathStart(typical=3))
-    assert result.structure.into_areas and any(n.startswith("into_areas: ") for n in result.notes)
-    assert any(n.startswith("into_areas: ") for n in path().notes)
-
-
-def test_an_area_that_names_none_is_said_in_the_notes(vault):
-    result = path(PathStart(surface="claude-ai"), PathWork(area="no-such-area"))
-    assert any(n.startswith("work.area 'no-such-area' names no area") for n in result.notes)
-    assert not any(n.startswith("work.area") for n in path(PathStart(surface="claude-ai"), PathWork(area="Repo")).notes or [])
-
-
-def test_agent_paths_description_points_to_the_backward_question(vault):
-    source = " ".join(open(apt.__file__, encoding="utf-8").read().split())
-    assert "Who meets one rule, and the path up to it: `agent_path_reached_by`." in source
 
 
 def test_a_backward_question_reached_through_one_area_shows_that_area(vault):
     for hit in reached_by("Areas/Repo/Not yet.md").reached_by:
         assert "<the area" not in json.dumps(hit), hit
-        assert hit["first_arrives"].startswith("served by open_area on Repo (")
+        assert hit["every_time"].startswith("served by open_area on Repo (")
 
 
 def test_a_claude_md_below_the_start_folder_loads_when_the_session_works_there(vault):
@@ -1364,22 +1328,22 @@ def test_a_claude_md_below_the_start_folder_loads_when_the_session_works_there(v
     files = {**SNAPSHOT["files"], "file:D:/work/repo/sub/CLAUDE.md": {"text": "Sub rules.\n@more.md\n"},
              "file:D:/work/repo/sub/more.md": {"text": "More sub rules.\n"}}
     _snapshot(vault, folders=folders, files=files)
-    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    by_id = {p.id: p for p in path(PathStart(typical=2)).pieces}
     sub = by_id["file:D:/work/repo/sub/CLAUDE.md"]
-    assert not sub.always and moments(sub) == ["when it reads a file in D:/work/repo/sub"]
-    assert sub.arrives == "loaded by Claude Code when it reads a file in D:/work/repo/sub"
+    assert not always(sub) and moments(sub) == ["when it reads a file in D:/work/repo/sub"]
+    assert drawn(PathStart(typical=2))[sub.id].arrives == "loaded by Claude Code when it reads a file in D:/work/repo/sub"
     more = by_id["file:D:/work/repo/sub/more.md"]  # its imports are expanded, waiting on the same moment
-    assert not more.always and moments(more) == moments(sub)
-    assert by_id["file:D:/work/repo/CLAUDE.md"].always  # the start folder's own is loaded at the start
+    assert not always(more) and moments(more) == moments(sub)
+    assert always(by_id["file:D:/work/repo/CLAUDE.md"])  # the start folder's own is loaded at the start
 
 
 def test_a_rule_section_listed_after_its_note_read_whole_says_so(vault):
     _write(vault, "_/agent/Common-rules.md", NOTES["_/agent/Common-rules.md"]
            + "- When the build breaks, read [[Areas/Repo/Repo notes]].\n")
     _write(vault, "Areas/Repo/Repo notes.md", "How the build works.\n\n## For agents\n\n- Ask first.\n")
-    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    by_id = {p.id: p for p in path(PathStart(typical=2)).pieces}
     assert "note:Areas/Repo/Repo notes.md" in by_id
-    assert by_id["section:Areas/Repo/Repo notes.md#For agents"].arrives.endswith(
+    assert by_id["section:Areas/Repo/Repo notes.md#For agents"].every_time.endswith(
         "(its text is in note:Areas/Repo/Repo notes.md, read whole earlier on this path)")
 
 
@@ -1389,19 +1353,19 @@ def test_a_rule_section_listed_after_its_note_read_whole_says_so(vault):
 def test_a_piece_shows_every_moment_leading_to_it_each_with_its_line(vault):
     _write(vault, "_/agent/Common-rules.md", NOTES["_/agent/Common-rules.md"]
            + "- When choosing it, read [[_/agent/Vault conventions]] for the names.\n")
-    result = path(PathStart(typical=3))
+    result = path(PathStart(typical=2))
     conv = {p.id: p for p in result.pieces}["note:_/agent/Vault conventions.md"]
     # In the order the agent meets them, each with the piece holding the line; no route picked.
     assert moments(conv) == ["Before working on one of the owner's areas", "When choosing it"]
-    assert {m.piece for m in conv.moments} == {"note:_/agent/Common-rules.md"}
-    first, second = conv.moments
+    assert {x.piece for x in conv.lines} == {"note:_/agent/Common-rules.md"}
+    first, second = conv.lines
     assert first.line.startswith("- Before working on one of the owner's areas, read")
     # A moment that doesn't stand alone comes with its whole line.
     assert second.line == "- When choosing it, read [[_/agent/Vault conventions]] for the names."
     # The short form (a piece held, or one whose text comes later) keeps only that line.
-    held = path(PathStart(typical=3), known={p.id: p.hash for p in result.pieces})
+    held = path(PathStart(typical=2), known={p.id: p.hash for p in result.pieces})
     assert held.pieces == [] or all(p.id != conv.id for p in held.pieces)
-    short = apt._no_lines(conv.moments)
+    short = apt._no_lines(conv.lines)
     assert short[0].line is None and short[1].line == second.line
 
 
@@ -1421,42 +1385,44 @@ def test_a_pointer_in_a_waiting_note_leads_with_that_notes_moment(vault):
            + "- When in voice, read [[_/agent/roles/Relay]].\n")
     _write(vault, "_/agent/roles/Relay.md", "Relay rules.\n\n- At the start, read [[_/agent/Notes kept]].\n")
     kept = {p.id: p for p in path(PathStart(surface="claude-ai")).pieces}["note:_/agent/Notes kept.md"]
-    assert not kept.always and moments(kept) == ["When in voice"]
-    assert kept.moments[0].piece == "note:_/agent/Common-rules.md"
-    assert kept.moments[0].through == ["note:_/agent/roles/Relay.md"]
+    assert not always(kept) and moments(kept) == ["When in voice"]
+    assert [x.piece for x in kept.lines] == ["note:_/agent/roles/Relay.md"]
+    eng = drawn(PathStart(surface="claude-ai"))["note:_/agent/Notes kept.md"]
+    assert eng.moments[0]["piece"] == "note:_/agent/Common-rules.md"
+    assert eng.moments[0]["through"] == ["note:_/agent/roles/Relay.md"]
     over = path()
-    assert any("note:_/agent/Notes kept.md" in line and "moment: When in voice" in line for line in over.typical[0].pieces)
+    assert any("note:_/agent/Notes kept.md" in line and "when: When in voice" in line for line in over.typical[0].pieces)
 
 
 def test_an_areas_for_agents_arrives_at_the_areas_opening_beside_the_folder_filing_route(vault):
     _write(vault, "_/agent/Vault conventions.md", NOTES["_/agent/Vault conventions.md"]
            + "\n## Folder notes\n\n- Before filing a note into a folder, read the `## For agents` section of its "
              "folder note, `<folder>/<folder>.md`.\n")
-    result = path(PathStart(typical=3))
+    result = path(PathStart(typical=2))
     section = {p.id: p for p in result.pieces}["section:Areas/Repo/Repo.md#For agents"]
     # Met first behind the filing rule (waiting), then at the area's opening: it arrives there, whatever comes.
-    assert section.always and section.stage == ap.STAGE_NAMES[ap.WORK]
-    assert section.arrives == "served by open_area on Repo (for_agents)"
+    assert always(section) and drawn(PathStart(typical=2))[section.id].stage == ap.WORK
+    assert section.every_time == "served by open_area on Repo (for_agents)"
     assert moments(section) == ["when the area is opened", "Before filing a note into a folder"]
-    assert section.moments[0].placed and not section.moments[1].placed
     # What it points to is placed the same way: read as soon as it's met.
-    assert {p.id: p for p in result.pieces}["note:Areas/Repo/Repo notes.md"].always
+    assert always({p.id: p for p in result.pieces}["note:Areas/Repo/Repo notes.md"])
     # The backward question shows the area's own chain: the section, served by open_area.
     hits = reached_by("Areas/Repo/Repo.md#For agents").reached_by
     assert any(hit["via"] == ["section:Areas/Repo/Repo.md#For agents"]
-               and hit["first_arrives"] == "served by open_area on Repo (for_agents)" for hit in hits)
+               and hit["every_time"] == "served by open_area on Repo (for_agents)" for hit in hits)
 
 
 def test_the_guide_brings_the_vaults_conventions_note_with_it(vault, monkeypatch):
     monkeypatch.setattr(tools.settings, "vault_guide_note", "_/agent/Vault conventions.md")
-    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    by_id = {p.id: p for p in path(PathStart(typical=2)).pieces}
     conv, guide = by_id["note:_/agent/Vault conventions.md"], by_id["guide:obsidian-mcp"]
     # On the path as the guide is: every agent on the connector calls get_vault_guide first.
-    assert conv.always and guide.always and conv.stage == guide.stage == ap.STAGE_NAMES[ap.TOOLS]
-    assert conv.arrives.startswith("returned by get_vault_guide after the connector's own guide")
+    eng = drawn(PathStart(typical=2))
+    assert always(conv) and always(guide) and eng[conv.id].stage == eng[guide.id].stage == ap.TOOLS
+    assert conv.every_time.startswith("returned by get_vault_guide after the connector's own guide")
     # The arrival placing it first; the other route after.
     assert moments(conv) == ["when get_vault_guide is called", "Before working on one of the owner's areas"]
-    assert conv.moments[0].piece == "tool:obsidian-mcp:get_vault_guide" and conv.moments[0].placed
+    assert conv.lines[0].piece == "tool:obsidian-mcp:get_vault_guide"
     # It counts as the vault note it is, not as a tool text.
     over = path().typical[1]
     assert any(line.split(". ", 1)[1].startswith("note:_/agent/Vault conventions.md") for line in over.pieces)
@@ -1475,8 +1441,8 @@ def test_a_start_in_a_folder_the_snapshot_doesnt_hold_still_gets_the_session_sta
     hook = by_id["hook:SessionStart/area-start.py"]
     # The hooks are the user's, so they run in every folder; the folder's own part, with this folder's path.
     assert hook.text == everywhere + "\n\nThis session runs in D:\\work\\elsewhere, outside the vault: open_area on D:\\work\\elsewhere."
-    assert "in D:/work/repo, with this folder's path" in hook.arrives
-    assert by_id["note:_/agent/roles/Worker.md"].always
+    assert "in D:/work/repo, with this folder's path" in hook.every_time
+    assert always(by_id["note:_/agent/roles/Worker.md"])
     # A start folder no area lists is said as the start's, not as a work.area naming nothing.
     assert {"from": ["start.folder"], "target": "D:/work/elsewhere",
             "via": f"no area in {ap.AREAS_NOTE} lists it"} in result.structure.broken_pointers
@@ -1488,7 +1454,7 @@ def test_a_worktree_start_loads_its_repos_own_claude_md_not_those_above_it(vault
     folders["D:/work/repo"]["loads"].insert(2, {"id": "file:D:/work/CLAUDE.md", "exists": True,
                                                 "arrives": "loaded at the start by Claude Code (D:/work)"})
     _snapshot(vault, folders=folders, files={**SNAPSHOT["files"], "file:D:/work/CLAUDE.md": {"text": "Work.\n"}})
-    assert "file:D:/work/CLAUDE.md" in ids(path(PathStart(typical=3)))
+    assert "file:D:/work/CLAUDE.md" in ids(path(PathStart(typical=2)))
     tree = path(PathStart(surface="claude-code", folder="D:/work/repo/.claude/worktrees/fix", role="worker"))
     order = ids(tree)
     assert "file:D:/work/repo/CLAUDE.md" in order and "file:D:/work/CLAUDE.md" not in order
@@ -1513,7 +1479,7 @@ def test_reached_by_gives_texts_up_to_the_place_and_every_other_piece_as_a_line(
     # Every other piece on the path, one line each; the tool texts as one line per server.
     assert "note:_/agent/Vault conventions.md" not in with_text
     conv = [line for line in result.other_pieces if line.startswith("note:_/agent/Vault conventions.md  ")]
-    assert len(conv) == 1 and "moment: Before working on one of the owner's areas" in conv[0]
+    assert len(conv) == 1 and "when: Before working on one of the owner's areas" in conv[0]
     assert any(line.startswith("tool:obsidian-mcp:* (") for line in result.other_pieces)
     assert not any(line.startswith("tool:obsidian-mcp:read_note") for line in result.other_pieces)
     assert any(n.startswith("other_pieces: every other piece on those paths") and "read_from={id, offset: 0}" in n
@@ -1564,34 +1530,34 @@ def test_the_structure_is_cut_first_when_that_lets_the_texts_fit(vault):
     from src.plugins.kelno_vault.agent_path_result import PathStructure, ReachedByResult
 
     def result(n):
-        st = PathStructure(into_areas=[{"from": f"open_area:Areas/A{i}/A{i}.md", "to": "note:_/agent/x.md",
-                                        "kind": "shared into local"} for i in range(n)])
+        st = PathStructure(broken_pointers=[{"from": [f"open_area:Areas/A{i}/A{i}.md"], "target": "_/agent/x.md",
+                                             "via": "Read [[_/agent/x]]."} for i in range(n)])
         return ReachedByResult(place="x", pieces=[], structure=st)
 
     big = ap.Piece("note:big.md", ap.LOADED, "loaded", "big.md", "x" * 60_000)
     fits, notes = result(400), []
     apt._trim_structure(fits, [big], notes)
-    assert fits.structure.cut == ["into_areas"] and 0 < len(fits.structure.into_areas) < 400
+    assert fits.structure.cut == ["broken_pointers"] and 0 < len(fits.structure.broken_pointers) < 400
     assert len(fits.model_dump_json()) + 60_010 <= apt.PAGE_CHARS - apt._NOTES_RESERVE
     assert notes and notes[0].startswith(apt._CUT_NOTE)
     # Texts that can't fit anyway come over several calls: the structure stays whole.
     huge = ap.Piece("note:huge.md", ap.LOADED, "loaded", "huge.md", "x" * 90_000)
     whole, notes = result(400), []
     apt._trim_structure(whole, [huge], notes)
-    assert whole.structure.cut is None and len(whole.structure.into_areas) == 400 and not notes
+    assert whole.structure.cut is None and len(whole.structure.broken_pointers) == 400 and not notes
 
 
 def test_a_whole_drawing_says_why(vault):
-    path(PathStart(typical=3))
+    path(PathStart(typical=2))
     (k,) = apt._KEPT.values()
     assert k.cause == "the first drawing since the server started"
     _write(vault, "Areas/Areas.md", NOTES["Areas/Areas.md"] + "| Other | | |\n")
-    path(PathStart(typical=3))
+    path(PathStart(typical=2))
     (k,) = apt._KEPT.values()
     assert k.cause == "changed: Areas/Areas.md" and k.reach_map().cause == k.cause
     # An update draws only what changed, and has no cause to give.
     _write(vault, "_/agent/roles/Worker.md", "Worker rules, again.\n")
-    path(PathStart(typical=3))
+    path(PathStart(typical=2))
     (k,) = apt._KEPT.values()
     assert k.cause == "" and k.redrawn < len(k.runs)
     before = ap.ServedTexts([("a", "one"), ("b", "two")], "i", "g", "o")
@@ -1621,13 +1587,14 @@ def test_the_tool_texts_come_before_the_pieces_waiting_on_a_moment(vault):
     common = vault / "_/agent/Common-rules.md"
     common.write_text(common.read_text(encoding="utf-8") + "- When the build breaks, read [[_/agent/Notes kept]].\n",
                       encoding="utf-8")
-    stages = [p.stage for p in path(PathStart(typical=1)).pieces]
-    tools_end = max(i for i, s in enumerate(stages) if s == ap.STAGE_NAMES[ap.TOOLS])
-    assert stages.index(ap.STAGE_NAMES[ap.LATER]) > tools_end
+    eng = drawn(PathStart(typical=1))
+    stages = [eng[p.id].stage for p in path(PathStart(typical=1)).pieces]
+    tools_end = max(i for i, s in enumerate(stages) if s == ap.TOOLS)
+    assert stages.index(ap.LATER) > tools_end
     # The overview's line for the tool texts stands where they come.
     lines = path().typical[0].pieces
     tools_at = next(i for i, line in enumerate(lines) if ". tool:obsidian-mcp:* (" in line)
-    assert tools_at < next(i for i, line in enumerate(lines) if "  moment: " in line)
+    assert tools_at < next(i for i, line in enumerate(lines) if "  when: " in line)
 
 
 def test_a_piece_with_another_text_on_another_path_is_a_line_of_its_own(vault):
@@ -1649,7 +1616,7 @@ def test_a_piece_with_another_text_on_another_path_is_a_line_of_its_own(vault):
 def test_an_area_without_for_agents_says_so(vault):
     _write(vault, "Areas/Repo/Repo.md", NOTES["Areas/Repo/Repo.md"].replace(
         "## For agents\n\n- Read [[Areas/Repo/Repo notes]] before changing the build.\n\n", ""))
-    result = path(PathStart(typical=3))
+    result = path(PathStart(typical=2))
     assert "section:Areas/Repo/Repo.md#For agents" not in ids(result)
     assert any(x.startswith("Repo's `## For agents`: its main note, Areas/Repo/Repo.md, has none")
                for x in result.structure.not_followed)
@@ -1680,13 +1647,12 @@ def test_a_long_line_is_cut_around_its_pointer():
 
 
 def test_the_arrival_that_places_a_piece_comes_first(vault):
-    by_id = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    by_id = {p.id: p for p in path(PathStart(typical=2)).pieces}
     rules = by_id["section:Areas/Repo/Repo.md#For agents"]
-    first = rules.moments[0]
-    assert (first.moment, first.piece, first.placed) == ("when the area is opened", "tool:obsidian-mcp:open_area", True)
-    assert all(not m.placed for m in rules.moments[1:])
+    first = rules.lines[0]
+    assert (first.when, first.piece) == ("when the area is opened", "tool:obsidian-mcp:open_area")
     worker = by_id["note:_/agent/roles/Worker.md"]
-    assert worker.moments[0].piece == "hook:SessionStart/area-start.py" and worker.moments[0].placed
+    assert worker.lines[0].piece == "hook:SessionStart/area-start.py"
 
 
 def test_a_line_in_a_waiting_piece_says_after_which_moment(vault):
@@ -1694,10 +1660,15 @@ def test_a_line_in_a_waiting_piece_says_after_which_moment(vault):
     _write(vault, "Areas/Repo/Repo.md", NOTES["Areas/Repo/Repo.md"].replace("code_project: true", "code_project: false"))
     by_id = {p.id: p for p in path(PathStart(typical=1)).pieces}
     guide = by_id["note:_/agent/guides/coding-practices.md"]
-    assert not guide.always
+    assert not always(guide)
     kept = by_id["note:_/agent/Notes kept.md"]
-    (m,) = [m for m in kept.moments if m.piece == "note:_/agent/guides/coding-practices.md"]
-    assert m.moment == "When the tests fail" and m.after == guide.moments[0].moment == "any code work"
+    (m,) = [x for x in kept.lines if x.piece == "note:_/agent/guides/coding-practices.md"]
+    # The line's own moment; the piece it sits in waits on its own, which comes first (round 5: the result no longer
+    # says `after`; the engine still knows it).
+    assert m.when == "When the tests fail" and guide.when == ["any code work"]
+    eng = drawn(PathStart(typical=1))["note:_/agent/Notes kept.md"]
+    (e,) = [x for x in eng.moments if x["piece"] == "note:_/agent/guides/coding-practices.md"]
+    assert e["after"] == "any code work"
 
 
 # --- The helper process ends with the server ------------------------------------------------------------------
@@ -1762,7 +1733,7 @@ def test_a_section_place_gives_the_section_as_the_place_and_its_note_as_a_line(v
     part = by_id["section:_/agent/roles/Worker.md#Landing"]
     # The section, to the next heading of its level, at any level.
     assert part.text == "## Landing\n\nAsk first.\n\n### Detail\n\nMore.\n"
-    assert part.hash == ap.digest(part.text) and part.arrives.startswith("in note:_/agent/roles/Worker.md, which is ")
+    assert part.hash == ap.digest(part.text) and part.every_time.startswith("in note:_/agent/roles/Worker.md, which is ")
     assert "note:_/agent/roles/Worker.md" not in by_id
     (line,) = [x for x in result.other_pieces if x.startswith("note:_/agent/roles/Worker.md  ")]
     assert line.endswith("(the place's note: the place is its section, given in pieces)")
@@ -1786,18 +1757,14 @@ def test_reached_by_tags_each_piece_with_the_groups_that_have_it(vault):
     # Two lines of memory point to it: one piece pointing, said once.
     assert groups[chat]["pointed_to_by"] == ["memory:/preferences.md"]
     by_id = {p.id: p for p in result.pieces}
-    assert by_id["file:C:/Users/me/.claude/CLAUDE.md"].groups == [code]
-    assert by_id["memory:/preferences.md"].groups == [chat]
-    # Read at the start in a chat, loaded at the start in Claude Code: the other group's stage is said.
+    assert by_id["file:C:/Users/me/.claude/CLAUDE.md"].every_time_for == [code]
+    assert by_id["memory:/preferences.md"].every_time_for == [chat]
+    # Every time for both groups: said as one list (round 5: groups and other_stages gave way to these).
     common = by_id["note:_/agent/Common-rules.md"]
-    assert common.groups == sorted([chat, code])
-    (other,) = common.other_stages
-    shown, then = common.stage, other["stage"]
-    assert {shown, then} == {ap.STAGE_NAMES[ap.LOADED], ap.STAGE_NAMES[ap.START_READ]} and other["always"]
-    assert other["groups"] == [code if shown == ap.STAGE_NAMES[ap.START_READ] else chat]
-    assert apt._GROUPS_NOTE in result.notes and all(n in result.notes for n in apt._FIELD_NOTES)
+    assert common.every_time_for == sorted([chat, code]) and common.when_for is None
+    assert apt._GROUPS_NOTE in result.notes and apt._FIELD_NOTE in result.notes
     again = reached_by("_/agent/Common-rules.md", known={p.id: p.hash for p in result.pieces})
-    assert not any(n in (again.notes or []) for n in apt._FIELD_NOTES)
+    assert apt._FIELD_NOTE not in (again.notes or [])
 
 
 def test_what_open_area_serves_with_the_place_comes_with_its_text(vault):
@@ -1820,10 +1787,10 @@ def test_no_tool_text_comes_while_a_rule_piece_waits(vault):
 
 
 def test_the_field_notes_come_with_a_first_call(vault):
-    first = path(PathStart(typical=3))
-    assert all(n in first.notes for n in apt._FIELD_NOTES)
-    again = path(PathStart(typical=3), known={p.id: p.hash for p in first.pieces})
-    assert not any(n in (again.notes or []) for n in apt._FIELD_NOTES)
+    first = path(PathStart(typical=2))
+    assert apt._FIELD_NOTE in first.notes
+    again = path(PathStart(typical=2), known={p.id: p.hash for p in first.pieces})
+    assert apt._FIELD_NOTE not in (again.notes or [])
 
 
 def test_pointers_alike_but_for_where_they_come_from_are_one_entry():
@@ -1848,8 +1815,8 @@ def test_pointers_alike_but_for_where_they_come_from_are_one_entry():
 def test_one_note_says_which_structure_lists_are_cut():
     from src.plugins.kelno_vault.agent_path_result import PathStructure
 
-    notes, st = ["x"], PathStructure(cut=["into_areas"])
+    notes, st = ["x"], PathStructure(cut=["broken_pointers"])
     apt._note_cut(notes, st)
-    st.cut = ["into_areas", "mentions"]
+    st.cut = ["broken_pointers", "unplaced_pointers"]
     apt._note_cut(notes, st)
-    assert notes == ["x", f"{apt._CUT_NOTE} (into_areas, mentions)."]
+    assert notes == ["x", f"{apt._CUT_NOTE} (broken_pointers, unplaced_pointers)."]

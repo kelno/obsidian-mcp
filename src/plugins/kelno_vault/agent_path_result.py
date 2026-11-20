@@ -48,25 +48,19 @@ class ReadFrom(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
-# One moment that leads to a piece.
-class PieceMoment(_OmitNone):
-    #: When the line says to read it: its opening (At the start, While, When, Before) or the guide index's "when to
-    #: read it"; "when met" for a line that says to read it with no moment (outside the rule notes); "unplaced"
-    #: when such a line doesn't say; or how it comes with no line (a hook's message, a nested CLAUDE.md).
-    moment: str
-    #: The piece holding the line.
-    piece: str | None = None
-    #: The line, word for word: whole when the moment doesn't read right without it ("When choosing it"), else the
+# One line pointing to a piece (round 5: `stage`, `always`, `placed`, `after` and `through` gave way to "every
+# time" or "when", with every pointing line).
+class PieceLine(_OmitNone):
+    #: The piece the line sits in.
+    piece: str
+    #: The line, word for word: whole when its moment doesn't read right without it ("When choosing it"), else the
     #: part holding the moment and the link, about 240 characters, cut with "…". In short form, only for a moment
     #: that doesn't read right without it.
     line: str | None = None
-    #: The pieces between `piece` and this one: a line that says to read it as soon as it is met (or "At the
-    #: start"), in a piece that itself waits on a moment, leads here when that piece's moment comes.
-    through: list[str] | None = None
-    #: The arrival that places the piece (its stage and `always`), first in the list; the others are other routes.
-    placed: bool | None = None
-    #: For a line in a piece that itself waits on a moment: that piece's moment, which comes first.
-    after: str | None = None
+    #: When the line says to read it: its opening (At the start, While, When, Before) or the guide index's "when to
+    #: read it"; "when met" for a line that says to read it with no moment (outside the rule notes); "unplaced"
+    #: when such a line doesn't say.
+    when: str
 
 
 class PathPiece(_OmitNone):
@@ -74,27 +68,22 @@ class PathPiece(_OmitNone):
     #: note as `open_area` serves it), `file:<PC path>` (outside the vault), `hook:<event>/<script>`, `memory:/<file>`, `tool:obsidian-mcp:<tool>`, `instructions:obsidian-mcp`,
     #: `guide:obsidian-mcp`.
     id: str
-    #: When it arrives: loaded at the start, session-start hook, read at the start, at the first bridge
-    #: result, when the work's area is opened, when the connector's tools load, when its moment comes.
-    stage: str
-    #: How it arrives first, in words: what loads it or points to it. Left out, with `where`, `chars` and the
-    #: moments' lines, for a piece you hold (`unchanged`) and one whose text comes later (`text_withheld`): the
-    #: short form, its details coming with its text.
-    arrives: str | None = None
-    #: False when it arrives only if one of its moments comes (`moments`).
-    always: bool
-    #: On a backward question: the groups (`reached_by`'s `group`) whose agents have it on their path.
-    groups: list[int] | None = None
-    #: On a backward question: where a group meets it at another stage than `stage`, `{groups, stage, always}`.
-    other_stages: list[dict] | None = None
+    #: On the path whatever the conversation brings: what brings it.
+    every_time: str | None = None
+    #: Otherwise, the moments that bring it, in the order the agent meets them.
+    when: list[str] | None = None
+    #: On a backward question: the groups (`reached_by`'s `group`) whose agents have it every time, and those
+    #: whose agents have it only when its moment comes.
+    every_time_for: list[int] | None = None
+    when_for: list[int] | None = None
     #: Where it lives: a path on the PC, a vault path, or this server.
     where: str | None = None
     chars: int | None = None
     #: The first 12 hex digits of the sha256 of its text: the same hash means the same text.
     hash: str
-    #: Every moment that leads to it, in the order the agent meets them, each with the line it comes from; none
-    #: for what arrives with no line (loaded at the start, a session-start hook, what open_area serves).
-    moments: list[PieceMoment] | None = None
+    #: Every line pointing to it, in the order the agent meets them; none for what no line brings (loaded at the
+    #: start, a session-start hook, what open_area serves).
+    lines: list[PieceLine] | None = None
     #: With `known`: new, changed or unchanged against the hash you passed.
     status: Literal["new", "changed", "unchanged"] | None = None
     #: The piece's text: given when it is new or changed (always, without `known`), within the size budget.
@@ -112,26 +101,14 @@ class PathPiece(_OmitNone):
     private: bool | None = None
 
 
-# Facts about the structure itself, found on the way; judging them is left to the caller.
+# The faults found on the way, each list only when it holds any (round 5: faults only), and the path's size.
 class PathStructure(_OmitNone):
-    #: Characters and pieces: always on the path, arriving only when their moment comes, and tool texts.
+    #: Characters and pieces: on the path every time, arriving only when their moment comes, and tool texts.
     size: dict[str, int] | None = None
     #: Pointers whose line doesn't say when to read the note; those alike but for `from` as one, `from` a list.
     unplaced_pointers: list[dict] | None = None
     #: Rule files reached through a pointer outside every rule file; `from` a list, as above.
     pointers_outside_rule_files: list[dict] | None = None
-    #: Pointers into an area's local pieces from a shared one, or from one area's local pieces into another's: one
-    #: entry per piece reached and kind, `{to, kind, from: [...]}`.
-    into_areas: list[dict] | None = None
-    #: Links that are mentions, not pointers: counted, not followed.
-    mentions_not_followed: int | None = None
-    #: On one agent's path, those to notes that aren't rule files, one entry per note (`{target, from: [...]}`),
-    #: the pieces linking to it; the line is in the text of the piece it comes from.
-    mentions: list[dict] | None = None
-    #: Of those, the links to rule files: between rule notes, a link in none of the pointer shapes is a
-    #: mention, not a pointer, so the rule file it names is not put on the path. One entry per rule file
-    #: (`{target, from: [...]}`), the notes linking to it.
-    rule_file_mentions: list[dict] | None = None
     #: Links and vault paths to nothing found; `from` a list, as above.
     broken_pointers: list[dict] | None = None
     #: Imports Claude Code doesn't load (`{from, import, target, why}`): one in a project's file resolving outside
@@ -140,9 +117,9 @@ class PathStructure(_OmitNone):
     #: Imports the PC's snapshot warns about (`{from, import, target, warning}`), such as an import line right next
     #: to another one, which failed to load in tests. Their files stay on the path, as the snapshot lists them.
     import_warnings: list[dict] | None = None
-    #: What the path leaves out: what cannot be followed yet, and what isn't followed by design.
+    #: What this path leaves out that it should hold (a failed command, a missing snapshot); what the tools leave
+    #: out by design is in the tool's description.
     not_followed: list[str] | None = None
-    #: An empty list is a check made that found nothing; a list left out isn't part of this structure.
     #: The lists above cut short to keep the result within its size budget, if any.
     cut: list[str] | None = None
 
@@ -151,7 +128,9 @@ class PathStructure(_OmitNone):
 class TypicalPath(_OmitNone):
     number: int | None = None
     name: str
-    #: `<n>. <id>  <chars> chars  #<hash>`, with `[status]` against `known` and `moment: <moments>` for a piece
+    #: What it reads every time: `<chars> characters in <n> pieces`.
+    every_time: str | None = None
+    #: `<n>. <id>  <chars> chars  #<hash>`, with `[status]` against `known` and `when: <moments>` for a piece
     #: that arrives only when one of its moments comes (` | ` between them), without their lines: those come with
     #: `agent_path` for that agent.
     pieces: list[str]

@@ -39,7 +39,7 @@ from src.plugins.kelno_vault import rule_files as _rule_files
 from src.plugins.kelno_vault.agent_path_result import (
     AgentPathResult,
     PathPiece,
-    PieceMoment,
+    PieceLine,
     PathStart,
     PathStructure,
     PathWork,
@@ -387,7 +387,7 @@ _SECTIONS: dict[tuple[str, tuple[str, ...]], dict[str, tuple]] = {}
 
 
 def _run_key(s: ap.Start, w: ap.Work) -> tuple:
-    return (s.surface, s.folder, s.started_by, s.role, tuple(s.extras), s.name, s.handwritten, w.area, w.kind)
+    return (s.surface, s.folder, s.started_by, s.role, tuple(s.extras), s.name, s.number, w.area, w.kind)
 
 
 @dataclass
@@ -835,29 +835,47 @@ def _piece(p: ap.Piece, known: dict | None) -> PathPiece:
     status = None if known is None else ("unchanged" if known.get(p.id) == p.hash
                                          else "changed" if p.id in known else "new")
     path = p.id.split(":", 1)[1].split("#")[0] if p.id.startswith(ap.VAULT_IDS) else None
-    moments = _moments(p)
+    lines = _lines(p)
+    every_time, when = _every_time_or_when(p)
     if status == "unchanged":
-        # The caller holds this piece from an earlier call: what places it on the path, and its hash, are
-        # enough; the rest (where, how, the pointing lines) came then. Keeps a call with `known` small, so
+        # The caller holds this piece from an earlier call: its moments, if it waits on one, and its hash are
+        # enough; the rest (what brings it, where, the pointing lines) came then. Keeps a call with `known` small, so
         # withheld texts always find room on the next one.
-        return PathPiece(id=p.id, stage=ap.STAGE_NAMES[p.stage], always=p.always, moments=_no_lines(moments),
-                         hash=p.hash, status=status)
+        return PathPiece(id=p.id, when=when, lines=_no_lines(lines), hash=p.hash, status=status)
     return PathPiece(
-        id=p.id, stage=ap.STAGE_NAMES[p.stage], arrives=p.arrives, always=p.always, where=p.where, chars=p.chars,
-        hash=p.hash, moments=moments, status=status,
-        private=True if path and private_folders.is_private(path) else None)
+        id=p.id, every_time=every_time, when=when, where=p.where, chars=p.chars, hash=p.hash, lines=lines,
+        status=status, private=True if path and private_folders.is_private(path) else None)
 
 
-def _moments(p: ap.Piece) -> list[PieceMoment] | None:
-    """The piece's moments, each line whole when its moment doesn't stand alone (`ap.stands_alone`), else the part
-    holding the moment and the link (`_window`)."""
-    out = []
+def _every_time_or_when(p: ap.Piece) -> tuple[str | None, list[str] | None]:
+    """A piece on the path whatever the conversation brings: what brings it; otherwise the moments that bring it, each
+    once, in the order met (round 5: `stage`, `always` and `arrives` gave way to these)."""
+    if p.always:
+        return p.arrives, None
+    when: list[str] = []
     for e in p.moments:
-        line = e["line"]
+        if e["moment"] not in when:
+            when.append(e["moment"])
+    return None, when or ["unplaced"]
+
+
+def _lines(p: ap.Piece) -> list[PieceLine] | None:
+    """Every line pointing to the piece, with the piece it sits in and its moment; the line whole when its moment
+    doesn't stand alone (`ap.stands_alone`), else the part holding the moment and the link (`_window`). A line read
+    as soon as it is met, in a piece that waits on a moment, gives that piece's moment (round 5: the line is the one
+    pointing here, where `through` named the pieces between)."""
+    direct = {src: line for _, src, line in p.arrivals if src}
+    out: list[PieceLine] = []
+    for e in p.moments:
+        if not e["piece"]:
+            continue
+        src = e["through"][-1] if e["through"] else e["piece"]
+        line = direct.get(src, e["line"]) if e["through"] else e["line"]
         if line:
             line = " ".join(line.split()) if not ap.stands_alone(e["moment"]) else _window(line, e["moment"], p.id)
-        out.append(PieceMoment(moment=e["moment"], piece=e["piece"], line=line, through=e["through"] or None,
-                               placed=e.get("placed"), after=e.get("after")))
+        x = PieceLine(piece=src, line=line, when=e["moment"])
+        if x not in out:
+            out.append(x)
     return out or None
 
 
@@ -888,24 +906,24 @@ def _window(line: str, moment: str | None, pid: str) -> str:
     return head + " … " + flat[a:b] + ("…" if b < len(flat) else "")
 
 
-def _no_lines(moments: list[PieceMoment] | None) -> list[PieceMoment] | None:
-    """The short form's moments: without their lines, except a moment that doesn't read right without its line
-    ("When choosing it"); the lines come with the piece's details (owner: the short form stays short)."""
-    if not moments:
-        return moments
-    return [m if not ap.stands_alone(m.moment) else m.model_copy(update={"line": None}) for m in moments]
+def _no_lines(lines: list[PieceLine] | None) -> list[PieceLine] | None:
+    """The short form's lines: without their text, except one whose moment doesn't read right without it ("When
+    choosing it"); the lines come with the piece's details (owner: the short form stays short)."""
+    if not lines:
+        return lines
+    return [x if not ap.stands_alone(x.when) else x.model_copy(update={"line": None}) for x in lines]
 
 
-_DETAILS = ("arrives", "where", "chars")
+_DETAILS = ("every_time", "where", "chars")
 
 
 def _short_form(o: PathPiece) -> dict:
-    """Strip a piece to what places it on the path and its hash; the details taken, to give back with its
-    text."""
-    taken = {k: getattr(o, k) for k in (*_DETAILS, "moments")}
+    """Strip a piece to its moments, if it waits on one, and its hash (no `when`: it is there every time); the details
+    taken, to give back with its text (what brings it, `every_time`, longer than the old `stage`, filled a page)."""
+    taken = {k: getattr(o, k) for k in (*_DETAILS, "lines")}
     for k in _DETAILS:
         setattr(o, k, None)
-    o.moments = _no_lines(o.moments)
+    o.lines = _no_lines(o.lines)
     return taken
 
 
@@ -914,7 +932,8 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
     """Fill in the texts of new or changed pieces, in path order, while the result stays within the budget.
 
     Sets `result.notes`. A first call (no `known`) lists every piece: those whose text waits for a later call
-    in short form (id, stage, always, moments without their lines, hash), their details (how it arrives, where,
+    in short form (id, `when` for one waiting on a moment, lines without their text, hash), their details (what
+    brings it, where,
     the pointing lines) coming with their text, so the whole path shows at once. A call with `known` lists only what it brings:
     the pieces with their text this time, those now marked in parts, and new private ones; the pieces held
     and those still waiting were in the first call, so they are left out and counted (`waiting`), and a removal
@@ -1012,8 +1031,9 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
         n = withheld()
         if n:
             lines.append(f"{texts(n)} not in this result (text_withheld, counted in waiting): those pieces come in "
-                         "short form, their moments without the lines they come from (a moment that doesn't read "
-                         "right alone keeps its line). Call again with the same arguments, passing in known the hash of every piece "
+                         "short form: `when` for one waiting on a moment (none: it is there every time), the lines "
+                         "pointing to it without their text (a moment that doesn't read right alone keeps its line). "
+                         "Call again with the same arguments, passing in known the hash of every piece "
                          "whose text you now hold, and only what's new comes next, with these texts (read_from is "
                          + ("for a text marked text_in_parts, or a piece listed in other_pieces)."
                             if hasattr(result, "other_pieces") else "only for a text marked text_in_parts)."))
@@ -1060,8 +1080,7 @@ def _fit_metadata(result, notes: list[str], cap: int) -> None:
         dropped += 1
     st = result.structure
     if st is not None:
-        for name in ("mentions", "rule_file_mentions", "unplaced_pointers", "pointers_outside_rule_files",
-                     "into_areas", "broken_pointers", "skipped_imports", "import_warnings"):
+        for name in _FAULT_LISTS:
             items = getattr(st, name)
             while items and size() > cap:
                 items.pop()
@@ -1079,11 +1098,9 @@ def _fit_overview(result) -> None:
     back, then those across every area, each cut said in its `cut` and in the notes."""
     cap = PAGE_CHARS - _NOTES_RESERVE
     structures = [t.structure for t in reversed(result.typical or [])] + [result.across_every_area]
-    names = ("rule_file_mentions", "unplaced_pointers", "pointers_outside_rule_files", "into_areas",
-             "broken_pointers", "skipped_imports", "import_warnings")
     cut = False
     for st in structures:
-        for name in names:
+        for name in _FAULT_LISTS:
             items = getattr(st, name) if st else None
             while items and len(result.model_dump_json()) > cap:
                 items.pop()
@@ -1207,34 +1224,9 @@ def _left_path(known: dict | None, on_path) -> list[str] | None:
 
 
 def _clip_vias(items: list[dict] | None) -> list[dict] | None:
-    """The list with each line cut at `_VIA_MAX`; an empty list stays one (checked, nothing found)."""
+    """The list with each line cut at `_VIA_MAX`."""
     return None if items is None else [{**x, "via": _short(x["via"], _VIA_MAX)} if x.get("via") else x
                                        for x in items]
-
-
-def _grouped_mentions(ms: list[dict] | None) -> list[dict] | None:
-    """The links to rule files that are mentions, one entry per rule file with the notes linking to it: a
-    path meets sixty of them, and quoting each line ran past the result's budget (the line is in the text of
-    the note it comes from)."""
-    out: dict[str, list[str]] = {}
-    for m in ms or []:
-        froms = out.setdefault(m["target"], [])
-        if m["from"] not in froms:
-            froms.append(m["from"])
-    return None if ms is None else [{"target": t, "from": f} for t, f in out.items()]
-
-
-def _grouped_into(items: list[dict] | None) -> list[dict] | None:
-    """`into_areas`, one entry per piece reached and kind, `{to, kind, from: [...]}` (test bench, 2026-11-20: the
-    pointer to converting an area, in 26 area main notes, took 26 entries and the structure half a first page)."""
-    if items is None:
-        return None
-    out: dict[tuple, dict] = {}
-    for x in items:
-        e = out.setdefault((x["to"], x["kind"]), {"to": x["to"], "kind": x["kind"], "from": []})
-        if x["from"] not in e["from"]:
-            e["from"].append(x["from"])
-    return list(out.values())
 
 
 def _grouped_from(items: list[dict] | None) -> list[dict] | None:
@@ -1251,35 +1243,24 @@ def _grouped_from(items: list[dict] | None) -> list[dict] | None:
     return list(out.values())
 
 
-def _structure(st: dict, mentions: bool = False) -> PathStructure:
-    """The structure as the result gives it: every check made, an empty list when it found nothing (a cold reader
-    couldn't tell a check left out from one that found nothing); `mentions` listed on one agent's path only."""
-    return PathStructure(
+#: The structure's lists of faults.
+_FAULT_LISTS = ("unplaced_pointers", "pointers_outside_rule_files", "broken_pointers", "skipped_imports",
+                "import_warnings")
+
+
+def _structure(st: dict) -> PathStructure:
+    """The structure as the result gives it: the path's size, and each list of faults only when it holds any (round
+    5: faults only; `into_areas` and the mention lists went, and empty lists with them)."""
+    out = PathStructure(
         size=st.get("size"), unplaced_pointers=_grouped_from(_clip_vias(st.get("unplaced_pointers"))),
         pointers_outside_rule_files=_grouped_from(_clip_vias(st.get("pointers_outside_rule_files"))),
-        into_areas=_grouped_into(st.get("into_areas")), mentions_not_followed=st.get("mentions_not_followed"),
-        mentions=_grouped_mentions(st.get("mentions")) if mentions else None,
-        rule_file_mentions=_grouped_mentions(st.get("rule_file_mentions")),
         broken_pointers=_grouped_from(_clip_vias(st.get("broken_pointers"))),
         skipped_imports=st.get("skipped_imports"), import_warnings=st.get("import_warnings"),
         not_followed=st.get("not_followed"))
-
-
-#: Said once with a structure listing `into_areas`: a cold reader took them for faults (test bench, 2026-11-19).
-_INTO_AREAS_NOTE = ("into_areas: pointers bringing one area's own pieces to agents outside it (most: a shared rule "
-                    "pointing to every folder note's `## For agents`); facts, not faults.")
-
-
-def _structure_notes(*structures) -> list[str]:
-    """The notes a result's structures call for: what `into_areas` is, when one lists any."""
-    return [_INTO_AREAS_NOTE] if any(st is not None and st.into_areas for st in structures) else []
-
-
-def _drop_empty(st: PathStructure) -> None:
-    """Leave out the structure's empty lists (the overview's typical agents, where room is short)."""
-    for name, value in list(vars(st).items()):
+    for name, value in list(vars(out).items()):
         if value == []:
-            setattr(st, name, None)
+            setattr(out, name, None)
+    return out
 
 
 def _short(s: str | None, n: int) -> str:
@@ -1287,7 +1268,7 @@ def _short(s: str | None, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def _overview_moments(p: ap.Piece) -> str:
+def _overview_when(p: ap.Piece) -> str:
     """A waiting piece's moments on one line, without their lines (room: five paths side by side, owner: the short
     form stays short): each once, ` | ` between them."""
     out = []
@@ -1304,7 +1285,7 @@ def _overview_lines(b: ap.PathBuilder, known: dict | None) -> list[str]:
 
 
 def _piece_lines(pieces: list[ap.Piece], known: dict | None, numbered: bool, tag=None) -> list[str]:
-    """One line per piece (`<id>  <chars> chars  #<hash>`, its status against `known`, its moments when it waits
+    """One line per piece (`<id>  <chars> chars  #<hash>`, its status against `known`, `when:` its moments when it waits
     on one), each server's tool texts as one line, where its first one comes; `tag(pieces)`, when given, ends each
     line."""
     tag = tag or (lambda ps: "")
@@ -1319,7 +1300,7 @@ def _piece_lines(pieces: list[ap.Piece], known: dict | None, numbered: bool, tag
             continue
         status = "" if known is None else (" [unchanged]" if known.get(p.id) == p.hash
                                            else " [changed]" if p.id in known else " [new]")
-        when = "" if p.always else f"  moment: {_overview_moments(p)}"
+        when = "" if p.always else f"  when: {_overview_when(p)}"
         lines.append(f"{p.id}  {p.chars:,} chars  #{p.hash}{status}{when}{tag([p])}")
     for server, texts in tools.items():
         combined = ap.digest("".join(p.hash for p in texts))
@@ -1333,10 +1314,10 @@ def _start_of(start: PathStart, points: ap.StartingPoints) -> ap.Start:
     if start.typical is not None:
         if any(v is not None for k, v in start.model_dump().items() if k not in ("typical", "machine")):
             raise _SetupError("start.typical names a typical agent whole: give it alone (start.machine aside).")
-        hit = next((t for t in points.typical if t.handwritten == start.typical), None)
+        hit = next((t for t in points.typical if t.number == start.typical), None)
         if hit is None:
             raise _SetupError(f"No typical agent {start.typical}: {ap.STARTING_POINTS_PATH} has "
-                              f"{', '.join(str(t.handwritten) for t in points.typical)}.")
+                              f"{', '.join(str(t.number) for t in points.typical)}.")
         return hit
     if start.surface is None:
         raise _SetupError("start needs a surface (claude-code or claude-ai), or a typical agent's number.")
@@ -1394,22 +1375,13 @@ def _path_result(kept: _Kept, start: PathStart | None, work: PathWork | None, kn
         if read_from is not None:
             raise _SetupError("read_from needs the start (and work) of the call that gave text_in_parts.")
         runs = kept.all_runs()
-        typical = [TypicalPath(number=s.handwritten, name=label, pieces=_overview_lines(b, known), structure=_structure(ap.structure_of(b)))
-                   for label, s, _w, b in runs[: len(setup.points.typical)]]
+        typical = [_typical_path(label, s, b, known) for label, s, _w, b in runs[: len(setup.points.typical)]]
         notes.append("Pass start (a typical agent's number, or a surface and folder) for one path with its "
                      "texts.")
         unreached = ap.unreached_rule_files(setup, runs, kept.every_rule_file())
         if unreached:
             notes.append(_NO_PATH_NOTE)
-        # What every path leaves out by design is said once, across every area, rather than on each path.
-        by_design = ap.by_design(setup.vault)
-        for t in typical:
-            t.structure.not_followed = [x for x in t.structure.not_followed or [] if x != by_design]
-        for t in typical:  # side by side, five structures: an empty list would only take room
-            _drop_empty(t.structure)
         across = _structure(ap.across_runs(runs))
-        across.not_followed = [by_design]
-        notes += _structure_notes(across)
         result = AgentPathResult(typical=typical, rule_files_no_path_reaches=unreached,
                                  across_every_area=across, notes=notes, **common)
         _fit_overview(result)
@@ -1431,11 +1403,11 @@ def _path_result(kept: _Kept, start: PathStart | None, work: PathWork | None, kn
     pieces = [b.pieces[i] for i in b.order]
     out = [_piece(p, known) for p in pieces]
     result = AgentPathResult(
-        start={("typical" if k == "handwritten" else k): v for k, v in vars(s).items() if v}, work={k: v for k, v in vars(w).items() if v} or None,
+        start={("typical" if k == "number" else k): v for k, v in vars(s).items() if v}, work={k: v for k, v in vars(w).items() if v} or None,
         pieces=out, left_path=_left_path(known, b.order),
-        structure=_structure(ap.structure_of(b), mentions=True), notes=notes or None, **common)
-    if known is None and read_from is None:  # the structure comes only then, and its note with it
-        notes += _structure_notes(result.structure) + _FIELD_NOTES
+        structure=_structure(ap.structure_of(b)), notes=notes or None, **common)
+    if known is None and read_from is None:  # the structure comes only then, and the note on the fields with it
+        notes.append(_FIELD_NOTE)
     result.notes = notes or None
     if read_from is not None:
         return _part_of(result, pieces, out, read_from)
@@ -1464,13 +1436,12 @@ def _reached_by_result(kept: _Kept, place: str, known: dict | None, machine: str
         other_pieces=_other_pieces(r, [p for p in every if p.id not in held]) or None,
         left_path=_left_path(known, r["pieces"]), structure=_structure(r["structure"]), notes=notes or None)
     if known is None and read_from is None:  # the structure comes only then, and its note with it
-        notes += _structure_notes(result.structure)
         if result.other_pieces:
             notes.append(_OTHER_PIECES_NOTE)
         if r["other_versions"]:
             notes.append(_VERSIONS_NOTE)
         if out:  # a place no path reaches has no pieces to explain
-            notes += _FIELD_NOTES + [_GROUPS_NOTE]
+            notes += [_FIELD_NOTE, _GROUPS_NOTE]
     result.notes = notes or None
     if read_from is not None:  # any piece on those paths, not only those listed with their text
         result.reached_by = result.other_pieces = None
@@ -1483,17 +1454,25 @@ def _reached_by_result(kept: _Kept, place: str, known: dict | None, machine: str
 
 
 def _grouped(o: PathPiece, p: ap.Piece, met: dict) -> PathPiece:
-    """A backward question's piece with the groups whose agents have it on their path, and where one of them meets
-    it at another stage than the one shown (test bench, 2026-11-20: Personal agent showed "read at the start"
-    beside a Claude Code group whose agents meet it only when its moment comes)."""
-    mine = met.get(p.id, {})
-    o.groups = sorted(mine) or None
-    other: dict[tuple, list[int]] = {}
-    for n, (stage, always) in sorted(mine.items()):
-        if (stage, always) != (p.stage, p.always):
-            other.setdefault((stage, always), []).append(n)
-    o.other_stages = [{"groups": ns, "stage": ap.STAGE_NAMES[s], "always": a} for (s, a), ns in other.items()] or None
+    """A backward question's piece with the groups whose agents have it every time, and those whose agents have it
+    only when its moment comes (test bench, 2026-11-20: Personal agent showed "read at the start" beside a Claude
+    Code group whose agents meet it only when its moment comes; round 5: `groups` and `other_stages` gave way to
+    these)."""
+    mine = sorted(met.get(p.id, {}).items())
+    o.every_time_for = [n for n, (_stage, always) in mine if always] or None
+    o.when_for = [n for n, (_stage, always) in mine if not always] or None
     return o
+
+
+def _typical_path(label: str, s: ap.Start, b: ap.PathBuilder, known: dict | None) -> TypicalPath:
+    """One typical agent in the overview, headed by what it reads every time (round 5: the overview's headline)."""
+    st = ap.structure_of(b)
+    size = st["size"]
+    return TypicalPath(
+        number=s.number, name=label,
+        every_time=(f"{size['always_chars']:,} characters in {size['always_pieces']} pieces, and "
+                    f"{size['tool_text_chars']:,} in {size['tool_texts']} tool texts"),
+        pieces=_overview_lines(b, known), structure=_structure(st))
 
 
 def _other_pieces(r: dict, pieces: list[ap.Piece]) -> list[str]:
@@ -1547,8 +1526,7 @@ def _trim_structure(result, pieces: list[ap.Piece], notes: list[str]) -> None:
         return
     texts = sum(len(json.dumps(p.text, ensure_ascii=False)) + len(',"text":') for p in pieces)
     room = PAGE_CHARS - _NOTES_RESERVE - texts
-    names = ("into_areas", "pointers_outside_rule_files", "unplaced_pointers", "rule_file_mentions",
-             "broken_pointers", "skipped_imports", "import_warnings")
+    names = _FAULT_LISTS
     lists = sum(len(json.dumps(getattr(st, n) or [], ensure_ascii=False)) for n in names)
     if len(result.model_dump_json()) - lists > room:
         return
@@ -1600,24 +1578,19 @@ _VERSIONS_NOTE = ("Some pieces have another text on other paths (an area-start h
                   "them gives that agent's text.")
 
 
-#: What the fields that needed guessing mean, one line each, on a call without `known` (round 4, cold read
-#: 2026-11-20: `always`, `placed` and `after` were guessed; the result models' comments aren't served).
-_FIELD_NOTES = [
-    ("always: true when the piece is on the path whatever the conversation brings; false when it arrives only once "
-     "one of its moments comes (on a reached_by entry, said of the place for that group)."),
-    ("placed: marks the moment that puts the piece on the path, which its stage and always follow; its other "
-     "moments are other routes to it, some on other agents' paths."),
-    ("after: on a moment whose line sits in a piece that itself waits on a moment: that piece's moment, which comes "
-     "first."),
-]
+#: What the fields mean, on a call without `known` (the result models' comments aren't served; round 4, cold read
+#: 2026-11-20: `always`, `placed` and `after` were guessed; round 5 replaced them).
+_FIELD_NOTE = ("every_time: the piece is on the path whatever the conversation brings, and this is what brings it; "
+               "when: it arrives only when one of these moments comes; lines: each line pointing to it, the piece it "
+               "sits in and the moment it gives.")
 
 
 #: Said with a backward question's groups (round 4, cold read 2026-11-20: which agent has which piece was guessed).
 _GROUPS_NOTE = ("group: each reached_by entry is one group, agents meeting the place by the same chain; a piece's "
-                "groups are those whose agents have it on their path, other_stages where one meets it at "
-                "another stage than the piece shows; a line in other_pieces ends on its groups when not every "
-                "group has it. The pieces fill pages in this order: the place, what arrives with it, what points "
-                "to it and the chain, then the start pieces.")
+                "every_time_for and when_for name the groups whose agents have it every time, or only when its "
+                "moment comes (its every_time or when are as the first of them meets it); a line in other_pieces "
+                "ends on its groups when not every group has it. The pieces fill pages in this order: the place, "
+                "what arrives with it, what points to it and the chain, then the start pieces.")
 
 
 #: Said in a result that reports a place no path reaches: a cold reader took it for `not_followed` (2026-11-19).
@@ -1625,8 +1598,21 @@ _NO_PATH_NOTE = (
     "No path reaches (`rule_files_no_path_reaches`, or `matched_by` \"nothing\") means the path tools followed every "
     "way they know that rules reach agents, and none leads there: either nothing sends an agent there, or something "
     "does by a way they don't follow, which they must then be taught. `not_followed` is different: what the tools "
-    "know of and leave out, because they can't read it (such as claude.ai's own system prompt) or by design (such as "
-    "a repo's docs); a rule reached only through one of them also shows as reached by no path.")
+    "know of and leave out, because they can't read it (such as claude.ai's own system prompt) or by design (the "
+    "tool's description lists those); a rule reached only through one of them also shows as reached by no path.")
+
+
+#: What the tools leave out by design, said once in both descriptions (round 5: it was a line of every path's
+#: `not_followed`, read from the vault's Where agent instructions go; the wording is the Agent paths session's,
+#: 2026-11-21) [P277, P287].
+BY_DESIGN = (
+    "What the path tools don't follow, by design: in a repo, anything beyond what Claude Code loads there (its "
+    "`CLAUDE.md` files and their imports), whose docs you read by hand with the repo's files in front of you; a "
+    "reference with no link or path; a wildcard path, or a placeholder path other than the vault's note patterns "
+    "(`<folder>/<folder>.md`, `Reference/Servers/<name>/<name>.md`); what isn't a rule file, a hook's message or a "
+    "tool's text, such as a code comment, a URL or another repo's file; an import Claude Code itself skips. When one "
+    "of these matters, point to it from a rule file the tools follow, in one of the pointer shapes of Where agent "
+    "instructions go.")
 
 
 _A_START = Field(description="Who the agent is; omit it for the five typical agents side by side.")
@@ -1644,12 +1630,6 @@ async def agent_path(
     known: Annotated[dict[str, str] | None, _A_KNOWN] = None,
     read_from: Annotated[ReadFrom | None, _A_READ_FROM] = None,
 ) -> AgentPathResult:
-    """What an agent of this setup meets, in order: every rule text on its path, with a hash.
-
-    Without `start`: the five typical agents side by side. `structure` lists facts to judge, not faults. Who meets one
-    rule, and the path up to it: `agent_path_reached_by`. Field
-    reference, for maintaining this tool: https://github.com/kelno/obsidian-mcp/blob/main/docs/architecture/agent-paths.md
-    """
     return await agent_path_impl(start, work, known, read_from)
 
 
@@ -1659,13 +1639,27 @@ async def agent_path_reached_by(
     machine: Annotated[str | None, _A_MACHINE] = None,
     read_from: Annotated[ReadFrom | None, _A_READ_FROM] = None,
 ) -> ReachedByResult:
-    """Which agents of this setup meet a rule's place, by which chain, and what they have in front of them then.
+    return await agent_path_reached_by_impl(place, known, machine, read_from)
+
+
+#: The descriptions, set here so both can carry `BY_DESIGN` (a docstring can't be built from a constant).
+agent_path.__doc__ = f"""What an agent of this setup meets, in order: every rule text on its path, with a hash.
+
+    Without `start`: the five typical agents side by side. `structure` lists the faults found, only when there are
+    any. Who meets one rule, and the path up to it: `agent_path_reached_by`.
+
+    {BY_DESIGN}
+
+    Field reference, for maintaining this tool: https://github.com/kelno/obsidian-mcp/blob/main/docs/architecture/agent-paths.md
+    """
+agent_path_reached_by.__doc__ = f"""Which agents of this setup meet a rule's place, by which chain, and what they have in front of them then.
 
     `agent_path` backward: use it before adding or changing a rule. Texts come for the place first, what points
     to it and arrives with it, each chain, and the start pieces its agents share; the other pieces on their paths
     as lines, readable with `read_from`. Its pieces, `structure`, `known` and `read_from` work as in `agent_path`.
+
+    {BY_DESIGN}
     """
-    return await agent_path_reached_by_impl(place, known, machine, read_from)
 
 
 def _path_refusal(message: str) -> AgentPathResult:

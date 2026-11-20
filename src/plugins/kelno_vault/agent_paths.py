@@ -26,8 +26,8 @@ Where each part of a path comes from:
 - the server's own texts as served (tool descriptions, the server instructions, `get_vault_guide`'s own
   part, `open_area`'s instruction lines), handed in by the tool wrapper.
 
-What cannot be followed is reported under `not_followed` on each path, never guessed, with what isn't followed
-by design, as `WHERE_NOTE` lists it (`BY_DESIGN_OPENING`): in a repo, nothing beyond what Claude Code loads there.
+What cannot be followed is reported under `not_followed` on each path, never guessed; what isn't followed by
+design is said once, in the tool's description (`agent_path_tools.BY_DESIGN`).
 
 Standard library only, and no import from the server: the tool wrapper does the reading, so this module can
 also be loaded on its own (the comparison with the prototype does).
@@ -68,10 +68,6 @@ ROLES_DIR = "_/agent/roles/"
 #: vault file.
 OPEN_AREA_ID = "open_area:"
 VAULT_IDS = ("note:", "section:", OPEN_AREA_ID)
-#: The section of `WHERE_NOTE` holding the hand-written paths of the typical agents, numbered.
-HANDWRITTEN_HEADING = "Checking a rule against agent paths"
-#: The paragraph of that section listing what the tools leave out by design opens with these words [P277].
-BY_DESIGN_OPENING = "The tools don't follow, by design:"
 #: The server these tools run in, in tool piece ids (`tool:<server>:<tool>`).
 SERVER = "obsidian-mcp"
 #: The voice bridge, in its pieces' ids, its texts read from the PC's snapshot (`bridge`).
@@ -473,7 +469,8 @@ class Start:
     role: str | None = None
     extras: list[str] = field(default_factory=list)
     name: str | None = None
-    handwritten: int | None = None
+    #: A typical agent's number: its position in the starting points' file, from 1 [P313].
+    number: int | None = None
 
 
 @dataclass
@@ -494,7 +491,7 @@ class StartingPoints:
         except tomllib.TOMLDecodeError as e:
             raise StartingPointsError(f"{STARTING_POINTS_PATH} is not valid TOML: {e}") from e
         typical = [Start(t["surface"], t.get("folder"), t.get("started_by"), t.get("role"), t.get("extras", []),
-                         t.get("name"), t.get("handwritten")) for t in data.get("typical", [])]
+                         t.get("name"), n) for n, t in enumerate(data.get("typical", []), 1)]
         if not data.get("surface"):
             raise StartingPointsError(f"{STARTING_POINTS_PATH} names no surface")
         return cls(data["surface"], typical)
@@ -570,7 +567,6 @@ class PathBuilder:
         self.order: list[str] = []
         self.queue: list = []
         self.seq = 0
-        self.mentions: list[dict] = []  # links to non-rule notes with no reading verb: not followed
         self.broken: list[dict] = []
         #: Imports Claude Code doesn't load, as the snapshot lists them (`skipped_imports`).
         self.skipped: list[dict] = []
@@ -787,14 +783,12 @@ class PathBuilder:
         if self.v.is_rule_file(r):
             if moment == "unplaced" or (shaped is None and self.bound(p)):
                 # Between rule notes, a link in none of the pointer shapes is a mention [P250, P259]; elsewhere (a
-                # hook's message, a main note's text) one that says neither when nor "read". Listed, not followed.
-                self.mention({"from": p.id, "target": r, "via": via, "rule_file": True})
+                # hook's message, a main note's text) one that says neither when nor "read". Not followed.
                 return
             self.push(self.note_piece(r, stage, arrives, p.id, via, moment, always))
             return
         if heading and heading in self.v.rule_headings and (moment == "unplaced" or (shaped is None and self.bound(p))):
             # A link to a rule section (`[[Areas/X/X#For agents]]`) is read as one to a rule note.
-            self.mention({"from": p.id, "target": f"{r}#{heading}", "via": via, "rule_file": True})
             return
         text = self.v.text(r) or ""
         rule_sections = [h for h in self.v.rule_headings if section(text, h)] if reads else []
@@ -809,8 +803,6 @@ class PathBuilder:
                     return
             self.push(Piece(f"note:{r}", stage, arrives, self.v.where(r), text, via, moment, p.id, always,
                             rule=False))
-        else:
-            self.mention({"from": p.id, "target": r, "via": via})
         for h in rule_sections:
             self.push(Piece(f"section:{r}#{h}", stage, arrives, self.v.where(r), section(text, h), via, moment,
                             p.id, always))
@@ -831,7 +823,7 @@ class PathBuilder:
         it is reached, with the line's moment, as if the line pointed to each [P261, P262]. When the sentence names a
         rule section (the `## For agents` section of its folder note), each match's section is the piece, and only
         notes that have one count. Otherwise a match that is a rule file is the piece, and any other match, when the
-        line says to read it, is a note read for its rule sections. A line that brings nothing is one mention."""
+        line says to read it, is a note read for its rule sections. A line that brings nothing isn't followed."""
         reads = reads_it(sentence, at)
         moment = shaped or ("when met" if reads else "unplaced")
         stage, always = self.placed(p, moment)
@@ -841,7 +833,6 @@ class PathBuilder:
         # A rule note or section is reached only by a pointer in the convention's shapes [P259], as a link to one is.
         to_rules = moment != "unplaced" and not (shaped is None and self.bound(p))
         own = (self.piece_rel(p) or "").lower()
-        brought = False
         for r in self.v.matching(pattern):
             if r.lower() == own:
                 continue
@@ -850,11 +841,9 @@ class PathBuilder:
                 if body and to_rules:
                     self.push(Piece(f"section:{r}#{heading}", stage, arrives, self.v.where(r), body, via, moment,
                                     p.id, always))
-                    brought = True
             elif self.v.is_rule_file(r):
                 if to_rules:
                     self.push(self.note_piece(r, stage, arrives, p.id, via, moment, always))
-                    brought = True
             elif reads:
                 text = self.v.text(r) or ""
                 self.push(Piece(f"note:{r}", stage, arrives, self.v.where(r), text, via, moment, p.id, always,
@@ -864,14 +853,10 @@ class PathBuilder:
                     if body:
                         self.push(Piece(f"section:{r}#{h}", stage, arrives, self.v.where(r), body, via, moment,
                                         p.id, always))
-                brought = True
-        if not brought:
-            self.mention({"from": p.id, "target": target, "via": via})
 
-    def mention(self, entry: dict, into: list | None = None) -> None:
-        """A mention (or, `into` broken, a pointer to nothing): each link counts, but a piece placed again and
-        followed again doesn't count its links twice."""
-        into = self.mentions if into is None else into
+    def mention(self, entry: dict, into: list) -> None:
+        """A pointer to nothing, into `into` (`broken`): each link counts, but a piece placed again and followed
+        again doesn't count its links twice."""
         if not (self.again and entry in into):
             into.append(entry)
 
@@ -1340,7 +1325,6 @@ class PathBuilder:
 
     def note_not_followed(self) -> None:
         nf = self.not_followed
-        nf.append(by_design(self.v))
         if self.start.surface == "claude-code":
             if self.snap is None or self.snap.hook_messages is None:  # a snapshot from before `hook_messages`
                 events = sorted({h.get("event", "") for h in (self.snap.hooks if self.snap else [])} - {"SessionStart"})
@@ -1512,27 +1496,6 @@ def moment_of(line: str, sentence: str, at: int = 0) -> str:
 
 # --- runs ----------------------------------------------------------------------------------------------------
 
-def handwritten_paths(v: Vault) -> dict[int, str]:
-    text = section(v.text(WHERE_NOTE) or "", HANDWRITTEN_HEADING) or ""
-    out = {}
-    for line in text.splitlines():
-        m = re.match(r"^(\d+)\.\s+(.*)", line)
-        if m:
-            out[int(m.group(1))] = m.group(2).strip()
-    return out
-
-
-def by_design(v: Vault) -> str:
-    """What the tools leave out by design, for `not_followed`: `WHERE_NOTE`'s paragraph saying it, read at each call
-    so the list has one home, without its ledger refs."""
-    text = section(v.text(WHERE_NOTE) or "", HANDWRITTEN_HEADING) or ""
-    para = next((line.strip() for line in text.splitlines() if line.startswith(BY_DESIGN_OPENING)), None)
-    if para is None:
-        return (f"what the tools leave out by design: \"{HANDWRITTEN_HEADING}\" in {WHERE_NOTE} holds no paragraph "
-                f"opening \"{BY_DESIGN_OPENING}\"")
-    return re.sub(r"\s*\[[PQFC]\d+(?:,\s*[PQFC]\d+)*\]", "", para)
-
-
 def run(setup: Setup, start: Start, work: Work) -> PathBuilder:
     return PathBuilder(setup, start, work).build()
 
@@ -1550,10 +1513,6 @@ def structure_of(b: PathBuilder) -> dict:
                  "tool_text_chars": sum(p.chars for p in tools), "tool_texts": len(tools)},
         "unplaced_pointers": unplaced,
         "pointers_outside_rule_files": outside_rules(b),
-        "into_areas": into_areas(b),
-        "mentions_not_followed": len(b.mentions),
-        "mentions": [m for m in b.mentions if not m.get("rule_file")],
-        "rule_file_mentions": [m for m in b.mentions if m.get("rule_file")],
         "broken_pointers": b.broken,
         "skipped_imports": b.skipped,
         "import_warnings": b.import_warnings,
@@ -1586,28 +1545,6 @@ def outside_rules(b: PathBuilder) -> list[dict]:
             src = parent.split(":", 1)[1]
             if not b.v.is_rule_file(src) and p.id.startswith("note:") and b.v.is_rule_file(p.id.split(":", 1)[1]):
                 out.append({"from": parent, "to": p.id, "via": line})
-    return out
-
-
-def into_areas(b: PathBuilder) -> list[dict]:
-    """Pointers into an area's local pieces: from a shared piece (any rule file outside Areas/), or from one area's
-    local pieces into another's (which brings the combinations back). A shared piece is met by every agent of a
-    kind; a local one only by agents working in that area, folder, machine or repo [P276]."""
-    out = []
-    for p in b.pieces.values():
-        for parent, _ in pointing(p):
-            if not p.id.startswith(VAULT_IDS):
-                continue
-            target = p.id.split(":", 1)[1].split("#")[0]
-            to_area = b.v.area_of_note(target)
-            if not to_area:
-                continue
-            src = parent.split(":", 1)[1].split("#")[0] if parent.startswith(VAULT_IDS) else None
-            from_area = b.v.area_of_note(src) if src else None
-            if from_area and from_area["name"] == to_area["name"]:
-                continue
-            out.append({"from": parent, "to": p.id,
-                        "kind": "local into another local" if from_area else "shared into local"})
     return out
 
 
@@ -1688,7 +1625,7 @@ def unreached_rule_files(setup: Setup, runs, every: list[str] | None = None) -> 
 
 def across_runs(runs) -> dict:
     """The structural facts over every run, each pointer once."""
-    seen, across = set(), {"pointers_outside_rule_files": [], "into_areas": []}
+    seen, across = set(), {"pointers_outside_rule_files": []}
     for *_, b in runs:
         st = structure_of(b)
         for k in across:
@@ -1845,8 +1782,16 @@ def reached_by(setup: Setup, place: str, runs: list | None = None) -> dict:
             named.append(ANY_FOLDER_WORKER)
         else:
             named += workers
-        reached.append({"group": n, "agents": named, "surface": surface, "via": list(c), "always": always,
-                        "first_arrives": first, "pointed_to_by": pointers})
+        # The place, for this group: every time, and what brings it; or when (round 5: `always`, the place's, and
+        # `first_arrives`, the chain's first piece's, gave way to these; `via` shows the chain).
+        here = ms[0][0].pieces[ms[0][1]]
+        if always:
+            arrives = here.arrives if len(concrete[key]) == 1 else re.sub(r" on .*? \(", " on <the area> (", here.arrives)
+            brings = {"every_time": arrives}
+        else:
+            brings = {"when": list(dict.fromkeys(e["moment"] for e in here.moments)) or ["unplaced"]}
+        reached.append({"group": n, "agents": named, "surface": surface, "via": list(c), **brings,
+                        "pointed_to_by": pointers})
     #: Which groups have each piece on their paths, and the stage and `always` each meets it at (its first run
     #: holding it): a start piece of one group can wait on a moment in another's (test bench, 2026-11-20: Personal
     #: agent showed "read at the start" beside the Claude Code group).
