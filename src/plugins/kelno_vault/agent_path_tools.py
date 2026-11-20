@@ -969,7 +969,8 @@ def _with_texts(result, pieces: list[ap.Piece], out: list[PathPiece], notes: lis
                          "short form, their moments without the lines they come from (a moment that doesn't read "
                          "right alone keeps its line). Call again with the same arguments, passing in known the hash of every piece "
                          "whose text you now hold, and only what's new comes next, with these texts (read_from is "
-                         "only for a text marked text_in_parts).")
+                         + ("for a text marked text_in_parts, or a piece listed in other_pieces)."
+                            if hasattr(result, "other_pieces") else "only for a text marked text_in_parts)."))
         if count["in_parts"]:
             lines.append(f"{texts(count['in_parts'])} too long for the room in this result (text_in_parts): call "
                          "again with the same arguments and read_from={id, offset: 0} for each; each part gives the "
@@ -1368,6 +1369,8 @@ def _reached_by_result(kept: _Kept, place: str, known: dict | None, machine: str
         left_path=_left_path(known, r["pieces"]), structure=_structure(r["structure"]), notes=notes or None)
     if known is None and read_from is None:  # the structure comes only then, and its note with it
         notes += _structure_notes(result.structure)
+        if result.other_pieces:
+            notes.append(_OTHER_PIECES_NOTE)
         if r["other_versions"]:
             notes.append(_VERSIONS_NOTE)
     result.notes = notes or None
@@ -1416,6 +1419,12 @@ async def agent_path_reached_by_impl(place: str, known: dict | None, machine: st
                                      read_from: ReadFrom | None = None) -> ReachedByResult:
     status, out = await _in_drawing(current_user_id.get(), "reached_by", (place, known, machine, read_from))
     return out if status == "ok" else _failed(ReachedByResult, out)
+
+
+#: Said with `other_pieces`: the result models' comments aren't served, and a writer asked how to read a line's text
+#: (Agent paths, 2026-11-20).
+_OTHER_PIECES_NOTE = ("other_pieces: every other piece on those paths, one line each; read any of them with the same "
+                      "arguments and read_from={id, offset: 0}.")
 
 
 #: Said when a piece has another text on another path (test bench, 2026-11-20: an area-start hook's messages, one

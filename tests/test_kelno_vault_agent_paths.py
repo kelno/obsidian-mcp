@@ -1465,6 +1465,8 @@ def test_reached_by_gives_texts_up_to_the_place_and_every_other_piece_as_a_line(
     assert len(conv) == 1 and "moment: Before working on one of the owner's areas" in conv[0]
     assert any(line.startswith("tool:obsidian-mcp:* (") for line in result.other_pieces)
     assert not any(line.startswith("tool:obsidian-mcp:read_note") for line in result.other_pieces)
+    assert any(n.startswith("other_pieces: every other piece on those paths") and "read_from={id, offset: 0}" in n
+               for n in result.notes)
     # Any piece on those paths can be read, not only those listed with their text.
     part = asyncio.run(apt.agent_path_reached_by_impl("_/agent/roles/Worker.md", None, None,
                                                        ReadFrom(id="note:_/agent/Vault conventions.md")))
