@@ -28,7 +28,8 @@ _TEMPLATES = _ROOT / "src" / "control_panel" / "templates"
 _STATIC = _ROOT / "src" / "control_panel" / "static"
 _PANEL_JS = _STATIC / "panel.js"
 
-_TRANSFER = {"transfer_upload.html", "transfer_download.html", "transfer_ledger.html"}
+# The pages `src/transfer/routes.py` renders with its own `nonce` (the note-link page `/open` among them).
+_TRANSFER = {"transfer_upload.html", "transfer_download.html", "transfer_ledger.html", "open_note.html"}
 _PANEL_NONCE = 'nonce="{{ csp_nonce }}"'
 _TRANSFER_NONCE = 'nonce="{{ nonce }}"'
 

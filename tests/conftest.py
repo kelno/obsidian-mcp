@@ -56,6 +56,7 @@ SETTINGS_ENV_KEYS = (
     "LIST_NOTES_DESCRIPTION_FIELD",
     # Open-note links (2026-11-12).
     "OPEN_NOTE_URL",
+    "OPEN_NOTE_VAULT",
     "INDEXER_DEGRADED_AFTER_FAILURES",
     "INDEXER_QUARANTINE_RETRIES_PER_TICK",
     # Stall detection and the embed stage's provider stop (fork).
