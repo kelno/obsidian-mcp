@@ -1,8 +1,8 @@
 """The agent ledger's entries: refs, validation, add, update, get, search.
 
-The ledger is **primary data** (see docs/architecture/agent-ledger.md): what
-agents write for each other, which nothing in the vault can rebuild. So every
-write here is one transaction that either lands whole or not at all, every
+The ledger is **primary data** (see docs/architecture/agent-ledger.md):
+quirks, feedback, proposals and rule cases, which nothing in the vault can
+rebuild. So every write here is one transaction that either lands whole or not at all, every
 change keeps the previous version in `ledger_revisions` with a reason, and an
 update names the revision it was based on and is refused if the entry moved
 since. The database enforces the structure (per-kind fields, statuses, owner

@@ -1,8 +1,8 @@
-# Agent ledger: what agents write for each other, in the database
+# Agent ledger: quirks, feedback, proposals and rule cases, in the database
 
 > Read before touching the eight `ledger_*` tools, `src/services/ledger*.py`, `src/mcp_server/ledger_result.py`, the `ledger_*` tables or migrations 1002, 1004 and 1005, `scripts/ledger_import.py` / `scripts/ledger_export.py`. The write tools are on the repo's mandatory-adversarial-review surface: they write primary data an agent acts on.
 
-The agent ledger holds the logs agents keep for each other: **quirks** (Q: what Claude can or can't do on a surface, what works included), **feedback** (F: an unclear instruction, friction or a suggestion, from an agent or logged at the owner's request), **proposals** (P: a change an agent proposed to an instruction for agents, and what went in) and **rule cases** (C: a real situation where an agent's behaviour was right or wrong against a rule, the test battery for rules; see "Rule cases"). Eight MCP tools reach it; nothing else writes it. Fork-only (see `FORK.md`).
+The agent ledger holds **quirks** (Q: what Claude can or can't do on a surface, what works included), **feedback** (F: an unclear instruction, friction or a suggestion, from an agent or logged at the owner's request), **proposals** (P: a change an agent proposed to an instruction for agents, and what went in) and **rule cases** (C: a real situation where an agent's behaviour was right or wrong against a rule, the test battery for rules; see "Rule cases"). Eight MCP tools reach it; nothing else writes it. Fork-only (see `FORK.md`).
 
 ## The requirements this design answers to
 

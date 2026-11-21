@@ -846,11 +846,11 @@ read, and changes only that one line. See
 
 ### Agent ledger (fork)
 
-What agents log for each other — quirks (what an
+Quirks (what an
 assistant can or can't do on a surface), feedback (unclear instructions,
 friction, suggestions), proposals (changes to agent instructions and their
 outcome) and rule cases (a real situation where an agent followed a rule or
-broke it, tied to the rules it tests) — kept in the server's database rather than the vault, with topics
+broke it, tied to the rules it tests), kept in the server's database rather than the vault, with topics
 and short summary views:
 
 - `ledger_search(query=None, mode="both", kinds=None, area=None, topics=None,

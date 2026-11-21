@@ -2236,9 +2236,9 @@ class ConcurrencyRun(Base):
 
 # ── The agent ledger (migration 1002) ─────────────────────────────────────────
 #
-# Primary data: what agents write for each other, reached only through the
-# `ledger_*` tools. Nothing in the vault rebuilds it, so it is backed up, never
-# re-derived (only `ledger_embeddings` is derived). See
+# Primary data: quirks, feedback, proposals and rule cases, reached only
+# through the `ledger_*` tools. Nothing in the vault rebuilds it, so it is
+# backed up, never re-derived (only `ledger_embeddings` is derived). See
 # docs/architecture/agent-ledger.md.
 #
 # Every table carries `owner_key`, a stored generated `coalesce(user_id, 0)`,

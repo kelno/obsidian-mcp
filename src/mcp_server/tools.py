@@ -11261,8 +11261,8 @@ async def set_task_status_impl(
 
 # ── Agent ledger (fork) ─────────────────────────────────────────────────────
 #
-# Eight tools over the `ledger_*` tables (migration 1002): what agents write
-# for each other — quirks, feedback, proposals — with topics and summary
+# Eight tools over the `ledger_*` tables (migration 1002): quirks, feedback,
+# proposals and rule cases, with topics and summary
 # views. Primary data, not derived from the vault. The rules live in
 # `src/services/ledger.py` (entries), `ledger_views.py` (topics, views) and
 # `ledger_embed.py` (vectors); these wrappers map arguments and results. See

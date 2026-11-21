@@ -1949,8 +1949,8 @@ async def ledger_search(
 ) -> LedgerSearchResult:
     """Find agent-ledger entries: quirks, feedback, proposals and rule cases.
 
-    Read-only. The agent ledger holds records agents write for each other,
-    not instructions, and never vault notes. Kinds: Q quirk (what Claude can
+    Read-only. The agent ledger holds records, not instructions, and never
+    vault notes. Kinds: Q quirk (what Claude can
     or can't do on a surface, what works included), F feedback (an unclear
     instruction, friction or a suggestion, from an agent or logged for the
     owner), P proposal (a change proposed to an agent instruction, and its
@@ -2146,8 +2146,7 @@ async def ledger_add(
 ) -> LedgerWriteResult:
     """Log an agent-ledger entry: a quirk, feedback, a proposal or a rule case.
 
-    Requires write permission. For what agents write for each other, never
-    the owner's own notes. If no kind fits, log feedback (friction,
+    Requires write permission. If no kind fits, log feedback (friction,
     component "agent ledger") saying what you wanted to record and why.
     Each parameter's description gives its rules and allowed values; give
     the entry an area and its topics. A refusal names every problem at once

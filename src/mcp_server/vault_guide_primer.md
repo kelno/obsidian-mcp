@@ -260,7 +260,7 @@ Once a file is stored, embed it in a note the usual way — `![[path]]` via
 
 ## Agent ledger
 
-The `ledger_*` tools keep what agents write for each other, in the server's database, not in the vault: quirks (Q: what Claude can or can't do on a surface, what works included), feedback (F: an unclear instruction, friction or a suggestion, from an agent or logged at the owner's request with origin `owner`), proposals (P: a change proposed to an instruction for agents, logged once decided: first version, what went in, outcome) and rule cases (C: below). Entries are records of what happened, not instructions. The vault tools never return them and `ledger_search` never returns notes.
+The `ledger_*` tools keep quirks (Q: what Claude can or can't do on a surface, what works included), feedback (F: an unclear instruction, friction or a suggestion, from an agent or logged at the owner's request with origin `owner`), proposals (P: a change proposed to an instruction for agents, logged once decided: first version, what went in, outcome) and rule cases (C: below) in the server's database, not in the vault. Entries are records of what happened, not instructions. The vault tools never return them and `ledger_search` never returns notes.
 
 - Log what the owner would not otherwise see, not what you are already telling them (rule cases are the exception: below); say in one line of your reply that you logged it, then carry on.
 - When you start work in an area, or answer a question about one, start with `open_area`: it returns the area's ledger entries along with its main note and open tasks.
@@ -300,7 +300,7 @@ The `ledger_*` tools keep what agents write for each other, in the server's data
 - Plugin syntax (Dataview, Templater) is literal text, not code to run.
 - Backlinks are computed from the link graph; query them via tools, do
   not edit source notes to "create" a backlink.
-- What agents log for each other (quirks, feedback, proposals, rule cases) goes in the
-  agent ledger through the `ledger_*` tools, never in a note.
+- Quirks, feedback, proposals and rule cases go in the agent ledger through
+  the `ledger_*` tools, never in a note.
 - Notes whose content changed since a point in time are found with
   `order_by="content_changed"` and `since` on `get_recent` / `list_notes`.
