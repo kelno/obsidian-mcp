@@ -1198,6 +1198,31 @@ def test_without_a_role_each_role_note_waits_on_its_role(vault):
     assert not any(n.startswith("No role given") for n in picked.notes or [])
 
 
+def test_the_arborist_role_picks_its_own_note_from_the_hooks_line(vault):
+    # The hook's line since 2026-11-21 names three role notes (P328): the Arborist picks its own, like the Coordinator.
+    _write(vault, "_/agent/roles/Arborist.md", "Arborist rules.\n")
+    folders = json.loads(json.dumps(SNAPSHOT["folders"]))
+    folders["D:/work/repo"]["session_start"][0]["text"] = (
+        "You work in the owner's setup. Read the vault note D:\\vault\\_\\agent\\roles\\Worker.md and follow it; if "
+        "you are the Coordinator, read your own role note, D:\\vault\\_\\agent\\roles\\Coordinator.md, instead; if you "
+        "are the Arborist, read yours, D:\\vault\\_\\agent\\roles\\Arborist.md, instead.")
+    _snapshot(vault, folders=folders)
+    (vault / ap.STARTING_POINTS_PATH).write_text(STARTING_POINTS + (
+        '\n[[typical]]\nname = "the Arborist"\nsurface = "claude-code"\nfolder = "D:/work/repo"\n'
+        'started_by = "coordinator"\nrole = "arborist"\n'), encoding="utf-8")
+    arborist = {p.id: p for p in path(PathStart(typical=3)).pieces}
+    assert always(arborist["note:_/agent/roles/Arborist.md"])
+    assert "note:_/agent/roles/Worker.md" not in arborist and "note:_/agent/roles/Coordinator.md" not in arborist
+    assert ids(path(PathStart(surface="claude-code", folder="D:/work/repo", role="arborist"))).count(
+        "note:_/agent/roles/Arborist.md") == 1
+    worker = {p.id: p for p in path(PathStart(typical=2)).pieces}
+    assert always(worker["note:_/agent/roles/Worker.md"]) and "note:_/agent/roles/Arborist.md" not in worker
+    unpicked = {p.id: p for p in path(PathStart(surface="claude-code", folder="D:/work/repo")).pieces}
+    assert moments(unpicked["note:_/agent/roles/Arborist.md"]) == ["if its role is Arborist"]
+    (hit,) = reached_by("_/agent/roles/Arborist.md").reached_by
+    assert "the Arborist" in hit["agents"]
+
+
 def test_a_note_read_as_soon_as_a_waiting_piece_points_to_it_waits_on_that_moment(vault):
     _write(vault, "_/agent/Vault conventions.md", NOTES["_/agent/Vault conventions.md"]
            + "\n## Details\n\nRead [[Notes/Some note]] for the details.\n")

@@ -22,7 +22,7 @@ Where each part of a path comes from:
   the hooks registered at every event and what they say at events other than a session's start, the voice
   relay's notes;
 - `STARTING_POINTS_PATH`, the only hand-written input: what each surface loads first (a fact of the product
-  no file states) and the five typical agents;
+  no file states) and the typical agents;
 - the server's own texts as served (tool descriptions, the server instructions, `get_vault_guide`'s own
   part, `open_area`'s instruction lines), handed in by the tool wrapper.
 

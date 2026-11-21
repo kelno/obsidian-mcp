@@ -1619,7 +1619,7 @@ BY_DESIGN = (
     "instructions go.")
 
 
-_A_START = Field(description="Who the agent is; omit it for the five typical agents side by side.")
+_A_START = Field(description="Who the agent is; omit it for the typical agents side by side.")
 _A_WORK = Field(description="What it was given to do.")
 _A_KNOWN = Field(description="{piece id: hash} of the texts you hold: only new or changed ones come back.")
 _A_READ_FROM = Field(description="{id, offset}: the next part of a text in parts, with the same other arguments.")
@@ -1649,7 +1649,7 @@ async def agent_path_reached_by(
 #: The descriptions, set here so both can carry `BY_DESIGN` (a docstring can't be built from a constant).
 agent_path.__doc__ = f"""What an agent of this setup meets, in order: every rule text on its path, with a hash.
 
-    Without `start`: the five typical agents side by side. `structure` lists the faults found, only when there are
+    Without `start`: the typical agents side by side. `structure` lists the faults found, only when there are
     any. Who meets one rule, and the path up to it: `agent_path_reached_by`.
 
     {BY_DESIGN}

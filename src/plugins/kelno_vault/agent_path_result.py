@@ -22,12 +22,13 @@ class PathStart(BaseModel):
 
     typical: int | None = Field(default=None, description=(
         "A typical agent by number, given alone: 1 a claude.ai chat, 2 the voice relay passing on a request, 3 a "
-        "Claude Code worker in a repo, 4 a Claude Code session changing the rules, 5 the Coordinator."))
+        "Claude Code worker in a repo, 4 a Claude Code session changing the rules, 5 the Coordinator, 6 the "
+        "Arborist."))
     surface: Literal["claude-code", "claude-ai"] | None = Field(default=None, description=(
         "claude-ai includes the voice relay."))
     folder: str | None = Field(default=None, description="Claude Code's start folder on the PC; default home.")
     started_by: Literal["owner", "relay", "coordinator"] | None = None
-    role: Literal["worker", "coordinator", "relay"] | None = Field(default=None, description=(
+    role: Literal["worker", "coordinator", "arborist", "relay"] | None = Field(default=None, description=(
         "Picks its role note."))
     machine: str | None = Field(default=None, description="The PC whose snapshot to use; default the latest.")
 
