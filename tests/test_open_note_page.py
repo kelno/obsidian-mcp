@@ -1,6 +1,7 @@
 """The note-link page, `/open` (fork, 2026-11-21): what it accepts, where it sends, and its tab-closing script."""
 from __future__ import annotations
 
+import html
 import re
 
 import httpx
@@ -30,7 +31,7 @@ def target(page: str) -> str:
     """Where the page sends the browser: its meta refresh, unescaped."""
     m = re.search(r'content="0;url=([^"]*)"', page)
     assert m, page
-    return m.group(1).replace("&amp;", "&")
+    return html.unescape(m.group(1))
 
 
 async def test_without_a_vault_name_there_is_no_page(client, monkeypatch):
@@ -53,9 +54,35 @@ async def test_a_path_goes_to_obsidian_as_received(client, vault, file):
     assert r.text.count("obsidian://open?vault=My%20Vault&amp;file=") == 2  # the refresh and the fallback link
 
 
-async def get_raw(client, target: str) -> httpx.Response:
-    """GET with the request target sent byte for byte: httpx would percent-encode `"`, `<`, a space and the like."""
-    return await client.send(client.build_request("GET", httpx.URL("http://localhost:8000", raw_path=target.encode())))
+class Raw:
+    """A response to a request made straight on the app, its query string sent byte for byte (httpx would
+    percent-encode `"`, `<`, `'`, a space and the like, as browsers mostly do; a proxy passes them on raw)."""
+
+    def __init__(self, status_code: int, text: str):
+        self.status_code, self.text = status_code, text
+
+
+async def get_raw(client, target: str) -> Raw:
+    from src.main import app
+
+    path, _, query = target.partition("?")
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
+        "path": path, "raw_path": path.encode(), "root_path": "", "query_string": query.encode("latin-1"),
+        "headers": [(b"host", b"localhost:8000")], "client": ("203.0.113.9", 4242), "server": ("localhost", 8000),
+    }
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await app(scope, receive, send)
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return Raw(start["status"], body.decode())
 
 
 @pytest.mark.parametrize("query", [
@@ -90,9 +117,13 @@ async def test_head_answers_like_get(client, vault):
 
 @pytest.mark.parametrize("value,expected", [(None, None), ("", None), ("  ", None), (" Obsidian ", "Obsidian")])
 def test_a_blank_vault_name_means_unset(value, expected):
-    assert Settings(open_note_vault=value, _env_file=None).open_note_vault == expected
+    assert make_settings(open_note_vault=value).open_note_vault == expected
 
 
 def test_a_vault_name_with_a_control_character_is_refused():
     with pytest.raises(ValueError, match="OPEN_NOTE_VAULT"):
-        Settings(open_note_vault="My\nVault", _env_file=None)
+        make_settings(open_note_vault="My\nVault")
+
+
+def make_settings(**kw) -> Settings:
+    return Settings(secret_key="test", _env_file=None, **kw)

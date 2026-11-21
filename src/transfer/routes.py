@@ -1206,8 +1206,10 @@ OPEN_USAGE = "Usage: /open?file=<percent-encoded vault path, without .md>\n"
 
 
 def _raw_query_arg(request: Request, name: str) -> str | None:
-    """The first `name=` argument of the query string, not percent-decoded: the page passes it on as received."""
-    for part in request.url.query.split("&"):
+    """The first `name=` argument of the query string, not percent-decoded: the page passes it on as received.
+
+    Read from the ASGI scope's bytes, as the client sent them, not from `request.url`."""
+    for part in request.scope.get("query_string", b"").decode("latin-1").split("&"):
         key, sep, value = part.partition("=")
         if sep and key == name:
             return value
