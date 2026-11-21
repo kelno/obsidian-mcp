@@ -44,6 +44,7 @@ import hashlib
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import stat
 import urllib.parse
@@ -65,6 +66,8 @@ from src.services.vault import classify_bytes, is_hidden_path
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/transfer", tags=["transfer"])
+#: `/open`, outside `/transfer` so that links already given keep working (fork; see "the note-link page" below).
+open_router = APIRouter(tags=["transfer"])
 
 templates = Jinja2Templates(
     directory=os.path.join(os.path.dirname(os.path.dirname(__file__)), "control_panel", "templates")
@@ -416,8 +419,8 @@ async def _release_quietly(session, row, request: Request) -> bool:
 # ── static pages ────────────────────────────────────────────────────────────
 
 
-def _page(request: Request, template: str) -> Response:
-    """Render one of the two transfer pages with a per-response nonce CSP.
+def _page(request: Request, template: str, **context) -> Response:
+    """Render one of the pages served here with a per-response nonce CSP.
 
     The page is identical for every token — it renders nothing token- or
     path-specific server-side, so the only injection surface is the JSON→DOM
@@ -425,7 +428,7 @@ def _page(request: Request, template: str) -> Response:
     that braces: no external origin, no inline script but ours, no form posts.
     """
     nonce = secrets.token_urlsafe(16)
-    response = templates.TemplateResponse(request, template, {"nonce": nonce})
+    response = templates.TemplateResponse(request, template, {"nonce": nonce, **context})
     response.headers["Content-Security-Policy"] = (
         "default-src 'none'; "
         f"script-src 'nonce-{nonce}'; "
@@ -1184,3 +1187,42 @@ async def download_file(request: Request, token: str | None = Depends(_bearer)) 
     return StreamingResponse(
         _stream_fd(fd, st.st_size), media_type=mime, headers=headers
     )
+
+
+# ── the note-link page (fork) ───────────────────────────────────────────────
+#
+# `OPEN_NOTE_URL` links lead here when `OPEN_NOTE_VAULT` is set: the page opens
+# the note in the Obsidian app and closes its own tab a few seconds later, so
+# link tabs don't pile up. Like the ledger page, it reads nothing from the vault
+# or the database and authenticates nothing: it only echoes the path it is
+# given, which an allowlist keeps to characters that can't leave the HTML
+# attribute they sit in. See docs/open-note-links.md.
+
+#: The `file` argument as received, still percent-encoded: the characters of a
+#: percent-encoded path, `/`, and the punctuation a client may leave raw (the
+#: desktop Claude app seems to decode `%28`/`%29`); never `"`, `<`, `>`, `&`.
+OPEN_FILE_RE = re.compile(r"[A-Za-z0-9%._~/!'()*+,:;=@-]+")
+OPEN_USAGE = "Usage: /open?file=<percent-encoded vault path, without .md>\n"
+
+
+def _raw_query_arg(request: Request, name: str) -> str | None:
+    """The first `name=` argument of the query string, not percent-decoded: the page passes it on as received."""
+    for part in request.url.query.split("&"):
+        key, sep, value = part.partition("=")
+        if sep and key == name:
+            return value
+    return None
+
+
+@open_router.api_route("/open", methods=["GET", "HEAD"])
+@limiter.limit(PAGE_LIMIT)
+async def open_note_page(request: Request) -> Response:
+    vault = settings.open_note_vault
+    if vault is None:
+        return Response(status_code=404)
+    file = _raw_query_arg(request, "file")
+    if not file or not OPEN_FILE_RE.fullmatch(file):
+        return Response(OPEN_USAGE, status_code=400, media_type="text/plain; charset=utf-8",
+                        headers={"Cache-Control": "no-store"})
+    target = f"obsidian://open?vault={urllib.parse.quote(vault, safe='')}&file={file}"
+    return _page(request, "open_note.html", target=target)

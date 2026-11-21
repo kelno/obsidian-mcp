@@ -59,6 +59,7 @@ from src.services import concurrency_counters
 from src.services import vault_fs
 from src.services import indexer_health
 from src.logging_setup import configure_logging
+from src.transfer.routes import open_router as open_note_router
 from src.transfer.routes import router as transfer_router
 
 # **After** the import block, deliberately. `src.mcp_server.server` constructs
@@ -1041,6 +1042,8 @@ app.include_router(api_router)
 # untouched. `tests/test_transfer_routes.py` asserts that rather than trusting
 # it. Each handler authenticates its own request from the token row.
 app.include_router(transfer_router)
+# The note-link page (`/open`, fork), public in the same way: a 404 unless OPEN_NOTE_VAULT is set.
+app.include_router(open_note_router)
 
 # Panel assets (Chart.js, panel.js) served from this app rather than a CDN — see
 # the comment in `src/control_panel/templates/base.html`. Mounted under

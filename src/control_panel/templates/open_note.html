@@ -1,0 +1,14 @@
+{#-
+  The note-link page (fork, owner's decision 2026-11-21): opens one note in
+  the Obsidian app, then closes its own tab, so link tabs don't pile up. The
+  route checks `target`'s path against an allowlist; autoescaping covers it
+  again. Firefox lets the script close a tab opened from a link clicked in
+  another app; a browser that refuses leaves the tab with its fallback link.
+-#}
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<meta http-equiv="refresh" content="0;url={{ target }}">
+<title>Open in Obsidian</title>
+<p><a href="{{ target }}">Open in Obsidian</a></p>
+<script nonce="{{ nonce }}">setTimeout(function () { window.close(); }, 3000);</script>

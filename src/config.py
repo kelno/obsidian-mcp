@@ -966,10 +966,14 @@ class Settings(BaseSettings):
     # name a note for the agent to show the user (read_note, open_area,
     # create_note, edit_note, move_note, the search and listing tools) carry `open_url`: the
     # template with `{path}` replaced by the note's vault-relative path without
-    # `.md`, percent-encoded with `/` kept. The page behind it (typically a
-    # redirect to `obsidian://open?…`) is the deployment's, not this app's.
+    # `.md`, percent-encoded with `/` kept. The page behind it is this app's
+    # `/open` when `open_note_vault` is set, or the deployment's own.
     # Unset: no links anywhere. See src/services/open_note_url.py.
     open_note_url: str | None = None
+    # The vault's name in the Obsidian app. When set, this app serves `/open?file=<path>`: a page that
+    # opens that note in Obsidian (`obsidian://open?vault=<name>&file=<path>`) and closes its tab a few
+    # seconds later. Point `open_note_url` at it. Unset: no `/open` (a 404). See src/transfer/routes.py.
+    open_note_vault: str | None = None
 
     # ── Agent ledger (fork) ──────────────────────────────────────────────────
     # A topic holding at least this many current quirks, more than half of
@@ -1876,6 +1880,21 @@ class Settings(BaseSettings):
             # a bool or None, so the stamp would never find its own key.
             if yaml.safe_load(f"{v}: 1") != {v: 1}:
                 raise ValueError(f"LAST_AI_EDIT_FIELD={v!r} is not read by YAML as a string key")
+        return v
+
+    @field_validator("open_note_vault", mode="before")
+    @classmethod
+    def _open_note_vault_name(cls, v):
+        """Blank means unset; a name with control characters is refused (it is percent-encoded into the page)."""
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("OPEN_NOTE_VAULT must be a string")
+        v = v.strip()
+        if not v:
+            return None
+        if any(not c.isprintable() for c in v):
+            raise ValueError("OPEN_NOTE_VAULT must not contain control characters")
         return v
 
     @field_validator("open_note_url", mode="before")
