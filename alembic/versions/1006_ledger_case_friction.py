@@ -126,7 +126,14 @@ def upgrade() -> None:
     if comment == CONSTRAINT_MARKER:
         _verify_own(bind, live)
     elif comment == MARKER_1004:
-        _replace(PREDICATE, CONSTRAINT_MARKER)
+        try:
+            _replace(PREDICATE, CONSTRAINT_MARKER)
+        except sa.exc.DBAPIError as exc:
+            raise RuntimeError(
+                f"1006 could not replace 1004's {NAME} over the rows present "
+                f"({type(exc.orig).__name__ if exc.orig is not None else type(exc).__name__}): something in the "
+                "ledger is not what 1006 allows. Inspect it by hand. Nothing has been changed."
+            ) from None
     else:
         found = f"no {NAME}" if live is None else f"{NAME} without 1004's or its own marker"
         raise RuntimeError(

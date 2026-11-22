@@ -10174,7 +10174,7 @@ def test_1006_fresh_head_takes_friction_and_still_refuses_another_outcome():
         assert_alembic_check_clean(url, DIM)
 
 
-@pytest.mark.parametrize("stamp", ["1001", "1003", "1005"])
+@pytest.mark.parametrize("stamp", ["1001", "1003", "1004", "1005"])
 def test_stamp_back_reruns_through_1006_keep_a_friction_case(stamp):
     # From 1001: 1002 adopts the ledger (its allow-list names 1006's marker), then 1004 leaves 1006's CHECK
     # alone, then 1006 verifies it. From 1003: 1004, then 1006. From 1005: 1006 alone.
@@ -10217,6 +10217,21 @@ def test_1006_stamp_back_rerun_refuses_an_altered_check(label, ddl, fragment):
         assert alembic_version(url) == "1005"
 
 
+@pytest.mark.parametrize("stamp", ["1001", "1003"])
+def test_a_weakened_1006_check_passed_over_by_1002_and_1004_is_still_refused_at_1006(stamp):
+    # 1002 and 1004 leave a CHECK with 1006's marker to 1006 on purpose; the run as a whole still refuses it.
+    with throwaway_db(f"schema_1006_weakened_from_{stamp}") as url:
+        sql(url, "ALTER TABLE ledger_entries DROP CONSTRAINT ck_ledger_entries_case_fields")
+        sql(url, "ALTER TABLE ledger_entries ADD CONSTRAINT ck_ledger_entries_case_fields CHECK (true)")
+        sql(url, "COMMENT ON CONSTRAINT ck_ledger_entries_case_fields ON ledger_entries IS "
+                 "'rule case constraint (1006_ledger_case_friction)'")
+        _harness.run_alembic(url, "stamp", stamp, dimensions=DIM)
+        result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
+        assert result.returncode != 0
+        assert "1006 will not adopt a ck_ledger_entries_case_fields that differs" in (result.stdout + result.stderr)
+        assert alembic_version(url, fork=True) == stamp
+
+
 def test_downgrade_1006_refuses_while_a_friction_case_exists_and_up_again_is_clean():
     with throwaway_db("schema_1006_downgrade") as url:
         sql(url, FRICTION_CASE_1006)
@@ -10224,7 +10239,12 @@ def test_downgrade_1006_refuses_while_a_friction_case_exists_and_up_again_is_cle
         assert result.returncode != 0
         assert "holds 1 case entries with the outcome friction" in (result.stdout + result.stderr)
         assert alembic_version(url) == HEAD_REVISION
-        sql(url, "UPDATE ledger_entries SET outcome = 'slip' WHERE ref = 'C2'")
+        # Entries keep their history on every change, so the case is removed (the delete switch on), not edited.
+        async def remove_the_case(conn):
+            async with conn.transaction():
+                await conn.execute("SET LOCAL ledger.allow_delete = 'on'")
+                await conn.execute("DELETE FROM ledger_entries WHERE ref = 'C2'")
+        asyncio.run(_run(url, remove_the_case))
         _harness.run_alembic(url, "downgrade", "1005", dimensions=DIM)
         assert alembic_version(url) == "1005"
         definition, comment = _case_fields(url)
