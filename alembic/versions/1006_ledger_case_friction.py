@@ -128,10 +128,10 @@ def upgrade() -> None:
     elif comment == MARKER_1004:
         _replace(PREDICATE, CONSTRAINT_MARKER)
     else:
+        found = f"no {NAME}" if live is None else f"{NAME} without 1004's or its own marker"
         raise RuntimeError(
-            f"1006 found {'no ' + NAME if live is None else NAME + ' without 1004's or its own marker'}, so it "
-            "will not replace it: the ledger is primary data. Inspect it by hand, then re-run. "
-            "Nothing has been changed."
+            f"1006 found {found}, so it will not replace it: the ledger is primary data. Inspect it by hand, "
+            "then re-run. Nothing has been changed."
         )
 
     op.execute("RESET lock_timeout")
