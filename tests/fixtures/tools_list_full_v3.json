@@ -6074,11 +6074,12 @@
         "type": "string"
        },
        "outcome": {
-        "description": "case only, required: slip (the agent broke the rule), good (it did what the rule wants: behaviour to keep) or overdone (it followed the rule too far: the opposite failure).",
+        "description": "case only, required: slip (the agent broke the rule), good (it did what the rule wants: behaviour to keep), overdone (it followed the rule too far: the opposite failure) or friction (a rule got in the agent's way, by the agent's own reading; not a judgment of the agent or the rule).",
         "enum": [
          "slip",
          "good",
-         "overdone"
+         "overdone",
+         "friction"
         ],
         "maxLength": 16,
         "type": "string"
@@ -6185,7 +6186,7 @@
        }
       ],
       "default": null,
-      "description": "A case only: the rules it tests, by the proposal ref each rule carries (e.g. [\"P41\"]; the rule's line ends with [P41]). Each must be an existing proposal. When the rule carries no proposal ref yet, first log a proposal for it as it stands (status accepted: the rule is in force; proposed_text and final_text its current wording; the body saying it was logged afterwards and its origin is unknown), add that ref at the end of the rule's line, then tie the case to it. Leave rules out only when no rule covers the case yet.",
+      "description": "A case only: the rules it tests, by the proposal ref each rule carries (e.g. [\"P41\"]; the rule's line ends with [P41]). Each must be an existing proposal. When the rule carries no proposal ref, leave rules out and quote the rule's line in the body; never edit a rule's line to add one.",
       "maxItems": 20,
       "title": "Rules"
      },
@@ -6705,11 +6706,12 @@
         ]
        },
        "outcome": {
-        "description": "case only, required: slip (the agent broke the rule), good (it did what the rule wants: behaviour to keep) or overdone (it followed the rule too far: the opposite failure).",
+        "description": "case only, required: slip (the agent broke the rule), good (it did what the rule wants: behaviour to keep), overdone (it followed the rule too far: the opposite failure) or friction (a rule got in the agent's way, by the agent's own reading; not a judgment of the agent or the rule).",
         "enum": [
          "slip",
          "good",
          "overdone",
+         "friction",
          null
         ],
         "maxLength": 16,

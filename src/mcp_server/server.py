@@ -2027,8 +2027,9 @@ _LEDGER_FIELD_HELP = {
     "final_text": "what went in (required when status is accepted or adjusted)",
     "changes": "summary of what changed between proposed and final",
     "owner_reason": "only if the owner gave one; never press for it",
-    "outcome": "slip (the agent broke the rule), good (it did what the rule wants: behaviour to keep) or "
-               "overdone (it followed the rule too far: the opposite failure)",
+    "outcome": "slip (the agent broke the rule), good (it did what the rule wants: behaviour to keep), "
+               "overdone (it followed the rule too far: the opposite failure) or friction (a rule got in the "
+               "agent's way, by the agent's own reading; not a judgment of the agent or the rule)",
     "expected": "what should have happened",
     "expected_by": "whose call that is: owner when the owner said or confirmed what was expected, agent when "
                    "it is your own reading of the rule",
@@ -2118,12 +2119,8 @@ _D_CHALLENGES = Field(description="Summary-view line ids (ledger_digest with_ids
                                   "get flagged for review.")
 _D_RULES = Field(description="A case only: the rules it tests, by the proposal ref each rule carries (e.g. "
                              "[\"P41\"]; the rule's line ends with [P41]). Each must be an existing proposal. "
-                             "When the rule carries no proposal ref yet, first log a proposal for it as it "
-                             "stands (status accepted: the rule is in force; proposed_text and final_text its "
-                             "current wording; the body "
-                             "saying it was logged afterwards and its origin is unknown), add that ref at the end "
-                             "of the rule's line, then tie the case to it. Leave rules out only when no rule "
-                             "covers the case yet.",
+                             "When the rule carries no proposal ref, leave rules out and quote the rule's line "
+                             "in the body; never edit a rule's line to add one.",
                  json_schema_extra={"maxItems": _ledger_rules.LIST_ARG_MAX})
 
 

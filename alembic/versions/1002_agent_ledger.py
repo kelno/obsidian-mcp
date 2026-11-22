@@ -519,10 +519,11 @@ SCRATCH = "ledger_032_shape"
 #
 # **A future revision that adds or replaces a unit on these tables must
 # extend these lists on purpose**, with its literal names and markers;
-# nothing is inferred from a comment's shape. Byte identical to 1004's
-# literals.
+# nothing is inferred from a comment's shape. Byte identical to 1004's and
+# 1006's literals. A name a second revision replaces again lists both markers.
 _1004_COLUMN = "rule case field (1004_ledger_cases)"
 _1004_CONSTRAINT = "rule case constraint (1004_ledger_cases)"
+_1006_CONSTRAINT = "rule case constraint (1006_ledger_case_friction)"
 LATER_COLUMNS = {
     "ledger_entries": {
         "outcome": _1004_COLUMN,
@@ -538,13 +539,20 @@ LATER_CONSTRAINTS = {
         "ck_ledger_entries_ref": _1004_CONSTRAINT,
         "ck_ledger_entries_status": _1004_CONSTRAINT,
         "ck_ledger_entries_quirk_fields": _1004_CONSTRAINT,
-        "ck_ledger_entries_case_fields": _1004_CONSTRAINT,
+        "ck_ledger_entries_case_fields": (_1004_CONSTRAINT, _1006_CONSTRAINT),
         "uq_ledger_entries_id_owner_kind": _1004_CONSTRAINT,
     },
     "ledger_ref_counters": {
         "ck_ledger_ref_counters_kind": _1004_CONSTRAINT,
     },
 }
+
+
+def _listed(markers: str | tuple[str, ...] | None, comment: str) -> bool:
+    """Whether `comment` is the listed marker, or one of the listed markers."""
+    if isinstance(markers, tuple):
+        return comment in markers
+    return markers == comment
 
 
 def _later_units(bind) -> dict[str, dict[str, set[str]]]:
@@ -566,7 +574,7 @@ def _later_units(bind) -> dict[str, dict[str, set[str]]]:
             name for name, comment in bind.execute(sa.text(
                 "SELECT conname, obj_description(oid, 'pg_constraint') FROM pg_constraint "
                 "WHERE conrelid = CAST(:r AS regclass)"), {"r": rel}).all()
-            if comment is not None and LATER_CONSTRAINTS.get(table, {}).get(name) == comment
+            if comment is not None and _listed(LATER_CONSTRAINTS.get(table, {}).get(name), comment)
         }
         out[table] = {"columns": columns, "constraints": constraints}
     return out

@@ -119,6 +119,12 @@ REPLACED = {
 CASE_FIELDS_CHECK = "ck_ledger_entries_case_fields"
 UNIQUE_KIND = "uq_ledger_entries_id_owner_kind"
 
+#: This revision's constraints a later revision replaces under the same name, each with that
+#: revision's exact marker: on a stamp-back rerun, a unit of this name *and* that marker is the later
+#: revision's to verify, so it is counted as present and left out of the rebuild and the comparison.
+#: Byte identical to 1006's literal. A later revision replacing another of these units must extend it.
+LATER_CONSTRAINTS = {CASE_FIELDS_CHECK: "rule case constraint (1006_ledger_case_friction)"}
+
 #: Constraints this revision adds: `{name: (table, definition)}`.
 ADDED = {
     CASE_FIELDS_CHECK: (
@@ -200,8 +206,8 @@ def _table_comment(bind) -> tuple[bool, str | None]:
         "SELECT obj_description(CAST(:t AS regclass), 'pg_class')"), {"t": f"public.{TABLE}"}).scalar()
 
 
-def _shape(bind) -> dict:
-    """Everything this revision decides, as the catalog renders it, comparable by name."""
+def _shape(bind, skip: frozenset[str] = frozenset()) -> dict:
+    """Everything this revision decides, as the catalog renders it, comparable by name (not `skip`)."""
     def rows(query: str, **params) -> list:
         return sorted(tuple(r) for r in bind.execute(sa.text(query), params).all())
 
@@ -214,6 +220,8 @@ def _shape(bind) -> dict:
         "constraints": [],
     }
     for name, table in CONSTRAINTS.items():
+        if name in skip:
+            continue
         shape["constraints"] += rows(
             "SELECT conname, contype, pg_get_constraintdef(oid), convalidated, "
             "obj_description(oid, 'pg_constraint') FROM pg_constraint "
@@ -251,12 +259,14 @@ def _create() -> None:
     _create_constraints_and_table()
 
 
-def _create_constraints_and_table() -> None:
+def _create_constraints_and_table(skip: frozenset[str] = frozenset()) -> None:
     for name, (table, predicate, _old) in REPLACED.items():
         op.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}")
         op.execute(f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({predicate})")
         op.execute(f"COMMENT ON CONSTRAINT {name} ON {table} IS {_quote(CONSTRAINT_MARKER)}")
     for name, (table, definition) in ADDED.items():
+        if name in skip:
+            continue
         op.execute(f"ALTER TABLE {table} ADD CONSTRAINT {name} {definition}")
         op.execute(f"COMMENT ON CONSTRAINT {name} ON {table} IS {_quote(CONSTRAINT_MARKER)}")
     for statement in TABLE_DDL:
@@ -268,29 +278,31 @@ def _create_constraints_and_table() -> None:
 COLUMN_TYPES = {"varchar(16)": "character varying(16)", "varchar(8)": "character varying(8)", "text": "text"}
 
 
-def _drop_constraints_and_table() -> None:
+def _drop_constraints_and_table(skip: frozenset[str] = frozenset()) -> None:
     """Drop this revision's constraints (the replaced CHECKs included, not restored) and its table.
 
     Not its columns: dropping them would drop the cases' content, and the
-    CHECKs could not be added back over the rows.
+    CHECKs could not be added back over the rows. Not the names in `skip`: a
+    later revision's.
     """
     op.execute(f"DROP TABLE {TABLE}")
     for name, table in CONSTRAINTS.items():
-        op.execute(f"ALTER TABLE {table} DROP CONSTRAINT {name}")
+        if name not in skip:
+            op.execute(f"ALTER TABLE {table} DROP CONSTRAINT {name}")
 
 
 #: The savepoint a stamp-back rerun rebuilds this revision's units in, to compare.
 SCRATCH = "ledger_1004_shape"
 
 
-def _verify_own(bind) -> None:
+def _verify_own(bind, skip: frozenset[str] = frozenset()) -> None:
     """Accept this revision's units only if they are exactly what it creates.
 
     The columns are compared with their declared shape; the constraints and
     the table are rebuilt in place inside a savepoint over the rows present,
     and the catalog compared before and after.
     """
-    live = _shape(bind)
+    live = _shape(bind, skip)
     expected_columns = sorted(
         (column, COLUMN_TYPES[type_], False, COLUMN_MARKER) for column, type_ in COLUMNS.items())
     if live["columns"] != expected_columns:
@@ -300,9 +312,9 @@ def _verify_own(bind) -> None:
         )
     op.execute(f"SAVEPOINT {SCRATCH}")
     try:
-        _drop_constraints_and_table()
-        _create_constraints_and_table()
-        rebuilt = _shape(bind)
+        _drop_constraints_and_table(skip)
+        _create_constraints_and_table(skip)
+        rebuilt = _shape(bind, skip)
     except sa.exc.DBAPIError as exc:
         op.execute(f"ROLLBACK TO SAVEPOINT {SCRATCH}")
         op.execute(f"RELEASE SAVEPOINT {SCRATCH}")
@@ -333,6 +345,7 @@ def upgrade() -> None:
     table_present, table_comment = _table_comment(bind)
 
     # 1002's own CHECKs carry no comment: those names are "not yet replaced".
+    later = frozenset(n for n, marker in LATER_CONSTRAINTS.items() if constraints.get(n) == marker)
     replaced_mine = {n for n in REPLACED if constraints.get(n) == CONSTRAINT_MARKER}
     replaced_foreign = sorted(n for n in REPLACED if n in constraints and constraints[n] not in
                               (None, CONSTRAINT_MARKER))
@@ -341,7 +354,7 @@ def upgrade() -> None:
     everything = len(COLUMNS) + len(REPLACED) + len(ADDED) + 1
     unmarked = (
         sorted(c for c, comment in columns.items() if comment != COLUMN_MARKER)
-        + sorted(n for n in ADDED if n in constraints and constraints[n] != CONSTRAINT_MARKER)
+        + sorted(n for n in ADDED if n in constraints and constraints[n] != CONSTRAINT_MARKER and n not in later)
         + replaced_foreign
         + ([TABLE] if table_present and table_comment != TABLE_MARKER else [])
     )
@@ -352,7 +365,7 @@ def upgrade() -> None:
             "aside by hand, then re-run. Nothing has been changed."
         )
     if len(present) == everything:
-        _verify_own(bind)
+        _verify_own(bind, later)
     elif present:
         raise RuntimeError(
             f"1004 found only part of its units ({', '.join(present)}): a half-applied rule-case schema is "

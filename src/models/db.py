@@ -2270,8 +2270,9 @@ LEDGER_CERTAINTIES = ("tested", "seen_once", "inferred", "docs", "untested")
 LEDGER_FEEDBACK_SUBTYPES = ("unclear_instruction", "friction", "suggestion")
 LEDGER_ORIGINS = ("agent", "owner")
 #: A rule case's outcome: the agent broke the rule (slip), did what it wants
-#: (good), or followed it too far (overdone, the opposite failure).
-LEDGER_CASE_OUTCOMES = ("slip", "good", "overdone")
+#: (good), followed it too far (overdone, the opposite failure), or the rule got
+#: in its way, by its own reading (friction, 1006).
+LEDGER_CASE_OUTCOMES = ("slip", "good", "overdone", "friction")
 #: Whose call a case's expected behaviour is: the owner's own, or an agent's reading of the rule.
 LEDGER_CASE_EXPECTED_BY = ("owner", "agent")
 LEDGER_TOPIC_KINDS = ("system", "surface")
@@ -2446,7 +2447,7 @@ class LedgerEntry(Base):
             "(kind = 'case') = (outcome IS NOT NULL AND expected IS NOT NULL AND expected_by IS NOT NULL) "
             "AND (kind = 'case' OR (outcome IS NULL AND expected IS NULL AND expected_by IS NULL "
             "AND owner_words IS NULL AND agent_did IS NULL)) "
-            "AND outcome IN ('slip', 'good', 'overdone') "
+            "AND outcome IN ('slip', 'good', 'overdone', 'friction') "
             "AND expected_by IN ('owner', 'agent') "
             "AND char_length(btrim(expected)) >= 1 AND char_length(expected) <= 4000 "
             "AND char_length(owner_words) <= 4000 AND char_length(agent_did) <= 4000",

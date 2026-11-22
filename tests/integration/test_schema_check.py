@@ -61,7 +61,7 @@ DIM = 64  # irrelevant here; keeps the migration cheap.
 # The current head. Every case that migrates forward asserts it, so adding a
 # revision without teaching this module about it fails loudly rather than
 # leaving the new migration unexercised.
-HEAD_REVISION = "1005"
+HEAD_REVISION = "1006"
 
 # Every test builds and drops its own database, nothing is module-scoped:
 # pytest-xdist may share the tests out one by one (see tests/conftest.py).
@@ -9748,7 +9748,8 @@ def test_1001_chains_from_030():
     assert script.get_revision("1003").down_revision == ("040", "1002")
     assert script.get_revision("1004").down_revision == "1003"
     assert script.get_revision("1005").down_revision == "1004"
-    assert script.get_current_head() == HEAD_REVISION == "1005"
+    assert script.get_revision("1006").down_revision == "1005"
+    assert script.get_current_head() == HEAD_REVISION == "1006"
 
 
 def test_1001_rows_cascade_with_their_note_and_the_checks_hold():
@@ -9846,7 +9847,7 @@ LEDGER_ENTRY_1002 = (
 
 def test_1002_fresh_head_is_clean_and_marked():
     with throwaway_db("schema_1002_fresh") as url:
-        assert alembic_version(url) == HEAD_REVISION == "1005"
+        assert alembic_version(url) == HEAD_REVISION == "1006"
         assert fetchval(
             url, "SELECT obj_description('public.ledger_entries'::regclass, 'pg_class')"
         ) == "agent ledger entries, primary data (032_agent_ledger)"
@@ -10138,4 +10139,98 @@ def test_downgrade_1005_drops_the_table_and_up_again_is_clean():
         assert fetchval(url, "SELECT count(*) FROM ledger_entries") == 1
         _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
         assert alembic_version(url) == HEAD_REVISION
+        assert_alembic_check_clean(url, DIM)
+
+
+# ── 1006: the case outcome `friction` ────────────────────────────────────────
+#
+# Fresh head: 1004's case-fields CHECK replaced under its name, with 1006's
+# marker, taking `friction`. 1002's and 1004's stamp-back reruns leave it to
+# 1006 (their allow-lists); 1006's own rerun changes nothing and refuses its
+# CHECK altered or unmarked; its downgrade refuses while a friction case
+# exists, restores 1004's CHECK, and up again is clean.
+
+FRICTION_CASE_1006 = (
+    "INSERT INTO ledger_entries (kind, number, ref, status, title, observed_on, created_by, content_hash, "
+    "outcome, expected, expected_by) VALUES ('case', 2, 'C2', 'current', 'f', '2026-11-22', 'gate', 'h', "
+    "'friction', 'e', 'agent')"
+)
+
+
+def _case_fields(url):
+    return tuple(fetch(url, "SELECT pg_get_constraintdef(oid) AS def, obj_description(oid, 'pg_constraint') AS c "
+                            "FROM pg_constraint WHERE conname = 'ck_ledger_entries_case_fields'")[0])
+
+
+def test_1006_fresh_head_takes_friction_and_still_refuses_another_outcome():
+    with throwaway_db("schema_1006_fresh") as url:
+        definition, comment = _case_fields(url)
+        assert comment == "rule case constraint (1006_ledger_case_friction)"
+        assert "'friction'" in definition
+        sql(url, CASE_1004)
+        sql(url, FRICTION_CASE_1006)
+        with pytest.raises(asyncpg.PostgresError, match="ck_ledger_entries_case_fields"):
+            sql(url, FRICTION_CASE_1006.replace("'friction'", "'meh'").replace("'C2'", "'C3'").replace(", 2,", ", 3,"))
+        assert_alembic_check_clean(url, DIM)
+
+
+@pytest.mark.parametrize("stamp", ["1001", "1003", "1005"])
+def test_stamp_back_reruns_through_1006_keep_a_friction_case(stamp):
+    # From 1001: 1002 adopts the ledger (its allow-list names 1006's marker), then 1004 leaves 1006's CHECK
+    # alone, then 1006 verifies it. From 1003: 1004, then 1006. From 1005: 1006 alone.
+    with throwaway_db(f"schema_1006_rerun_{stamp}") as url:
+        sql(url, CASE_1004)
+        sql(url, FRICTION_CASE_1006)
+        sql(url, PROPOSAL_1004)
+        sql(url, LINK_1004)
+        before = _case_snapshot(url)
+        _harness.run_alembic(url, "stamp", stamp, dimensions=DIM)
+        _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
+        assert alembic_version(url) == HEAD_REVISION
+        assert _case_snapshot(url) == before
+        assert_alembic_check_clean(url, DIM)
+
+
+@pytest.mark.parametrize("label,ddl,fragment", [
+    (
+        "marked_but_weakened",
+        ["ALTER TABLE ledger_entries DROP CONSTRAINT ck_ledger_entries_case_fields",
+         "ALTER TABLE ledger_entries ADD CONSTRAINT ck_ledger_entries_case_fields CHECK (true)",
+         "COMMENT ON CONSTRAINT ck_ledger_entries_case_fields ON ledger_entries IS "
+         "'rule case constraint (1006_ledger_case_friction)'"],
+        "1006 will not adopt a ck_ledger_entries_case_fields that differs",
+    ),
+    (
+        "unmarked",
+        ["COMMENT ON CONSTRAINT ck_ledger_entries_case_fields ON ledger_entries IS NULL"],
+        "without 1004's or its own marker",
+    ),
+])
+def test_1006_stamp_back_rerun_refuses_an_altered_check(label, ddl, fragment):
+    with throwaway_db(f"schema_1006_altered_{label}") as url:
+        for statement in ddl:
+            sql(url, statement)
+        _harness.run_alembic(url, "stamp", "1005", dimensions=DIM)
+        result = _harness.run_alembic(url, "upgrade", "head", dimensions=DIM, check=False)
+        assert result.returncode != 0
+        assert fragment in (result.stdout + result.stderr)
+        assert alembic_version(url) == "1005"
+
+
+def test_downgrade_1006_refuses_while_a_friction_case_exists_and_up_again_is_clean():
+    with throwaway_db("schema_1006_downgrade") as url:
+        sql(url, FRICTION_CASE_1006)
+        result = _harness.run_alembic(url, "downgrade", "1005", dimensions=DIM, check=False)
+        assert result.returncode != 0
+        assert "holds 1 case entries with the outcome friction" in (result.stdout + result.stderr)
+        assert alembic_version(url) == HEAD_REVISION
+        sql(url, "UPDATE ledger_entries SET outcome = 'slip' WHERE ref = 'C2'")
+        _harness.run_alembic(url, "downgrade", "1005", dimensions=DIM)
+        assert alembic_version(url) == "1005"
+        definition, comment = _case_fields(url)
+        assert comment == "rule case constraint (1004_ledger_cases)"
+        assert "'friction'" not in definition
+        _harness.run_alembic(url, "upgrade", "head", dimensions=DIM)
+        assert alembic_version(url) == HEAD_REVISION
+        assert _case_fields(url)[1] == "rule case constraint (1006_ledger_case_friction)"
         assert_alembic_check_clean(url, DIM)

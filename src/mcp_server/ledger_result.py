@@ -43,7 +43,7 @@ class EntrySummary(_OmitNone):
     date: str | None = None
     origin: str | None = None
     seen: bool | None = None
-    #: A case: slip, good or overdone.
+    #: A case: slip, good, overdone or friction.
     outcome: str | None = None
     #: In a "by meaning" list: cosine similarity of the best chunk.
     similarity: float | None = None
