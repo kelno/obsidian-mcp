@@ -1073,6 +1073,12 @@ app.include_router(users_router)
 if settings.multi_user_mode:
     from src.auth.routes import router as auth_router
     app.include_router(auth_router)
+else:
+    # Fork: single-user mode's own login, mounted only with PANEL_PASSWORD set.
+    from src.auth import panel_password
+
+    if panel_password.enabled():
+        app.include_router(panel_password.router)
 
 
 @app.get("/health")

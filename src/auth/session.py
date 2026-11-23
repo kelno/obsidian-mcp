@@ -182,6 +182,12 @@ async def get_current_user(
     session: AsyncSession = Depends(get_session),
 ) -> User | _SingleUserSentinel | None:
     if not settings.multi_user_mode:
+        # Fork: with PANEL_PASSWORD set, the sentinel only behind a session
+        # its login minted (src/auth/panel_password.py).
+        from src.auth import panel_password
+
+        if panel_password.enabled() and not panel_password.is_signed_in(request):
+            return None
         return _SINGLE_USER_SENTINEL
     return await get_active_session_user(request, session)
 

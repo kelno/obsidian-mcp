@@ -482,6 +482,11 @@ def _normalise_oidc_extra_scopes(value: str) -> str:
     return " ".join(kept)
 
 
+#: Shortest `PANEL_PASSWORD` accepted (fork). The login budgets slow guessing;
+#: a long random value is what makes it hopeless.
+PANEL_PASSWORD_MIN_CHARS = 16
+
+
 class Settings(BaseSettings):
     # No password in the default (#324): an unset DATABASE_URL must not
     # authenticate with a known value. The bundled compose files set it from
@@ -1486,6 +1491,10 @@ class Settings(BaseSettings):
     # the upgrade sequence; linking now lives on the `users` row.
     oidc_subject_user_ids: dict[str, Any] = Field(default_factory=dict, repr=False)
     local_login_enabled: bool = True
+    # Fork: a password for the panel, `/api` and `/authorize` in single-user
+    # mode (src/auth/panel_password.py). Empty means no login of the app's own,
+    # as upstream. Refused in multi-user mode, which has accounts.
+    panel_password: str = Field("", repr=False)
 
     _oidc_ssl_context: Any = PrivateAttr(default=None)
 
@@ -2613,6 +2622,27 @@ class Settings(BaseSettings):
                     repr(h) for h in public_hosts
                 ),
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_panel_password(self) -> "Settings":
+        value = self.panel_password
+        if not value:
+            return self
+        if self.multi_user_mode:
+            raise ValueError(
+                "PANEL_PASSWORD is for single-user mode; multi-user mode signs "
+                "in with accounts. Unset PANEL_PASSWORD."
+            )
+        if (len(value) < PANEL_PASSWORD_MIN_CHARS or not value.strip()
+                or value.strip().lower() in self._SECRET_KEY_PLACEHOLDERS):
+            raise ValueError(
+                f"PANEL_PASSWORD must be at least {PANEL_PASSWORD_MIN_CHARS} "
+                "characters and not a placeholder. Generate one with: "
+                'python -c "import secrets; print(secrets.token_urlsafe(24))"'
+            )
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+            raise ValueError("PANEL_PASSWORD must not contain control characters")
         return self
 
     @model_validator(mode="after")

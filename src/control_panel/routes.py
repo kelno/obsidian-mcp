@@ -16,6 +16,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.auth import panel_password
 from src.auth.passwords import (
     MIN_PASSWORD_LENGTH,
     hash_password,
@@ -436,7 +437,8 @@ def _panel_context(
     Every panel handler returning a template merges this in. The single-
     user sentinel has `username="admin"` and `is_admin=True`, so
     `base.html`'s `{% if multi_user_mode and username %}` user-badge block
-    stays hidden in single-user mode regardless of how it's rendered.
+    stays hidden in single-user mode regardless of how it's rendered,
+    unless PANEL_PASSWORD is on (fork), where it carries the Logout button.
 
     It is also the **only** place a panel flash is read (#138). Every render
     pops the session entry, so a message set before a redirect is shown once
@@ -449,6 +451,8 @@ def _panel_context(
         "is_admin": bool(user.is_admin),
         "username": user.username,
         "multi_user_mode": bool(settings.multi_user_mode),
+        # Fork: single-user mode behind PANEL_PASSWORD shows a Logout button.
+        "panel_password_login": panel_password.enabled(),
         "csrf_token": generate_csrf_token(request),
         "flash": flash_message,
         "flash_kind": flash_kind,

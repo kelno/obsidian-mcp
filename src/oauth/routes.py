@@ -16,6 +16,7 @@ from sqlalchemy import null as sa_null
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from src.auth import panel_password
 from src.auth.session import get_active_session_user
 from src.config import settings
 from src.database import async_session
@@ -846,6 +847,16 @@ async def _authorize_get(
     state,
 ):
     session_user_id: int | None = None
+    # Fork: single-user mode behind PANEL_PASSWORD signs in first, like
+    # multi-user mode below (src/auth/panel_password.py).
+    if panel_password.enabled() and not panel_password.is_signed_in(request):
+        target = request.url.path
+        if request.url.query:
+            target = f"{target}?{request.url.query}"
+        return RedirectResponse(
+            f"/admin/auth/login?next={quote(target, safe='')}",
+            status_code=302,
+        )
     # Multi-user mode: an end-user identity must exist on the request
     # session before we can stamp it onto the issued code/token. If there's
     # no session, bounce through login first and come back here. Single-
@@ -1155,6 +1166,13 @@ async def _authorize_post(
     state,
     client_state,
 ):
+    # Fork: no consent without the panel password's session (single-user
+    # mode with PANEL_PASSWORD set); nothing is issued or recorded.
+    if panel_password.enabled() and not panel_password.is_signed_in(request):
+        return JSONResponse(
+            {"error": "access_denied", "error_description": "Sign in to the panel first"},
+            status_code=401,
+        )
     # Verify CSRF state against the signed cookie
     signed_cookie = request.cookies.get("oauth_state", "")
     state_valid = False

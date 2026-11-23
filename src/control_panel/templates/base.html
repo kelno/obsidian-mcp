@@ -961,7 +961,7 @@
 
     <!-- ── Main ── -->
     <div class="main">
-        {% if multi_user_mode and username %}
+        {% if (multi_user_mode or panel_password_login) and username %}
         <div class="base-user-bar">
             <span class="user-badge">
                 <span class="user-badge-name">{{ username }}</span>
