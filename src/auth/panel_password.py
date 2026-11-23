@@ -129,8 +129,10 @@ def start(request: Request) -> str | None:
     _sessions[_digest(sid).hex()] = _Session(expires_at=now + settings.session_max_age)
     while len(_sessions) > MAX_SESSIONS:
         _sessions.popitem(last=False)
-    # A mint rewrites the cookie from scratch (session fixation), so a flash
-    # set before it would be lost; nothing here sets one.
+    # A mint rewrites the cookie from scratch (session fixation). Everything
+    # in it goes, the CSRF nonce included: another open tab must reload before
+    # its next POST. Don't carry keys across the mint. A flash set before it
+    # would be lost too; nothing here sets one.
     cookie.clear()
     cookie[SESSION_KEY] = sid
     return sid
