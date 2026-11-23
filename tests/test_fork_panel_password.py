@@ -286,8 +286,12 @@ def test_the_login_budget_throttles_guessing(client, monkeypatch):
     monkeypatch.setattr(limiter, "enabled", False)
     for _ in range(3):
         assert _login(client, password="wrong-password-of-good-length").status_code == 401
-    # Over budget: even the right password is refused until the window passes.
-    assert _login(client).status_code == 401
+    # Over budget: even the right password is refused until the window passes,
+    # and the page says why rather than "Invalid password".
+    throttled = _login(client)
+    assert throttled.status_code == 429
+    assert "Too many failed attempts" in throttled.text
+    assert "Invalid password" not in throttled.text
     assert not panel_password._sessions
 
 

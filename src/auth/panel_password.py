@@ -32,7 +32,10 @@ What it is, and why it is shaped this way (docs/architecture/control-panel.md,
   the password field only.
 * **The failed-login budgets are upstream's**: 5 attempts a minute per address
   on the POST (the decorator), and the per-account budget under a key no
-  `users` row can have.
+  `users` row can have. With one account that budget is global: whoever can
+  reach the login can spend it and keep the right password out for a window
+  (an accepted limitation, see the architecture note), and the page then says
+  so rather than "Invalid password".
 """
 from __future__ import annotations
 
@@ -237,7 +240,16 @@ async def login_submit(
             client_ip=security_events.client_ip(request),
             route=request.url.path,
         )
-        return _render_login(request, error=invalid, next_url=target, status_code=401)
+        # Said plainly, unlike multi-user mode: there is one account, so the
+        # message names no user, and an owner told "Invalid password" while a
+        # guesser holds the budget would doubt the right password.
+        minutes = max(1, -(-throttled.window_seconds // 60))
+        return _render_login(
+            request,
+            error=f"Too many failed attempts. Try again in up to {minutes} minutes.",
+            next_url=target,
+            status_code=429,
+        )
     if not check_password(password):
         security_events.emit(
             "panel_login_failed",
