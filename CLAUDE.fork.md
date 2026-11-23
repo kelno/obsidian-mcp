@@ -48,4 +48,4 @@ The fork's own architecture notes, each with what to read it before touching:
 - [open-area.md](docs/architecture/open-area.md): `open_area` and the area index (`kelno_vault`)
 - [agent-paths.md](docs/architecture/agent-paths.md): `agent_path`, `agent_path_reached_by` (`kelno_vault`)
 
-Two of upstream's notes, in `CLAUDE.md`'s list, have a section that is the fork's: [search.md](docs/architecture/search.md), "Private folders" (`PRIVATE_FOLDER_NAMES`, `include_private`), and [vault-tools.md](docs/architecture/vault-tools.md), "The agent-edit stamp" (`src/services/ai_edit_stamp.py`, `LAST_AI_EDIT_FIELD`, `ARCHIVE_FOLDER`).
+Three of upstream's notes, in `CLAUDE.md`'s list, have a section that is the fork's: [search.md](docs/architecture/search.md), "Private folders" (`PRIVATE_FOLDER_NAMES`, `include_private`); [vault-tools.md](docs/architecture/vault-tools.md), "The agent-edit stamp" (`src/services/ai_edit_stamp.py`, `LAST_AI_EDIT_FIELD`, `ARCHIVE_FOLDER`); and [control-panel.md](docs/architecture/control-panel.md), "Single-user panel password" (`PANEL_PASSWORD`, `src/auth/panel_password.py`).
