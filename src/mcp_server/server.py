@@ -1637,6 +1637,7 @@ async def list_tasks(
 
 
 @mcp.tool(title="Create task", annotations=_WRITE)
+@_plugins.tool_text("create_task")
 async def create_task(
     description: str,
     path: str | None = None,
@@ -1662,6 +1663,8 @@ async def create_task(
     Changes no other line. The line is read back before writing and the call
     is refused if the plugin would read it differently.
 
+    {plugin_text}
+
     Args:
         description: the task's text, one line. Tags (`#next`) may be part of
             it. Do not put dates or priority emojis in it: use the arguments.
@@ -1673,6 +1676,7 @@ async def create_task(
         path: the note to add it to; default the tasks inbox
             (`Tasks inbox.md` unless configured). Only the inbox is created
             when missing.
+            {plugin_text:path}
         heading: add it under this heading (same selectors as
             `edit_note(section=…)`: text, `Parent/Child` or `#N`), after the
             section's last non-blank line. Default: the end of the note.

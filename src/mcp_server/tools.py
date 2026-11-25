@@ -10848,6 +10848,7 @@ async def create_task_impl(
     its write. A missing note is created only when it is the inbox
     (`TASKS_INBOX_PATH`) and no heading is named.
     """
+    path_given = path
     if path is None:
         path = settings.tasks_inbox_path
     if not path.endswith(".md"):
@@ -10864,6 +10865,10 @@ async def create_task_impl(
         else:
             inferred = areas_index.area_for_path(path)
             area_tags = [inferred] if inferred else []
+        refusal, plugin_errors = await _plugins.check_task(_plugins.TaskPlace(
+            "create_task", path_given, await _task_areas(areas_index, area_tags, uid), uid))
+        if refusal is not None:
+            return _task_failed(TaskWriteResult, _body_refusal(refusal.message, refusal.code))
         new_status = _task_ops.resolve_status(registry, status, None) if status is not None else None
         task = _task_ops.new_task(
             description=description, settings=task_settings, registry=registry, today=today,
@@ -10932,7 +10937,8 @@ async def create_task_impl(
             return _task_failed(TaskWriteResult, err)
         return _with_notes(await _task_written(uid, target, number + shift, None, new_line, new_text, today,
                                                task_settings=task_settings, registry=registry, changed=True,
-                                               created_note=True if existing is None else None), link_notes)
+                                               created_note=True if existing is None else None),
+                           link_notes + ([plugin_errors.strip()] if plugin_errors else []))
 
 
 async def _existing_task(tool, uid, target, path, line, expected_line, expected_hash, task_id=None):
@@ -11077,6 +11083,23 @@ async def edit_task_impl(
                 f"The 🔁 rule was rewritten in the Tasks plugin's own wording ({old.recurrence!r} → "
                 f"{updated.recurrence!r}), as the plugin does whenever it saves the line; it means the same."]
         return _private_by_id(_with_notes(result, link_notes), by_line, named_path)
+
+
+async def _task_areas(areas_index, tags: list[str], uid) -> tuple:
+    """The plugins' view of a new task's areas: each tag with its main note's path (`TaskArea`).
+
+    An area just declared on disk, which the index does not know yet, is
+    looked up again in the notes changed lately (`area_lookup.refreshed`).
+    """
+    if not tags:
+        return ()
+    mains = {tag: path for tag, path, _ in areas_index.described()}
+    if any(t not in mains for t in tags):
+        try:
+            mains.update({tag: path for tag, path, _ in (await _area_lookup.refreshed(areas_index, uid)).described()})
+        except OSError:
+            pass   # the vault could not be walked: those areas go without a main note
+    return tuple(_plugins.TaskArea(t, mains.get(t)) for t in tags)
 
 
 def _with_notes(result: TaskWriteResult, notes: list[str]) -> TaskWriteResult:

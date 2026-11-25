@@ -368,7 +368,8 @@ def test_the_served_descriptions_hold_no_marker_and_no_plugin_rule_without_the_p
 def test_this_vaults_plugin_describes_its_rule_on_every_writer():
     (loaded,) = plugins.load(("kelno_vault",))
     # edit_note and move_note sit close to the description cap: one line each, pointing to create_note's.
-    assert set(loaded.tool_text) == {"create_note", "edit_note", "write_file", "move_note"}
+    assert set(loaded.tool_text) == {"create_note", "edit_note", "write_file", "move_note", "create_task:path"}
+    assert loaded.check_task is not None
     assert "task_line_by_hand" in loaded.tool_text["create_note"] and "task line" in loaded.tool_text["edit_note"]
     writers = [loaded.tool_text[name] for name in ("create_note", "write_file")]
     assert all("title_heading_removed" in text and "links_rewritten" in text and "task_line_by_hand" in text

@@ -41,6 +41,7 @@ from src.plugins.kelno_vault import (
     open_area,
     rule_notes,
     task_lines,
+    task_place,
     title_heading,
 )
 from src.services import vault
@@ -196,12 +197,14 @@ plugin = plugins.Plugin(
     check=task_lines.check,
     rewrite=_rewrite,
     check_name=_check_name,
+    check_task=task_place.check,
     tools=(open_area.TOOL, *agent_path_tools.TOOLS),
     tool_text={
         "create_note": f"{_WRITER_TEXT} {_CREATE_NOTE_NAME_TEXT}",
         "edit_note": _EDIT_NOTE_TEXT,
         "move_note": _MOVE_NOTE_TEXT,
         "write_file": _WRITE_FILE_TEXT,
+        "create_task:path": task_place.PATH_TEXT,
     },
     guide_text="\n\n".join((task_lines.GUIDE, rule_notes.GUIDE, note_names.GUIDE, _LINKS_GUIDE,
                            _TITLE_HEADING_GUIDE, _OPEN_AREA_GUIDE)),

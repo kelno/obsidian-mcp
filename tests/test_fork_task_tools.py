@@ -1444,3 +1444,90 @@ async def test_edit_refuses_a_dependency_cycle(vault):
     result = await edit(vault, text + "\n", 1, text, depends_on=["b"])
     assert code(result) == "invalid_argument"
     assert "o.md:1" in result.error
+
+
+# ── create_task with an area and no path (kelno_vault's task check, ledger P422) ──
+
+
+AREA_X_REFUSAL = (
+    "Refused: this task has an area but no path, so it would go to the Tasks inbox, which is for tasks whose "
+    "place isn't known yet. Put it in that area: its main note is `projects/Area X/Area X.md` "
+    "(path=\"projects/Area X/Area X.md\", heading=\"Tasks\"), or a note about it within the area. If you don't "
+    "know where it goes, leave out the area."
+)
+
+
+async def test_an_area_without_a_path_is_refused_naming_the_main_note(kelno_vault, vault):
+    result = await tools.create_task_impl("do", areas=["area-x"])
+    assert code(result) == "task_area_without_path"
+    assert result.error.rsplit("\n", 1)[0] == AREA_X_REFUSAL
+    assert not (vault / "Tasks inbox.md").exists()
+
+
+async def test_the_refusal_names_the_first_area(kelno_vault, vault):
+    result = await tools.create_task_impl("do", areas=["#area/other", "area-x"])
+    assert "`projects/Other/Other.md`" in result.error
+    assert not (vault / "Tasks inbox.md").exists()
+
+
+async def test_an_area_with_a_path_is_written(kelno_vault, vault):
+    note(vault, "projects/Area X/Area X.md", "## Tasks\n")
+    result = await tools.create_task_impl("do", path="projects/Area X/Area X.md", heading="Tasks", areas=["area-x"])
+    assert not result.error, result
+    assert read(vault, "projects/Area X/Area X.md") == "## Tasks\n- [ ] do #area/area-x\n"
+
+
+@pytest.mark.parametrize("areas", [None, []])
+async def test_no_area_and_no_path_still_goes_to_the_inbox(kelno_vault, vault, areas):
+    result = await tools.create_task_impl("do", areas=areas)
+    assert not result.error, result
+    assert read(vault, "Tasks inbox.md") == "- [ ] do\n"
+
+
+async def test_without_the_vault_plugin_an_area_without_a_path_goes_to_the_inbox(vault):
+    result = await tools.create_task_impl("do", areas=["area-x"])
+    assert not result.error, result
+    assert read(vault, "Tasks inbox.md") == "- [ ] do #area/area-x\n"
+
+
+async def test_a_failing_task_check_lets_the_write_through_and_says_so(vault, monkeypatch):
+    async def broken(place):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(plugins, "active", lambda: (plugins.Plugin(name="broken", check_task=broken),))
+    result = await tools.create_task_impl("do", areas=["area-x"])
+    assert not result.error, result
+    assert read(vault, "Tasks inbox.md") == "- [ ] do #area/area-x\n"
+    assert any("plugin_error:" in n and "task check" in n for n in result.notes or [])
+
+
+def test_the_path_description_gains_the_sentence_with_the_vault_plugin(monkeypatch):
+    from src.plugins.kelno_vault import task_place
+
+    raw = _create_task_source_doc()
+    monkeypatch.setattr(plugins, "active", lambda: plugins.load(("kelno_vault",)))
+    served = plugins.describe("create_task", raw)
+    lines = served.split("\n")
+    at = next(i for i, line in enumerate(lines) if line.strip().startswith("path: the note to add it to"))
+    assert lines[at + 3].strip() == task_place.PATH_TEXT == (
+        "Required with `areas`: a task whose area is known goes in that area.")
+    assert "{plugin_text" not in served
+
+
+def test_without_the_vault_plugin_the_path_description_is_unchanged(monkeypatch):
+    monkeypatch.setattr(plugins, "active", lambda: ())
+    served = plugins.describe("create_task", _create_task_source_doc())
+    assert "{plugin_text" not in served
+    assert "Required with `areas`" not in served
+    assert "when missing.\n        heading: add it under this heading" in served
+
+
+def _create_task_source_doc() -> str:
+    """`create_task`'s docstring as written in `server.py`, markers included."""
+    import ast
+    import pathlib
+
+    source = pathlib.Path(__file__).resolve().parent.parent / "src" / "mcp_server" / "server.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "create_task")
+    return ast.get_docstring(fn, clean=False)

@@ -126,6 +126,29 @@ class NoteName:
 
 
 @dataclass(frozen=True)
+class TaskArea:
+    """An area a new task carries: its tag (`area/<slug>`) and its main note's vault path."""
+
+    tag: str
+    main_note: str | None
+
+
+@dataclass(frozen=True)
+class TaskPlace:
+    """Where a task writer is about to put a new task, given to `check_task`.
+
+    `path` is the note the caller named, None when it named none (the tool
+    then writes to the tasks inbox); `areas` the areas the task carries, as
+    the caller gave them or as the note's folder implies.
+    """
+
+    tool: str
+    path: str | None
+    areas: tuple[TaskArea, ...]
+    user_id: int | None
+
+
+@dataclass(frozen=True)
 class NameCheck:
     """A plugin's answer on a note's name: a refusal (nothing written), or a block for the result."""
 
@@ -182,9 +205,14 @@ class Plugin:
         check_name: refuses a new note's name or a move's destination
             (`NameCheck.refusal`), or adds a block to the result
             (`NameCheck.note`); None when it has nothing to say.
+        check_task: refuses where a task writer is about to put a new task
+            (`TaskPlace`), or lets it through (None).
         tools: whole tools the plugin adds (`PluginTool`).
         tool_text: tool name → paragraphs the plugin adds to that tool's
-            description, where its docstring has the `TOOL_TEXT_MARKER` line.
+            description, where its docstring has the `TOOL_TEXT_MARKER` line;
+            `<tool>:<parameter>` → a line added to that parameter's
+            description, where the docstring has a `{plugin_text:<parameter>}`
+            line.
             One paragraph per line, unwrapped.
         guide_text: sections appended to `get_vault_guide`, each starting
             with a `## … (this server)` heading.
@@ -198,6 +226,7 @@ class Plugin:
     check: Callable[[NoteWrite], Awaitable[Refusal | None]] | None = None
     rewrite: Callable[[NoteWrite], Awaitable[Rewrite]] | None = None
     check_name: Callable[[NoteName], Awaitable[NameCheck | None]] | None = None
+    check_task: Callable[[TaskPlace], Awaitable[Refusal | None]] | None = None
     tools: tuple[PluginTool, ...] = ()
     tool_text: Mapping[str, str] = field(default_factory=dict)
     guide_text: str = ""
@@ -224,16 +253,16 @@ def describe(tool_name: str, doc: str) -> str:
     Raises:
         ValueError: `doc` has no marker line, or more than one.
     """
-    lines = doc.split("\n")
+    try:
+        loaded = active()
+    except PluginLoadError:
+        loaded = ()   # the lifespan refuses to start on it (see above)
+    lines = _parameter_text(tool_name, doc.split("\n"), loaded)
     at = [i for i, line in enumerate(lines) if line.strip() == TOOL_TEXT_MARKER]
     if len(at) != 1:
         raise ValueError(f"{tool_name}'s docstring must hold the line {TOOL_TEXT_MARKER} exactly once")
     i = at[0]
     indent = lines[i][: len(lines[i]) - len(lines[i].lstrip())]
-    try:
-        loaded = active()
-    except PluginLoadError:
-        loaded = ()   # the lifespan refuses to start on it (see above)
     paragraphs = [p.strip() for plugin in loaded if (p := plugin.tool_text.get(tool_name, "")).strip()]
     if not paragraphs:
         # The marker and the blank line after it go, so no double blank remains.
@@ -241,6 +270,25 @@ def describe(tool_name: str, doc: str) -> str:
         return "\n".join(lines[:i] + lines[end:])
     text = "\n\n".join("\n".join(indent + line if line.strip() else "" for line in p.split("\n")) for p in paragraphs)
     return "\n".join(lines[:i] + [text] + lines[i + 1:])
+
+
+def _parameter_text(tool_name: str, lines: list[str], loaded) -> list[str]:
+    """`lines` with each `{plugin_text:<parameter>}` line replaced by the plugins' text for that parameter, or removed.
+
+    The text is `tool_text["<tool>:<parameter>"]`, one line per plugin that has
+    one, at the marker's indentation: a continuation of the parameter's
+    description.
+    """
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        if not (stripped.startswith("{plugin_text:") and stripped.endswith("}")):
+            out.append(line)
+            continue
+        key = f"{tool_name}:{stripped[len('{plugin_text:'):-1]}"
+        indent = line[: len(line) - len(line.lstrip())]
+        out.extend(indent + t.strip() for plugin in loaded if (t := plugin.tool_text.get(key, "")).strip())
+    return out
 
 
 def tool_text(tool_name: str) -> Callable[[Callable], Callable]:
@@ -389,6 +437,35 @@ async def check_name(tool: str, path: str, from_path: str | None, user_id: int |
             return result.refusal, ""
         blocks.append(result.note)
     return None, "".join(blocks)
+
+
+async def check_task(place: TaskPlace) -> tuple[Refusal | None, str]:
+    """`(the first plugin refusal of where the task goes, or None; plugin_error lines for the result)`.
+
+    Called by `create_task` once the task's areas are known, before anything
+    is read or written. Fail-open like the other hooks: a hook that raises or
+    returns something unusable is set aside with a `plugin_error:` line, and
+    the call goes ahead.
+    """
+    errors: list[str] = []
+    for plugin in active():
+        if plugin.check_task is None:
+            continue
+        try:
+            refusal = await plugin.check_task(place)
+        except Exception:  # noqa: BLE001 - a plugin bug must not fail the call; logged and reported
+            logger.exception("plugin %s: task check failed (%s)", plugin.name, place.tool)
+            errors.append(_error_line(plugin, "task check", "failed"))
+            continue
+        if refusal is None:
+            continue
+        if not _usable_refusal(refusal):
+            logger.error("plugin %s: task check returned %r, not a Refusal with a code listed in "
+                         "refusals.BODY_CODES", plugin.name, refusal)
+            errors.append(_error_line(plugin, "task check", "returned something unusable"))
+            continue
+        return refusal, ""
+    return None, "".join(errors)
 
 
 def _lines(text: str) -> list[str]:

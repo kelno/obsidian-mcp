@@ -162,6 +162,9 @@ BODY_CODES = frozenset({
     # A general note writer asked to add or change a task line by hand: tasks
     # go through the task tools (the `kelno_vault` plugin's check).
     "task_line_by_hand",
+    # `create_task` given an area and no path: the task would land in the
+    # inbox (the `kelno_vault` plugin's task check).
+    "task_area_without_path",
     # A note named against its folder's `note_names: dated` setting (the
     # `kelno_vault` plugin's name check).
     "note_name_date",
