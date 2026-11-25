@@ -1531,3 +1531,10 @@ def _create_task_source_doc() -> str:
     tree = ast.parse(source.read_text(encoding="utf-8"))
     fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "create_task")
     return ast.get_docstring(fn, clean=False)
+
+
+async def test_an_inbox_inside_an_area_folder_still_takes_tasks_without_a_path(kelno_vault, vault, monkeypatch):
+    monkeypatch.setattr(tools.settings, "tasks_inbox_path", "projects/Area X/Inbox.md")
+    result = await tools.create_task_impl("do")
+    assert not result.error, result
+    assert read(vault, "projects/Area X/Inbox.md") == "- [ ] do #area/area-x\n"

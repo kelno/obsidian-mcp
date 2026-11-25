@@ -10865,8 +10865,10 @@ async def create_task_impl(
         else:
             inferred = areas_index.area_for_path(path)
             area_tags = [inferred] if inferred else []
+        # Without a path, an area inferred from the inbox's own folder is not one the caller gave.
+        place_tags = area_tags if (path_given is not None or areas is not None) else []
         refusal, plugin_errors = await _plugins.check_task(_plugins.TaskPlace(
-            "create_task", path_given, await _task_areas(areas_index, area_tags, uid), uid))
+            "create_task", path_given, await _task_areas(areas_index, place_tags, uid), uid))
         if refusal is not None:
             return _task_failed(TaskWriteResult, _body_refusal(refusal.message, refusal.code))
         new_status = _task_ops.resolve_status(registry, status, None) if status is not None else None

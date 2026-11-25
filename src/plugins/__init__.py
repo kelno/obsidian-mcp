@@ -139,7 +139,8 @@ class TaskPlace:
 
     `path` is the note the caller named, None when it named none (the tool
     then writes to the tasks inbox); `areas` the areas the task carries, as
-    the caller gave them or as the note's folder implies.
+    the caller gave them or as the named note's folder implies (not the
+    inbox's folder: without a path, only the areas the caller gave).
     """
 
     tool: str
