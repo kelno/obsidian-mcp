@@ -346,7 +346,10 @@
   toggle, no `localStorage`, and no shared panel partial — the panel's
   partial carries `{{ csp_nonce }}`, which the transfer instance does not
   provide (it renders `{{ nonce }}` under its own `default-src 'none'`
-  policy), so including it would put an unnonced inline script into a page
+  policy, whose one image source, `img-src data:`, is each page's empty
+  `<link rel="icon" href="data:,">`, so the browser never asks for a
+  `/favicon.ico` the policy would refuse), so including it would put an
+  unnonced inline script into a page
   whose whole point is that everything inline is nonced. The panel CSP never
   touches these pages: their instance does not mark the request, and an
   enforcing policy already on a response is left alone. Their security

@@ -104,6 +104,8 @@ async def test_the_page_closes_its_tab_with_its_one_allowed_script(client, vault
     r = await client.get("/open?file=Notes/A")
     csp = r.headers["content-security-policy"]
     assert "default-src 'none'" in csp
+    # The browser's own /favicon.ico request would break the CSP: the page names an empty icon instead.
+    assert "img-src data:;" in csp and '<link rel="icon" href="data:,">' in r.text
     nonce = re.search(r"script-src 'nonce-([^']+)'", csp).group(1)
     scripts = re.findall(r"<script([^>]*)>(.*?)</script>", r.text, re.DOTALL)
     assert scripts == [(f' nonce="{nonce}"', scripts[0][1])]

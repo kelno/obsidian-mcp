@@ -288,6 +288,15 @@ async def test_pages_are_static_and_nonce_guarded(client, harness, path):
     assert "cdn" not in body.lower()
 
 
+@pytest.mark.parametrize("path", ["/transfer/upload", "/transfer/download", "/transfer/ledger"])
+async def test_pages_name_an_empty_icon_so_the_browser_fetches_no_favicon(client, harness, path):
+    # The browser's own /favicon.ico request would break the CSP, failing every browser pass.
+    response = await client.get(path)
+    assert response.status_code == 200
+    assert "img-src data:;" in response.headers["content-security-policy"]
+    assert '<link rel="icon" href="data:,">' in response.text
+
+
 @pytest.mark.parametrize("path", ["/transfer/upload", "/transfer/download"])
 async def test_pages_never_carry_the_token_or_the_bound_path(client, harness, path):
     """The page is one static document; the token lives in the fragment.

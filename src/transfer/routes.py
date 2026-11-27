@@ -426,6 +426,11 @@ def _page(request: Request, template: str, **context) -> Response:
     path-specific server-side, so the only injection surface is the JSON→DOM
     step, which the script does with `textContent`. The nonce CSP is the belt to
     that braces: no external origin, no inline script but ours, no form posts.
+
+    `img-src data:` admits only the templates' empty `<link rel="icon"
+    href="data:,">`: without it the browser fetches `/favicon.ico` on its own,
+    which this CSP refuses, and that console error would fail every browser
+    pass on these pages (the owner's go, 2026-11-27). The server has no favicon.
     """
     nonce = secrets.token_urlsafe(16)
     response = templates.TemplateResponse(request, template, {"nonce": nonce, **context})
@@ -433,6 +438,7 @@ def _page(request: Request, template: str, **context) -> Response:
         "default-src 'none'; "
         f"script-src 'nonce-{nonce}'; "
         f"style-src 'nonce-{nonce}'; "
+        "img-src data:; "
         "connect-src 'self'; "
         "form-action 'none'; "
         "base-uri 'none'; "

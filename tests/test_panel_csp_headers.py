@@ -644,6 +644,7 @@ def _transfer_policy(nonce: str) -> str:
         "default-src 'none'; "
         f"script-src 'nonce-{nonce}'; "
         f"style-src 'nonce-{nonce}'; "
+        "img-src data:; "
         "connect-src 'self'; "
         "form-action 'none'; "
         "base-uri 'none'; "
