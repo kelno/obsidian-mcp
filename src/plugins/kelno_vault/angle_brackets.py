@@ -65,11 +65,12 @@ _QUOTE_RE = re.compile(r"^(?: {0,3}>[ \t]?)*")
 #: indentation with no marker after it stays. Code is looked for under both readings (`_code_lines`).
 _NESTED_QUOTE_RE = re.compile(r"^(?:[ \t]*>[ \t]?)*")
 
-#: A link reference definition up to its destination's `<` (`[ref]: <My note.md>`), after quote markers.
-_LINK_DEFINITION_RE = re.compile(r"(?: {0,3}>[ \t]?)* {0,3}\[[^\]]+\]:[ \t]*")
+#: A link reference definition up to its destination's `<` (`[ref]: <My note.md>`), after quote and list markers.
+_LINK_DEFINITION_RE = re.compile(r"(?:[ \t]*(?:>[ \t]?|(?:[-*+]|[0-9]{1,9}[.)])[ \t]+))*[ \t]*\[[^\]]+\]:[ \t]*")
 
-#: A line that starts a block of its own, so no code span pairs across its start: a list item, a heading, a table row.
-_BLOCK_START_RE = re.compile(r"[ \t]*(?:(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)|#{1,6}(?:[ \t]|$)|\|)")
+#: A line that may start a block of its own, after quote markers: a list item with content, a heading, a table row.
+_BLOCK_START_RE = re.compile(
+    r"(?P<indent>[ \t]*)(?:(?P<bullet>[-*+])[ \t]+\S|(?P<number>[0-9]{1,9})[.)][ \t]+\S|(?P<heading>#{1,6})(?:[ \t]|$)|\|)")
 
 #: A checkbox list item, quoted or not (as in `link_paths`).
 _CHECKBOX_RE = re.compile(r"^[ \t]*(?:>[ \t]?)*[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+\[.\]")
@@ -149,6 +150,8 @@ def _code_lines_read(lines: list[str], quote_re: re.Pattern[str]) -> set[int]:
         quote = quote_re.match(line).group(0)
         rest = line[len(quote):]
         depth = quote.count(">")
+        if fence is not None and depth < fence_depth and rest.strip():
+            fence = None                                 # the quote holding the fence has ended, and the fence with it
         if fence is not None:
             out.add(i)
             m = _FENCE_RE.match(rest)
@@ -160,9 +163,8 @@ def _code_lines_read(lines: list[str], quote_re: re.Pattern[str]) -> set[int]:
             open_to_code = True
             continue
         width = _width(rest)
-        m = _FENCE_RE.match(rest)
-        if m and not (m.group("run")[0] == "`" and "`" in m.group("rest")):
-            fence, fence_depth = m.group("run"), depth
+        if _opens_fence(rest):
+            fence, fence_depth = _FENCE_RE.match(rest).group("run"), depth
             out.add(i)
             continue
         while lists and width < lists[-1] and open_to_code:
@@ -179,7 +181,10 @@ def _code_lines_read(lines: list[str], quote_re: re.Pattern[str]) -> set[int]:
         if item:
             while lists and _width(item.group("indent")) < lists[-1]:
                 lists.pop()
-            marker_end = _width(item.group("indent")) + len(item.group("marker"))
+        column = 0
+        while item:
+            # An item's content may itself open an item (`- - x`) or a fence (`- ```bash`).
+            marker_end = column + _width(item.group("indent")) + len(item.group("marker"))
             content = marker_end
             for c in item.group("gap"):
                 content += 1 if c == " " else 4 - content % 4
@@ -188,11 +193,25 @@ def _code_lines_read(lines: list[str], quote_re: re.Pattern[str]) -> set[int]:
                 # the item's content column is then one past the marker.
                 lists.append(marker_end + 1)
                 out.add(i)
-                open_to_code = True
-                continue
+                break
             lists.append(content if content > marker_end else marker_end + 1)
+            rest, column = rest[item.end():], content
+            if _opens_fence(rest):
+                fence, fence_depth = _FENCE_RE.match(rest).group("run"), depth
+                out.add(i)
+                break
+            item = _LIST_ITEM_RE.match(rest) if item.group("gap") else None
+        if i in out:
+            open_to_code = True
+            continue
         open_to_code = heading
     return out
+
+
+def _opens_fence(rest: str) -> bool:
+    """Whether `rest` opens a fence: a backtick fence's info string may hold no backtick (that is an inline span)."""
+    m = _FENCE_RE.match(rest)
+    return bool(m) and not (m.group("run")[0] == "`" and "`" in m.group("rest"))
 
 
 def _blank_matches(text: str, pattern: re.Pattern[str]) -> str:
@@ -203,38 +222,69 @@ def _blank_matches(text: str, pattern: re.Pattern[str]) -> str:
 def _blank_all_code_spans(text: str) -> str:
     """`text` with its inline code spans blanked, a character counting as code when either of two readings says so.
 
-    A span may run across the lines of a paragraph but not past a blank line.
-    Whether it may also cross into a list item, a heading or a table row
-    below, or a line of another quote depth, depends on lazy continuation lines
-    that a line-based reading can't settle; a lone backtick paired too far
-    leaves the next real span's content bare, so both readings are taken.
+    A span may run across the lines of a paragraph but not past a blank line,
+    nor into a line that always starts a block of its own (`_block_starts`).
+    Whether it may cross into a table row, a line of another quote depth or a
+    list item that may be paragraph text depends on lazy continuation and
+    context that a line-based reading can't settle; a lone backtick paired too
+    far leaves the next real span's content bare, so both readings are taken
+    there. Taking both readings everywhere would hide every later line of a
+    list holding one lone backtick (third review, 2026-11-27).
     """
-    paragraph_ends = [m.start() for m in re.finditer(r"\n[ \t\r]*(?=\n|$)", text)]
-    block_ends = sorted(set(paragraph_ends) | set(_block_starts(text)))
-    by_paragraph = _blank_code_spans(text, paragraph_ends)
-    if block_ends == paragraph_ends:
-        return by_paragraph
-    by_block = _blank_code_spans(text, block_ends)
-    if by_paragraph == by_block:
-        return by_paragraph
-    return "".join(a if a == b else " " for a, b in zip(by_paragraph, by_block, strict=True))
+    blank_lines = {m.start() for m in re.finditer(r"\n[ \t\r]*(?=\n|$)", text)}
+    hard, unsure = _block_starts(text)
+    certain_ends = sorted(blank_lines | hard)
+    by_certain = _blank_code_spans(text, certain_ends)
+    if not unsure - blank_lines - hard:
+        return by_certain
+    by_block = _blank_code_spans(text, sorted(blank_lines | hard | unsure))
+    if by_certain == by_block:
+        return by_certain
+    return "".join(a if a == b else " " for a, b in zip(by_certain, by_block, strict=True))
 
 
-def _block_starts(text: str) -> list[int]:
-    """The offsets of the lines that start a block of their own, or change the quote depth, after the first line."""
-    out = []
+def _block_starts(text: str) -> tuple[set[int], set[int]]:
+    """The offsets of the lines after the first that start a block: those that surely do, and those that may.
+
+    Sure, as CommonMark has it: a heading (and the line after it) and a bullet
+    item with content, each indented less than four columns or inside a list,
+    and a numbered item inside a list or numbered 1 (only those interrupt a
+    paragraph). Maybe: a table row and the line after it, a change of quote
+    depth (a lazy continuation keeps the paragraph), any other list item or heading.
+    """
+    sure: set[int] = set()
+    maybe: set[int] = set()
     offset = 0
     depth = None
-    after_one_line_block = False     # a heading or table row is one line: the line after it starts a block too
+    in_list = False                  # whether a list item came since the last blank line
+    after_heading = after_row = False
     for line in text.split("\n"):
         quote = _QUOTE_RE.match(line).group(0)
         start = _BLOCK_START_RE.match(line, len(quote))
-        if depth is not None and (quote.count(">") != depth or start or after_one_line_block):
-            out.append(offset)
+        if not line[len(quote):].strip():
+            in_list = after_heading = after_row = False
+        elif depth is not None:
+            if after_heading or (start and _surely_starts(start, in_list)):
+                sure.add(offset)
+            elif start or after_row or quote.count(">") != depth:
+                maybe.add(offset)
+        if start and (start.group("bullet") or start.group("number")):
+            in_list = True
+        after_heading = bool(start and start.group("heading"))
+        after_row = bool(start) and not (start.group("heading") or start.group("bullet") or start.group("number"))
         depth = quote.count(">")
-        after_one_line_block = bool(start) and start.group(0).lstrip(" \t")[:1] in ("#", "|")
         offset += len(line) + 1
-    return out
+    return sure, maybe
+
+
+def _surely_starts(start: re.Match[str], in_list: bool) -> bool:
+    """Whether a `_BLOCK_START_RE` match surely starts a block, even right after a paragraph line."""
+    shallow = _width(start.group("indent")) < 4
+    if start.group("heading") or start.group("bullet"):
+        return shallow or in_list
+    if start.group("number"):
+        return in_list or (shallow and int(start.group("number")) == 1)
+    return False                     # a table row: only one if a table is there
 
 
 def _blank_code_spans(text: str, ends: list[int]) -> str:

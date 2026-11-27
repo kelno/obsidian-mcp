@@ -78,6 +78,11 @@ def test_escapes_what_obsidian_reads_as_a_tag(before, after):
     # A link reference definition's destination (finding 6).
     "[ref]: <My note.md>",
     "> [ref]: <My note.md>",
+    # Third review, 2026-11-27. A fence opened on a list item's own line (finding 2); a definition in a list (4).
+    "1. ```\n   cat <file>\n   ```\n",
+    "> - ```\n>   cat <file>\n>   ```\n",
+    "- - ```\n    cat <file>\n    ```\n",
+    "- [ref]: <My note.md>",
 ])
 def test_leaves_alone(text):
     assert esc(text) == (text, [])
@@ -96,6 +101,17 @@ def test_leaves_alone(text):
     ("> ```\n> x\n> ```\n\nText <name>", "> ```\n> x\n> ```\n\nText \\<name>"),
     ("- item\n## H <name>\n", "- item\n## H \\<name>\n"),
     ("[ref]: x <name>", "[ref]: x \\<name>"),
+    # Third review: a lone backtick in a list or under a heading hides nothing on the lines after it (finding 1).
+    ("- Press the ` key\n- Run `make test`\n- Fill in <name> here\n- Then `make lint`\n- And <job> too\n",
+     "- Press the ` key\n- Run `make test`\n- Fill in \\<name> here\n- Then `make lint`\n- And \\<job> too\n"),
+    ("- the ` key\n- write <name>\n- run `ls`\n", "- the ` key\n- write \\<name>\n- run `ls`\n"),
+    ("## The ` key\nUse `x` then\n<name> is bare\nand `y` here\n",
+     "## The ` key\nUse `x` then\n\\<name> is bare\nand `y` here\n"),
+    # A fence on a list item's line closes at its closer, so the text after it is no code (finding 2).
+    ("- ```bash\n  cat <file>\n  ```\n\nText <name>\n", "- ```bash\n  cat <file>\n  ```\n\nText \\<name>\n"),
+    # A fence in a quote ends with the quote (finding 3).
+    ("> ```\n> code\n\nText <name>\n", "> ```\n> code\n\nText \\<name>\n"),
+    ("para\n\n    > ```\n    > x\n\nText <name>\n", "para\n\n    > ```\n    > x\n\nText \\<name>\n"),
 ])
 def test_escapes_around_code(before, after):
     assert esc(before)[0] == after
