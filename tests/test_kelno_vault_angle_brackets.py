@@ -61,6 +61,23 @@ def test_escapes_what_obsidian_reads_as_a_tag(before, after):
     "## H\n    <x>",
     ">     <x>",
     "a [[Note|<name>]] link",
+    # Second review, 2026-11-27. A quoted closer inside an unquoted fence is the code's text (finding 1).
+    "Example:\n\n```markdown\n> [!note]\n> ```\n> cat <file>\n> ```\n```\n",
+    # A lone backtick pairs with nothing past the start of a list item, a heading or a table row (finding 3).
+    "- the ` key\n- run `cat <file>`\n",
+    "## The ` key\nUse `<path>` here\n",
+    "| a ` b |\n| `<x>` | c |\n",
+    "\\``<x>`",
+    # A quote or callout fence inside a list item, after a tab or deeper indentation (finding 4).
+    "- item\n\t> ~~~\n\t> cat <file>\n\t> ~~~\n",
+    "- a\n  - b\n\n    > ~~~\n    > <x>\n    > ~~~",
+    "para\n\n    > <x>",
+    # A list item opening with indented code; a heading ending a list (finding 5).
+    "-     <x>\n",
+    "- item\n## H\n    <x>\n",
+    # A link reference definition's destination (finding 6).
+    "[ref]: <My note.md>",
+    "> [ref]: <My note.md>",
 ])
 def test_leaves_alone(text):
     assert esc(text) == (text, [])
@@ -75,6 +92,10 @@ def test_leaves_alone(text):
     ("para\n    more <name>", "para\n    more \\<name>"),
     # A span opened in a paragraph does not reach past a blank line.
     ("a ` b\n\n<name> `", "a ` b\n\n\\<name> `"),
+    # A quoted fence closes at its own depth; a heading's text is no code; a definition's text after its link is.
+    ("> ```\n> x\n> ```\n\nText <name>", "> ```\n> x\n> ```\n\nText \\<name>"),
+    ("- item\n## H <name>\n", "- item\n## H \\<name>\n"),
+    ("[ref]: x <name>", "[ref]: x \\<name>"),
 ])
 def test_escapes_around_code(before, after):
     assert esc(before)[0] == after
@@ -127,6 +148,13 @@ def test_escaped_tag_in_old_does_not_shield_a_new_bare_one():
 def test_crlf_and_lone_cr_notes():
     assert esc("a\r\n<name>\r\n")[0] == "a\r\n\\<name>\r\n"
     assert esc("a\r<name>\r")[0] == "a\r\\<name>\r"
+
+
+def test_a_crlf_blank_line_ends_a_paragraph_for_code_spans():
+    """Second review, finding 2: a lone backtick paragraphs above doesn't pair with a real span's opener."""
+    old = "Press the ` key.\r\n"
+    new = old + "\r\nRun `cat <file>` now.\r\n"
+    assert esc(new, old) == (new, [])
 
 
 def test_report_names_lines_and_tags():

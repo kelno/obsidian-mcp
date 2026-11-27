@@ -15,7 +15,7 @@ front of every such `<`, except where it is not read as HTML or is meant:
   (`%%…%%`) and inside wikilinks (`[[Note|<name>]]`, whose display text
   Obsidian doesn't read as Markdown);
 - an autolink (`<https://…>`, `<user@host>`) or a link destination written in
-  angle brackets (`[text](<My note.md>)`);
+  angle brackets (`[text](<My note.md>)`, `[ref]: <My note.md>`);
 - a `<` already escaped;
 - a tag the note already held, unescaped and outside code, before the write:
   the owner's own `<br>`, on a line the write changes, stays as it was;
@@ -60,6 +60,16 @@ _TOKEN_RE = re.compile(r"<[^<>\n]*>|<[!/]?[\w\-]*")
 
 #: Quote markers at a line's start (`>`, `> >`), with the one space each may take; plain indentation stays.
 _QUOTE_RE = re.compile(r"^(?: {0,3}>[ \t]?)*")
+
+#: Quote markers after any indentation, as in a quote or callout inside a list item (`\t> ~~~`); plain
+#: indentation with no marker after it stays. Code is looked for under both readings (`_code_lines`).
+_NESTED_QUOTE_RE = re.compile(r"^(?:[ \t]*>[ \t]?)*")
+
+#: A link reference definition up to its destination's `<` (`[ref]: <My note.md>`), after quote markers.
+_LINK_DEFINITION_RE = re.compile(r"(?: {0,3}>[ \t]?)* {0,3}\[[^\]]+\]:[ \t]*")
+
+#: A line that starts a block of its own, so no code span pairs across its start: a list item, a heading, a table row.
+_BLOCK_START_RE = re.compile(r"[ \t]*(?:(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)|#{1,6}(?:[ \t]|$)|\|)")
 
 #: A checkbox list item, quoted or not (as in `link_paths`).
 _CHECKBOX_RE = re.compile(r"^[ \t]*(?:>[ \t]?)*[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+\[.\]")
@@ -110,24 +120,40 @@ def _width(text: str) -> int:
 def _code_lines(lines: list[str]) -> set[int]:
     """The lines of fenced and indented code blocks, erring towards code.
 
-    Measured on each line after its quote markers. A fence opens at any
-    indentation (a fence in a list item sits four or more columns in) and runs
-    to a closing run of its kind at least as long, or to the end of the note.
+    Quote markers after indentation (a quote or callout in a list item, which
+    Obsidian indents with a tab) are either that or indented code (`    > x`
+    after a blank line), so the lines are read both ways and a line is code
+    when either reading says so.
+    """
+    return _code_lines_read(lines, _QUOTE_RE) | _code_lines_read(lines, _NESTED_QUOTE_RE)
+
+
+def _code_lines_read(lines: list[str], quote_re: re.Pattern[str]) -> set[int]:
+    """The code lines of `lines`, each measured after the quote markers `quote_re` takes off.
+
+    A fence opens at any indentation (a fence in a list item sits four or more
+    columns in) and runs to a closing run of its kind at least as long, at the
+    opener's quote depth, or to the end of the note: a quoted closer inside an
+    unquoted fence is the code's own text, as when showing code in a callout.
     An indented code block is a line four columns past the content of the list
     item it sits in (or past the margin outside a list), after a blank line, a
     heading, a fence or another such line: a paragraph line can't start one.
     """
     out: set[int] = set()
     fence: str | None = None
+    fence_depth = 0                  # quote markers before the open fence's opener
     lists: list[int] = []            # content columns of the open list items, innermost last
     open_to_code = True              # whether an indented line here would start or continue code
     for i, raw in enumerate(lines):
         line = raw.rstrip("\r")
-        rest = line[_QUOTE_RE.match(line).end():]
+        quote = quote_re.match(line).group(0)
+        rest = line[len(quote):]
+        depth = quote.count(">")
         if fence is not None:
             out.add(i)
             m = _FENCE_RE.match(rest)
-            if m and m.group("run")[0] == fence[0] and len(m.group("run")) >= len(fence) and not m.group("rest").strip():
+            if (m and depth == fence_depth and m.group("run")[0] == fence[0] and len(m.group("run")) >= len(fence)
+                    and not m.group("rest").strip()):
                 fence, open_to_code = None, True
             continue
         if not rest.strip():
@@ -136,7 +162,7 @@ def _code_lines(lines: list[str]) -> set[int]:
         width = _width(rest)
         m = _FENCE_RE.match(rest)
         if m and not (m.group("run")[0] == "`" and "`" in m.group("rest")):
-            fence = m.group("run")
+            fence, fence_depth = m.group("run"), depth
             out.add(i)
             continue
         while lists and width < lists[-1] and open_to_code:
@@ -145,6 +171,10 @@ def _code_lines(lines: list[str]) -> set[int]:
         if open_to_code and width >= margin + 4:
             out.add(i)
             continue
+        heading = bool(_HEADING_RE.match(rest))
+        if heading:
+            while lists and width < lists[-1]:
+                lists.pop()                              # a heading at the margin ends the list, blank line or not
         item = _LIST_ITEM_RE.match(rest)
         if item:
             while lists and _width(item.group("indent")) < lists[-1]:
@@ -153,9 +183,15 @@ def _code_lines(lines: list[str]) -> set[int]:
             content = marker_end
             for c in item.group("gap"):
                 content += 1 if c == " " else 4 - content % 4
-            # Content five or more columns past the marker is indented code in the item: its column is one past it.
-            lists.append(content if 0 < content - marker_end <= 4 else marker_end + 1)
-        open_to_code = bool(_HEADING_RE.match(rest))
+            if content - marker_end > 4:
+                # Content five or more columns past the marker is indented code in the item, from its first line;
+                # the item's content column is then one past the marker.
+                lists.append(marker_end + 1)
+                out.add(i)
+                open_to_code = True
+                continue
+            lists.append(content if content > marker_end else marker_end + 1)
+        open_to_code = heading
     return out
 
 
@@ -164,23 +200,62 @@ def _blank_matches(text: str, pattern: re.Pattern[str]) -> str:
     return pattern.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
 
 
-def _blank_code_spans(text: str) -> str:
+def _blank_all_code_spans(text: str) -> str:
+    """`text` with its inline code spans blanked, a character counting as code when either of two readings says so.
+
+    A span may run across the lines of a paragraph but not past a blank line.
+    Whether it may also cross into a list item, a heading or a table row
+    below, or a line of another quote depth, depends on lazy continuation lines
+    that a line-based reading can't settle; a lone backtick paired too far
+    leaves the next real span's content bare, so both readings are taken.
+    """
+    paragraph_ends = [m.start() for m in re.finditer(r"\n[ \t\r]*(?=\n|$)", text)]
+    block_ends = sorted(set(paragraph_ends) | set(_block_starts(text)))
+    by_paragraph = _blank_code_spans(text, paragraph_ends)
+    if block_ends == paragraph_ends:
+        return by_paragraph
+    by_block = _blank_code_spans(text, block_ends)
+    if by_paragraph == by_block:
+        return by_paragraph
+    return "".join(a if a == b else " " for a, b in zip(by_paragraph, by_block, strict=True))
+
+
+def _block_starts(text: str) -> list[int]:
+    """The offsets of the lines that start a block of their own, or change the quote depth, after the first line."""
+    out = []
+    offset = 0
+    depth = None
+    after_one_line_block = False     # a heading or table row is one line: the line after it starts a block too
+    for line in text.split("\n"):
+        quote = _QUOTE_RE.match(line).group(0)
+        start = _BLOCK_START_RE.match(line, len(quote))
+        if depth is not None and (quote.count(">") != depth or start or after_one_line_block):
+            out.append(offset)
+        depth = quote.count(">")
+        after_one_line_block = bool(start) and start.group(0).lstrip(" \t")[:1] in ("#", "|")
+        offset += len(line) + 1
+    return out
+
+
+def _blank_code_spans(text: str, ends: list[int]) -> str:
     """`text` with its inline code spans blanked: a backtick run closes at the next run of the same length.
 
-    A span may run across lines but not past a blank line, which ends the
-    paragraph. A run with no partner is plain text.
+    A span stops at the next offset of `ends` (sorted). A run with no partner is plain text.
     """
     runs = [(m.start(), m.end()) for m in re.finditer(r"`+", text)]
-    blank_lines = [m.start() for m in re.finditer(r"\n[ \t]*(?=\n|$)", text)]
     chars = list(text)
     i = 0
     while i < len(runs):
         start, end = runs[i]
         if _escaped(text, start):
-            i += 1                                       # an escaped backtick opens nothing
-            continue
-        k = bisect.bisect_right(blank_lines, start)
-        paragraph_end = blank_lines[k] if k < len(blank_lines) else len(text)
+            # A backslash escapes the run's first backtick only; the rest of the run may still open a span.
+            if end - start == 1:
+                i += 1
+                continue
+            start += 1
+            runs[i] = (start, end)
+        k = bisect.bisect_right(ends, start)
+        paragraph_end = ends[k] if k < len(ends) else len(text)
         partner = None
         for j in range(i + 1, len(runs)):
             if runs[j][0] >= paragraph_end:
@@ -208,7 +283,7 @@ def _masked_lines(text: str) -> list[str]:
     lines = text.split("\n")
     hidden = _code_lines(lines) | set(range(frontmatter_lines(lines)))
     masked = "\n".join(" " * len(line) if i in hidden else line for i, line in enumerate(lines))
-    masked = _blank_code_spans(masked)
+    masked = _blank_all_code_spans(masked)
     for pattern in (_COMMENT_RE, _DISPLAY_MATH_RE, _INLINE_MATH_RE, _WIKILINK_RE):
         masked = _blank_matches(masked, pattern)
     return masked.split("\n")
@@ -226,7 +301,8 @@ def _tag_starts(line: str, visible: str) -> list[int]:
     """Where `line` has a `<` Obsidian reads as a tag: visible after masking, not escaped, no autolink or link."""
     return [m.start() for m in _TAG_START_RE.finditer(visible)
             if line[m.start()] == "<" and not _escaped(line, m.start())
-            and not _AUTOLINK_RE.match(line, m.start()) and not line[:m.start()].endswith("](")]
+            and not _AUTOLINK_RE.match(line, m.start()) and not line[:m.start()].endswith("](")
+            and not _LINK_DEFINITION_RE.fullmatch(line, 0, m.start())]
 
 
 def _held_tags(text: str | None) -> set[str]:
