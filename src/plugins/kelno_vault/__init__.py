@@ -64,7 +64,8 @@ _WRITER_TEXT = (
     "of whose lines gains a new proposal ref is flagged (`rule_change_unlogged:`), a link in its lines to "
     "another rule note in none of the pointer shapes (`pointer_or_mention:`), and a rule no agent path then "
     "reaches (`reached_by_no_path:`). A write in an area's folder "
-    "with no `open_area` call for it in the last hour is flagged (`area_not_opened:`)."
+    "with no `open_area` call for it in the last hour is flagged (`area_not_opened:`). A `<` read as HTML is "
+    "escaped (`angle_brackets_escaped:`) unless `allow_html`."
 )
 
 _CREATE_NOTE_NAME_TEXT = (
@@ -213,7 +214,6 @@ plugin = plugins.Plugin(
         "move_note": _MOVE_NOTE_TEXT,
         "write_file": _WRITE_FILE_TEXT,
         "create_task:path": task_place.PATH_TEXT,
-        "create_note:allow_html": angle_brackets.ALLOW_HTML_TEXT,
     },
     guide_text="\n\n".join((task_lines.GUIDE, rule_notes.GUIDE, note_names.GUIDE, _LINKS_GUIDE,
                            _TITLE_HEADING_GUIDE, angle_brackets.GUIDE, _OPEN_AREA_GUIDE)),

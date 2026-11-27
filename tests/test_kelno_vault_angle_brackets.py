@@ -46,9 +46,50 @@ def test_escapes_what_obsidian_reads_as_a_tag(before, after):
     "a mail <someone@example.com>",
     "[link](<My note.md>)",
     "- [ ] a checkbox <name>",
+    # Code in list items, at any indentation, tabs included (review 2026-11-27, finding 1).
+    "1. Run it:\n\n    ```bash\n    cat <file>\n    ```\n",
+    "1. Run it:\n    ```bash\n    cat <file>\n    ```\n",
+    "- a\n    - b\n\n        ```\n        <tag>\n        ```\n",
+    "- step\n\t```\n\techo <x>\n\t```\n",
+    "```\nunclosed <name>\n",
+    # Code spans of any backtick run, across lines of one paragraph (finding 2).
+    "Write `` <name> `` here.",
+    "``a ` <b>``",
+    "a `foo\n<bar>` b",
+    # Indented code in a list item, under a heading, in a quote (finding 3).
+    "- item\n\n      <x> code\n",
+    "## H\n    <x>",
+    ">     <x>",
+    "a [[Note|<name>]] link",
 ])
 def test_leaves_alone(text):
     assert esc(text) == (text, [])
+
+
+@pytest.mark.parametrize("before, after", [
+    # A line starting with a code span or math is not indented code (finding 4).
+    ("`a` <name> `c`", "`a` \\<name> `c`"),
+    ("`edit_note` takes <path>", "`edit_note` takes \\<path>"),
+    ("$$a<b$$ and $x<y$ <z>", "$$a<b$$ and $x<y$ \\<z>"),
+    # A paragraph line four columns in continues the paragraph.
+    ("para\n    more <name>", "para\n    more \\<name>"),
+    # A span opened in a paragraph does not reach past a blank line.
+    ("a ` b\n\n<name> `", "a ` b\n\n\\<name> `"),
+])
+def test_escapes_around_code(before, after):
+    assert esc(before)[0] == after
+
+
+@pytest.mark.parametrize("old", [
+    "Use `<path>` as the arg.\n",
+    "```\n<path>\n```\n",
+    "---\nx: <path>\n---\n",
+    "$a <path> b$\n",
+])
+def test_a_tag_held_in_old_code_does_not_shield_a_new_bare_one(old):
+    """Finding 5: only tags Obsidian read as HTML before the write are kept."""
+    new = old + "Then pass <path> here.\n"
+    assert esc(new, old)[0].endswith("Then pass \\<path> here.\n")
 
 
 def test_list_continuation_four_columns_in_is_text_not_code():
@@ -94,7 +135,7 @@ def test_report_names_lines_and_tags():
     block = angle_brackets.render(angle_brackets.shifted(report, 2))
     assert "angle_brackets_escaped:" in block
     assert "- line 4: `<name>`" in block and "- line 4: `<job x>`" in block
-    assert "allow_html=true" in block
+    assert "allow_html=true" in block and "appending again would add the text twice" in block
     assert "would get" in angle_brackets.render(report, dry_run=True)
     assert angle_brackets.render(angle_brackets.EscapeReport()) == ""
 
@@ -113,6 +154,14 @@ async def test_plugin_rewrite_honours_allow_html():
     rewrite = await kelno_vault._rewrite(write)
     assert rewrite.text == "a\n<kbd>x</kbd>\n"
     assert "angle_brackets_escaped:" not in rewrite.report(0, False)
+
+
+def test_a_large_note_with_many_spans_is_quick():
+    import time
+    text = "word `code` and <x> " * 20000
+    start = time.monotonic()
+    _out, report = angle_brackets.escape(None, text)
+    assert len(report.escaped) == 20000 and time.monotonic() - start < 5
 
 
 def test_escape_stays_within_the_plugin_scope_guard():

@@ -658,8 +658,7 @@ async def create_note(
         content: Full markdown content for the note, including any frontmatter.
         expected_hash: Accepted and always refused as `no_incumbent`, so the
             refusal is a normal result rather than a protocol error.
-        allow_html: Keep HTML in `content` as written.
-            {plugin_text:allow_html}
+        allow_html: Keep the HTML of `content` as is.
     """
     return await create_note_impl(path, content, expected_hash=expected_hash, allow_html=allow_html)
 

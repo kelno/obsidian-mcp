@@ -96,7 +96,7 @@ _QUOTE_PREFIX_RE = re.compile(r"^[ \t]*(?:>[ \t]?)+")
 _FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
 
 
-def quoted_code_lines(lines: list[str]) -> set[int]:
+def _quoted_code_lines(lines: list[str]) -> set[int]:
     """Lines inside a fenced block within a quote or callout, which the link masker does not see."""
     out, fence = set(), None
     for i, line in enumerate(lines):
@@ -192,7 +192,7 @@ def rewrite(old: str | None, new: str, index: NoteIndex,
     if "[[" not in new:
         return new, report
     lines = new.split("\n")
-    changed = changed_lines(old, new) - set(range(frontmatter_lines(lines))) - quoted_code_lines(lines)
+    changed = changed_lines(old, new) - set(range(frontmatter_lines(lines))) - _quoted_code_lines(lines)
     masked = mask_code(new, context=FULL_NOTE)
     # The masker blanks a fenced block whole, its line breaks included: put
     # them back so masked lines align with the note's.
