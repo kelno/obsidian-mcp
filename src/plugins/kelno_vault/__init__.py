@@ -13,7 +13,9 @@ against its folder's `note_names` setting (`note_names`, the name check). On
 the lines a note write adds or changes: a task line written by hand is refused (`task_lines`, the check); a first heading
 repeating the note's name is dropped (`title_heading`), then bare-name
 wikilinks get the note's full path (`link_paths`), in that order so the link
-report's line numbers are the written note's; last, a change to a rule note
+report's line numbers are the written note's; then a `<` Obsidian would read
+as the start of an HTML tag gets a backslash, unless the caller passed
+`allow_html` (`angle_brackets`, `create_note` and `edit_note` only); last, a change to a rule note
 whose lines gain no proposal ref is pointed out, and so are a link to another
 rule note in none of the pointer shapes and a rule no agent path then reaches
 (`rule_notes`, on the text as written; what a rule file is, the notes and the
@@ -34,6 +36,7 @@ from src import database, plugins
 from src.models.db import NoteMetadata
 from src.plugins.kelno_vault import (
     agent_path_tools,
+    angle_brackets,
     area_opened,
     conventions,
     link_paths,
@@ -78,7 +81,7 @@ _WRITE_FILE_TEXT = (
 
 _MOVE_NOTE_TEXT = f"The name is checked as in `create_note`. Where a note goes: `{conventions.FILING_NOTE}`."
 
-_EDIT_NOTE_TEXT = "Vault checks as in `create_note`: a task line written by hand is refused."
+_EDIT_NOTE_TEXT = "Vault checks as in `create_note`: hand-written task lines refused, `<` escaped unless `allow_html`."
 
 _LINKS_GUIDE = (
     "## Links (this server)\n\n"
@@ -163,6 +166,10 @@ async def _rewrite(write: plugins.NoteWrite) -> plugins.Rewrite:
     """
     text, removed = title_heading.strip(write.old, write.new, write.path)
     text, links_report, links_failure = await _full_path_links(write, text)
+    # After the links, which never hold a `<`; it keeps the line count, so their report's lines stay right.
+    escaped = angle_brackets.EscapeReport()
+    if write.tool in angle_brackets.TOOLS:
+        text, escaped = angle_brackets.escape(write.old, text, allow_html=write.allow_html)
     rule_check = await rule_notes.check(write.path, write.old, text, write.user_id)
     unopened = await area_opened.unopened_area(write.path, write.user_id)
 
@@ -173,6 +180,7 @@ async def _rewrite(write: plugins.NoteWrite) -> plugins.Rewrite:
                                        + rule_notes.render_unshaped(rule_check.unshaped, shift)
                                        + rule_notes.render_unreached(rule_check.unreached, rule_check.reach_unknown))
         return (rules + title_heading.render(removed, dry_run=dry_run) + links
+                + angle_brackets.render(angle_brackets.shifted(escaped, shift), dry_run=dry_run)
                 + area_opened.render(unopened, dry_run=dry_run))
 
     return plugins.Rewrite(text, report)
@@ -205,9 +213,10 @@ plugin = plugins.Plugin(
         "move_note": _MOVE_NOTE_TEXT,
         "write_file": _WRITE_FILE_TEXT,
         "create_task:path": task_place.PATH_TEXT,
+        "create_note:allow_html": angle_brackets.ALLOW_HTML_TEXT,
     },
     guide_text="\n\n".join((task_lines.GUIDE, rule_notes.GUIDE, note_names.GUIDE, _LINKS_GUIDE,
-                           _TITLE_HEADING_GUIDE, _OPEN_AREA_GUIDE)),
+                           _TITLE_HEADING_GUIDE, angle_brackets.GUIDE, _OPEN_AREA_GUIDE)),
     # Ends the path tools' helper process with the server (`agent_path_tools.helper_lifespan`).
     startup=agent_path_tools.helper_lifespan,
 )

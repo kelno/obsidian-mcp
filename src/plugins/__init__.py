@@ -71,6 +71,8 @@ class NoteWrite:
             plugins' rewrites).
         dry_run: True when nothing will be written (`edit_note(dry_run=True)`).
         user_id: the caller's user id; None in single-user mode.
+        allow_html: the caller's `allow_html` (`create_note`, `edit_note`): true when the text's HTML is
+            meant as written, so a plugin that escapes HTML-like text leaves it alone; False for `write_file`.
     """
 
     tool: str
@@ -79,6 +81,7 @@ class NoteWrite:
     new: str
     dry_run: bool
     user_id: int | None
+    allow_html: bool = False
 
 
 @dataclass(frozen=True)
@@ -507,11 +510,12 @@ class NoteWriteRun:
     old: str | None
     dry_run: bool
     user_id: int | None
+    allow_html: bool = False
     _reports: list[ReportRender] = field(default_factory=list)
     _errors: list[str] = field(default_factory=list)
 
     def _write(self, new: str) -> NoteWrite:
-        return NoteWrite(self.tool, self.path, self.old, new, self.dry_run, self.user_id)
+        return NoteWrite(self.tool, self.path, self.old, new, self.dry_run, self.user_id, self.allow_html)
 
     async def check(self, new: str) -> Refusal | None:
         """The first plugin refusal of `new`, in plugin order, or None."""

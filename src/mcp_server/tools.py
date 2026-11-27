@@ -5048,7 +5048,7 @@ def _move_precondition_error(
 
 @_tracked("create_note", ["path", "expected_hash"], write_class=True)
 async def create_note_impl(
-    path: str, content: str, expected_hash: str | None = None
+    path: str, content: str, expected_hash: str | None = None, allow_html: bool = False
 ) -> str:
     """Create a new note in the vault.
 
@@ -5105,7 +5105,8 @@ async def create_note_impl(
             if name_err:
                 return name_err
         # An existing note is refused as `already_exists` below: that answer wins.
-        plugin_run = _plugins.NoteWriteRun("create_note", target.rel, None, dry_run=False, user_id=uid)
+        plugin_run = _plugins.NoteWriteRun("create_note", target.rel, None, dry_run=False, user_id=uid,
+                                           allow_html=allow_html)
         if target.lstat() is None and (refusal := await plugin_run.check(content)):
             return _body_refusal(refusal.message, refusal.code)
         content = await plugin_run.rewrite(content)
@@ -5898,6 +5899,7 @@ async def edit_note_impl(
     dry_run: bool = False,
     replace_frontmatter: bool = False,
     expected_hash: str | None = None,
+    allow_html: bool = False,
 ) -> str:
     """Edit an existing note in the vault.
 
@@ -6208,7 +6210,8 @@ async def edit_note_impl(
 
         # The plugins' checks, in every mode and on a dry run, before anything
         # else is said about the write.
-        plugin_run = _plugins.NoteWriteRun("edit_note", target.rel, existing, dry_run=dry_run, user_id=uid)
+        plugin_run = _plugins.NoteWriteRun("edit_note", target.rel, existing, dry_run=dry_run, user_id=uid,
+                                           allow_html=allow_html)
         if new_content != existing and (refusal := await plugin_run.check(new_content)):
             return _body_refusal(refusal.message, refusal.code)
 

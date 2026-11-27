@@ -158,6 +158,25 @@ def test_a_check_that_raises_lets_the_write_through_and_says_so(vault, monkeypat
     assert "plugin_error: the server's `p` plugin failed in its check step" in result
 
 
+def test_allow_html_reaches_the_plugins_from_both_writers(vault, monkeypatch):
+    seen = []
+
+    async def check(write):
+        seen.append((write.tool, write.allow_html))
+
+    async def rewrite(write):
+        seen.append((write.tool, write.allow_html))
+        return plugins.Rewrite(write.new)
+
+    use(monkeypatch, plugins.Plugin("p", check=check, rewrite=rewrite))
+    asyncio.run(tools.create_note_impl("a.md", "text\n"))
+    asyncio.run(tools.create_note_impl("b.md", "text\n", allow_html=True))
+    asyncio.run(tools.edit_note_impl("b.md", "new\n", allow_html=True))
+    asyncio.run(tools.edit_note_impl("b.md", "newer\n", dry_run=True))
+    assert seen == [("create_note", False)] * 2 + [("create_note", True)] * 2 + [("edit_note", True)] * 2 + [
+        ("edit_note", False)] * 2
+
+
 def test_a_refusal_with_an_unlisted_code_lets_the_write_through(vault, monkeypatch):
     async def odd(write):
         return plugins.Refusal("made_up_code", "No.")
@@ -368,7 +387,10 @@ def test_the_served_descriptions_hold_no_marker_and_no_plugin_rule_without_the_p
 def test_this_vaults_plugin_describes_its_rule_on_every_writer():
     (loaded,) = plugins.load(("kelno_vault",))
     # edit_note and move_note sit close to the description cap: one line each, pointing to create_note's.
-    assert set(loaded.tool_text) == {"create_note", "edit_note", "write_file", "move_note", "create_task:path"}
+    assert set(loaded.tool_text) == {"create_note", "edit_note", "write_file", "move_note", "create_task:path",
+                                     "create_note:allow_html"}
+    assert "angle_brackets_escaped" in loaded.tool_text["create_note:allow_html"]
+    assert "allow_html" in loaded.tool_text["edit_note"]
     assert loaded.check_task is not None
     assert "task_line_by_hand" in loaded.tool_text["create_note"] and "task line" in loaded.tool_text["edit_note"]
     writers = [loaded.tool_text[name] for name in ("create_note", "write_file")]

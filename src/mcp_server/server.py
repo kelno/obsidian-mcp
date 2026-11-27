@@ -610,13 +610,11 @@ async def semantic_search(
 @mcp.tool(title="Create note", annotations=_WRITE)
 @_plugins.tool_text("create_note")
 async def create_note(
-    path: str, content: str, expected_hash: str | None = None
+    path: str, content: str, expected_hash: str | None = None, allow_html: bool = False
 ) -> str:
-    """Create a new markdown note in the Obsidian vault. Requires write permission — a `readwrite` API key, or an OAuth token
-    carrying the `readwrite` scope.
+    """Create a new markdown note in the Obsidian vault. Requires write permission (a `readwrite` API key or OAuth scope).
 
-    See `get_vault_guide` for Obsidian syntax and any vault-specific conventions
-    (naming, folder placement, frontmatter, tags).
+    See `get_vault_guide` for Obsidian syntax and the vault's conventions (naming, folders, frontmatter, tags).
 
     {plugin_text}
 
@@ -660,8 +658,10 @@ async def create_note(
         content: Full markdown content for the note, including any frontmatter.
         expected_hash: Accepted and always refused as `no_incumbent`, so the
             refusal is a normal result rather than a protocol error.
+        allow_html: Keep HTML in `content` as written.
+            {plugin_text:allow_html}
     """
-    return await create_note_impl(path, content, expected_hash=expected_hash)
+    return await create_note_impl(path, content, expected_hash=expected_hash, allow_html=allow_html)
 
 
 @mcp.tool(title="Edit note", annotations=_WRITE)
@@ -677,11 +677,12 @@ async def edit_note(
     dry_run: bool = False,
     replace_frontmatter: bool = False,
     expected_hash: str | None = None,
+    allow_html: bool = False,
 ) -> str:
     """Edit an existing note in the Obsidian vault. Requires write permission (a `readwrite` API key or OAuth scope).
 
     Arguments: `path`, `content`, at most one mode flag — `append`, `find` or `section` (`operation` is a
-    legacy alias) — plus `replace_all`, `dry_run`, `replace_frontmatter`, and the `expected_hash`
+    legacy alias) — plus `replace_all`, `dry_run`, `replace_frontmatter`, `allow_html`, and the `expected_hash`
     precondition. Every refusal the server raises ends with one machine-readable `MCP-REFUSAL {"code":…}`
     line; an undeclared or mistyped argument is rejected by protocol validation before the tool runs and
     carries no such line. See `get_vault_guide` for vault conventions.
@@ -740,6 +741,7 @@ async def edit_note(
         dry_run=dry_run,
         replace_frontmatter=replace_frontmatter,
         expected_hash=expected_hash,
+        allow_html=allow_html,
     )
 
 
