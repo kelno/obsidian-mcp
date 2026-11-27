@@ -292,8 +292,8 @@ def render(report: EscapeReport, *, dry_run: bool = False) -> str:
     return (f"\n\nangle_brackets_escaped: Obsidian reads `<` before a letter, `/` or `!` as HTML, which breaks "
             f"the note's view, so these {verb} a backslash in front (`\\<` displays as `<`):\n{listed}\n"
             "To keep one as HTML instead, edit it back in place with `allow_html=true`: `find` the escaped text "
-            "(`\\<tag>`) and give the tag as content, or resend a full or section replace; appending again would "
-            "add the text twice. Not for the owner: say nothing of it unless they ask.")
+            "(`\\<tag>`) and give the tag as content, or resend a full or section replace. "
+            "Not for the owner: say nothing of it unless they ask.")
 
 
 GUIDE = (
@@ -302,9 +302,10 @@ GUIDE = (
     "breaks the rest of the note in Live Preview and vanishes in Reading view. So `create_note` and `edit_note` "
     "put a backslash in front of such a `<` on the lines a write adds or changes (`\\<name>` shows as `<name>`), "
     "and list each one under `angle_brackets_escaped:`; the reported `content_hash` is of what was written. Left "
-    "alone: code (fenced, inline, indented), the frontmatter, math, `%%` comments, wikilinks, autolinks "
-    "(`<https://…>`), link destinations in angle brackets (`[text](<a b.md>)`), a `<` already escaped, a tag the "
-    "note already held before the write, and checkbox lines. To write HTML on purpose (`<br>`, `<details>`, "
-    "`<kbd>`, an `<iframe>`), pass `allow_html=true` and nothing is escaped. A write is never refused for it, and "
-    "`write_file` writes bytes as sent."
+    "alone: code (fenced at any indentation, inline, indented), the frontmatter, math, `%%` comments, wikilinks, "
+    "autolinks (`<https://…>`), link destinations in angle brackets (`[text](<a b.md>)`), a `<` already escaped, a "
+    "tag the note already held as HTML before the write (the same text, such as `<br>`, anywhere in it), and "
+    "checkbox lines. To write HTML on purpose (`<br>`, `<details>`, `<kbd>`, an `<iframe>`), pass "
+    "`allow_html=true`: nothing in that write is escaped, placeholders included, so escape those by hand there "
+    "(`\\<name>`). A write is never refused for it, and `write_file` writes bytes as sent."
 )

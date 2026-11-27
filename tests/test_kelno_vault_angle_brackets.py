@@ -135,7 +135,7 @@ def test_report_names_lines_and_tags():
     block = angle_brackets.render(angle_brackets.shifted(report, 2))
     assert "angle_brackets_escaped:" in block
     assert "- line 4: `<name>`" in block and "- line 4: `<job x>`" in block
-    assert "allow_html=true" in block and "appending again would add the text twice" in block
+    assert "allow_html=true" in block and "edit it back in place" in block
     assert "would get" in angle_brackets.render(report, dry_run=True)
     assert angle_brackets.render(angle_brackets.EscapeReport()) == ""
 
