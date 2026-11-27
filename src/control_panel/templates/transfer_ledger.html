@@ -189,14 +189,6 @@
     if (value instanceof Node) { dd.appendChild(value); } else { dd.textContent = String(value); }
     dl.appendChild(dd);
   }
-  function refList(refs) {
-    var span = el("span");
-    refs.forEach(function (ref, n) {
-      if (n) { span.appendChild(document.createTextNode(", ")); }
-      span.appendChild(refNode(ref));
-    });
-    return span;
-  }
   function day(iso) { return iso ? String(iso).slice(0, 10) : ""; }
 
   function render(data) {
@@ -220,7 +212,6 @@
     if (e.seen !== undefined) { row(meta, "Seen by the owner", e.seen ? "yes" : "no"); }
     if (e.superseded_by) { row(meta, "Superseded by", refNode(e.superseded_by)); }
     if (e.handled_account) { row(meta, "Handled", (e.handled_at ? day(e.handled_at) + ": " : "") + e.handled_account); }
-    if (e.related && e.related.length) { row(meta, "Related", refList(e.related)); }
     main.appendChild(meta);
 
     if (e.body) { main.appendChild(el("h2", "Text")); main.appendChild(markdown(e.body)); }
@@ -253,6 +244,7 @@
       });
       main.appendChild(ul);
     }
+    entryList("Related", e.related, function (r) { return r.kind + ", " + r.status; });
     entryList("Rules it tests", e.rules, function (r) { return r.status + (r.when ? ", " + r.when : ""); });
     entryList("Cases of this rule" + (e.cases_total ? " (" + e.cases_total + " in all)" : ""), e.cases,
               function (c) { return [c.outcome, c.status, c.when].filter(Boolean).join(", "); });

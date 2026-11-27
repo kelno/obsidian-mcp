@@ -148,6 +148,7 @@ async def test_the_three_tools_give_a_link_that_opens_the_entry_with_its_history
     assert entry["ref"] == first.ref and "Seen again." in entry["body"]
     assert entry.get("history"), "the page shows the history"
     assert "view_url" not in entry
+    assert [r["title"] for r in entry["related"]] == ["A second quirk"]
     assert set(data["links"]) == {second.ref}
     assert (await info(client, data["links"][second.ref])).json()["entry"]["ref"] == second.ref
     assert data["expires_at"] <= (_now() + datetime.timedelta(days=30, minutes=1)).isoformat()

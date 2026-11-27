@@ -1986,7 +1986,8 @@ async def ledger_get(
     Read-only. Up to 20 refs (Q14, F3, P1, C2); leading zeros don't matter
     (Q1 and Q01 are the same entry). Each entry comes with its
     `revision` (give it to `ledger_update` as `expected_revision`), its own
-    fields, topics, related refs, the summary-view lines that cite it, and
+    fields, topics, related entries (`related`: each one's ref, kind, title
+    and status), the summary-view lines that cite it, and
     the vault tasks citing it (`[F12]` in the task's text) with their status:
     for feedback, the work decided; for a quirk or proposal, an open task
     means something is pending on it. A case lists the rules it tests

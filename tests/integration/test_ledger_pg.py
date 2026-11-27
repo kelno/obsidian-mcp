@@ -552,6 +552,26 @@ async def test_a_vector_for_text_that_changed_meanwhile_is_discarded(sessionmake
         assert (await session.execute(text("SELECT count(*) FROM ledger_embeddings"))).scalar() == 0
 
 
+async def test_get_gives_each_related_entry_with_its_title_both_ways(ctx):
+    # F152: a reader tells which related entries matter without opening each one.
+    a = await add_quirk("The quirk both point to")
+    b = await add_quirk("A second quirk", related=[a.ref])
+    c = await tools.ledger_add_impl("feedback", "A suggestion about it", details={"subtype": "suggestion"},
+                                    related=[a.ref])
+    assert c.error is None, c.error
+    renamed = await tools.ledger_update_impl(ref=b.ref, expected_revision=b.revision, reason="clearer",
+                                             title="A second quirk, renamed")
+    assert renamed.error is None, renamed.error
+
+    got = {e.ref: e for e in (await tools.ledger_get_impl([a.ref, b.ref, c.ref])).entries}
+    assert got[a.ref].related == [
+        {"ref": b.ref, "kind": "quirk", "title": "A second quirk, renamed", "status": got[b.ref].status},
+        {"ref": c.ref, "kind": "feedback", "title": "A suggestion about it", "status": got[c.ref].status},
+    ]
+    assert got[b.ref].related == [{"ref": a.ref, "kind": "quirk", "title": "The quirk both point to",
+                                   "status": got[a.ref].status}]
+
+
 # ── Import and export ───────────────────────────────────────────────────────
 
 IMPORT_FILE = {
@@ -599,7 +619,8 @@ async def test_import_keeps_refs_and_dates_and_exports_back(sessionmaker, ctx, m
     got = (await tools.ledger_get_impl(["Q1", "Q02", "F1"])).entries
     assert [g.ref for g in got] == ["Q01", "Q02", "F1"]
     assert got[0].observed_on == "2026-10-02" and got[0].created_at.startswith("2026-10-02T09:00")
-    assert got[0].related == ["Q03"] and got[1].superseded_by == "Q03"
+    assert got[0].related == [{"ref": "Q03", "kind": "quirk", "title": "Newer wording", "status": "current"}]
+    assert got[1].superseded_by == "Q03"
     assert got[2].seen is True and got[2].handled_account == "Done by hand."
     new = await add_quirk("After the import")
     assert new.ref == "Q4"

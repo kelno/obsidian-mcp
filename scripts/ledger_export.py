@@ -64,7 +64,8 @@ async def collect(args) -> dict:
         ids = [e.id for e in entries]
         refs = {e.id: e.ref for e in entries}
         entry_topics = await ledger.entry_topics(session, ids) if ids else {}
-        related = await ledger.entry_related(session, ids) if ids else {}
+        related = {entry_id: [r["ref"] for r in listed]
+                   for entry_id, listed in (await ledger.entry_related(session, ids) if ids else {}).items()}
         rules = {case_id: [r["ref"] for r in listed] for case_id, listed in (await ledger.case_rules(
             session, [e.id for e in entries if e.kind == "case"])).items()}
         history = await ledger.history(session, ids) if (ids and args.history) else {}

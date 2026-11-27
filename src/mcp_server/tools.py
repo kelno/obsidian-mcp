@@ -12051,8 +12051,7 @@ async def ledger_view_payload(claims: "_ledger_view.Claims") -> dict | None:
     if not result.entries:
         return None
     entry = result.entries[0].model_dump(exclude_none=True)
-    refs = set(entry.get("related") or ())
-    refs.update(item["ref"] for key in ("rules", "cases") for item in entry.get(key) or () if item.get("ref"))
+    refs = {item["ref"] for key in ("related", "rules", "cases") for item in entry.get(key) or () if item.get("ref")}
     if entry.get("superseded_by"):
         refs.add(entry["superseded_by"])
     refs.discard(entry["ref"])

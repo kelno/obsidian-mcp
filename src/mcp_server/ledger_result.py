@@ -90,7 +90,8 @@ class LedgerEntryFull(_OmitNone):
     created_by: str
     area: str | None = None
     topics: list[str] | None = None
-    related: list[str] | None = None
+    #: See-also entries, by ref: `{ref, kind, title, status}` each.
+    related: list[dict] | None = None
     details: dict | None = None
     seen: bool | None = None
     superseded_by: str | None = None

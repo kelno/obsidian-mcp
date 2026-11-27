@@ -534,22 +534,29 @@ async def entry_topics(session: AsyncSession, entry_ids: list[int]) -> dict[int,
     return out
 
 
-async def entry_related(session: AsyncSession, entry_ids: list[int]) -> dict[int, list[str]]:
-    """See-also refs per entry, both directions (a link is stored once)."""
+async def entry_related(session: AsyncSession, entry_ids: list[int]) -> dict[int, list[dict]]:
+    """See-also entries per entry, both directions (a link is stored once), by ref:
+    `{entry id: [{ref, kind, title, status}]}`.
+
+    Each comes with its title and status so a reader of `ledger_get` can tell
+    which related entries matter without opening each one (owner, 2026-11-21, F152).
+    """
     a = select(LedgerEntryLink.entry_id.label("me"), LedgerEntryLink.related_id.label("other")).where(
         LedgerEntryLink.entry_id.in_(entry_ids))
     b = select(LedgerEntryLink.related_id.label("me"), LedgerEntryLink.entry_id.label("other")).where(
         LedgerEntryLink.related_id.in_(entry_ids))
     pairs = (await session.execute(a.union_all(b))).all()
     others = {p.other for p in pairs}
-    refs = dict((await session.execute(
-        select(LedgerEntry.id, LedgerEntry.ref).where(LedgerEntry.id.in_(others))
-    )).all()) if others else {}
-    out: dict[int, list[str]] = {i: [] for i in entry_ids}
+    rows = {r.id: r for r in (await session.execute(
+        select(LedgerEntry.id, LedgerEntry.ref, LedgerEntry.kind, LedgerEntry.title, LedgerEntry.status)
+        .where(LedgerEntry.id.in_(others))
+    )).all()} if others else {}
+    out: dict[int, list[dict]] = {i: [] for i in entry_ids}
     for p in pairs:
-        out[p.me].append(refs[p.other])
-    for refs_ in out.values():
-        refs_.sort(key=_ref_sort_key)
+        r = rows[p.other]
+        out[p.me].append({"ref": r.ref, "kind": r.kind, "title": r.title, "status": r.status})
+    for listed in out.values():
+        listed.sort(key=lambda item: _ref_sort_key(item["ref"]))
     return out
 
 
@@ -1323,7 +1330,7 @@ async def _update_entry(
 
     ids = [entry.id]
     topics_before = (await entry_topics(session, ids))[entry.id]
-    related_before = (await entry_related(session, ids))[entry.id]
+    related_before = [r["ref"] for r in (await entry_related(session, ids))[entry.id]]
     sup = await superseding_refs(session, [entry.superseded_by])
     rules_before = {r["id"]: r["ref"] for r in (await case_rules(session, ids))[entry.id]}
     before = snapshot(entry, topics_before, related_before, sup.get(entry.superseded_by),
